@@ -597,6 +597,7 @@ test "zen mode flattens sidebar and footer hierarchy while developer mode restor
 
     // Switching to Zen mode flattens the sidebar to a single list and hides git plumbing in the footer.
     h.a.settings.applyUiMode(.zen);
+    h.a.settings.setNumber("sidebarWidth", 256);
     h.t.settle(0.3);
     try testing.expectEqual(@import("motion_rules.zig").UiMode.zen, h.a.settings.uiMode());
     try testing.expectEqual(settings.Organization.in_one_list, h.a.settings.organization());
@@ -645,4 +646,189 @@ test "zen mode flattens sidebar and footer hierarchy while developer mode restor
     try testing.expectEqual(@as(usize, 4), pal.actionsFor("", true).len);
     try testing.expect(pal.actionsFor("zen", true).len >= 1);
     try testing.expect(pal.actionsFor("rail", true).len >= 1);
+}
+
+test "zeron sidebar layout, titlebar back/forward navigation, and smooth disclosure collapse" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.zen);
+    h.a.settings.setNumber("sidebarWidth", 256);
+    const spaces = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"proj-h","deviceId":"synthetic-device","name":"Harness","path":"/work/harness","gitDetected":true},
+        \\ {"id":"proj-m","deviceId":"synthetic-device","name":"Mail","path":"/work/mail","gitDetected":true}]
+    , .{});
+    defer spaces.deinit();
+    try h.a.spaces.replace(spaces.value);
+    const now = std.Io.Clock.Timestamp.now(testing.io, .real).raw.toMilliseconds();
+    const chats = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"c-init","deviceId":"synthetic-device","title":"Initial Greeting Session","config":{"harness":"claude-code"},"spaceId":"proj-h","archived":false},
+        \\ {"id":"c-casual","deviceId":"synthetic-device","title":"Casual Greeting Session","config":{"harness":"codex"},"spaceId":"proj-m","archived":false},
+        \\ {"id":"c-arch","deviceId":"synthetic-device","title":"hey there","config":{"harness":"claude-code"},"spaceId":"proj-m","archived":true}]
+    , .{});
+    defer chats.deinit();
+    try h.a.chats.replace(chats.value);
+    h.a.chats.items[0].last_message_ms = now;
+    h.a.chats.items[1].last_message_ms = now - 23 * 60 * 60 * 1000;
+    h.a.chats.items[2].last_message_ms = now - 23 * 60 * 60 * 1000;
+    h.t.settle(1);
+
+    // Titlebar hosts [⋯] at y < 38, and filterRow is a full-width rounded pill ("All projects").
+    const more = h.a.view.more_anchor orelse return error.MissingMoreButton;
+    try testing.expect(more.y < 38);
+    const filter = h.a.view.filter_anchor orelse return error.MissingFilterPill;
+    try testing.expect(filter.w >= 200);
+    try testing.expect(h.t.hasText("All projects"));
+    try testing.expect(h.t.hasText("Sessions"));
+    try testing.expect(h.t.hasText("Archived"));
+
+    // Navigate Home -> c-init -> c-casual, then verify [←] and [→] history navigation.
+    try testing.expect(!h.a.canGoBack());
+    h.a.openChatInTab("c-init");
+    h.t.settle(0.4);
+    try testing.expect(h.a.canGoBack());
+    try testing.expect(!h.a.canGoForward());
+    h.snap("desktop-zeron-sidebar");
+
+    h.a.goBack();
+    h.t.settle(0.4);
+    try testing.expect(h.a.selected == null);
+    try testing.expect(h.a.canGoForward());
+    h.a.goForward();
+    h.t.settle(0.4);
+    try testing.expectEqualStrings("c-init", h.a.selected.?);
+
+    // Smooth 0.18s disclosure collapse & expand on "Sessions".
+    const hasCasualInSidebar = struct {
+        fn check(t: *ui.Tester) bool {
+            for (t.ctx.nodes.items) |n| switch (n.content) {
+                .text => |tx| if (n.rect.x < 256 and std.mem.startsWith(u8, tx.str, "Casual Greeting")) return true,
+                else => {},
+            };
+            return false;
+        }
+    }.check;
+    try testing.expect(hasCasualInSidebar(&h.t));
+    try h.t.clickText("Sessions");
+    h.t.advance(0.06);
+    try testing.expect(!h.a.view.sessions_open);
+    // Mid-collapse: disclosure tween is active and still revealing partial rows.
+    const sess_tw = h.a.view.disclosures.get("sessions") orelse return error.MissingSessionsTween;
+    try testing.expect(sess_tw.animating(h.t.ctx.time, false));
+    h.t.settle(1);
+    try testing.expect(!hasCasualInSidebar(&h.t));
+    try testing.expect(h.t.hasText("Sessions (2)"));
+    try h.t.clickText("Sessions (2)");
+    h.t.settle(1);
+    try testing.expect(hasCasualInSidebar(&h.t));
+}
+
+test "zeron Home agent-update island morphs between pill and expandable card and dispatches ApplyHarnessUpdate" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    const devs = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"synthetic-device","name":"Synthetic Mac Studio","online":true}]
+    , .{});
+    defer devs.deinit();
+    try h.a.devices.replace(devs.value);
+    if (h.a.device_id) |old| h.a.gpa.free(old);
+    h.a.device_id = try h.a.gpa.dupe(u8, "synthetic-device");
+
+    const updates = @import("agent_updates.zig");
+    try updates.setTestStatuses(&h.a, "synthetic-device", true,
+        \\[{"harness":"claude-code","installedVersion":"2.1.319","latestVersion":"2.1.322","phase":"available","canApply":true},
+        \\ {"harness":"pi","installedVersion":"1.5.0","latestVersion":"1.5.2","phase":"available","canApply":true},
+        \\ {"harness":"opencode","installedVersion":"1.0.2-R2040.1","latestVersion":"1.4.15-R8339.1","phase":"available","canApply":true}]
+    );
+    h.t.settle(1);
+    h.t.frame();
+
+    // Collapsed pill state: [w, 38], bottom-anchored on Home.
+    try testing.expect(h.t.hasText("3 agent updates \u{00b7} Synthetic Mac Studio"));
+    const pill_rect = h.a.agent_updates.card_rect orelse return error.MissingUpdatePill;
+    try testing.expectApproxEqAbs(@as(f32, 38), pill_rect.h, 1);
+    h.snap("desktop-agent-updates-pill");
+
+    // Click pill to expand upward into the 360px card; verify mid-flight C0 morph!
+    h.t.click(pill_rect.x + pill_rect.w / 2, pill_rect.y + pill_rect.h / 2);
+    h.t.advance(0.08);
+    const mid_rect = h.a.agent_updates.card_rect orelse return error.MissingMidUpdateCard;
+    try testing.expect(mid_rect.h > 42 and mid_rect.h < 228);
+    // Bottom edge stays anchored while expanding upward.
+    try testing.expectApproxEqAbs(pill_rect.y + pill_rect.h, mid_rect.y + mid_rect.h, 2);
+
+    h.t.settle(1);
+    const card_rect = h.a.agent_updates.card_rect orelse return error.MissingExpandedUpdateCard;
+    try testing.expectApproxEqAbs(@as(f32, 360), card_rect.w, 1);
+    try testing.expectApproxEqAbs(@as(f32, 230), card_rect.h, 1);
+    try testing.expect(h.t.hasText("Claude Code"));
+    try testing.expect(h.t.hasText("2.1.319 \u{2192} 2.1.322"));
+    try testing.expect(h.t.hasText("Pi"));
+    try testing.expect(h.t.hasText("OpenCode"));
+    h.snap("desktop-agent-updates-expanded");
+
+    // Click first [Update] button and verify ApplyHarnessUpdate is dispatched.
+    try h.t.clickText("Update");
+    h.t.settle(0.3);
+    const last = h.a.agent_updates.last_action orelse return error.MissingDispatchedUpdateAction;
+    try testing.expectEqualStrings("ApplyHarnessUpdate", last.method);
+    try testing.expectEqualStrings("claude-code", last.harness);
+}
+
+test "desktop 3-pane horizontal split contains tool rows, question chips, and session footer within each pane" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.t.resize(1280, 780);
+    const spaces = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"proj-split","deviceId":"synthetic-device","name":"harness","path":"/work/harness","gitDetected":true}]
+    , .{});
+    defer spaces.deinit();
+    try h.a.spaces.replace(spaces.value);
+    const chats = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"split-a","deviceId":"synthetic-device","title":"Left Split Pane","spaceId":"proj-split","cwd":"/work/.graff/worktrees/s1","branch":"feat/split-a","archived":false},
+        \\ {"id":"split-b","deviceId":"synthetic-device","title":"Center Split Pane","spaceId":"proj-split","cwd":"/work/.graff/worktrees/s2","branch":"feat/split-b","archived":false},
+        \\ {"id":"split-c","deviceId":"synthetic-device","title":"Right Split Pane","spaceId":"proj-split","cwd":"/work/.graff/worktrees/s3","branch":"feat/split-c","archived":false}]
+    , .{});
+    defer chats.deinit();
+    try h.a.chats.replace(chats.value);
+
+    h.a.openChatInTab("split-a");
+    h.a.splitPane(.horizontal);
+    h.a.tabs.setCurrent("split-b");
+    h.a.select("split-b", "proj-split");
+    h.a.splitPane(.horizontal);
+    h.a.tabs.setCurrent("split-c");
+    h.a.select("split-c", "proj-split");
+    h.a.focusPane(1);
+    h.t.settle(1);
+
+    const doc_b = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"e1","role":"assistant","status":"complete","parts":[
+        \\  {"id":"t1","kind":"tool","resolved":true,"call":{"kind":"shell","command":"git status --short"}},
+        \\  {"id":"t2","kind":"tool","resolved":true,"call":{"kind":"editFile","path":"apps/nano/src/view_question.zig"}},
+        \\  {"id":"m1","kind":"text","text":"Checking where `main`, the branches and the worktrees stand before changing anything."},
+        \\  {"id":"q1","kind":"input","resolved":true,"questions":[{"id":"q-main","header":"Cleanup","question":"This worktree is now on `main`, level with `origin/main` (b3727a7), which cleanup mode should run?","options":["Prune clean throwaway worktrees","Keep all worktrees"]}]}
+        \\]}]}
+    , .{});
+    defer doc_b.deinit();
+    try h.a.transcript.apply(doc_b.value);
+    h.t.settle(1);
+    h.t.frame();
+    h.snap("desktop-3pane-split-fixed");
+
+    // Verify no text node inside the center pane overflows into the right pane.
+    const q_label = h.t.findText("Question") orelse return error.MissingQuestionChip;
+    const layout_s = h.a.tabs.layout() orelse return error.MissingSplitLayout;
+    try testing.expectEqual(@as(usize, 3), layout_s.panes.items.len);
+    const pane_each = h.a.view.chrome.chat_width / 3;
+    const center_right = sidebar.widthOf(&h.a) + h.a.view.chrome.leading + pane_each * 2;
+    try testing.expect(q_label.x + q_label.w < center_right);
+    for (h.t.ctx.nodes.items) |node| switch (node.content) {
+        .text => |tx| if (std.mem.startsWith(u8, tx.str, "This worktree is now")) {
+            try testing.expect(node.rect.x + node.rect.w <= center_right + 1);
+        },
+        else => {},
+    };
 }

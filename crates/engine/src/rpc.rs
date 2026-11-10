@@ -160,6 +160,28 @@ async fn update_harness_enabled(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct HarnessUpdateParams {
+    #[serde(default)]
+    harness: Option<HarnessId>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DismissHarnessUpdateParams {
+    harness: HarnessId,
+    #[serde(default)]
+    version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetHarnessUpdatePolicyParams {
+    harness: HarnessId,
+    policy: harness_proto::HarnessUpdatePolicy,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct QueueCommandParams {
     chat_id: String,
     command: SessionCommandPayload,
@@ -723,7 +745,11 @@ enum MutateParams {
     /// The desktop's appearance mode and light/dark theme ids, published to
     /// the registry so phones can match the desktop.
     #[serde(rename_all = "camelCase")]
-    SetAppearance { mode: String, light: String, dark: String },
+    SetAppearance {
+        mode: String,
+        light: String,
+        dark: String,
+    },
     /// Full-config replace on the chat row (harness `SetChatConfig`): the
     /// composer's mid-session model / reasoning / options changes, LWW-synced
     /// so they survive restarts and reach every device.
@@ -766,6 +792,7 @@ pub struct EngineRpc {
     auth: Option<Auth>,
     links: Option<std::sync::Arc<LinkCache>>,
     updater: Option<harness_update::Updater>,
+    harness_updates: Option<crate::harness_updates::HarnessUpdateCoordinator>,
     local_import: Option<crate::local_import::LocalImporter>,
     external_history: Option<crate::external_history::ExternalHistory>,
     engine_info: EngineInfo,
@@ -814,6 +841,7 @@ impl EngineRpc {
             auth: None,
             links: None,
             updater: None,
+            harness_updates: None,
             local_import: None,
             external_history: None,
             engine_info,
@@ -970,6 +998,14 @@ impl EngineRpc {
         self
     }
 
+    pub fn with_harness_updates(
+        mut self,
+        updates: crate::harness_updates::HarnessUpdateCoordinator,
+    ) -> Self {
+        self.harness_updates = Some(updates);
+        self
+    }
+
     /// Attach the local→synced profile importer (synced runtimes only).
     pub fn with_local_import(mut self, importer: crate::local_import::LocalImporter) -> Self {
         self.local_import = Some(importer);
@@ -1001,6 +1037,14 @@ impl EngineRpc {
         self.updater
             .as_ref()
             .ok_or_else(|| RpcError::Failed("updates unavailable".into()))
+    }
+
+    fn harness_updates(
+        &self,
+    ) -> Result<&crate::harness_updates::HarnessUpdateCoordinator, RpcError> {
+        self.harness_updates
+            .as_ref()
+            .ok_or_else(|| RpcError::Failed("agent updates unavailable".into()))
     }
 
     fn local_importer(&self) -> Result<&crate::local_import::LocalImporter, RpcError> {
@@ -1350,7 +1394,11 @@ impl EngineRpc {
                 .set_chat_host(&chat_id, &device_id)
                 .map_err(failed)
                 .map(drop),
-            MutateParams::SetChatArchived { chat_id, archived, archive_requested_at } => {
+            MutateParams::SetChatArchived {
+                chat_id,
+                archived,
+                archive_requested_at,
+            } => {
                 match archive_requested_at.filter(|_| archived) {
                     Some(at) => self.workspace.archive_chat_at(&chat_id, at),
                     None => self.workspace.set_chat_archived(&chat_id, archived),
@@ -1508,6 +1556,8 @@ fn forward_deadline(method: &str) -> std::time::Duration {
             Duration::from_secs(15 * 60)
         }
         methods::INSTALL_HARNESS | methods::SET_UP_SIMULATORS => Duration::from_secs(15 * 60),
+        methods::CHECK_HARNESS_UPDATES => Duration::from_secs(4 * 60),
+        methods::APPLY_HARNESS_UPDATE => crate::harness_updates::APPLY_REPLY_DEADLINE,
         methods::BOOT_SIMULATOR => Duration::from_secs(150),
         methods::CREATE_WORKTREE => Duration::from_secs(120),
         // Allow the adapter discovery budget plus relay and shutdown overhead.
@@ -1642,6 +1692,12 @@ fn forwardable(method: &str) -> bool {
             | methods::CHECK_FOR_UPDATES
             | methods::QUEUE_UPDATE
             | methods::APPLY_UPDATE
+            | methods::WATCH_HARNESS_UPDATES
+            | methods::CHECK_HARNESS_UPDATES
+            | methods::APPLY_HARNESS_UPDATE
+            | methods::CANCEL_HARNESS_UPDATE
+            | methods::DISMISS_HARNESS_UPDATE
+            | methods::SET_HARNESS_UPDATE_POLICY
     )
 }
 
@@ -1660,6 +1716,7 @@ fn is_stream_method(method: &str) -> bool {
             | methods::WATCH_CHECKOUT_CHANGE_REQUEST
             | methods::WATCH_WORKSPACE_FILES
             | methods::UPDATE_STATUS
+            | methods::WATCH_HARNESS_UPDATES
     )
 }
 
@@ -2776,6 +2833,58 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(format!("{e:#}")))?;
                 RpcReply::value(&serde_json::json!({ "ok": true, "version": version }))
             }
+            methods::WATCH_HARNESS_UPDATES => {
+                let coordinator = self.harness_updates()?;
+                coordinator.recheck_changed_binaries_soon();
+                Ok(RpcReply::Stream(watch_stream(coordinator.watch())))
+            }
+            methods::CHECK_HARNESS_UPDATES => {
+                let p: HarnessUpdateParams = parse_params(params)?;
+                let coordinator = self.harness_updates()?.clone();
+                let statuses = tokio::spawn(async move {
+                    if let Some(harness) = p.harness {
+                        coordinator.check_one(harness).await?;
+                    } else {
+                        coordinator.check_all().await;
+                    }
+                    Ok::<_, String>(coordinator.snapshot())
+                })
+                .await
+                .map_err(|error| {
+                    RpcError::Failed(format!("agent update check task failed: {error}"))
+                })?
+                .map_err(RpcError::Failed)?;
+                RpcReply::value(&statuses)
+            }
+            methods::APPLY_HARNESS_UPDATE => {
+                let p: HarnessUpdateParams = parse_params(params)?;
+                let harness = p
+                    .harness
+                    .ok_or_else(|| RpcError::BadParams("harness is required".into()))?;
+                let version = self
+                    .harness_updates()?
+                    .apply(harness)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({ "ok": true, "version": version }))
+            }
+            methods::CANCEL_HARNESS_UPDATE => {
+                let p: HarnessUpdateParams = parse_params(params)?;
+                let harness = p
+                    .harness
+                    .ok_or_else(|| RpcError::BadParams("harness is required".into()))?;
+                RpcReply::value(&serde_json::json!({
+                    "cancelled": self.harness_updates()?.cancel(harness),
+                }))
+            }
+            methods::DISMISS_HARNESS_UPDATE => {
+                let p: DismissHarnessUpdateParams = parse_params(params)?;
+                RpcReply::value(&self.harness_updates()?.dismiss(p.harness, p.version))
+            }
+            methods::SET_HARNESS_UPDATE_POLICY => {
+                let p: SetHarnessUpdatePolicyParams = parse_params(params)?;
+                RpcReply::value(&self.harness_updates()?.set_policy(p.harness, p.policy))
+            }
             methods::MUTATE => {
                 let p: MutateParams = parse_params(params)?;
                 let sidebar_pins = matches!(&p, MutateParams::ChangeSidebarPin { .. });
@@ -3513,7 +3622,9 @@ impl RpcService for EngineRpc {
                     .cwd
                     .as_deref()
                     .and_then(harness_proto::graff_worktree::GraffWorktree::from_path)
-                    .ok_or_else(|| RpcError::Failed("This chat isn't in a Graff worktree".into()))?;
+                    .ok_or_else(|| {
+                        RpcError::Failed("This chat isn't in a Graff worktree".into())
+                    })?;
                 let result = harness_adapters::run_graff_worktree_action(
                     std::path::Path::new(&tree.root),
                     &tree.name,
@@ -3526,7 +3637,11 @@ impl RpcService for EngineRpc {
                     self.workspace
                         .set_chat_cwd(&p.chat_id, &tree.root)
                         .map_err(|e| RpcError::Failed(e.to_string()))?;
-                    if let Ok(branch) = self.repos.current_branch(std::path::Path::new(&tree.root)).await {
+                    if let Ok(branch) = self
+                        .repos
+                        .current_branch(std::path::Path::new(&tree.root))
+                        .await
+                    {
                         let _ = self.workspace.set_chat_branch(&p.chat_id, &branch);
                     }
                 }

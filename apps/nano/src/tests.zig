@@ -84,6 +84,7 @@ test {
     _ = @import("tests_ui_rail.zig");
     _ = @import("tests_ui_tooltips.zig");
     _ = @import("change_requests.zig");
+    _ = @import("agent_updates.zig");
     _ = @import("tests_ui_change_requests.zig");
     _ = @import("palette.zig");
     _ = @import("tests_ui_palette.zig");

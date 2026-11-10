@@ -224,7 +224,7 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
         drawn.from_end = @max(0, max - at);
     }
     var ticks: std.ArrayList(@import("view_rail.zig").Tick) = .empty;
-    const body = ui.div(c).column().w(col);
+    const body = ui.div(c).column().w(col).clip();
     if (subagent == null and t == &a.transcript and streaming and !a.offscreen and !c.reduced_motion and !just_stuck and a.view.rail.glide == null) {
         c.node(body.index).style.settle_y = .{ .response = 0.20, .damping = 1.0 };
     }
@@ -636,24 +636,27 @@ fn workLine(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, work: 
     const box = ui.div(c).column().wFull();
     defer box.end();
     {
-        const h = kit.pressFeedback(ui.div(c).row().h(26).gap(6).pr(4).itemsCenter().rounded(4).control().hover(k.wash(0.04)));
+        const h = kit.pressFeedback(ui.div(c).row().wFull().h(26).gap(6).pr(4).itemsCenter().rounded(4).clip().control().hover(k.wash(0.04)));
         defer h.end();
         if (h.clicked()) a.view.toggleGroup(a.gpa, override, open);
         const slot = ui.div(c).row().size(22, 18).center();
         @import("view_tool_rows.zig").chevron(c, k, open, 14);
         slot.end();
+        const max_title_w = @import("motion_rules.zig").toolGroupTitleCap(at.col, 28, 8);
+        const title_slot = ui.div(c).row().grow().w(0).clip();
+        defer title_slot.end();
         const st = kit.style(c, 15, 18, .{ .color = if (h.hovered()) k.text else k.muted });
         const settled = if (e.status != .streaming) compact.workedSecs(e) else null;
         if (settled) |s| {
             const lb = c.alloc().alloc(u8, 48) catch return;
-            ui.text(c, compact.workedFor(lb, s), st);
+            kit.fadeText(c, compact.workedFor(lb, s), st, max_title_w);
         } else {
             const lb = c.alloc().alloc(u8, 160) catch return;
             // Thinking belongs to the piece the reply is still writing.
             const active = e.status == .streaming and for (work) |p| {
                 if ((p.kind == .reasoning and at.closes) or (p.kind == .tool and !p.resolved)) break true;
             } else false;
-            @import("view_tool_rows.zig").title(c, k, workLabel(c, lb, work), active, h.hovered());
+            @import("view_tool_rows.zig").title(c, k, workLabel(c, lb, work), active, h.hovered(), max_title_w);
         }
     }
     const state = @import("tool_ui_state.zig");

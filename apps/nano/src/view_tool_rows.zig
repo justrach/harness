@@ -147,9 +147,11 @@ pub fn summary(c: *ui.Context, k: theme.Colors, stats: []const tr.Stat) void {
 }
 
 /// Slower desktop 3.4s title shimmer (not the per-file scramble clock).
-pub fn title(c: *ui.Context, k: theme.Colors, text: []const u8, active: bool, hot: bool) void {
+pub fn title(c: *ui.Context, k: theme.Colors, text: []const u8, active: bool, hot: bool, max_w: f32) void {
     const st = kit.style(c, 15, 18, .{ .color = if (hot) k.text else k.muted });
-    if (!active or c.reduced_motion) return ui.text(c, text, st);
+    if (!active or c.reduced_motion) return kit.fadeText(c, text, st, max_w);
+    const box = ui.div(c).row().maxW(max_w).clip();
+    defer box.end();
     const phase: f32 = @floatCast(@mod(c.time / 3.4, 1));
     var spans: std.ArrayList(ui.Span) = .empty;
     var it = std.unicode.Utf8View.initUnchecked(text).iterator();
