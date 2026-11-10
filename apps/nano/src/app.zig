@@ -1019,7 +1019,7 @@ pub const App = struct {
         drafts.adopt(a, fresh);
     }
 
-    /// Sidebar / All sessions "+": an independent workspace, not another
+    /// Sidebar "+": an independent workspace, not another
     /// tab inside the focused panel. Keep the entire old split and its
     /// focused draft parked together for when that workspace is reopened.
     pub fn newWorkspaceSession(a: *App) void {

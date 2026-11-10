@@ -258,7 +258,7 @@ fn filterRow(c: *ui.Context, a: *App, k: theme.Colors) void {
         if (c.rects.get(c.node(t.index).id)) |r| a.view.filter_anchor = r;
         const color = if (lh.hovered) k.text else k.text.alpha(0.8);
         // The trigger less its insets, icon, chevron and gaps.
-        const room = widthOf(a) - 16 - 2 * 30 - 24 - 3 * 4 - 16 - 14 - 8;
+        const room = widthOf(a) - 16 - 2 * 30 - 2 * 4 - 16 - 14 - 8;
         if (a.findSpace(a.view.filter)) |s| {
             // The project, "@ device" after it, and the offline mark.
             const tag = c.print("@ {s}", .{a.deviceName(s.device_id)});
@@ -288,13 +288,6 @@ fn filterRow(c: *ui.Context, a: *App, k: theme.Colors) void {
         if (kit.iconButton(c, k, .@"more-horizontal", .{ .size = 30, .radius = 8, .icon = 16, .color = k.muted.alpha(0.6), .on = a.view.more_menu }))
             if (a.view.more_menu) menus.close(a) else menus.openView(a);
         if (c.rects.get(c.node(more.index).id)) |r| a.view.more_anchor = r;
-    }
-    {
-        ui.key(c, "sidebar-overview");
-        const overview = tip.on(ui.div(c).row().size(24, 24).center().rounded(6).hover(k.hover), k, .{ .text = "All sessions" });
-        defer overview.end();
-        icons.icon(c, .widget, 16, k.muted, 0);
-        if (overview.clicked()) @import("view_sessions.zig").open(a);
     }
 }
 
@@ -1279,11 +1272,19 @@ fn footer(c: *ui.Context, a: *App, k: theme.Colors) void {
         ui.text(c, c.print("{c}", .{account.initial(display)}), .{ .size = 9, .line_height = 13, .weight = .semibold, .mono = true, .color = k.shell });
     }
     ui.spacer(c);
-    @import("view_sessions.zig").historyButton(c, a, k);
+    historyButton(c, a, k);
     ui.div(c).w(6).end();
     ui.key(c, "sidebar-session-create");
     const b = tip.on(ui.div(c).row().size(26, 26).center().rounded(6).border(k.muted.alpha(0.45)).borderW(1).hover(k.hover), k, .{ .text = "New session" });
     defer b.end();
     icons.icon(c, .plus, 16, k.muted, 0);
     if (b.clicked()) a.newWorkspaceSession();
+}
+
+fn historyButton(c: *ui.Context, a: *App, k: theme.Colors) void {
+    ui.key(c, "chat-history");
+    const b = tip.on(ui.div(c).row().size(26, 26).center().rounded(6).hover(k.hover), k, .{ .text = "Chat history", .delay = tip.quick });
+    defer b.end();
+    icons.icon(c, .@"clock-circle", 16, k.muted, 0);
+    if (b.clicked()) @import("view_palette.zig").toggle(a, .chat_history);
 }
