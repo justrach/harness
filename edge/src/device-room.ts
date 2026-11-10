@@ -18,6 +18,7 @@ import { ensureNudges, enqueueNudge, pendingNudges, acknowledgeNudge, NUDGE_PAGE
 import { BytesReader, BytesWriter } from "loro-protocol";
 import { createBlobStore, getJsonBlob, putJsonBlob, type BlobStore } from "./blobs";
 import { AUTH_USER_HEADER, type Env } from "./env";
+import { readJsonCapped } from "./body";
 import { isPurge, wipeObject } from "./purge";
 
 export interface DeviceFrameHeader {
@@ -90,6 +91,9 @@ const RELAY_KIND = " relay";
 export const NUDGE_KIND = "nudge";
 const NUDGE_ACK_KIND = "nudgeAck";
 const CHAT_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+/** A sidecar slot holds one host-published JSON snapshot: the same limit as
+ * a chat's sidecars (chat-room.ts `MAX_SIDECAR_BYTES`). */
+export const MAX_DEVICE_SIDECAR_BYTES = 4 * 1024 * 1024;
 
 export class DeviceRoom implements DurableObject {
   private readonly ctx: DurableObjectState;
@@ -202,7 +206,9 @@ export class DeviceRoom implements DurableObject {
         return value === undefined ? json({ error: "not_found" }, 404) : json(value);
       }
       if (request.method === "POST") {
-        putJsonBlob(this.blobs, `sidecar:${name}`, await request.json());
+        const body = await readJsonCapped(request, MAX_DEVICE_SIDECAR_BYTES);
+        if (!body.ok) return json({ error: body.error }, body.status);
+        putJsonBlob(this.blobs, `sidecar:${name}`, body.value);
         return json({ ok: true });
       }
     }

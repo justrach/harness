@@ -1465,7 +1465,7 @@ dependencies = [
 
 [[package]]
 name = "harness"
-version = "0.2.183"
+version = "0.2.184"
 dependencies = [
  "anyhow",
  "clap",
@@ -1489,7 +1489,7 @@ dependencies = [
 
 [[package]]
 name = "harness-adapters"
-version = "0.2.183"
+version = "0.2.184"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1516,7 +1516,7 @@ dependencies = [
 
 [[package]]
 name = "harness-doc"
-version = "0.2.183"
+version = "0.2.184"
 dependencies = [
  "chrono",
  "harness-proto",
@@ -1530,7 +1530,7 @@ dependencies = [
 
 [[package]]
 name = "harness-engine"
-version = "0.2.183"
+version = "0.2.184"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1575,7 +1575,7 @@ dependencies = [
 
 [[package]]
 name = "harness-mcp"
-version = "0.2.183"
+version = "0.2.184"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1593,7 +1593,7 @@ dependencies = [
 
 [[package]]
 name = "harness-mobile"
-version = "0.2.183"
+version = "0.2.184"
 dependencies = [
  "async-trait",
  "futures",
@@ -1616,7 +1616,7 @@ dependencies = [
 
 [[package]]
 name = "harness-observe"
-version = "0.2.183"
+version = "0.2.184"
 dependencies = [
  "anyhow",
  "clap",
@@ -1629,7 +1629,7 @@ dependencies = [
 
 [[package]]
 name = "harness-preview"
-version = "0.2.183"
+version = "0.2.184"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1657,7 +1657,7 @@ dependencies = [
 
 [[package]]
 name = "harness-proto"
-version = "0.2.183"
+version = "0.2.184"
 dependencies = [
  "chrono",
  "pulldown-cmark",
@@ -1667,7 +1667,7 @@ dependencies = [
 
 [[package]]
 name = "harness-rpc"
-version = "0.2.183"
+version = "0.2.184"
 dependencies = [
  "async-trait",
  "futures",
@@ -1684,7 +1684,7 @@ dependencies = [
 
 [[package]]
 name = "harness-sync"
-version = "0.2.183"
+version = "0.2.184"
 dependencies = [
  "block2",
  "chrono",
@@ -1706,7 +1706,7 @@ dependencies = [
 
 [[package]]
 name = "harness-syntax"
-version = "0.2.183"
+version = "0.2.184"
 dependencies = [
  "thiserror 2.0.20",
  "tree-sitter",
@@ -1740,7 +1740,7 @@ dependencies = [
 
 [[package]]
 name = "harness-theme"
-version = "0.2.183"
+version = "0.2.184"
 dependencies = [
  "anyhow",
  "clap",
@@ -1755,7 +1755,7 @@ dependencies = [
 
 [[package]]
 name = "harness-update"
-version = "0.2.183"
+version = "0.2.184"
 dependencies = [
  "anyhow",
  "futures",
@@ -1772,7 +1772,7 @@ dependencies = [
 
 [[package]]
 name = "harness-visual"
-version = "0.2.183"
+version = "0.2.184"
 dependencies = [
  "mlua",
  "serde",

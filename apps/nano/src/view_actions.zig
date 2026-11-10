@@ -66,11 +66,26 @@ pub fn control(c: *ui.Context, a: *App, k: theme.Colors) void {
     ui.text(c, "Add action", .{ .size = 11.5, .color = k.text.alpha(0.9) });
 }
 
+const toolbar_h: f32 = 36;
+const dock_h: f32 = 280;
+
+/// The toolbar's height in the conversation panel: none until a project's
+/// actions are known.
+pub fn toolbarHeight(a: *const App) f32 {
+    const status = a.actions.status;
+    return if (status == .idle or status == .loading or status == .unsupported) 0 else toolbar_h;
+}
+
+/// The run dock's height under the chat, with its hairline: none while shut.
+pub fn dockHeight(a: *const App) f32 {
+    return if (!a.actions.dock_open or a.actions.runs.items.len == 0) 0 else dock_h + 1;
+}
+
 /// Release desktop keeps project actions inside the conversation panel.
 pub fn toolbar(c: *ui.Context, a: *App, k: theme.Colors) void {
     const x = &a.actions;
-    if (x.status == .idle or x.status == .loading or x.status == .unsupported) return;
-    const bar = ui.div(c).column().wFull().h(36);
+    if (toolbarHeight(a) == 0) return;
+    const bar = ui.div(c).column().wFull().h(toolbar_h);
     defer bar.end();
     {
         const row_box = ui.div(c).row().wFull().grow().h(0).px(10).gap(6).itemsCenter();
@@ -304,9 +319,9 @@ fn field(c: *ui.Context, k: theme.Colors, buf: *ui.TextBuffer, placeholder: []co
 /// The dock under the chat: a tab per run, its output as a log.
 pub fn dock(c: *ui.Context, a: *App, k: theme.Colors) void {
     const x = &a.actions;
-    if (!x.dock_open or x.runs.items.len == 0) return;
+    if (dockHeight(a) == 0) return;
     _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
-    const d = ui.div(c).column().wFull().h(280).bg(k.background);
+    const d = ui.div(c).column().wFull().h(dock_h).bg(k.background);
     defer d.end();
     {
         const strip = ui.div(c).row().wFull().h(32).px(8).gap(4).itemsCenter();

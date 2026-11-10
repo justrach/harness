@@ -3,10 +3,11 @@ import Nano.ScrollFollow
 import Nano.Tween
 import Nano.StripMenu
 import Nano.FooterChips
+import Nano.QuestionPanel
 
 open Nano
 
-/-- Verifies all five Harness Nano / nanoui formal kernels and prints their
+/-- Verifies all six Harness Nano / nanoui formal kernels and prints their
 enumerated cube sizes. Run with:
   `lean --run Main.lean` (inside `apps/nano/lean-proofs` with `LEAN_PATH=.`) -/
 def main : IO Unit := do
@@ -17,4 +18,5 @@ def main : IO Unit := do
   IO.println s!"strip_menu      {StripMenu.stripCells}  chip_conserved={StripMenu.chipConservationCube}  focus_kept={StripMenu.menuFocusPreservedCube}  split_bounded={StripMenu.splitSlotPartitionCube}"
   IO.println s!"footer_chips    {FooterChips.footerCells}  conserved={FooterChips.footerConservationCube}  monotone={FooterChips.footerMonotoneCube}  rank_order={FooterChips.footerRankOrderCube}  split_windows={FooterChips.footerSplitWindowsCube}"
   IO.println s!"ui_mode_fsm     zen_default={FrameSchedule.UiState.initial.mode == .zen}  zen_depth={FrameSchedule.hierarchyDepth (FrameSchedule.HierarchyProfile.ofMode .zen)}  dev_depth={FrameSchedule.hierarchyDepth (FrameSchedule.HierarchyProfile.ofMode .developer)}  zen_parts={FrameSchedule.movingPartsCount (FrameSchedule.HierarchyProfile.ofMode .zen)}  dev_parts={FrameSchedule.movingPartsCount (FrameSchedule.HierarchyProfile.ofMode .developer)}"
-  IO.println s!"cells_total     {FrameSchedule.scheduleCells + ScrollFollow.scrollCells + Tween.tweenCells + StripMenu.stripCells + FooterChips.footerCells}"
+  IO.println s!"question_panel  {QuestionPanel.questionCells}  conserved={QuestionPanel.splitConservationCube}  monotone={QuestionPanel.splitMonotoneCube}  chip_bounded={QuestionPanel.chipCube}"
+  IO.println s!"cells_total     {FrameSchedule.scheduleCells + ScrollFollow.scrollCells + Tween.tweenCells + StripMenu.stripCells + FooterChips.footerCells + QuestionPanel.questionCells}"
