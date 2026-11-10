@@ -367,11 +367,20 @@ fn windowCard(c: *ui.Context, a: *App, k: theme.Colors) void {
     const r = set.row(c, k, false, false);
     defer r.end();
     set.tile(c, k, .@"file-image");
-    // Choose image's own width: 10 before it, 10 a side, its words.
-    words(c, k, "New thread composer background", "Add an image behind the composer on empty new threads.", 10 + 2 * 10 + @ceil(c.text.width("Choose image", .{ .size = 11.5 })));
+    const bg_choice = a.settings.text("composerBackground");
+    const bg_btn = if (bg_choice != null) "Clear image" else "Choose image";
+    const bg_desc = if (bg_choice) |bg| c.print("Active preset · {s}", .{bg}) else "Add an image behind the composer on empty new threads.";
+    words(c, k, "New thread composer background", bg_desc, 10 + 2 * 10 + @ceil(c.text.width(bg_btn, .{ .size = 11.5 })));
     const act = ui.div(c).row().pl(10).gap(6);
     defer act.end();
-    if (compactAction(c, k, "Choose image")) a.setNotice("A composer background isn't in Harness Nano yet: use Harness.");
+    if (compactAction(c, k, bg_btn)) {
+        if (bg_choice != null) {
+            a.settings.clearText("composerBackground");
+        } else {
+            a.settings.setText("composerBackground", "warm-grain");
+        }
+        c.changed = true;
+    }
 }
 
 /// `compact_action`: a small bordered button.
@@ -455,14 +464,23 @@ fn fonts(c: *ui.Context, a: *App, k: theme.Colors) void {
         const size = a.settings.number(f[4]) orelse f[5];
         const pair = ui.div(c).row().gap(8);
         defer pair.end();
-        if (dropdown(c, k, 220, familyLabel(family))) a.setNotice("Choosing a font isn't in Harness Nano yet: use Harness.");
+        if (dropdown(c, k, 220, familyLabel(family))) {
+            const next_family: []const u8 = if (comptime std.mem.eql(u8, f[2], "uiFontFamily"))
+                (if (std.mem.eql(u8, family, "geist")) "system" else if (std.mem.eql(u8, family, "system")) "geistMono" else "geist")
+            else
+                (if (std.mem.eql(u8, family, "geistMono")) "installed:Menlo" else if (std.mem.eql(u8, family, "installed:Menlo")) "installed:SF Mono" else "geistMono");
+            a.settings.setText(f[2], next_family);
+            c.changed = true;
+        }
         if (dropdown(c, k, 128, c.print("{d} px", .{size}))) {
             if (comptime std.mem.eql(u8, f[4], "uiFontSize")) {
                 const cur = a.settings.uiFontSize();
                 const next = if (cur >= 20) @as(f32, 12) else @import("settings.zig").stepUiFontSize(cur, 1);
                 a.settings.setUiFontSize(next);
             } else {
-                a.setNotice("Choosing a size isn't in Harness Nano yet: use Harness.");
+                const next_sz: f64 = if (size >= 20) 11 else @floor(size) + 1;
+                a.settings.setNumber(f[4], next_sz);
+                c.changed = true;
             }
         }
     }

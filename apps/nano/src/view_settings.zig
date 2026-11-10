@@ -374,9 +374,19 @@ fn files(c: *ui.Context, a: *App, k: theme.Colors) void {
     const r = row(c, k, false, false);
     defer r.end();
     tile(c, k, .folder);
-    // Edit's own width: 12 a side and its words.
-    words(c, k, "New project starting folder", c.print("Automatic · {s}", .{startingFolder(a) orelse "Home"}), 24 + @ceil(c.text.width("Edit", .{ .size = 13 })));
-    if (ghost(c, k, "Edit")) a.setNotice("Choosing a starting folder isn't in Harness Nano yet: use Harness.");
+    const explicit_folder = a.settings.text("startingFolder");
+    const btn_label = if (explicit_folder != null) "Reset" else "Edit";
+    const folder_desc = if (explicit_folder) |ef| ef else c.print("Automatic · {s}", .{startingFolder(a) orelse "Home"});
+    words(c, k, "New project starting folder", folder_desc, 24 + @ceil(c.text.width(btn_label, .{ .size = 13 })));
+    if (ghost(c, k, btn_label)) {
+        if (explicit_folder != null) {
+            a.settings.clearText("startingFolder");
+        } else {
+            const fallback = startingFolder(a) orelse (if (a.env) |e| e.get("HOME") else null) orelse "~";
+            a.settings.setText("startingFolder", fallback);
+        }
+        c.changed = true;
+    }
 }
 
 /// The folder new projects start in, with none chosen: the folder most of

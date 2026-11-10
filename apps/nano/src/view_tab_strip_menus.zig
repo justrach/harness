@@ -38,7 +38,7 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
             return;
         }
     }
-    const card = @import("view_sidebar_menus.zig").held(kit.shadowLg(ui.div(c).fixed().offset(x, y).w(width).maxH(@max(0, c.size.h - y - 8)).column().p(5).gap(2).bg(k.overlay.alpha(1)).border(k.border).borderW(1).rounded(12).layer(5).scrollY()));
+    const card = @import("view_sidebar_menus.zig").held(kit.shadowLg(ui.div(c).fixed().offset(x, y).w(width).maxH(@max(0, c.size.h - y - 8)).column().p(5).gap(2).bg(.{ .r = k.overlay.r, .g = k.overlay.g, .b = k.overlay.b, .a = 1 }).border(k.border).borderW(1).rounded(12).layer(5).scrollY()));
     defer card.end();
     if (menu == .device) {
         const id = strip.device(a, target);
@@ -168,7 +168,7 @@ fn folderMenu(c: *ui.Context, a: *App, k: theme.Colors, anchor: ui.Rect) void {
             return;
         }
     }
-    const card = @import("view_sidebar_menus.zig").held(kit.shadowLg(ui.div(c).fixed().offset(x, y).w(width).maxH(@max(32, budget)).column().p(5).gap(2).bg(k.overlay.alpha(1)).border(k.border).borderW(1).rounded(12).layer(5).clip()));
+    const card = @import("view_sidebar_menus.zig").held(kit.shadowLg(ui.div(c).fixed().offset(x, y).w(width).maxH(@max(32, budget)).column().p(5).gap(2).bg(.{ .r = k.overlay.r, .g = k.overlay.g, .b = k.overlay.b, .a = 1 }).border(k.border).borderW(1).rounded(12).layer(5).clip()));
     defer card.end();
     {
         ui.key(c, "panel-menu-search");

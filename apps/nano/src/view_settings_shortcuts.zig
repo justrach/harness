@@ -191,8 +191,32 @@ fn completion(c: *ui.Context, a: *App, k: theme.Colors) void {
         ui.text(c, "For active agents on this device. Completion preferences apply across your devices.", .{ .size = 13, .line_height = 20, .wrap = true, .color = k.muted });
     }
     if (a.harnesses.items.len > 0) {
-        // Per-agent switches ($ for skills, / commands) aren't here yet.
-        set.subtitle(c, k, "Completion for each agent isn't in Harness Nano yet: set it in Harness.", false);
+        const cd = ui.div(c).column().wFull().p(1).rounded(12).border(k.border).borderW(1).bg(if (k.frosted) k.card else k.shell).clip();
+        defer cd.end();
+        for (a.harnesses.items, 0..) |h, idx| {
+            ui.key(c, c.print("comp-{s}", .{h.id}));
+            const item_row = set.row(c, k, idx + 1 < a.harnesses.items.len, false);
+            defer item_row.end();
+            {
+                const col = ui.div(c).column().grow().w(0);
+                defer col.end();
+                ui.text(c, h.name, .{ .size = 13, .line_height = 20, .weight = .medium, .color = k.text });
+            }
+            const toggles = ui.div(c).row().gap(6).itemsCenter();
+            defer toggles.end();
+            inline for (.{ .{ "$ Skills", "completionSkills." }, .{ "/ Commands", "completionCommands." } }) |pair| {
+                const setting_key = c.print("{s}{s}", .{ pair[1], h.id });
+                const enabled = !std.mem.eql(u8, a.settings.text(setting_key) orelse "on", "off");
+                var chip = ui.div(c).row().h(26).px(9).itemsCenter().rounded(6).borderW(1);
+                chip = if (enabled) chip.border(k.accent).bg(if (k.is_harp) k.active else k.accent_wash) else chip.border(k.border).bg(k.raised.alpha(0.28)).hover(k.raised);
+                defer chip.end();
+                ui.text(c, pair[0], .{ .size = 11, .line_height = 16, .mono = true, .color = if (enabled) k.accent else k.muted });
+                if (chip.clicked()) {
+                    a.settings.setText(setting_key, if (enabled) "off" else "on");
+                    c.changed = true;
+                }
+            }
+        }
         return;
     }
     const r = ui.div(c).row().wFull().gap(12).itemsCenter();

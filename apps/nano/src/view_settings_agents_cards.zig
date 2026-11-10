@@ -173,7 +173,7 @@ pub fn screenAccess(c: *ui.Context, a: *App, k: theme.Colors) void {
         };
         if (after) {
             if (shots.action(c, k, "Open System Settings")) _ = nanoui.shell.openUrl("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture");
-            if (shots.action(c, k, "Restart Harness")) a.setNotice("Restarting isn't in Harness Nano yet: quit and open it again.");
+            if (shots.action(c, k, "Restart Harness")) @import("view_updates.zig").restartIntoUpdate(a);
         }
     }
     set.space(c, 4);

@@ -249,7 +249,21 @@ pub fn applyAcpLineLeaky(
             if (std.mem.eql(u8, kind_val.string, "tool_call") or std.mem.eql(u8, kind_val.string, "tool_call_update")) {
                 const tc_id = if (update.object.get("toolCallId")) |v| (if (v == .string) v.string else "tool-1") else "tool-1";
                 const title = if (update.object.get("title")) |v| (if (v == .string) v.string else "Tool") else "Tool";
-                _ = try doc.appendPartDelta(assistant_msg_id, tc_id, "tool", title);
+                const status_s = if (update.object.get("status")) |sv| (if (sv == .string) sv.string else "") else "";
+                const resolved = std.mem.eql(u8, status_s, "completed") or std.mem.eql(u8, status_s, "failed");
+                const is_error = std.mem.eql(u8, status_s, "failed");
+                const acp_kind = if (update.object.get("kind")) |kv| (if (kv == .string) kv.string else "") else "";
+                const call_json = if (std.mem.eql(u8, acp_kind, "execute"))
+                    try std.fmt.allocPrint(scratch_arena, "{{\"kind\":\"exec\",\"command\":{f}}}", .{json.fmt(title, .{})})
+                else if (std.mem.eql(u8, acp_kind, "read"))
+                    try std.fmt.allocPrint(scratch_arena, "{{\"kind\":\"readFile\",\"path\":{f}}}", .{json.fmt(title, .{})})
+                else if (std.mem.eql(u8, acp_kind, "edit"))
+                    try std.fmt.allocPrint(scratch_arena, "{{\"kind\":\"editFile\",\"path\":{f}}}", .{json.fmt(title, .{})})
+                else if (std.mem.eql(u8, acp_kind, "search"))
+                    try std.fmt.allocPrint(scratch_arena, "{{\"kind\":\"search\",\"pattern\":{f}}}", .{json.fmt(title, .{})})
+                else
+                    try std.fmt.allocPrint(scratch_arena, "{{\"kind\":\"unknown\",\"name\":{f}}}", .{json.fmt(title, .{})});
+                try doc.upsertToolPart(assistant_msg_id, tc_id, call_json, null, resolved, is_error);
                 return .{ .tool_update = .{ .tool_call_id = tc_id, .title = title } };
             }
         }

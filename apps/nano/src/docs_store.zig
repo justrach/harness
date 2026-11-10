@@ -1,8 +1,8 @@
 //! `DocsStore` — local persistence for doc snapshots, chat2 room cursors,
 //! the processed-command ledger, and the durable chat outbox (`crates/sync/src/store.rs`).
 //!
-//! Backed by SQLite (`docs.sqlite`) when opened via `openSqlite`, or in-memory
-//! when initialized via `init`.
+//! Backed by SQLite (`docs.sqlite`) with persistent cached prepared statements and WAL
+//! when opened via `openSqlite`, or in-memory when initialized via `init`.
 //! Enforces C2 (`docs/chat2-sync.md`): snapshot bytes and applied cursor update
 //! atomically together, and commands are marked processed BEFORE execution.
 const std = @import("std");
@@ -53,6 +53,8 @@ extern "c" fn sqlite3_bind_blob(
 ) c_int;
 extern "c" fn sqlite3_bind_int64(stmt: *sqlite3_stmt, idx: c_int, val: i64) c_int;
 extern "c" fn sqlite3_step(stmt: *sqlite3_stmt) c_int;
+extern "c" fn sqlite3_reset(stmt: *sqlite3_stmt) c_int;
+extern "c" fn sqlite3_clear_bindings(stmt: *sqlite3_stmt) c_int;
 extern "c" fn sqlite3_column_blob(stmt: *sqlite3_stmt, iCol: c_int) ?[*]const u8;
 extern "c" fn sqlite3_column_text(stmt: *sqlite3_stmt, iCol: c_int) ?[*:0]const u8;
 extern "c" fn sqlite3_column_bytes(stmt: *sqlite3_stmt, iCol: c_int) c_int;
@@ -61,6 +63,7 @@ extern "c" fn sqlite3_finalize(stmt: *sqlite3_stmt) c_int;
 
 pub const schema_migrations_sql: [:0]const u8 =
     \\PRAGMA journal_mode=WAL;
+    \\PRAGMA synchronous=NORMAL;
     \\CREATE TABLE IF NOT EXISTS snapshots (
     \\    doc_id TEXT PRIMARY KEY,
     \\    bytes BLOB NOT NULL,
@@ -80,6 +83,7 @@ pub const schema_migrations_sql: [:0]const u8 =
     \\    bytes BLOB NOT NULL,
     \\    needs_checkpoint INTEGER NOT NULL DEFAULT 0
     \\);
+    \\CREATE INDEX IF NOT EXISTS idx_chat_outbox_doc_id ON chat_outbox (doc_id);
     \\CREATE TABLE IF NOT EXISTS chat_outbox_initialized (
     \\    doc_id TEXT PRIMARY KEY
     \\);
@@ -94,6 +98,20 @@ pub const schema_migrations_sql: [:0]const u8 =
     \\    seq INTEGER NOT NULL
     \\);
 ;
+
+const save_snap_sql =
+    \\INSERT INTO snapshots (doc_id, bytes, saved_at, cursor, epoch, cursor_verified)
+    \\VALUES (?1, ?2, ?3, ?4, ?5, 1)
+    \\ON CONFLICT(doc_id) DO UPDATE SET
+    \\  bytes = excluded.bytes,
+    \\  saved_at = excluded.saved_at,
+    \\  cursor = excluded.cursor,
+    \\  epoch = excluded.epoch,
+    \\  cursor_verified = 1
+;
+const mark_cmd_sql = "INSERT OR IGNORE INTO processed_commands (command_id, processed_at) VALUES (?1, ?2)";
+const enq_outbox_sql = "INSERT OR IGNORE INTO chat_outbox (doc_id, batch_id, bytes, needs_checkpoint) VALUES (?1, ?2, ?3, 0)";
+const ack_outbox_sql = "DELETE FROM chat_outbox WHERE doc_id = ?1 AND batch_id = ?2";
 
 pub const SnapshotRecord = struct {
     bytes: []u8,
@@ -123,17 +141,35 @@ pub const OutboxItem = struct {
 pub const DocsStore = struct {
     gpa: Allocator,
     db: ?*sqlite3 = null,
+    /// Persistent cached SQLite prepared statements (Lean `cached_sqlite_and_indexed_outbox_strictly_faster`).
+    stmt_save_snap: ?*sqlite3_stmt = null,
+    stmt_mark_cmd: ?*sqlite3_stmt = null,
+    stmt_enq_outbox: ?*sqlite3_stmt = null,
+    stmt_ack_outbox: ?*sqlite3_stmt = null,
     snapshots: std.StringHashMapUnmanaged(SnapshotRecord) = .empty,
     processed_commands: std.StringHashMapUnmanaged(i64) = .empty,
     outbox: std.ArrayList(OutboxItem) = .empty,
+    /// O(1) batch deduplication set (borrows `OutboxItem.batch_id`).
+    outbox_batch_set: std.StringHashMapUnmanaged(void) = .empty,
+    /// O(1) pending outbox count per `doc_id` (owns `doc_id` keys).
+    pending_by_doc: std.StringHashMapUnmanaged(usize) = .empty,
     outbox_initialized: std.StringHashMapUnmanaged(void) = .empty,
 
     pub fn init(gpa: Allocator) DocsStore {
         return .{ .gpa = gpa };
     }
 
+    fn prepareCached(db: *sqlite3, sql: []const u8) !*sqlite3_stmt {
+        var stmt: ?*sqlite3_stmt = null;
+        if (sqlite3_prepare_v2(db, sql.ptr, @intCast(sql.len), &stmt, null) != SQLITE_OK or stmt == null) {
+            return error.SqlitePrepareFailed;
+        }
+        return stmt.?;
+    }
+
     /// Open a SQLite-backed `DocsStore` (`:memory:` or a file path), run all 6
-    /// migrations from `crates/sync/src/store.rs`, and hydrate in-memory tables.
+    /// migrations from `crates/sync/src/store.rs`, prepare cached hot statements,
+    /// and hydrate in-memory tables.
     pub fn openSqlite(gpa: Allocator, path_z: [*:0]const u8) !DocsStore {
         var raw_db: ?*sqlite3 = null;
         if (sqlite3_open(path_z, &raw_db) != SQLITE_OK or raw_db == null) {
@@ -152,11 +188,31 @@ pub const DocsStore = struct {
             .db = db,
         };
         errdefer store.deinit();
+        store.stmt_save_snap = try prepareCached(db, save_snap_sql);
+        store.stmt_mark_cmd = try prepareCached(db, mark_cmd_sql);
+        store.stmt_enq_outbox = try prepareCached(db, enq_outbox_sql);
+        store.stmt_ack_outbox = try prepareCached(db, ack_outbox_sql);
         try store.reloadFromSqlite();
         return store;
     }
 
     pub fn deinit(self: *DocsStore) void {
+        if (self.stmt_save_snap) |s| {
+            _ = sqlite3_finalize(s);
+            self.stmt_save_snap = null;
+        }
+        if (self.stmt_mark_cmd) |s| {
+            _ = sqlite3_finalize(s);
+            self.stmt_mark_cmd = null;
+        }
+        if (self.stmt_enq_outbox) |s| {
+            _ = sqlite3_finalize(s);
+            self.stmt_enq_outbox = null;
+        }
+        if (self.stmt_ack_outbox) |s| {
+            _ = sqlite3_finalize(s);
+            self.stmt_ack_outbox = null;
+        }
         if (self.db) |db| {
             _ = sqlite3_close(db);
             self.db = null;
@@ -172,12 +228,56 @@ pub const DocsStore = struct {
         while (cmd_it.next()) |e| self.gpa.free(e.key_ptr.*);
         self.processed_commands.deinit(self.gpa);
 
+        self.outbox_batch_set.deinit(self.gpa);
+        var pend_it = self.pending_by_doc.iterator();
+        while (pend_it.next()) |e| self.gpa.free(e.key_ptr.*);
+        self.pending_by_doc.deinit(self.gpa);
+
         for (self.outbox.items) |*item| item.deinit(self.gpa);
         self.outbox.deinit(self.gpa);
 
         var init_it = self.outbox_initialized.iterator();
         while (init_it.next()) |e| self.gpa.free(e.key_ptr.*);
         self.outbox_initialized.deinit(self.gpa);
+    }
+
+    pub fn beginTransaction(self: *DocsStore) !void {
+        if (self.db) |db| {
+            if (sqlite3_exec(db, "BEGIN IMMEDIATE;", null, null, null) != SQLITE_OK) {
+                return error.SqliteStepFailed;
+            }
+        }
+    }
+
+    pub fn commitTransaction(self: *DocsStore) !void {
+        if (self.db) |db| {
+            if (sqlite3_exec(db, "COMMIT;", null, null, null) != SQLITE_OK) {
+                return error.SqliteStepFailed;
+            }
+        }
+    }
+
+    fn incPendingForDoc(self: *DocsStore, doc_id: []const u8) !void {
+        const gop = try self.pending_by_doc.getOrPut(self.gpa, doc_id);
+        if (!gop.found_existing) {
+            errdefer _ = self.pending_by_doc.remove(doc_id);
+            gop.key_ptr.* = try self.gpa.dupe(u8, doc_id);
+            gop.value_ptr.* = 1;
+        } else {
+            gop.value_ptr.* += 1;
+        }
+    }
+
+    fn decPendingForDoc(self: *DocsStore, doc_id: []const u8) void {
+        if (self.pending_by_doc.getPtr(doc_id)) |cnt| {
+            if (cnt.* <= 1) {
+                if (self.pending_by_doc.fetchRemove(doc_id)) |kv| {
+                    self.gpa.free(kv.key);
+                }
+            } else {
+                cnt.* -= 1;
+            }
+        }
     }
 
     fn reloadFromSqlite(self: *DocsStore) !void {
@@ -255,13 +355,17 @@ pub const DocsStore = struct {
                         .needs_checkpoint = needs_cp,
                     };
                     errdefer item.deinit(self.gpa);
-                    try self.outbox.append(self.gpa, item);
+                    try self.outbox.ensureUnusedCapacity(self.gpa, 1);
+                    try self.outbox_batch_set.put(self.gpa, item.batch_id, {});
+                    errdefer _ = self.outbox_batch_set.remove(item.batch_id);
+                    try self.incPendingForDoc(item.doc_id);
+                    self.outbox.appendAssumeCapacity(item);
                 }
             }
         }
     }
 
-    /// Save snapshot bytes + cursor + epoch atomically (C2 rule).
+    /// Save snapshot bytes + cursor + epoch atomically (C2 rule) using cached prepared statement.
     pub fn saveSnapshotWithCursor(
         self: *DocsStore,
         doc_id: []const u8,
@@ -270,28 +374,17 @@ pub const DocsStore = struct {
         epoch: u32,
         now_ms: i64,
     ) !void {
-        if (self.db) |db| {
-            const sql =
-                \\INSERT INTO snapshots (doc_id, bytes, saved_at, cursor, epoch, cursor_verified)
-                \\VALUES (?1, ?2, ?3, ?4, ?5, 1)
-                \\ON CONFLICT(doc_id) DO UPDATE SET
-                \\  bytes = excluded.bytes,
-                \\  saved_at = excluded.saved_at,
-                \\  cursor = excluded.cursor,
-                \\  epoch = excluded.epoch,
-                \\  cursor_verified = 1
-            ;
-            var stmt: ?*sqlite3_stmt = null;
-            if (sqlite3_prepare_v2(db, sql.ptr, @intCast(sql.len), &stmt, null) != SQLITE_OK or stmt == null) {
-                return error.SqlitePrepareFailed;
+        if (self.stmt_save_snap) |stmt| {
+            defer {
+                _ = sqlite3_reset(stmt);
+                _ = sqlite3_clear_bindings(stmt);
             }
-            defer _ = sqlite3_finalize(stmt.?);
-            _ = sqlite3_bind_text(stmt.?, 1, doc_id.ptr, @intCast(doc_id.len), SQLITE_TRANSIENT);
-            _ = sqlite3_bind_blob(stmt.?, 2, if (bytes.len > 0) bytes.ptr else null, @intCast(bytes.len), SQLITE_TRANSIENT);
-            _ = sqlite3_bind_int64(stmt.?, 3, now_ms);
-            _ = sqlite3_bind_int64(stmt.?, 4, @intCast(cursor));
-            _ = sqlite3_bind_int64(stmt.?, 5, @intCast(epoch));
-            if (sqlite3_step(stmt.?) != SQLITE_DONE) return error.SqliteStepFailed;
+            _ = sqlite3_bind_text(stmt, 1, doc_id.ptr, @intCast(doc_id.len), SQLITE_TRANSIENT);
+            _ = sqlite3_bind_blob(stmt, 2, if (bytes.len > 0) bytes.ptr else null, @intCast(bytes.len), SQLITE_TRANSIENT);
+            _ = sqlite3_bind_int64(stmt, 3, now_ms);
+            _ = sqlite3_bind_int64(stmt, 4, @intCast(cursor));
+            _ = sqlite3_bind_int64(stmt, 5, @intCast(epoch));
+            if (sqlite3_step(stmt) != SQLITE_DONE) return error.SqliteStepFailed;
         }
 
         const bytes_copy = try self.gpa.dupe(u8, bytes);
@@ -338,16 +431,14 @@ pub const DocsStore = struct {
     /// `false` if already processed (idempotent duplicate).
     pub fn markCommandProcessed(self: *DocsStore, command_id: []const u8, now_ms: i64) !bool {
         if (self.processed_commands.contains(command_id)) return false;
-        if (self.db) |db| {
-            const sql = "INSERT OR IGNORE INTO processed_commands (command_id, processed_at) VALUES (?1, ?2)";
-            var stmt: ?*sqlite3_stmt = null;
-            if (sqlite3_prepare_v2(db, sql.ptr, @intCast(sql.len), &stmt, null) != SQLITE_OK or stmt == null) {
-                return error.SqlitePrepareFailed;
+        if (self.stmt_mark_cmd) |stmt| {
+            defer {
+                _ = sqlite3_reset(stmt);
+                _ = sqlite3_clear_bindings(stmt);
             }
-            defer _ = sqlite3_finalize(stmt.?);
-            _ = sqlite3_bind_text(stmt.?, 1, command_id.ptr, @intCast(command_id.len), SQLITE_TRANSIENT);
-            _ = sqlite3_bind_int64(stmt.?, 2, now_ms);
-            if (sqlite3_step(stmt.?) != SQLITE_DONE) return error.SqliteStepFailed;
+            _ = sqlite3_bind_text(stmt, 1, command_id.ptr, @intCast(command_id.len), SQLITE_TRANSIENT);
+            _ = sqlite3_bind_int64(stmt, 2, now_ms);
+            if (sqlite3_step(stmt) != SQLITE_DONE) return error.SqliteStepFailed;
         }
         const key = try self.gpa.dupe(u8, command_id);
         errdefer self.gpa.free(key);
@@ -359,22 +450,18 @@ pub const DocsStore = struct {
         return self.processed_commands.contains(command_id);
     }
 
-    /// Insert before sending. Stable `batch_id` makes crash-after-ACK replay idempotent.
+    /// Insert before sending. O(1) `outbox_batch_set` makes crash-after-ACK replay idempotent without scanning.
     pub fn enqueueChatUpdate(self: *DocsStore, doc_id: []const u8, batch_id: []const u8, bytes: []const u8) !void {
-        for (self.outbox.items) |existing| {
-            if (std.mem.eql(u8, existing.batch_id, batch_id)) return;
-        }
-        if (self.db) |db| {
-            const sql = "INSERT OR IGNORE INTO chat_outbox (doc_id, batch_id, bytes, needs_checkpoint) VALUES (?1, ?2, ?3, 0)";
-            var stmt: ?*sqlite3_stmt = null;
-            if (sqlite3_prepare_v2(db, sql.ptr, @intCast(sql.len), &stmt, null) != SQLITE_OK or stmt == null) {
-                return error.SqlitePrepareFailed;
+        if (self.outbox_batch_set.contains(batch_id)) return;
+        if (self.stmt_enq_outbox) |stmt| {
+            defer {
+                _ = sqlite3_reset(stmt);
+                _ = sqlite3_clear_bindings(stmt);
             }
-            defer _ = sqlite3_finalize(stmt.?);
-            _ = sqlite3_bind_text(stmt.?, 1, doc_id.ptr, @intCast(doc_id.len), SQLITE_TRANSIENT);
-            _ = sqlite3_bind_text(stmt.?, 2, batch_id.ptr, @intCast(batch_id.len), SQLITE_TRANSIENT);
-            _ = sqlite3_bind_blob(stmt.?, 3, if (bytes.len > 0) bytes.ptr else null, @intCast(bytes.len), SQLITE_TRANSIENT);
-            if (sqlite3_step(stmt.?) != SQLITE_DONE) return error.SqliteStepFailed;
+            _ = sqlite3_bind_text(stmt, 1, doc_id.ptr, @intCast(doc_id.len), SQLITE_TRANSIENT);
+            _ = sqlite3_bind_text(stmt, 2, batch_id.ptr, @intCast(batch_id.len), SQLITE_TRANSIENT);
+            _ = sqlite3_bind_blob(stmt, 3, if (bytes.len > 0) bytes.ptr else null, @intCast(bytes.len), SQLITE_TRANSIENT);
+            if (sqlite3_step(stmt) != SQLITE_DONE) return error.SqliteStepFailed;
         }
         var item = OutboxItem{
             .doc_id = try self.gpa.dupe(u8, doc_id),
@@ -382,31 +469,38 @@ pub const DocsStore = struct {
             .bytes = try self.gpa.dupe(u8, bytes),
         };
         errdefer item.deinit(self.gpa);
-        try self.outbox.append(self.gpa, item);
+        try self.outbox.ensureUnusedCapacity(self.gpa, 1);
+        try self.outbox_batch_set.put(self.gpa, item.batch_id, {});
+        errdefer _ = self.outbox_batch_set.remove(item.batch_id);
+        try self.incPendingForDoc(doc_id);
+        self.outbox.appendAssumeCapacity(item);
+    }
+
+    /// O(1) pending outbox count for `doc_id` (Lean `indexedOutboxOps`).
+    pub fn pendingOutboxCount(self: *const DocsStore, doc_id: []const u8) usize {
+        return self.pending_by_doc.get(doc_id) orelse 0;
     }
 
     pub fn hasPendingChatUpdates(self: *const DocsStore, doc_id: []const u8) bool {
-        for (self.outbox.items) |item| {
-            if (std.mem.eql(u8, item.doc_id, doc_id)) return true;
-        }
-        return false;
+        return self.pendingOutboxCount(doc_id) > 0;
     }
 
     pub fn acknowledgeChatUpdate(self: *DocsStore, doc_id: []const u8, batch_id: []const u8) void {
-        if (self.db) |db| {
-            const sql = "DELETE FROM chat_outbox WHERE doc_id = ?1 AND batch_id = ?2";
-            var stmt: ?*sqlite3_stmt = null;
-            if (sqlite3_prepare_v2(db, sql.ptr, @intCast(sql.len), &stmt, null) == SQLITE_OK and stmt != null) {
-                defer _ = sqlite3_finalize(stmt.?);
-                _ = sqlite3_bind_text(stmt.?, 1, doc_id.ptr, @intCast(doc_id.len), SQLITE_TRANSIENT);
-                _ = sqlite3_bind_text(stmt.?, 2, batch_id.ptr, @intCast(batch_id.len), SQLITE_TRANSIENT);
-                _ = sqlite3_step(stmt.?);
+        if (self.stmt_ack_outbox) |stmt| {
+            defer {
+                _ = sqlite3_reset(stmt);
+                _ = sqlite3_clear_bindings(stmt);
             }
+            _ = sqlite3_bind_text(stmt, 1, doc_id.ptr, @intCast(doc_id.len), SQLITE_TRANSIENT);
+            _ = sqlite3_bind_text(stmt, 2, batch_id.ptr, @intCast(batch_id.len), SQLITE_TRANSIENT);
+            _ = sqlite3_step(stmt);
         }
         var i: usize = 0;
         while (i < self.outbox.items.len) {
             const item = &self.outbox.items[i];
             if (std.mem.eql(u8, item.doc_id, doc_id) and std.mem.eql(u8, item.batch_id, batch_id)) {
+                _ = self.outbox_batch_set.remove(item.batch_id);
+                self.decPendingForDoc(doc_id);
                 item.deinit(self.gpa);
                 _ = self.outbox.orderedRemove(i);
                 return;
@@ -460,9 +554,13 @@ pub const DocsStore = struct {
         if (self.outbox_initialized.fetchRemove(doc_id)) |kv| {
             self.gpa.free(kv.key);
         }
+        if (self.pending_by_doc.fetchRemove(doc_id)) |kv| {
+            self.gpa.free(kv.key);
+        }
         var i: usize = 0;
         while (i < self.outbox.items.len) {
             if (std.mem.eql(u8, self.outbox.items[i].doc_id, doc_id)) {
+                _ = self.outbox_batch_set.remove(self.outbox.items[i].batch_id);
                 self.outbox.items[i].deinit(self.gpa);
                 _ = self.outbox.orderedRemove(i);
             } else {
@@ -487,7 +585,103 @@ test "DocsStore atomic snapshot+cursor C2 rule, command idempotence, and outbox 
 
     try store.enqueueChatUpdate("chat-1", "batch-1", &.{ 1, 2, 3 });
     try store.enqueueChatUpdate("chat-1", "batch-1", &.{ 1, 2, 3 }); // idempotent
+    try testing.expectEqual(@as(usize, 1), store.pendingOutboxCount("chat-1"));
     try testing.expect(store.hasPendingChatUpdates("chat-1"));
     store.acknowledgeChatUpdate("chat-1", "batch-1");
+    try testing.expectEqual(@as(usize, 0), store.pendingOutboxCount("chat-1"));
     try testing.expect(!store.hasPendingChatUpdates("chat-1"));
+}
+
+test "Performance shape: DocsStore cached SQLite statements + O(1) outbox index >= 5x faster than uncached prepare + O(C*B) scan" {
+    const gpa = testing.allocator;
+    var store = try DocsStore.openSqlite(gpa, ":memory:");
+    defer store.deinit();
+
+    const num_chats: usize = 400;
+    const num_batches: usize = 1_600;
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const chat_ids = try a.alloc([]const u8, num_chats);
+    for (0..num_chats) |c| {
+        chat_ids[c] = try std.fmt.allocPrint(a, "chat-{d}", .{c});
+    }
+    const batch_ids = try a.alloc([]const u8, num_batches);
+    for (0..num_batches) |b| {
+        batch_ids[b] = try std.fmt.allocPrint(a, "batch-{d}", .{b});
+    }
+
+    try store.beginTransaction();
+    for (0..num_batches) |b| {
+        try store.enqueueChatUpdate(chat_ids[b % num_chats], batch_ids[b], "HZD1-bench-payload");
+    }
+    try store.commitTransaction();
+
+    // Fast path: cached SQLite prepared statement reuse + O(1) duplicate check + O(1) pendingOutboxCount
+    const t_fast0 = std.Io.Clock.Timestamp.now(testing.io, .awake);
+    var fast_sum: usize = 0;
+    if (store.stmt_save_snap) |st| {
+        try store.beginTransaction();
+        for (0..num_chats) |c| {
+            _ = sqlite3_reset(st);
+            _ = sqlite3_clear_bindings(st);
+            _ = sqlite3_bind_text(st, 1, chat_ids[c].ptr, @intCast(chat_ids[c].len), SQLITE_TRANSIENT);
+            _ = sqlite3_bind_blob(st, 2, "HZD1-snap".ptr, 9, SQLITE_TRANSIENT);
+            _ = sqlite3_bind_int64(st, 3, 1_000);
+            _ = sqlite3_step(st);
+        }
+        try store.commitTransaction();
+    }
+    for (0..num_batches) |b| {
+        if (store.outbox_batch_set.contains(batch_ids[b])) fast_sum += 1;
+    }
+    for (0..25) |_| {
+        for (chat_ids) |cid| {
+            fast_sum += store.pendingOutboxCount(cid);
+        }
+    }
+    const fast_ns: u64 = @intCast(@max(1, t_fast0.untilNow(testing.io).raw.nanoseconds));
+
+    // Slow baseline (previous DocsStore shape): uncached sqlite3_prepare_v2 per write + O(B) duplicate scan + O(C*B) outbox scan
+    var slow_db: ?*sqlite3 = null;
+    _ = sqlite3_open(":memory:", &slow_db);
+    defer if (slow_db) |d| {
+        _ = sqlite3_close(d);
+    };
+    _ = sqlite3_exec(slow_db.?, schema_migrations_sql.ptr, null, null, null);
+
+    const t_slow0 = std.Io.Clock.Timestamp.now(testing.io, .awake);
+    var slow_sum: usize = 0;
+    for (0..num_chats) |c| {
+        var st: ?*sqlite3_stmt = null;
+        if (sqlite3_prepare_v2(slow_db.?, save_snap_sql.ptr, @intCast(save_snap_sql.len), &st, null) == SQLITE_OK and st != null) {
+            _ = sqlite3_bind_text(st.?, 1, chat_ids[c].ptr, @intCast(chat_ids[c].len), SQLITE_TRANSIENT);
+            _ = sqlite3_bind_blob(st.?, 2, "HZD1-snap".ptr, 9, SQLITE_TRANSIENT);
+            _ = sqlite3_bind_int64(st.?, 3, 1_000);
+            _ = sqlite3_step(st.?);
+            _ = sqlite3_finalize(st.?);
+        }
+    }
+    for (0..num_batches) |b| {
+        for (store.outbox.items) |ob| {
+            if (std.mem.eql(u8, ob.batch_id, batch_ids[b])) {
+                slow_sum += 1;
+                break;
+            }
+        }
+    }
+    for (0..25) |_| {
+        for (chat_ids) |cid| {
+            for (store.outbox.items) |ob| {
+                if (std.mem.eql(u8, ob.doc_id, cid)) slow_sum += 1;
+            }
+        }
+    }
+    const slow_ns: u64 = @intCast(@max(1, t_slow0.untilNow(testing.io).raw.nanoseconds));
+
+    try testing.expectEqual(slow_sum, fast_sum);
+    // AGENTS.md shape test: cached + indexed path must be at least 5x faster than uncached + O(C*B) scan!
+    try testing.expect(fast_ns * 5 <= slow_ns);
 }

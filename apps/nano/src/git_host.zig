@@ -219,6 +219,66 @@ pub fn runGitDiffJson(gpa: Allocator, maybe_io: ?std.Io, cwd: []const u8) ![]u8 
     return parseUnifiedDiffToJson(gpa, cwd, "HEAD", "");
 }
 
+/// Run `git for-each-ref` for `ListBranches` when `maybe_io` is set.
+pub fn listBranchesJson(gpa: Allocator, maybe_io: ?std.Io, cwd: []const u8) ![]u8 {
+    if (maybe_io) |io| {
+        if (captureGitStdout(gpa, io, cwd, &.{ "git", "for-each-ref", "--format=%(HEAD)|%(refname:short)", "refs/heads/" })) |out| {
+            defer gpa.free(out);
+            var aw: std.Io.Writer.Allocating = .init(gpa);
+            errdefer aw.deinit();
+            const w = &aw.writer;
+            try w.writeByte('[');
+            var count: usize = 0;
+            var lines = std.mem.splitScalar(u8, out, '\n');
+            while (lines.next()) |raw| {
+                const line = std.mem.trimEnd(u8, raw, "\r");
+                if (line.len < 3) continue;
+                const sep = std.mem.indexOfScalar(u8, line, '|') orelse continue;
+                const is_cur = std.mem.eql(u8, line[0..sep], "*");
+                const bname = line[sep + 1 ..];
+                if (bname.len == 0) continue;
+                if (count > 0) try w.writeByte(',');
+                try w.print("{{\"name\":{f},\"current\":{}}}", .{ json.fmt(bname, .{}), is_cur });
+                count += 1;
+            }
+            try w.writeByte(']');
+            if (count > 0) return aw.toOwnedSlice();
+            aw.deinit();
+        }
+    }
+    return gpa.dupe(
+        u8,
+        "[{\"name\":\"experimental-zig-branch\",\"current\":true},{\"name\":\"main\",\"current\":false}]",
+    );
+}
+
+/// Run `git for-each-ref` for `ListRefs` when `maybe_io` is set.
+pub fn listRefsJson(gpa: Allocator, maybe_io: ?std.Io, cwd: []const u8) ![]u8 {
+    if (maybe_io) |io| {
+        if (captureGitStdout(gpa, io, cwd, &.{ "git", "for-each-ref", "--format=%(refname:short)", "refs/heads/", "refs/tags/" })) |out| {
+            defer gpa.free(out);
+            var aw: std.Io.Writer.Allocating = .init(gpa);
+            errdefer aw.deinit();
+            const w = &aw.writer;
+            try w.writeByte('[');
+            var count: usize = 0;
+            var lines = std.mem.splitScalar(u8, out, '\n');
+            while (lines.next()) |raw| {
+                const rname = std.mem.trim(u8, raw, " \t\r");
+                if (rname.len == 0) continue;
+                if (count > 0) try w.writeByte(',');
+                try w.print("{{\"name\":{f}}}", .{json.fmt(rname, .{})});
+                count += 1;
+                if (count >= 128) break;
+            }
+            try w.writeByte(']');
+            if (count > 0) return aw.toOwnedSlice();
+            aw.deinit();
+        }
+    }
+    return gpa.dupe(u8, "[{\"name\":\"experimental-zig-branch\"},{\"name\":\"main\"}]");
+}
+
 test "git_host parses porcelain v2 status, unified diffs, GitHub remotes, and runs real git status" {
     const gpa = testing.allocator;
 

@@ -748,7 +748,7 @@ fn appUpdatedCard(c: *ui.Context, a: *App, k: theme.Colors) void {
     const card_h: f32 = 126;
     ui.key(c, "app-updated");
     const card = @import("view_sidebar_menus.zig").held(kit.shadowLg(ui.div(c).fixed().offset(@max(16, c.size.w - card_w - 16), @max(16, c.size.h - card_h - 16))
-        .layer(5).column().w(card_w).p(14).gap(10).rounded(12).border(k.border).borderW(1).bg(k.composer.alpha(1))));
+        .layer(5).column().w(card_w).p(14).gap(10).rounded(12).border(k.border).borderW(1).bg(.{ .r = k.composer.r, .g = k.composer.g, .b = k.composer.b, .a = 1 })));
     defer card.end();
     {
         const hd = ui.div(c).row().gap(10).itemsCenter();
@@ -814,7 +814,7 @@ fn graffNoticeCard(c: *ui.Context, a: *App, k: theme.Colors) void {
     const measured_h: ?f32 = if (c.rects.get(card_id)) |r| (if (r.h > 0 and r.h < 600) r.h else null) else null;
     const card_h = measured_h orelse s.graff_card_h orelse est_h;
     const card = @import("view_sidebar_menus.zig").held(kit.shadowLg(ui.div(c).fixed().offset(@max(16, c.size.w - card_w - 16), @max(16, c.size.h - card_h - 16))
-        .layer(5).column().w(card_w).p(14).gap(10).rounded(12).border(k.border).borderW(1).bg(k.composer.alpha(1))));
+        .layer(5).column().w(card_w).p(14).gap(10).rounded(12).border(k.border).borderW(1).bg(.{ .r = k.composer.r, .g = k.composer.g, .b = k.composer.b, .a = 1 })));
     defer card.end();
     if (c.rects.get(c.node(card.index).id)) |r| {
         if (r.h > 0 and r.h < 600) s.graff_card_h = r.h;

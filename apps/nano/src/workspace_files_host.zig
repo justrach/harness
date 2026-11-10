@@ -167,6 +167,125 @@ pub fn filterPathsToJson(
     return aw.toOwnedSlice();
 }
 
+/// List folders inside `req_path` (`ListFolders`) when `maybe_io` is available and `req_path` exists.
+pub fn listFoldersJson(gpa: Allocator, maybe_io: ?std.Io, req_path: []const u8) ![]u8 {
+    if (maybe_io) |io| {
+        if (std.Io.Dir.cwd().openDir(io, req_path, .{ .iterate = true })) |dir_val| {
+            var dir = dir_val;
+            defer dir.close(io);
+            var aw: std.Io.Writer.Allocating = .init(gpa);
+            errdefer aw.deinit();
+            const w = &aw.writer;
+            try w.print("{{\"path\":{f},\"entries\":[", .{json.fmt(req_path, .{})});
+            var it = dir.iterate();
+            var count: usize = 0;
+            var truncated = false;
+            while (it.next(io) catch null) |entry| {
+                if (entry.kind != .directory) continue;
+                if (std.mem.startsWith(u8, entry.name, ".")) continue;
+                if (count >= 200) {
+                    truncated = true;
+                    break;
+                }
+                const git_sub = try std.fmt.allocPrint(gpa, "{s}/.git", .{entry.name});
+                defer gpa.free(git_sub);
+                const is_repo = if (dir.access(io, git_sub, .{})) |_| true else |_| false;
+                if (count > 0) try w.writeByte(',');
+                try w.print("{{\"name\":{f},\"isDir\":true,\"isRepo\":{}}}", .{ json.fmt(entry.name, .{}), is_repo });
+                count += 1;
+            }
+            try w.print("],\"truncated\":{}}}", .{truncated});
+            return aw.toOwnedSlice();
+        } else |_| {}
+    }
+    return std.fmt.allocPrint(
+        gpa,
+        "{{\"path\":{f},\"entries\":[{{\"name\":\"apps\",\"isDir\":true,\"isRepo\":false}},{{\"name\":\"crates\",\"isDir\":true,\"isRepo\":false}},{{\"name\":\"lean-proofs\",\"isDir\":true,\"isRepo\":false}},{{\"name\":\"protocol\",\"isDir\":true,\"isRepo\":false}}],\"truncated\":false}}",
+        .{json.fmt(req_path, .{})},
+    );
+}
+
+fn shouldSkipWalkDir(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, ".") or
+        std.mem.eql(u8, name, "target") or
+        std.mem.eql(u8, name, "node_modules") or
+        std.mem.eql(u8, name, "zig-out");
+}
+
+/// Search real workspace files up to 2 directory levels deep when `maybe_io` is set.
+pub fn searchWorkspaceFilesJson(
+    gpa: Allocator,
+    maybe_io: ?std.Io,
+    root_dir: []const u8,
+    query: []const u8,
+    limit: usize,
+) ![]u8 {
+    if (maybe_io) |io| {
+        if (std.Io.Dir.cwd().openDir(io, root_dir, .{ .iterate = true })) |dir_val| {
+            var root = dir_val;
+            defer root.close(io);
+            var found: std.ArrayList([]u8) = .empty;
+            defer {
+                for (found.items) |p| gpa.free(p);
+                found.deinit(gpa);
+            }
+
+            var it1 = root.iterate();
+            while ((it1.next(io) catch null)) |e1| {
+                if (found.items.len >= 512) break;
+                if (e1.kind == .directory) {
+                    if (shouldSkipWalkDir(e1.name)) continue;
+                    if (root.openDir(io, e1.name, .{ .iterate = true })) |sub1_val| {
+                        var sub1 = sub1_val;
+                        defer sub1.close(io);
+                        var it2 = sub1.iterate();
+                        while ((it2.next(io) catch null)) |e2| {
+                            if (found.items.len >= 512) break;
+                            if (e2.kind == .file and !std.mem.startsWith(u8, e2.name, ".")) {
+                                const rel = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ e1.name, e2.name });
+                                errdefer gpa.free(rel);
+                                if (matchesQuery(rel, query)) {
+                                    try found.append(gpa, rel);
+                                } else {
+                                    gpa.free(rel);
+                                }
+                            }
+                        }
+                    } else |_| {}
+                } else if (e1.kind == .file and !std.mem.startsWith(u8, e1.name, ".")) {
+                    if (matchesQuery(e1.name, query)) {
+                        try found.append(gpa, try gpa.dupe(u8, e1.name));
+                    }
+                }
+            }
+            if (found.items.len > 0 or query.len > 0) {
+                return filterPathsToJson(gpa, found.items, query, limit);
+            }
+        } else |_| {}
+    }
+    const candidates = [_][]const u8{"README.md"};
+    return filterPathsToJson(gpa, &candidates, query, limit);
+}
+
+/// Write a relative file inside `root_dir` (`WriteWorkspaceFile`), rejecting `..` traversal.
+pub fn writeWorkspaceFile(
+    gpa: Allocator,
+    io: std.Io,
+    root_dir: []const u8,
+    rel_path: []const u8,
+    content: []const u8,
+) !void {
+    if (!isSafeRelativePath(rel_path) or rel_path.len == 0) return error.PathTraversalDenied;
+    const full_path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ std.mem.trimEnd(u8, root_dir, "/"), rel_path });
+    defer gpa.free(full_path);
+    if (std.fs.path.dirname(full_path)) |parent| {
+        std.Io.Dir.cwd().createDirPath(io, parent) catch {};
+    }
+    const f = try std.Io.Dir.cwd().createFile(io, full_path, .{ .truncate = true });
+    defer f.close(io);
+    try f.writeStreamingAll(io, content);
+}
+
 test "workspace_files_host rejects path traversal, lists real directories, and filters workspace files" {
     const gpa = testing.allocator;
     try testing.expect(isSafeRelativePath("src/main.zig"));

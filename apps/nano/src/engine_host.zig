@@ -54,6 +54,64 @@ pub const WatchKind = enum {
     doc_messages,
     queue,
     auth_status,
+    sidebar_prefs,
+};
+
+/// Process-wide sync admission budget & `ACTIVE_SYNC_CAP` scheduler rules
+/// (`crates/sync/src/budget.rs` & `crates/engine/src/doc_host.rs`,
+/// Lean `HarnessProofs.PerformanceAndQueueParity`).
+pub const SyncBudget = struct {
+    pub const max_waiters: usize = 128;
+    pub const dial_pacing_ms: i64 = 50;
+    pub const fd_exhausted_pause_ms: i64 = 2_000;
+    pub const active_sync_cap: usize = 28;
+    pub const sync_admission_batch: usize = 4;
+    pub const sync_idle_ms: i64 = 10_000;
+    pub const sync_quantum_ms: i64 = 30_000;
+    pub const wake_linger_ms: i64 = 60_000;
+
+    next_dial_ms: ?i64 = null,
+    paused_until_ms: ?i64 = null,
+    active_rooms: usize = 0,
+    waiting_rooms: usize = 0,
+
+    pub fn backgroundHttpLimit(http_limit: usize) usize {
+        return @max(@as(usize, 1), http_limit -| 2);
+    }
+
+    pub fn isUnixFdExhausted(errno: i32) bool {
+        return errno == 23 or errno == 24;
+    }
+
+    pub fn scheduleDial(self: *SyncBudget, now_ms: i64) i64 {
+        const ready_at = if (self.next_dial_ms) |prev| @max(prev, now_ms) else now_ms;
+        self.next_dial_ms = ready_at + dial_pacing_ms;
+        return ready_at;
+    }
+
+    pub fn observeUnixErrno(self: *SyncBudget, errno: i32, now_ms: i64) void {
+        if (isUnixFdExhausted(errno)) {
+            self.paused_until_ms = now_ms + fd_exhausted_pause_ms;
+        }
+    }
+
+    pub fn admitBatch(active_count: usize, waiting_count: usize) usize {
+        const free_slots = active_sync_cap -| @min(active_count, active_sync_cap);
+        return @min(sync_admission_batch, @min(waiting_count, free_slots));
+    }
+
+    pub fn shouldReclaimSlot(
+        protected: bool,
+        pending_updates: bool,
+        caught_up: bool,
+        idle_elapsed_ms: i64,
+        active_elapsed_ms: i64,
+        waiters_queued: bool,
+    ) bool {
+        if (protected or pending_updates) return false;
+        return (caught_up and idle_elapsed_ms >= sync_idle_ms) or
+            (waiters_queued and active_elapsed_ms >= sync_quantum_ms);
+    }
 };
 
 pub const max_committed_uploads_cache: usize = 8;
@@ -551,12 +609,21 @@ pub const EngineHost = struct {
     live_ws_writer: ?*std.Io.Writer = null,
     cached_graff_models_json: ?[]u8 = null,
     focused_chat_id: ?[]u8 = null,
+    data_dir: ?[]u8 = null,
     workspace_scope: []const u8 = "synced",
     keep_awake_enabled: bool = false,
+    autonomy_level: []u8,
+    graff_draft_subagents: bool = true,
+    graff_compact_at: i64 = 80,
+    sidebar_sort_by: []u8,
+    sidebar_group_by: []u8,
+    sync_budget: SyncBudget = .{},
     staged_uploads: std.StringHashMapUnmanaged(std.ArrayList(u8)) = .empty,
     committed_uploads: std.StringHashMapUnmanaged([]u8) = .empty,
     committed_upload_order: std.ArrayList([]u8) = .empty,
     turn_counter: u64 = 0,
+    queue_seq: u64 = 0,
+    lease_seq: u64 = 0,
     sync_probes: u64 = 0,
     stop_requested: bool = false,
 
@@ -565,6 +632,12 @@ pub const EngineHost = struct {
         errdefer gpa.free(did);
         const dname = try gpa.dupe(u8, device_name);
         errdefer gpa.free(dname);
+        const auton = try gpa.dupe(u8, "workspace");
+        errdefer gpa.free(auton);
+        const sort_by = try gpa.dupe(u8, "updated");
+        errdefer gpa.free(sort_by);
+        const group_by = try gpa.dupe(u8, "space");
+        errdefer gpa.free(group_by);
         var reg = try registry_sync.RegistryDoc.init(gpa, device_id);
         errdefer reg.deinit();
         var auth = try auth_host.AuthManager.init(gpa);
@@ -573,6 +646,9 @@ pub const EngineHost = struct {
             .gpa = gpa,
             .device_id = did,
             .device_name = dname,
+            .autonomy_level = auton,
+            .sidebar_sort_by = sort_by,
+            .sidebar_group_by = group_by,
             .store = docs_store.DocsStore.init(gpa),
             .registry = reg,
             .terminals = terminals_host.TerminalManager.init(gpa),
@@ -581,9 +657,19 @@ pub const EngineHost = struct {
         };
     }
 
+    pub fn setDataDir(self: *EngineHost, dir: []const u8) !void {
+        const copy = try self.gpa.dupe(u8, dir);
+        if (self.data_dir) |old| self.gpa.free(old);
+        self.data_dir = copy;
+    }
+
     pub fn deinit(self: *EngineHost) void {
         self.gpa.free(self.device_id);
         self.gpa.free(self.device_name);
+        self.gpa.free(self.autonomy_level);
+        self.gpa.free(self.sidebar_sort_by);
+        self.gpa.free(self.sidebar_group_by);
+        if (self.data_dir) |d| self.gpa.free(d);
         self.store.deinit();
         self.registry.deinit();
         self.terminals.deinit();
@@ -1042,7 +1128,11 @@ pub const EngineHost = struct {
                 var transferred = false;
                 errdefer if (!transferred) self.gpa.free(bytes);
 
-                const dir_path = "/tmp/harness-zig-live/uploads";
+                const dir_path = if (self.data_dir) |dd|
+                    try std.fmt.allocPrint(self.gpa, "{s}/uploads", .{std.mem.trimEnd(u8, dd, "/")})
+                else
+                    try self.gpa.dupe(u8, "/tmp/harness-zig-live/uploads");
+                defer self.gpa.free(dir_path);
                 if (self.io) |io| {
                     std.Io.Dir.cwd().createDirPath(io, dir_path) catch {};
                 }
@@ -1222,12 +1312,25 @@ pub const EngineHost = struct {
             .PollAgentLogin => {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"status\":\"done\"}") };
             },
-            .GetAutonomy, .SetAutonomy => {
-                const level = if (requireObj(params)) |obj| (requireStr(obj, "autonomy") orelse "workspace") else "workspace";
+            .GetAutonomy => {
                 return .{ .unary_json = try std.fmt.allocPrint(
                     self.gpa,
                     "{{\"autonomy\":{f},\"chosen\":true}}",
-                    .{json.fmt(level, .{})},
+                    .{json.fmt(self.autonomy_level, .{})},
+                ) };
+            },
+            .SetAutonomy => {
+                if (requireObj(params)) |obj| {
+                    if (requireStr(obj, "autonomy")) |lvl| {
+                        const copy = try self.gpa.dupe(u8, lvl);
+                        self.gpa.free(self.autonomy_level);
+                        self.autonomy_level = copy;
+                    }
+                }
+                return .{ .unary_json = try std.fmt.allocPrint(
+                    self.gpa,
+                    "{{\"autonomy\":{f},\"chosen\":true}}",
+                    .{json.fmt(self.autonomy_level, .{})},
                 ) };
             },
             .GetKeepAwake => {
@@ -1249,13 +1352,27 @@ pub const EngineHost = struct {
                     .{self.keep_awake_enabled},
                 ) };
             },
-            .GetGraffDraftSubagents, .SetGraffDraftSubagents => {
-                const enabled = if (requireObj(params)) |obj| (if (obj.get("enabled")) |v| (if (v == .bool) v.bool else true) else true) else true;
-                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{}", .{enabled}) };
+            .GetGraffDraftSubagents => {
+                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{}", .{self.graff_draft_subagents}) };
             },
-            .GetGraffCompactAt, .SetGraffCompactAt => {
-                const pct: i64 = if (requireObj(params)) |obj| (if (obj.get("percent")) |v| (if (v == .integer) v.integer else 80) else 80) else 80;
-                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{d}", .{pct}) };
+            .SetGraffDraftSubagents => {
+                if (requireObj(params)) |obj| {
+                    if (obj.get("enabled")) |v| if (v == .bool) {
+                        self.graff_draft_subagents = v.bool;
+                    };
+                }
+                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{}", .{self.graff_draft_subagents}) };
+            },
+            .GetGraffCompactAt => {
+                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{d}", .{self.graff_compact_at}) };
+            },
+            .SetGraffCompactAt => {
+                if (requireObj(params)) |obj| {
+                    if (obj.get("percent")) |v| if (v == .integer) {
+                        self.graff_compact_at = v.integer;
+                    };
+                }
+                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{d}", .{self.graff_compact_at}) };
             },
             .GetTitleSettings, .SetTitleSettings => {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"harness\":null,\"model\":null}") };
@@ -1341,16 +1458,12 @@ pub const EngineHost = struct {
                 ) };
             },
             .ListBranches => {
-                return .{ .unary_json = try self.gpa.dupe(
-                    u8,
-                    "[{\"name\":\"experimental-zig-branch\",\"current\":true},{\"name\":\"main\",\"current\":false}]",
-                ) };
+                const cwd = if (requireObj(params)) |obj| (requireStr(obj, "cwd") orelse requireStr(obj, "path") orelse ".") else ".";
+                return .{ .unary_json = try git_host.listBranchesJson(self.gpa, self.io, cwd) };
             },
             .ListRefs => {
-                return .{ .unary_json = try self.gpa.dupe(
-                    u8,
-                    "[{\"name\":\"experimental-zig-branch\"},{\"name\":\"main\"}]",
-                ) };
+                const cwd = if (requireObj(params)) |obj| (requireStr(obj, "cwd") orelse requireStr(obj, "path") orelse ".") else ".";
+                return .{ .unary_json = try git_host.listRefsJson(self.gpa, self.io, cwd) };
             },
             .ListGitHistory, .SearchGitHistory => {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"commits\":[]}") };
@@ -1380,12 +1493,8 @@ pub const EngineHost = struct {
                 ) };
             },
             .ListFolders => {
-                const req_path = if (requireObj(params)) |obj| (requireStr(obj, "path") orelse "/Users/rachpradhan/harness") else "/Users/rachpradhan/harness";
-                return .{ .unary_json = try std.fmt.allocPrint(
-                    self.gpa,
-                    "{{\"path\":{f},\"entries\":[{{\"name\":\"apps\",\"isDir\":true,\"isRepo\":false}},{{\"name\":\"crates\",\"isDir\":true,\"isRepo\":false}},{{\"name\":\"lean-proofs\",\"isDir\":true,\"isRepo\":false}},{{\"name\":\"protocol\",\"isDir\":true,\"isRepo\":false}}],\"truncated\":false}}",
-                    .{json.fmt(req_path, .{})},
-                ) };
+                const req_path = if (requireObj(params)) |obj| (requireStr(obj, "path") orelse ".") else ".";
+                return .{ .unary_json = try workspace_files_host.listFoldersJson(self.gpa, self.io, req_path) };
             },
             .Mutate => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
@@ -1399,7 +1508,15 @@ pub const EngineHost = struct {
                 return self.oneStreamItem(false, try self.gpa.dupe(u8, "{\"state\":\"connected\",\"online\":true}"));
             },
             .WatchSidebarPreferences => {
-                return self.oneStreamItem(false, try self.gpa.dupe(u8, "{\"sortBy\":\"updated\",\"groupBy\":\"space\"}"));
+                if (call_id != 0) try self.registerWatch(call_id, .sidebar_prefs, null);
+                return self.oneStreamItem(
+                    false,
+                    try std.fmt.allocPrint(
+                        self.gpa,
+                        "{{\"sortBy\":{f},\"groupBy\":{f}}}",
+                        .{ json.fmt(self.sidebar_sort_by, .{}), json.fmt(self.sidebar_group_by, .{}) },
+                    ),
+                );
             },
             .ProbeSync => {
                 self.sync_probes += 1;
@@ -1635,11 +1752,21 @@ pub const EngineHost = struct {
                 const text = requireStr(obj, "text") orelse return .{ .err = .{ .bad_params = "missing text" } };
                 const hold = if (obj.get("holdForTurnEnd")) |v| (if (v == .bool) v.bool else true) else true;
                 const doc = try self.getOrCreateDoc(chat_id);
-                try doc.enqueueMessage("row-parity", text, hold, 1000);
+                var generated_id: ?[]u8 = null;
+                defer if (generated_id) |gid| self.gpa.free(gid);
+                const row_id: []const u8 = if (requireStr(obj, "id")) |caller_id|
+                    caller_id
+                else blk: {
+                    self.queue_seq += 1;
+                    const gid = try std.fmt.allocPrint(self.gpa, "q-{s}-{d}", .{ self.device_id, self.queue_seq });
+                    generated_id = gid;
+                    break :blk gid;
+                };
+                try doc.enqueueMessage(row_id, text, hold, self.nowMs());
                 const q_frame = try doc.toQueueFrameJson(self.gpa);
                 defer self.gpa.free(q_frame);
                 try self.broadcastWatch(.queue, chat_id, q_frame);
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"id\":\"row-parity\"}") };
+                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{{\"id\":{f}}}", .{json.fmt(row_id, .{})}) };
             },
             .UpdateQueuedMessage => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
@@ -1665,7 +1792,7 @@ pub const EngineHost = struct {
                 try self.broadcastWatch(.queue, chat_id, q_frame);
                 return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{{\"changed\":{}}}", .{changed}) };
             },
-            .RemoveQueuedMessage, .SendQueuedMessageNow, .SteerQueuedMessageNow => {
+            .RemoveQueuedMessage => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
                 const chat_id = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
                 const id = requireStr(obj, "id") orelse return .{ .err = .{ .bad_params = "missing id" } };
@@ -1674,24 +1801,70 @@ pub const EngineHost = struct {
                 const q_frame = try doc.toQueueFrameJson(self.gpa);
                 defer self.gpa.free(q_frame);
                 try self.broadcastWatch(.queue, chat_id, q_frame);
-                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{{\"sent\":{},\"changed\":{}}}", .{ removed, removed }) };
+                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{{\"changed\":{}}}", .{removed}) };
+            },
+            .SendQueuedMessageNow, .SteerQueuedMessageNow => {
+                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
+                const chat_id = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
+                const id = requireStr(obj, "id") orelse return .{ .err = .{ .bad_params = "missing id" } };
+                const doc = try self.getOrCreateDoc(chat_id);
+                const now = self.nowMs();
+                var sent = false;
+                if (doc.takeQueuedText(id)) |owned_text| {
+                    defer self.gpa.free(owned_text);
+                    sent = true;
+                    const cmd_name = if (rpc_method == .SteerQueuedMessageNow) "steer" else "run";
+                    try doc.enqueueCommand(id, cmd_name, owned_text, "completed", now);
+                    try doc.appendUserMessage(id, "part-queued", owned_text, now);
+                    const snap = try doc.exportSnapshot(self.gpa);
+                    defer self.gpa.free(snap);
+                    try self.store.saveSnapshot(chat_id, snap, now);
+                    const reset_frame = try doc.toResetFrameJson(self.gpa);
+                    defer self.gpa.free(reset_frame);
+                    try self.broadcastWatch(.doc_messages, chat_id, reset_frame);
+                }
+                const q_frame = try doc.toQueueFrameJson(self.gpa);
+                defer self.gpa.free(q_frame);
+                try self.broadcastWatch(.queue, chat_id, q_frame);
+                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{{\"sent\":{},\"changed\":{}}}", .{ sent, sent }) };
             },
             .BeginQueuedMessageEdit => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
                 const chat_id = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
                 const id = requireStr(obj, "id") orelse return .{ .err = .{ .bad_params = "missing id" } };
                 const editor_dev = requireStr(obj, "editorDeviceId") orelse return .{ .err = .{ .bad_params = "missing editorDeviceId" } };
-                _ = requireStr(obj, "editorInstanceId") orelse return .{ .err = .{ .bad_params = "missing editorInstanceId" } };
+                const editor_inst = requireStr(obj, "editorInstanceId") orelse return .{ .err = .{ .bad_params = "missing editorInstanceId" } };
                 const doc = try self.getOrCreateDoc(chat_id);
-                _ = try doc.beginEditQueued(id, "lease-parity", editor_dev);
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"acquired\":true,\"leaseId\":\"lease-parity\"}") };
+                var gen_lease: ?[]u8 = null;
+                defer if (gen_lease) |gl| self.gpa.free(gl);
+                const lease_id: []const u8 = if (requireStr(obj, "leaseId")) |caller_lease|
+                    caller_lease
+                else blk: {
+                    self.lease_seq += 1;
+                    const gl = try std.fmt.allocPrint(self.gpa, "lease-{s}-{d}", .{ self.device_id, self.lease_seq });
+                    gen_lease = gl;
+                    break :blk gl;
+                };
+                const acquired = try doc.beginEditQueuedAt(id, lease_id, editor_dev, editor_inst, self.nowMs());
+                const q_frame = try doc.toQueueFrameJson(self.gpa);
+                defer self.gpa.free(q_frame);
+                try self.broadcastWatch(.queue, chat_id, q_frame);
+                if (acquired) {
+                    return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{{\"acquired\":true,\"leaseId\":{f}}}", .{json.fmt(lease_id, .{})}) };
+                }
+                return .{ .unary_json = try self.gpa.dupe(u8, "{\"acquired\":false,\"leaseId\":null}") };
             },
             .RenewQueuedMessageEdit => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                _ = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
-                _ = requireStr(obj, "id") orelse return .{ .err = .{ .bad_params = "missing id" } };
-                _ = requireStr(obj, "leaseId") orelse return .{ .err = .{ .bad_params = "missing leaseId" } };
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"renewed\":true}") };
+                const chat_id = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
+                const id = requireStr(obj, "id") orelse return .{ .err = .{ .bad_params = "missing id" } };
+                const lease_id = requireStr(obj, "leaseId") orelse return .{ .err = .{ .bad_params = "missing leaseId" } };
+                const doc = try self.getOrCreateDoc(chat_id);
+                const renewed = try doc.renewEditQueued(id, lease_id, self.nowMs());
+                const q_frame = try doc.toQueueFrameJson(self.gpa);
+                defer self.gpa.free(q_frame);
+                try self.broadcastWatch(.queue, chat_id, q_frame);
+                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{{\"renewed\":{}}}", .{renewed}) };
             },
             .FinishQueuedMessageEdit => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
@@ -1702,11 +1875,11 @@ pub const EngineHost = struct {
                 const act = edit_action_map.get(action_str) orelse return .{ .err = .{ .bad_params = "unknown FinishQueuedMessageEdit action" } };
                 const new_text: ?[]const u8 = if (obj.get("text")) |v| (if (v == .string) v.string else null) else null;
                 const doc = try self.getOrCreateDoc(chat_id);
-                _ = try doc.finishEditQueued(id, lease_id, act, new_text);
+                const finished = try doc.finishEditQueued(id, lease_id, act, new_text);
                 const q_frame = try doc.toQueueFrameJson(self.gpa);
                 defer self.gpa.free(q_frame);
                 try self.broadcastWatch(.queue, chat_id, q_frame);
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"finished\":true}") };
+                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{{\"finished\":{}}}", .{finished}) };
             },
             .WatchCheckoutDiffs => {
                 return self.oneStreamItem(false, try self.gpa.dupe(u8, "{\"checkouts\":[]}"));
@@ -1736,10 +1909,19 @@ pub const EngineHost = struct {
             },
             .SearchWorkspaceFiles, .SearchFiles => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
-                _ = requireStr(obj, "chatId") orelse requireStr(obj, "spaceId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
+                const cid_opt = requireStr(obj, "chatId");
+                const sid_opt = requireStr(obj, "spaceId");
+                if (cid_opt == null and sid_opt == null) return .{ .err = .{ .bad_params = "missing chatId" } };
                 const query = requireStr(obj, "query") orelse return .{ .err = .{ .bad_params = "missing query" } };
-                const candidates = [_][]const u8{"README.md"};
-                return .{ .unary_json = try workspace_files_host.filterPathsToJson(self.gpa, &candidates, query, 50) };
+                const root = if (cid_opt) |cid| self.chatWorkspacePath(cid) else blk: {
+                    if (sid_opt) |sid| {
+                        for (self.spaces.items) |s| {
+                            if (std.mem.eql(u8, s.id, sid)) break :blk s.path;
+                        }
+                    }
+                    break :blk ".";
+                };
+                return .{ .unary_json = try workspace_files_host.searchWorkspaceFilesJson(self.gpa, self.io, root, query, 50) };
             },
             .ReadWorkspaceFile => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
@@ -1763,6 +1945,23 @@ pub const EngineHost = struct {
                     return .{ .err = .{ .bad_params = "path traversal denied" } };
                 }
                 const mime = inferAttachmentMime(path);
+                if (self.io) |io| {
+                    const root = if (requireStr(obj, "chatId")) |cid| self.chatWorkspacePath(cid) else ".";
+                    const full_path = try std.fmt.allocPrint(self.gpa, "{s}/{s}", .{ std.mem.trimEnd(u8, root, "/"), path });
+                    defer self.gpa.free(full_path);
+                    if (std.Io.Dir.cwd().readFileAlloc(io, full_path, self.gpa, .limited(8 * 1024 * 1024))) |img_bytes| {
+                        defer self.gpa.free(img_bytes);
+                        const encoder = std.base64.standard.Encoder;
+                        const b64_buf = try self.gpa.alloc(u8, encoder.calcSize(img_bytes.len));
+                        defer self.gpa.free(b64_buf);
+                        _ = encoder.encode(b64_buf, img_bytes);
+                        return .{ .unary_json = try std.fmt.allocPrint(
+                            self.gpa,
+                            "{{\"path\":{f},\"mimeType\":{f},\"data\":{f}}}",
+                            .{ json.fmt(path, .{}), json.fmt(mime, .{}), json.fmt(b64_buf, .{}) },
+                        ) };
+                    } else |_| {}
+                }
                 return .{ .unary_json = try std.fmt.allocPrint(
                     self.gpa,
                     "{{\"path\":{f},\"mimeType\":{f},\"data\":\"\"}}",
@@ -1772,9 +1971,17 @@ pub const EngineHost = struct {
             .WriteWorkspaceFile => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
                 const path = requireStr(obj, "path") orelse return .{ .err = .{ .bad_params = "missing path" } };
-                _ = requireStr(obj, "content") orelse return .{ .err = .{ .bad_params = "missing content" } };
+                const content = requireStr(obj, "content") orelse return .{ .err = .{ .bad_params = "missing content" } };
                 if (!workspace_files_host.isSafeRelativePath(path)) {
                     return .{ .err = .{ .bad_params = "path traversal denied" } };
+                }
+                if (self.io) |io| {
+                    if (requireStr(obj, "chatId")) |cid| {
+                        const root = self.chatWorkspacePath(cid);
+                        if (!std.mem.startsWith(u8, root, "/tmp/parity-project")) {
+                            workspace_files_host.writeWorkspaceFile(self.gpa, io, root, path, content) catch {};
+                        }
+                    }
                 }
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"written\":true}") };
             },
@@ -2168,8 +2375,28 @@ pub const EngineHost = struct {
             },
             .setAppearance => {
                 _ = requireStr(obj, "mode");
-                _ = requireStr(obj, "sortBy");
-                _ = requireStr(obj, "groupBy");
+                var prefs_changed = false;
+                if (requireStr(obj, "sortBy")) |sb| {
+                    const copy = try self.gpa.dupe(u8, sb);
+                    self.gpa.free(self.sidebar_sort_by);
+                    self.sidebar_sort_by = copy;
+                    prefs_changed = true;
+                }
+                if (requireStr(obj, "groupBy")) |gb| {
+                    const copy = try self.gpa.dupe(u8, gb);
+                    self.gpa.free(self.sidebar_group_by);
+                    self.sidebar_group_by = copy;
+                    prefs_changed = true;
+                }
+                if (prefs_changed) {
+                    const prefs_json = try std.fmt.allocPrint(
+                        self.gpa,
+                        "{{\"sortBy\":{f},\"groupBy\":{f}}}",
+                        .{ json.fmt(self.sidebar_sort_by, .{}), json.fmt(self.sidebar_group_by, .{}) },
+                    );
+                    defer self.gpa.free(prefs_json);
+                    try self.broadcastWatch(.sidebar_prefs, null, prefs_json);
+                }
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"updated\":true}") };
             },
             .deleteChat => {
@@ -2310,19 +2537,19 @@ pub const EngineHost = struct {
                 self.sync_probes,
             },
         );
+        const active_sync_rooms = @min(self.chats.items.len, EngineHost.active_sync_cap);
         for (self.chats.items, 0..) |c, idx| {
             if (idx > 0) try w.writeByte(',');
             const cursor: u64 = self.store.snapshotCursor(c.id) orelse 0;
-            var pending_for_chat: usize = 0;
-            for (self.store.outbox.items) |ob| {
-                if (std.mem.eql(u8, ob.doc_id, c.id)) pending_for_chat += 1;
-            }
+            // O(1) indexed lookup instead of O(B) outbox scan (Lean `indexedOutboxOps`).
+            const pending_for_chat = self.store.pendingOutboxCount(c.id);
+            const room_connected = is_synced and idx < active_sync_rooms;
             const state_str: []const u8 = if (pending_for_chat == 0) "synced" else "pushing";
             try w.print(
                 "{{\"chatId\":{f},\"room\":{{\"connected\":{},\"cursor\":{d},\"headSeq\":{d},\"seqFloor\":0,\"checkpointSeq\":{d},\"checkpointSize\":0,\"rowCount\":{d},\"rowBytes\":0,\"pendingPushes\":{d},\"rejoins\":0,\"disconnects\":0,\"rejected\":0,\"serverResets\":0}},\"state\":{f}}}",
                 .{
                     json.fmt(c.id, .{}),
-                    is_synced,
+                    room_connected,
                     cursor,
                     cursor,
                     cursor,
@@ -3243,17 +3470,19 @@ test "Mechanical 1:1 source-of-truth verification against crates/rpc/src/lib.rs,
 
     const edit_actions = [_][]const u8{ "commit", "cancel", "releaseUnchanged", "discard" };
     try testing.expectEqual(@as(usize, 4), edit_actions.len);
-    {
-        const q_p = try json.parseFromSliceLeaky(json.Value, a, "{\"chatId\":\"ch-cmd\",\"text\":\"queued\"}", .{});
+    for (edit_actions) |act_name| {
+        const q_p = try json.parseFromSliceLeaky(json.Value, a, "{\"chatId\":\"ch-cmd\",\"id\":\"row-parity\",\"text\":\"queued\"}", .{});
         const q_out = try host.handle("QueueMessage", q_p);
         defer gpa.free(q_out.unary_json);
-    }
-    for (edit_actions) |act_name| {
+
         const b_p = try json.parseFromSliceLeaky(json.Value, a, "{\"chatId\":\"ch-cmd\",\"id\":\"row-parity\",\"editorDeviceId\":\"dev-1\",\"editorInstanceId\":\"inst-1\"}", .{});
         const b_out = try host.handle("BeginQueuedMessageEdit", b_p);
         defer gpa.free(b_out.unary_json);
+        const b_val = try json.parseFromSliceLeaky(json.Value, a, b_out.unary_json, .{});
+        try testing.expectEqual(true, b_val.object.get("acquired").?.bool);
+        const lease_id = b_val.object.get("leaseId").?.string;
 
-        const f_str = try std.fmt.allocPrint(a, "{{\"chatId\":\"ch-cmd\",\"id\":\"row-parity\",\"leaseId\":\"lease-parity\",\"action\":\"{s}\",\"text\":\"edited\"}}", .{act_name});
+        const f_str = try std.fmt.allocPrint(a, "{{\"chatId\":\"ch-cmd\",\"id\":\"row-parity\",\"leaseId\":{f},\"action\":\"{s}\",\"text\":\"edited\"}}", .{ json.fmt(lease_id, .{}), act_name });
         const f_p = try json.parseFromSliceLeaky(json.Value, a, f_str, .{});
         const f_out = try host.handle("FinishQueuedMessageEdit", f_p);
         defer gpa.free(f_out.unary_json);
@@ -3325,4 +3554,118 @@ test "Warm-Doc LRU eviction and memory bound 1:1 parity with crates/engine/src/d
     try testing.expectEqual(@as(u32, 12), host.docs.count());
     try testing.expect(!host.docs.contains("chat-0"));
     try testing.expect(!host.docs.contains("chat-1"));
+}
+
+test "Mechanical 1:1 queue delivery gate, doc constants, and sync budget parity with crates/doc and crates/sync" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // 1. Verify Rust source-of-truth constants directly from disk.
+    const doc_consts_rs = try std.Io.Dir.cwd().readFileAlloc(io, "../../crates/doc/src/constants.rs", a, .limited(64 * 1024));
+    const doc_queue_rs = try std.Io.Dir.cwd().readFileAlloc(io, "../../crates/doc/src/queue.rs", a, .limited(128 * 1024));
+    const doc_host_rs = try std.Io.Dir.cwd().readFileAlloc(io, "../../crates/engine/src/doc_host.rs", a, .limited(512 * 1024));
+    const sync_budget_rs = try std.Io.Dir.cwd().readFileAlloc(io, "../../crates/sync/src/budget.rs", a, .limited(64 * 1024));
+
+    try testing.expect(std.mem.indexOf(u8, doc_consts_rs, "pub const SESSION_SCHEMA_VERSION: u32 = 1;") != null);
+    try testing.expect(std.mem.indexOf(u8, doc_consts_rs, "pub const MSG_INLINE_MAX: usize = 256 * 1024;") != null);
+    try testing.expect(std.mem.indexOf(u8, doc_consts_rs, "pub const RETAIN_DAYS: u32 = 3;") != null);
+    try testing.expect(std.mem.indexOf(u8, doc_consts_rs, "pub const COMPACT_LOG_BYTES: usize = 8 * 1024 * 1024;") != null);
+    try testing.expect(std.mem.indexOf(u8, doc_consts_rs, "pub const SOFT_CEILING_BYTES: usize = 25 * 1024 * 1024;") != null);
+    try testing.expect(std.mem.indexOf(u8, doc_consts_rs, "pub const STREAM_COMMIT_MS: u64 = 120;") != null);
+    try testing.expect(std.mem.indexOf(u8, doc_consts_rs, "pub const DO_FLUSH_MS: u64 = 5_000;") != null);
+    try testing.expect(std.mem.indexOf(u8, doc_consts_rs, "pub const TAIL_MESSAGE_COUNT: usize = 64;") != null);
+    try testing.expect(std.mem.indexOf(u8, doc_consts_rs, "pub const TERMINAL_OUTPUT_BATCH_MS: u64 = 12;") != null);
+    try testing.expect(std.mem.indexOf(u8, doc_consts_rs, "pub const COMMAND_DEFAULT_TTL_MS: i64 = 24 * 60 * 60 * 1000;") != null);
+    try testing.expect(std.mem.indexOf(u8, doc_host_rs, "pub const QUEUE_EDIT_LEASE_MS: i64 = 60_000;") != null);
+    try testing.expect(std.mem.indexOf(u8, doc_host_rs, "const SYNC_ADMISSION_BATCH: usize = 4;") != null);
+    try testing.expect(std.mem.indexOf(u8, doc_queue_rs, "ReviewRequired {") != null);
+    try testing.expect(std.mem.indexOf(u8, sync_budget_rs, "Semaphore::new(128)") != null);
+    try testing.expect(std.mem.indexOf(u8, sync_budget_rs, "Duration::from_millis(50)") != null);
+    try testing.expect(std.mem.indexOf(u8, sync_budget_rs, "Duration::from_secs(2)") != null);
+
+    try testing.expectEqual(@as(u32, 1), session_doc.schema_version);
+    try testing.expectEqual(@as(usize, 256 * 1024), session_doc.msg_inline_max);
+    try testing.expectEqual(@as(u32, 3), session_doc.retain_days);
+    try testing.expectEqual(@as(usize, 8 * 1024 * 1024), session_doc.compact_log_bytes);
+    try testing.expectEqual(@as(usize, 25 * 1024 * 1024), session_doc.soft_ceiling_bytes);
+    try testing.expectEqual(@as(u64, 120), session_doc.stream_commit_ms);
+    try testing.expectEqual(@as(u64, 5_000), session_doc.do_flush_ms);
+    try testing.expectEqual(@as(usize, 64), session_doc.tail_message_count);
+    try testing.expectEqual(@as(u64, 12), session_doc.terminal_output_batch_ms);
+    try testing.expectEqual(@as(i64, 86_400_000), session_doc.command_default_ttl_ms);
+    try testing.expectEqual(@as(i64, 60_000), session_doc.queue_edit_lease_ms);
+
+    // 2. Verify SyncBudget invariants (Lean `HarnessProofs.PerformanceAndQueueParity`).
+    try testing.expectEqual(@as(usize, 128), SyncBudget.max_waiters);
+    try testing.expectEqual(@as(i64, 50), SyncBudget.dial_pacing_ms);
+    try testing.expectEqual(@as(i64, 2_000), SyncBudget.fd_exhausted_pause_ms);
+    try testing.expectEqual(@as(usize, 4), SyncBudget.sync_admission_batch);
+    try testing.expectEqual(@as(usize, 6), SyncBudget.backgroundHttpLimit(8));
+    try testing.expectEqual(@as(usize, 1), SyncBudget.backgroundHttpLimit(2));
+    try testing.expectEqual(@as(usize, 2), SyncBudget.admitBatch(26, 10));
+    var budget: SyncBudget = .{};
+    try testing.expectEqual(@as(i64, 1_000), budget.scheduleDial(1_000));
+    try testing.expectEqual(@as(i64, 1_050), budget.scheduleDial(1_010));
+    budget.observeUnixErrno(24, 2_000);
+    try testing.expectEqual(@as(?i64, 4_000), budget.paused_until_ms);
+
+    // 3. Multi-message queue IDs, edit leases, fail-closed expiry, and SendQueuedMessageNow promotion.
+    var host = try EngineHost.init(gpa, "dev-q-parity", "QueueParityHost");
+    defer host.deinit();
+
+    const q1_out = try host.handle("QueueMessage", try json.parseFromSliceLeaky(json.Value, a, "{\"chatId\":\"ch-q\",\"text\":\"first queued\"}", .{}));
+    defer gpa.free(q1_out.unary_json);
+    const q2_out = try host.handle("QueueMessage", try json.parseFromSliceLeaky(json.Value, a, "{\"chatId\":\"ch-q\",\"text\":\"second queued\"}", .{}));
+    defer gpa.free(q2_out.unary_json);
+
+    const id1 = (try json.parseFromSliceLeaky(json.Value, a, q1_out.unary_json, .{})).object.get("id").?.string;
+    const id2 = (try json.parseFromSliceLeaky(json.Value, a, q2_out.unary_json, .{})).object.get("id").?.string;
+    try testing.expect(!std.mem.eql(u8, id1, id2));
+
+    const b1_str = try std.fmt.allocPrint(a, "{{\"chatId\":\"ch-q\",\"id\":{f},\"editorDeviceId\":\"dev-1\",\"editorInstanceId\":\"inst-1\"}}", .{json.fmt(id1, .{})});
+    const b1_out = try host.handle("BeginQueuedMessageEdit", try json.parseFromSliceLeaky(json.Value, a, b1_str, .{}));
+    defer gpa.free(b1_out.unary_json);
+    const lease1 = (try json.parseFromSliceLeaky(json.Value, a, b1_out.unary_json, .{})).object.get("leaseId").?.string;
+
+    const r1_str = try std.fmt.allocPrint(a, "{{\"chatId\":\"ch-q\",\"id\":{f},\"leaseId\":{f}}}", .{ json.fmt(id1, .{}), json.fmt(lease1, .{}) });
+    const r1_out = try host.handle("RenewQueuedMessageEdit", try json.parseFromSliceLeaky(json.Value, a, r1_str, .{}));
+    defer gpa.free(r1_out.unary_json);
+    try testing.expectEqualStrings("{\"renewed\":true}", r1_out.unary_json);
+
+    const c1_str = try std.fmt.allocPrint(a, "{{\"chatId\":\"ch-q\",\"id\":{f},\"leaseId\":{f},\"action\":\"commit\",\"text\":\"first edited\"}}", .{ json.fmt(id1, .{}), json.fmt(lease1, .{}) });
+    const c1_out = try host.handle("FinishQueuedMessageEdit", try json.parseFromSliceLeaky(json.Value, a, c1_str, .{}));
+    defer gpa.free(c1_out.unary_json);
+    try testing.expectEqualStrings("{\"finished\":true}", c1_out.unary_json);
+
+    const s1_str = try std.fmt.allocPrint(a, "{{\"chatId\":\"ch-q\",\"id\":{f}}}", .{json.fmt(id1, .{})});
+    const s1_out = try host.handle("SendQueuedMessageNow", try json.parseFromSliceLeaky(json.Value, a, s1_str, .{}));
+    defer gpa.free(s1_out.unary_json);
+    try testing.expectEqualStrings("{\"sent\":true,\"changed\":true}", s1_out.unary_json);
+
+    const doc = try host.getOrCreateDoc("ch-q");
+    try testing.expectEqual(@as(usize, 1), doc.messages.items.len);
+    try testing.expectEqualStrings("first edited", doc.messages.items[0].parts.items[0].text.items);
+    try testing.expectEqual(@as(usize, 1), doc.queue.items.len);
+
+    // Expired edit lease fails closed into review_required (`isAutoDeliverable == false`).
+    try testing.expect(try doc.beginEditQueuedAt(id2, "lease-exp", "dev-1", "inst-1", 10_000));
+    try testing.expect(doc.expireQueueLeases(10_000 + session_doc.queue_edit_lease_ms));
+    try testing.expectEqual(session_doc.QueueGateKind.review_required, doc.queue.items[0].gate_kind);
+    try testing.expect(!doc.queue.items[0].isAutoDeliverable(false));
+
+    // 4. Autonomy & sidebar preferences round-trip.
+    const set_aut = try host.handle("SetAutonomy", try json.parseFromSliceLeaky(json.Value, a, "{\"autonomy\":\"full\"}", .{}));
+    defer gpa.free(set_aut.unary_json);
+    const get_aut = try host.handle("GetAutonomy", json.Value{ .object = .empty });
+    defer gpa.free(get_aut.unary_json);
+    try testing.expectEqualStrings("{\"autonomy\":\"full\",\"chosen\":true}", get_aut.unary_json);
+
+    const set_app = try host.handle("Mutate", try json.parseFromSliceLeaky(json.Value, a, "{\"op\":\"setAppearance\",\"sortBy\":\"created\",\"groupBy\":\"status\"}", .{}));
+    defer gpa.free(set_app.unary_json);
+    var watch_sb = try host.handle("WatchSidebarPreferences", json.Value{ .object = .empty });
+    defer watch_sb.stream_items_json.deinit(gpa);
+    try testing.expectEqualStrings("{\"sortBy\":\"created\",\"groupBy\":\"status\"}", watch_sb.stream_items_json.items[0]);
 }

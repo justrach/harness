@@ -90,6 +90,7 @@ pub fn main(init: std.process.Init) !void {
     if (resolved_data_dir) |data_dir| {
         if (data_dir.len > 0) {
             std.Io.Dir.cwd().createDirPath(io, data_dir) catch {};
+            host.setDataDir(data_dir) catch {};
             if (comptime builtin.os.tag != .windows) {
                 var lock_path_buf: [512]u8 = undefined;
                 var pid_buf: [32]u8 = undefined;
