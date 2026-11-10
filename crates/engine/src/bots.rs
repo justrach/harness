@@ -292,7 +292,7 @@ impl Bots {
     }
 
     pub async fn detail(&self, bot: &str) -> Result<BotDetail, EngineError> {
-        if !valid_bot_name(bot) {
+        if !valid_bot_name(bot) || !self.cli.has_store() {
             return Err(other("No such bot."));
         }
         parse(&self.cli.run(words(&["show", bot, "--json"])).await?)
@@ -306,6 +306,10 @@ impl Bots {
         p: BotActionParams,
     ) -> Result<BotsState, EngineError> {
         let args = action_args(&p)?;
+        // Only these two can be the first thing a device does with bots.
+        if !self.cli.has_store() && !matches!(p.action, BotVerb::Create | BotVerb::About) {
+            return Err(other("There are no bots on this device yet."));
+        }
         let chat = match p.action {
             BotVerb::Remove => {
                 let name = name_of(&p.bot)?;

@@ -203,6 +203,14 @@ async fn a_device_with_no_bots_never_starts_graff() {
     let world = World::default();
     assert_eq!(bots.state().await.unwrap(), BotsState::default());
     assert_eq!(bots.tick(&world).await.unwrap(), 0);
+    assert!(bots.detail("notes").await.is_err());
+    let pause: BotActionParams = serde_json::from_value(
+        json!({ "action": "routinePause", "bot": "notes", "routine": "r1" }),
+    )
+    .unwrap();
+    assert!(bots.act(&world, pause).await.is_err());
+    let run = run_params(json!({ "bot": "notes", "message": "x" }));
+    assert!(bots.run(&world, run).await.is_err());
     assert!(cli.said().is_empty());
     assert!(world.took().is_empty());
 }
