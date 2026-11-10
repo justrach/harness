@@ -85,6 +85,51 @@ pub fn allowedNavigation(address: []const u8) bool {
     return true;
 }
 
+pub const Range = struct { start: usize, end: usize };
+
+/// Length of a valid bare `http(s)://` URL at the start of `text`, trimming
+/// trailing sentence punctuation while keeping balanced parentheses. Returns 0
+/// when `text` does not begin with a valid HTTP(S) destination.
+pub fn bareUrlLen(text: []const u8) usize {
+    const scheme_len: usize = if (text.len >= 8 and std.ascii.eqlIgnoreCase(text[0..8], "https://"))
+        8
+    else if (text.len >= 7 and std.ascii.eqlIgnoreCase(text[0..7], "http://"))
+        7
+    else
+        return 0;
+    var end = scheme_len;
+    var open_parens: usize = 0;
+    while (end < text.len) {
+        const ch = text[end];
+        if (ch <= ' ' or ch == '<' or ch == '>' or ch == '"' or ch == '\'' or ch == '`') break;
+        if (ch == '(') {
+            open_parens += 1;
+        } else if (ch == ')') {
+            if (open_parens == 0) break;
+            open_parens -= 1;
+        }
+        end += 1;
+    }
+    while (end > scheme_len and std.mem.indexOfScalar(u8, ".,;:!?", text[end - 1]) != null) {
+        end -= 1;
+    }
+    if (end <= scheme_len) return 0;
+    return if (allowedNavigation(text[0..end])) end else 0;
+}
+
+/// Finds the next valid bare `http(s)://` URL in `text` at or after `from`,
+/// skipping occurrences glued to a preceding alphanumeric character.
+pub fn findBareUrl(text: []const u8, from: usize) ?Range {
+    var i = from;
+    while (i + 7 <= text.len) : (i += 1) {
+        if (i > 0 and std.ascii.isAlphanumeric(text[i - 1])) continue;
+        if (text[i] != 'h' and text[i] != 'H') continue;
+        const len = bareUrlLen(text[i..]);
+        if (len > 0) return .{ .start = i, .end = i + len };
+    }
+    return null;
+}
+
 pub fn message(err: anyerror) []const u8 {
     return switch (err) {
         error.EmptyAddress => "Enter a website or localhost address.",

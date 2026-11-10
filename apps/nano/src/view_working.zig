@@ -108,7 +108,7 @@ pub fn trailer(c: *ui.Context, a: *App, k: theme.Colors, chat_id: ?[]const u8, t
     const started = if (pending) |p| p.started_ms else session.?.started_ms;
     const elapsed = if (started) |start| @divTrunc(@max(now - start, 0), 1000) else 0;
     ui.key(c, "working-trailer");
-    const box = ui.div(c).column().wFull().pt(16).gap(5);
+    const box = ui.div(c).column().wFull().pt(16).gap(5).control();
     defer box.end();
     const live = activity(t);
     {

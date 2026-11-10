@@ -47,6 +47,8 @@ pub const View = struct {
     /// A prompt was just sent: the open chat's transcript goes to its end
     /// and follows the reply again, however far up it was read.
     stick_end: bool = false,
+    /// Where the messages sent while a turn worked arrived in its reply.
+    steer: @import("steer_order.zig").Store = .{},
     /// The jump pill is up. It stays until the reader is near the end.
     jump_shown: bool = false,
     jump_box: u64 = 0,
@@ -63,6 +65,8 @@ pub const View = struct {
     chrome: @import("panel_chrome.zig").Frame = .{},
     strip: @import("view_tab_strip.zig").State = .{},
     tool_ui: @import("tool_ui_state.zig").State = .{},
+    /// The message footer's transient checkmark, keyed by its mounted control.
+    message_copy: @import("view_transcript.zig").CopyFeedback = .{},
     /// Focus before a pointer press blurs a control in the sliding sidebar.
     sidebar_press_frame: u64 = 0,
     sidebar_press_focus: bool = false,
@@ -107,6 +111,8 @@ pub const View = struct {
     /// Where the controls that open popovers were, as last laid out.
     filter_anchor: ?nanoui.ui.Rect = null,
     more_anchor: ?nanoui.ui.Rect = null,
+    search_anchor: ?nanoui.ui.Rect = null,
+    disclosures: std.StringHashMapUnmanaged(@import("agent_updates.zig").Tween) = .empty,
     account_anchor: ?nanoui.ui.Rect = null,
     /// The account menu's height as last drawn, to keep it in the window.
     account_h: ?f32 = null,
@@ -208,6 +214,13 @@ pub const View = struct {
     /// Active streaming scroll-glide horizon and last streaming content signature.
     stream_glide_until: f64 = 0,
     stream_sig: u64 = 0,
+    /// Active rendered-selection scope signature and whitespace-origin drag state.
+    selection_scope: u64 = 0,
+    selection_had_text: bool = false,
+    whitespace_drag: struct {
+        active: bool = false,
+        origin: nanoui.ui.Point = .{},
+    } = .{},
 
     pub fn deinit(v: *View, gpa: Allocator) void {
         @import("text_buffer.zig").deinit(&v.settings_search);
@@ -244,6 +257,9 @@ pub const View = struct {
         var it = v.groups.keyIterator();
         while (it.next()) |key| gpa.free(key.*);
         v.groups.deinit(gpa);
+        var disc_it = v.disclosures.keyIterator();
+        while (disc_it.next()) |key| gpa.free(key.*);
+        v.disclosures.deinit(gpa);
     }
 
     pub fn setFilter(v: *View, gpa: Allocator, space: ?[]const u8) void {
@@ -360,6 +376,7 @@ pub const App = struct {
     /// ↑/↓ through the open chat's earlier prompts.
     prompt_nav: @import("prompt_history.zig").Nav = .{},
     attachments: @import("app_attachments.zig").State = .{},
+    file_drop: @import("view_attachment_drop.zig").State = .{},
     /// The last error the engine gave, shown under the composer.
     notice: [200]u8 = undefined,
     notice_len: usize = 0,
@@ -460,6 +477,13 @@ pub const App = struct {
     /// Each active chat's branch's pull request, watched, and the session
     /// footer's merge (app_change_requests.zig).
     change_requests: change_requests.State,
+    /// Device-local and remote-device agent CLI updates (`agent_updates.zig`).
+    agent_updates: @import("agent_updates.zig").State,
+    /// Back / forward session navigation stack for the sidebar titlebar.
+    nav_history: std.ArrayList(?[]u8) = .empty,
+    nav_index: usize = 0,
+    nav_initialized: bool = false,
+    nav_restoring: bool = false,
 
     pub fn init(gpa: Allocator, io: std.Io, port: u16) App {
         return .{
@@ -482,6 +506,7 @@ pub const App = struct {
             .release = .{ .gpa = gpa, .io = io },
             .reauth = .init(gpa),
             .change_requests = .init(gpa),
+            .agent_updates = .init(gpa),
         };
     }
 
@@ -498,6 +523,7 @@ pub const App = struct {
         a.engine.deinit();
         a.reap();
         a.attachments.deinit(a.gpa);
+        a.file_drop.deinit(a.gpa);
         @import("app_send_feedback.zig").deinit(a);
         var blobs = a.tool_blobs.valueIterator();
         while (blobs.next()) |value| {
@@ -560,6 +586,9 @@ pub const App = struct {
         a.reauth.deinit();
         a.graff_worktree.deinit(a.gpa);
         a.change_requests.deinit();
+        a.agent_updates.deinit();
+        for (a.nav_history.items) |entry| if (entry) |s| a.gpa.free(s);
+        a.nav_history.deinit(a.gpa);
     }
 
     pub const setHarness = agent.setHarness;
@@ -652,6 +681,7 @@ pub const App = struct {
                 a.w_doc = .{};
                 a.w_queue = .{};
                 change_requests.disconnected(a);
+                @import("agent_updates.zig").disconnected(a);
                 // Nothing answers: start an engine, as a person would.
                 if (s == .disconnected) @import("engine_start.zig").disconnected(a);
             },
@@ -714,6 +744,7 @@ pub const App = struct {
         if (@import("app_reauth.zig").tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (@import("app_sandboxes.zig").tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (change_requests.tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
+        if (@import("agent_updates.zig").tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (@import("app_subagents.zig").tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (a.w_queue.retry_at) |t| {
             if (now >= t) {
@@ -757,6 +788,7 @@ pub const App = struct {
             .item => |v| {
                 a.devices.replace(v) catch {};
                 change_requests.devicesArrived(a);
+                @import("agent_updates.zig").reconcile(a);
             },
             .done, .err => a.ended(&a.w_devices),
             .ok => {},
@@ -826,7 +858,13 @@ pub const App = struct {
     /// the current tabs.
     pub fn restoreTabs(a: *App) void {
         if (a.tabs_ready) return;
-        if (a.selected != null or a.tabs.items.items.len != 1 or a.tabs.current() != null) {
+        const dirty_boot_draft = a.composer.text().len > 0 or
+            @import("app_attachments.zig").count(a) > 0 or
+            a.space != null or
+            a.new_no_project or
+            a.new_device != null or
+            a.new_chat_mode;
+        if (a.selected != null or a.tabs.items.items.len != 1 or a.tabs.current() != null or dirty_boot_draft) {
             a.tabs_ready = true;
             return;
         }
@@ -838,7 +876,8 @@ pub const App = struct {
         // chat and stays empty.
         if (a.settings.open_tabs.items.len == 0) {
             const only = active orelse return;
-            if (a.findChat(only) == null) return;
+            const ch = a.findChat(only) orelse return;
+            if (ch.archived) return;
             a.tabs.setCurrent(only);
             a.tabs.clearShown();
             a.select(only, null);
@@ -847,7 +886,8 @@ pub const App = struct {
         var wanted: usize = 0;
         var active_ix: ?usize = null;
         for (a.settings.open_tabs.items) |id| {
-            if (a.findChat(id) == null or a.tabs.find(id) != null) continue;
+            const ch = a.findChat(id) orelse continue;
+            if (ch.archived or a.tabs.find(id) != null) continue;
             if (wanted == 0) a.tabs.setCurrent(id) else {
                 a.tabs.newTab();
                 a.tabs.setCurrent(id);
@@ -1021,7 +1061,7 @@ pub const App = struct {
         drafts.adopt(a, fresh);
     }
 
-    /// Sidebar / All sessions "+": an independent workspace, not another
+    /// Sidebar "+": an independent workspace, not another
     /// tab inside the focused panel. Keep the entire old split and its
     /// focused draft parked together for when that workspace is reopened.
     pub fn newWorkspaceSession(a: *App) void {
@@ -1110,6 +1150,27 @@ pub const App = struct {
         } else if (was_chat and a.selected == null) {
             @import("app_attachments.zig").clear(a);
             a.composer.clear();
+        }
+    }
+
+    /// Reopen the most recently closed chat tab (⌘⇧T).
+    pub fn reopenClosedTab(a: *App) void {
+        while (a.tabs.popClosed()) |id| {
+            defer a.gpa.free(id);
+            if (a.tabs.find(id) != null) continue;
+            const ch = a.findChat(id) orelse continue;
+            if (ch.archived) continue;
+            if (a.selected == null and a.composer.text().len == 0 and @import("app_attachments.zig").count(a) == 0) {
+                a.tabs.setCurrent(id);
+                a.select(id, ch.space_id);
+            } else {
+                a.newTab();
+                a.tabs.setCurrent(id);
+                a.select(id, ch.space_id);
+            }
+            a.rememberTabs();
+            a.redraw();
+            return;
         }
     }
 
@@ -1468,6 +1529,7 @@ pub const App = struct {
         a.account.scope = account.readScope(v.object);
         if (v.object.get("capabilities")) |caps| if (caps == .array) {
             a.caps = queue_mod.readCaps(caps.array.items);
+            @import("agent_updates.zig").readEngineCaps(a, caps.array.items);
         };
         if (v.object.get("version")) |ver_val| if (ver_val == .string) {
             const updates = @import("view_updates.zig");
@@ -1498,6 +1560,7 @@ pub const App = struct {
         a.device_id = a.gpa.dupe(u8, id.string) catch null;
         // Watches opened before routed through `targetDeviceId`.
         change_requests.restart(a);
+        @import("agent_updates.zig").reconcile(a);
     }
 
     fn onHarnesses(a: *App, _: u64, r: rpc.Reply) void {
@@ -1558,6 +1621,7 @@ pub const App = struct {
         a.notice_len = 0;
         queue_mod.stop(a);
         const same = if (a.selected) |s| (if (chat_id) |c| std.mem.eql(u8, s, c) else false) else chat_id == null;
+        if (!same and !a.nav_restoring) a.recordNav(a.selected, chat_id);
         if (!same) if (a.selected) |s| a.retireSlice(s);
         if (!same) a.selected = if (chat_id) |c| a.gpa.dupe(u8, c) catch null else null;
         // A leftover offset from the previous chat parks this one in padding.
@@ -1594,6 +1658,89 @@ pub const App = struct {
     pub fn retireSlice(a: *App, slice: []u8) void {
         if (slice.len == 0) return;
         a.retired_ids.append(a.gpa, slice) catch a.gpa.free(slice);
+    }
+
+    fn recordNav(a: *App, prev: ?[]const u8, next_id: ?[]const u8) void {
+        if (!a.nav_initialized) {
+            a.nav_initialized = true;
+            const first: ?[]u8 = if (prev) |p| (a.gpa.dupe(u8, p) catch return) else null;
+            a.nav_history.append(a.gpa, first) catch {
+                if (first) |s| a.gpa.free(s);
+                return;
+            };
+            a.nav_index = 0;
+        }
+        while (a.nav_history.items.len > a.nav_index + 1) {
+            const popped = a.nav_history.pop().?;
+            if (popped) |s| a.gpa.free(s);
+        }
+        if (a.nav_history.items.len > 0) {
+            const cur = a.nav_history.items[a.nav_index];
+            const eq = if (cur) |x| (if (next_id) |y| std.mem.eql(u8, x, y) else false) else next_id == null;
+            if (eq) return;
+        }
+        const duped: ?[]u8 = if (next_id) |c| (a.gpa.dupe(u8, c) catch return) else null;
+        if (a.nav_history.items.len >= 64) {
+            if (a.nav_history.orderedRemove(0)) |s| a.gpa.free(s);
+        }
+        a.nav_history.append(a.gpa, duped) catch {
+            if (duped) |s| a.gpa.free(s);
+            return;
+        };
+        a.nav_index = a.nav_history.items.len - 1;
+    }
+
+    fn navEntryValid(a: *const App, entry: ?[]const u8) bool {
+        const id = entry orelse return true;
+        return a.findChat(id) != null;
+    }
+
+    pub fn canGoBack(a: *const App) bool {
+        if (!a.nav_initialized or a.nav_index == 0 or a.nav_history.items.len == 0) return false;
+        var i = a.nav_index;
+        while (i > 0) {
+            i -= 1;
+            if (a.navEntryValid(a.nav_history.items[i])) return true;
+        }
+        return false;
+    }
+
+    pub fn canGoForward(a: *const App) bool {
+        if (!a.nav_initialized or a.nav_history.items.len == 0) return false;
+        var i = a.nav_index + 1;
+        while (i < a.nav_history.items.len) : (i += 1) {
+            if (a.navEntryValid(a.nav_history.items[i])) return true;
+        }
+        return false;
+    }
+
+    pub fn goBack(a: *App) void {
+        if (!a.nav_initialized or a.nav_index == 0 or a.nav_history.items.len == 0) return;
+        var i = a.nav_index;
+        while (i > 0) {
+            i -= 1;
+            const entry = a.nav_history.items[i];
+            if (!a.navEntryValid(entry)) continue;
+            a.nav_index = i;
+            a.nav_restoring = true;
+            defer a.nav_restoring = false;
+            if (entry) |id| a.openChatInTab(id) else a.replaceCurrent(null);
+            return;
+        }
+    }
+
+    pub fn goForward(a: *App) void {
+        if (!a.nav_initialized or a.nav_history.items.len == 0) return;
+        var i = a.nav_index + 1;
+        while (i < a.nav_history.items.len) : (i += 1) {
+            const entry = a.nav_history.items[i];
+            if (!a.navEntryValid(entry)) continue;
+            a.nav_index = i;
+            a.nav_restoring = true;
+            defer a.nav_restoring = false;
+            if (entry) |id| a.openChatInTab(id) else a.replaceCurrent(null);
+            return;
+        }
     }
 
     /// Opened, a chat is seen (`mark_chat_seen`): here at once, its
@@ -1680,7 +1827,11 @@ pub const App = struct {
                 return a.redraw();
             };
             const action = explicit orelse queue_mod.followUpAction(queue_mod.followUpBehavior(a), blocker);
-            if (action == .steer) queue_mod.steer(a, prompt) else queue_mod.queueMessage(a, prompt);
+            if (action == .steer) {
+                queue_mod.steer(a, prompt);
+                // It lands in the transcript, as a prompt does: show it.
+                a.view.stick_end = true;
+            } else queue_mod.queueMessage(a, prompt);
             attachments.clear(a);
             a.composer.clear();
             return a.redraw();

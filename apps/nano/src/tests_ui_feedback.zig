@@ -30,6 +30,14 @@ const Harness = struct {
         h.a.deinit();
     }
 
+    /// Optional synthetic evidence for a regression report or PR.
+    fn snap(h: *Harness, name: []const u8) !void {
+        const dir = std.c.getenv("NANO_SNAP_DIR") orelse return;
+        var buf: [1024]u8 = undefined;
+        const path = try std.fmt.bufPrint(&buf, "{s}/{s}.png", .{ std.mem.span(dir), name });
+        try h.t.screenshot(path);
+    }
+
     fn apply(h: *Harness, text: []const u8) !void {
         const frame = try std.json.parseFromSlice(std.json.Value, testing.allocator, text, .{});
         defer frame.deinit();
@@ -37,6 +45,55 @@ const Harness = struct {
         h.t.frame();
     }
 };
+
+/// The message footer's 14-point glyph, not a sidebar/composer icon.
+fn messageCopyIcon(h: *Harness, message: ui.Rect) !usize {
+    for (h.t.ctx.nodes.items, 0..) |node, i| {
+        if (node.content != .image) continue;
+        const r = node.rect;
+        if (@abs(r.w - 14) < 0.1 and @abs(r.h - 14) < 0.1 and
+            r.y >= message.y + message.h and r.y < message.y + message.h + 60)
+            return i;
+    }
+    return error.CopyIconNotFound;
+}
+
+fn messageCopyFeedback(role: []const u8, reduced_motion: bool) !void {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.t.ctx.reduced_motion = reduced_motion;
+    const frame = try std.fmt.allocPrint(testing.allocator, "{{\"reset\":[{{\"id\":\"message\",\"role\":\"{s}\",\"status\":\"complete\",\"parts\":[{{\"id\":\"text\",\"kind\":\"text\",\"text\":\"Synthetic copy feedback\"}}]}}]}}", .{role});
+    defer testing.allocator.free(frame);
+    try h.apply(frame);
+    h.t.settle(1);
+    const message = h.t.findText("Synthetic copy feedback") orelse return error.MessageNotDrawn;
+    h.t.moveTo(message.x + message.w / 2, message.y + message.h / 2);
+    h.t.settle(0.2);
+    const before_ix = try messageCopyIcon(&h, message);
+    const before = h.t.ctx.nodes.items[before_ix].content.image;
+    const r = h.t.ctx.nodes.items[before_ix].rect;
+    h.t.click(r.x + r.w / 2, r.y + r.h / 2);
+    h.t.frame();
+    try testing.expectEqualStrings("Synthetic copy feedback", h.t.clipboard.items);
+    if (std.mem.eql(u8, role, "user") and !reduced_motion) try h.snap("message-copy-clicked");
+    const copied = h.t.ctx.nodes.items[try messageCopyIcon(&h, message)].content.image;
+    try testing.expect(!std.meta.eql(before, copied));
+    h.t.advance(0.8);
+    try testing.expect(std.meta.eql(copied, h.t.ctx.nodes.items[try messageCopyIcon(&h, message)].content.image));
+    // Clicking again restarts the original 1.2-second confirmation window.
+    h.t.click(r.x + r.w / 2, r.y + r.h / 2);
+    h.t.advance(0.5);
+    try testing.expect(std.meta.eql(copied, h.t.ctx.nodes.items[try messageCopyIcon(&h, message)].content.image));
+    h.t.advance(0.8);
+    try testing.expect(std.meta.eql(before, h.t.ctx.nodes.items[try messageCopyIcon(&h, message)].content.image));
+}
+
+test "message copy feedback changes to a tick then resets for prompts and replies" {
+    try messageCopyFeedback("user", false);
+    try messageCopyFeedback("assistant", false);
+    try messageCopyFeedback("assistant", true);
+}
 
 test "a send paints its prompt and activity next frame without waiting for the engine echo" {
     var h: Harness = undefined;

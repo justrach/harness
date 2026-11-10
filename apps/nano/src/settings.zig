@@ -99,7 +99,6 @@ pub const Prefs = struct {
     archive_on_close_chosen: bool = false,
     escape_stops_active_agent: bool = false,
     transcript_compact_mode: bool = true,
-    sidebar_task_view: bool = false,
     pause_animations_in_background: bool = false,
     /// The Write page starts in the interface sans; Aa offers a serif.
     write_sans: bool = true,
@@ -135,7 +134,6 @@ pub const Flag = enum {
     archive_on_close_chosen,
     escape_stops_active_agent,
     transcript_compact_mode,
-    sidebar_task_view,
     pause_animations_in_background,
     write_sans,
     sidebar_compact,
@@ -241,6 +239,52 @@ pub const Sort = enum {
             .last_updated => "lastUpdated",
             .created => "created",
         };
+    }
+};
+
+/// How far back the sidebar shows recent sessions (`sidebarLastActivity`).
+pub const LastActivity = enum {
+    d1,
+    d3,
+    d7,
+    d30,
+    all,
+
+    pub fn key(o: LastActivity) []const u8 {
+        return switch (o) {
+            .d1 => "1d",
+            .d3 => "3d",
+            .d7 => "7d",
+            .d30 => "30d",
+            .all => "all",
+        };
+    }
+
+    pub fn label(o: LastActivity) []const u8 {
+        return switch (o) {
+            .d1 => "1d",
+            .d3 => "3d",
+            .d7 => "7d",
+            .d30 => "30d",
+            .all => "All",
+        };
+    }
+
+    pub fn windowMs(o: LastActivity) ?i64 {
+        const day_ms: i64 = 24 * 60 * 60 * 1000;
+        return switch (o) {
+            .d1 => 1 * day_ms,
+            .d3 => 3 * day_ms,
+            .d7 => 7 * day_ms,
+            .d30 => 30 * day_ms,
+            .all => null,
+        };
+    }
+
+    pub fn matches(o: LastActivity, chat_ms: i64, now_ms: i64) bool {
+        const window = o.windowMs() orelse return true;
+        if (chat_ms <= 0 or now_ms <= 0) return true;
+        return now_ms -| chat_ms <= window;
     }
 };
 
@@ -703,6 +747,74 @@ pub const Store = struct {
         s.set(flag, !s.get(flag));
     }
 
+    /// Experience mode from the Lean 4 state machine (`motion_rules.zig:UiMode`):
+    /// Live disk-backed stores (`s.path != null`) default to `.zen` ("for normies"),
+    /// while in-memory test stores (`s.path == null`) default to `.developer` unless
+    /// explicitly switched with `applyUiMode`.
+    pub fn baseUiMode(s: *const Store) @import("motion_rules.zig").UiMode {
+        const rules = @import("motion_rules.zig");
+        if (s.text("uiMode")) |raw| {
+            if (std.mem.eql(u8, raw, "zen")) return .zen;
+            if (std.mem.eql(u8, raw, "developer")) return .developer;
+        }
+        return if (s.path != null) rules.UiState.initial.mode else .developer;
+    }
+
+    pub fn hierarchyProfile(s: *const Store) @import("motion_rules.zig").HierarchyProfile {
+        const rules = @import("motion_rules.zig");
+        var p = rules.HierarchyProfile.ofMode(s.baseUiMode());
+        for (rules.MovingPart.all) |part| {
+            if (s.text(part.key())) |raw| {
+                if (std.mem.eql(u8, raw, "on")) p = p.setPart(part, true);
+                if (std.mem.eql(u8, raw, "off")) p = p.setPart(part, false);
+            }
+        }
+        return p;
+    }
+
+    pub fn uiMode(s: *const Store) @import("motion_rules.zig").UiMode {
+        return s.hierarchyProfile().effectiveMode();
+    }
+
+    pub fn applyUiMode(s: *Store, mode: @import("motion_rules.zig").UiMode) void {
+        const rules = @import("motion_rules.zig");
+        for (rules.MovingPart.all) |part| s.clearText(part.key());
+        s.setText("uiMode", mode.key());
+        switch (mode) {
+            .zen => {
+                s.setText("sidebarOrganization", Organization.in_one_list.key());
+                s.set(.sidebar_show_harness, true);
+                s.set(.sidebar_show_project_icon, true);
+                s.set(.sidebar_show_branch, false);
+                s.set(.sidebar_show_project_label, false);
+            },
+            .developer => {
+                s.setText("sidebarOrganization", Organization.by_project.key());
+                s.set(.sidebar_show_harness, true);
+                s.set(.sidebar_show_branch, true);
+            },
+        }
+    }
+
+    pub fn toggleMovingPart(s: *Store, part: @import("motion_rules.zig").MovingPart) void {
+        const next = !s.hierarchyProfile().partEnabled(part);
+        s.setText(part.key(), if (next) "on" else "off");
+        switch (part) {
+            .grouped_sections => s.setText("sidebarOrganization", if (next) Organization.by_project.key() else Organization.in_one_list.key()),
+            .row_tech_badges => {
+                s.set(.sidebar_show_harness, next);
+                s.set(.sidebar_show_branch, next);
+            },
+            else => {},
+        }
+    }
+
+    pub fn toggleUiMode(s: *Store) void {
+        const rules = @import("motion_rules.zig");
+        const next = rules.stepUiState(.{ .mode = s.uiMode() }, .toggle_mode).mode;
+        s.applyUiMode(next);
+    }
+
     pub fn organization(s: *const Store) Organization {
         return fromKey(Organization, s.text("sidebarOrganization"), .by_project);
     }
@@ -748,6 +860,10 @@ pub const Store = struct {
 
     pub fn sort(s: *const Store) Sort {
         return fromKey(Sort, s.text("sidebarSort"), .last_updated);
+    }
+
+    pub fn lastActivity(s: *const Store) LastActivity {
+        return fromKey(LastActivity, s.text("sidebarLastActivity"), .all);
     }
 
     /// The sidebar's project filter (`spaceFilter`): a space's id, or all.

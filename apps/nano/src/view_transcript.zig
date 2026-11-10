@@ -16,6 +16,7 @@ const kit = @import("view_kit.zig");
 const tools = @import("tools.zig");
 const compact = @import("compact.zig");
 const tr = @import("transcript.zig");
+const steer_order = @import("steer_order.zig");
 const attachment_refs = @import("attachment_refs.zig");
 const attachment_images = @import("app_attachment_images.zig");
 const sidebar = @import("view_sidebar.zig");
@@ -83,7 +84,8 @@ pub fn transcript(c: *ui.Context, a: *App, k: theme.Colors) void {
     const just_stuck = a.view.stick_end;
     const pane_w = paneWidth(c, a);
     const drawn = entries(c, a, k, &a.transcript, pane_w, a.w_doc.id != null, 64 - sidebar.titlebar_h);
-    rail.rail(c, k, &a.view.rail, &a.transcript, drawn.ticks, drawn.box, pane_w + a.view.seam_inset);
+    if (a.settings.hierarchyProfile().shows_prompt_rail)
+        rail.rail(c, k, &a.view.rail, &a.transcript, drawn.ticks, drawn.box, pane_w + a.view.seam_inset);
     if (!just_stuck) recoverBlank(c, a, drawn);
     a.view.jump_box = drawn.box;
     a.view.jump_distance = drawn.from_end;
@@ -168,6 +170,7 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     } else null;
     if (subagent != null) st.justify = .start;
     st.scroll = true;
+    st.selectable = true;
     st.direction = .column;
     // The chat these are, for routing a sign-in: the open one's or a pane's.
     const chat_id: ?[]const u8 = if (subagent) |s| s.parent else if (t == &a.transcript) a.selected else for (a.peers.items) |*p| {
@@ -221,7 +224,7 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
         drawn.from_end = @max(0, max - at);
     }
     var ticks: std.ArrayList(@import("view_rail.zig").Tick) = .empty;
-    const body = ui.div(c).column().w(col);
+    const body = ui.div(c).column().w(col).clip();
     if (subagent == null and t == &a.transcript and streaming and !a.offscreen and !c.reduced_motion and !just_stuck and a.view.rail.glide == null) {
         c.node(body.index).style.settle_y = .{ .response = 0.20, .damping = 1.0 };
     }
@@ -230,40 +233,45 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     // no assistant part has arrived yet.
     _ = loading;
     const scroll_rect = c.rects.get(drawn.box);
-    const cull_offscreen = (!a.offscreen or tweening or resizing) and @import("motion_rules.zig").shouldCullOffscreen(tweening, resizing, streaming, a.view.rail.glide != null);
-    const cull_pad: f32 = if (tweening or resizing) 220 else 380;
+    const has_selection = c.selection.anchor != null or c.selection.dragging;
+    const cull_offscreen = !has_selection and (!a.offscreen or tweening or resizing) and @import("motion_rules.zig").shouldCullOffscreen(tweening, resizing, streaming, a.view.rail.glide != null);
+    const cull: Cull = .{ .on = cull_offscreen, .loose = tweening or resizing, .pad = if (tweening or resizing) 220 else 380, .view = scroll_rect, .col = col };
+    // A message sent while its turn works is drawn where it arrived, and
+    // what the reply gains after it under it (steer_order.zig).
+    const steer = &a.view.steer;
+    const steer_chat: ?u64 = if (subagent == null) (if (chat_id) |id| steer_order.hash(id) else null) else null;
+    if (steer_chat) |chat| steer.observe(chat, entries_);
+    const steered = if (steer_chat) |chat| steer.any(chat) else false;
     for (entries_, 0..) |*e, i| {
+        const tail = if (steered and e.role == .user) steer_order.tailAfter(steer, steer_chat.?, entries_, i) else null;
+        // After its message, whether that was drawn or is off screen.
+        defer if (tail) |x| steerTail(c, a, k, x, entries_, i, chat_id, cull, just_stuck);
+        const parts_len = e.parts.items.len;
+        const head_end = if (steered and e.role == .assistant) steer_order.headEnd(steer, steer_chat.?, entries_, i) else parts_len;
+        // Everything it has came after the message: nothing in its place.
+        if (head_end == 0 and parts_len > 0) continue;
         // `top_gap_for`: every entry's first row opens a turn (`SPACE_LG`).
         if (i > 0) _ = c.leaf(.{ .height = .{ .px = 16 } }, .none, null);
-        ui.key(c, c.print("entry-{s}", .{e.id}));
-        const entry_id = c.peekId(null);
-        const prev = c.rects.get(entry_id);
-        if (prev) |r| if (r.h > 0 and e.measured_w > 0) {
-            e.cached_h = r.h;
-            e.cached_w = e.measured_w;
-        };
-        const width_ok = tweening or resizing or @abs(e.cached_w - col) <= 1.0;
-        if (cull_offscreen and (!just_stuck or i + 1 < entries_.len) and e.status != .streaming and e.cached_h > 0 and width_ok) {
-            if (scroll_rect) |view| if (prev) |r| {
-                if (@import("motion_rules.zig").skipOffscreenRow(true, r.y, r.y + r.h, view.y, view.y + view.h, cull_pad)) {
-                    e.measured_w = 0;
-                    _ = c.leaf(.{ .width = .fill, .height = .{ .px = e.cached_h } }, .none, null);
-                    if (e.role == .user) {
-                        ticks.append(c.alloc(), .{ .entry = i, .top = r.y - (if (i > 0) @as(f32, 16) else 0) }) catch {};
-                    }
-                    continue;
-                }
-            };
+        ui.key(c, c.print("entry-{s}-{s}", .{ chat_id orelse "", e.id }));
+        if (spacer(c, cull, (!just_stuck or i + 1 < entries_.len) and e.status != .streaming, &e.cached_h, &e.cached_w, &e.measured_w)) |r| {
+            if (e.role == .user) {
+                ticks.append(c.alloc(), .{ .entry = i, .top = r.y - (if (i > 0) @as(f32, 16) else 0) }) catch {};
+            }
+            continue;
         }
-        e.measured_w = col;
-        const at: At = .{ .chat_id = chat_id, .entries = entries_, .index = i, .col = col, .scroll = scroll_rect };
+        var at: At = .{ .chat_id = chat_id, .entries = entries_, .index = i, .col = col, .scroll = scroll_rect };
         switch (e.role) {
             .user => {
                 // Its row starts where the turn's gap does (`top_gap_for`).
                 const r = user(c, a, k, e, col, chat_id);
                 ticks.append(c.alloc(), .{ .entry = i, .top = if (r) |x| x.y - (if (i > 0) @as(f32, 16) else 0) else null }) catch {};
             },
-            .assistant => assistant(c, a, k, e, at),
+            .assistant => if (head_end == parts_len) assistant(c, a, k, e, at) else {
+                // Under the reply's own id: its rows keep what they
+                // remembered when the message split it.
+                at.closes = false;
+                assistant(c, a, k, steerPiece(c, e, e.id, 0, head_end) orelse e, at);
+            },
             .system => system(c, a, k, e, at),
         }
     }
@@ -280,11 +288,68 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     return drawn;
 }
 
+/// What decides whether a row off screen is drawn or stood in for.
+const Cull = struct {
+    on: bool,
+    /// The column is changing width: a remembered height still stands in.
+    loose: bool,
+    pad: f32,
+    view: ?ui.Rect,
+    col: f32,
+};
+
+/// For the row keyed just before: its last rect when it is off screen and
+/// a spacer of its remembered height stands in for it, else null with the
+/// row still to draw. `h`, `w` and `m` are what the row remembers (an
+/// entry's `cached_h`, `cached_w` and `measured_w`).
+fn spacer(c: *ui.Context, cull: Cull, settled: bool, h: *f32, w: *f32, m: *f32) ?ui.Rect {
+    const prev = c.rects.get(c.peekId(null));
+    if (prev) |r| if (r.h > 0 and m.* > 0) {
+        h.* = r.h;
+        w.* = m.*;
+    };
+    const width_ok = cull.loose or @abs(w.* - cull.col) <= 1.0;
+    if (cull.on and settled and h.* > 0 and width_ok) {
+        if (cull.view) |view| if (prev) |r| {
+            if (@import("motion_rules.zig").skipOffscreenRow(true, r.y, r.y + r.h, view.y, view.y + view.h, cull.pad)) {
+                m.* = 0;
+                _ = c.leaf(.{ .width = .fill, .height = .{ .px = h.* } }, .none, null);
+                return r;
+            }
+        };
+    }
+    m.* = cull.col;
+    return null;
+}
+
+/// A reply's parts `[start, end)` as an entry of this frame's to draw.
+fn steerPiece(c: *ui.Context, e: *const tr.Entry, id: []const u8, start: usize, end: usize) ?*const tr.Entry {
+    const p = c.alloc().create(tr.Entry) catch return null;
+    p.* = steer_order.piece(e, id, start, end);
+    return p;
+}
+
+/// Under a message sent while its turn worked: what the reply gained
+/// after it, a row of its own with the gap of one.
+fn steerTail(c: *ui.Context, a: *App, k: theme.Colors, t: steer_order.Tail, entries_: []tr.Entry, user_ix: usize, chat_id: ?[]const u8, cull: Cull, just_stuck: bool) void {
+    if (t.start >= t.end) return;
+    const owner = &entries_[t.owner];
+    const message = entries_[user_ix].id;
+    _ = c.leaf(.{ .height = .{ .px = 16 } }, .none, null);
+    ui.key(c, c.print("entry-{s}-{s}-after-{s}", .{ chat_id orelse "", owner.id, message }));
+    const at_end = user_ix + 1 == entries_.len;
+    if (spacer(c, cull, (!just_stuck or !at_end) and owner.status != .streaming, &t.cut.cached_h, &t.cut.cached_w, &t.cut.measured_w) != null) return;
+    const piece = steerPiece(c, owner, c.print("{s}~{s}", .{ owner.id, message }), t.start, t.end) orelse return;
+    const closes = t.end == owner.parts.items.len;
+    assistant(c, a, k, piece, .{ .chat_id = chat_id, .entries = entries_, .index = t.owner, .col = cull.col, .scroll = cull.view, .closes = closes, .last = closes and at_end });
+}
+
 /// A prompt's bubble; where it was last laid out.
 fn user(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, col: f32, chat_id: ?[]const u8) ?ui.Rect {
     const wrap = ui.div(c).column().wFull().itemsEnd();
     defer wrap.end();
     const hovered = wrap.hovered();
+    if (c.hot == c.node(wrap.index).id) c.cursor_hand = false;
     {
         const bubble = ui.div(c).column().maxW(col * 0.8).bg(k.user_bubble).rounded(16).px(16).py(10).gap(6);
         defer bubble.end();
@@ -292,7 +357,10 @@ fn user(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, col: f32, 
         for (e.parts.items) |*p| switch (p.kind) {
             .text => {
                 const parsed = attachment_refs.parse(c.alloc(), p.text.items) catch attachment_refs.Parsed{ .text = p.text.items };
-                if (parsed.text.len > 0) ui.text(c, parsed.text, st);
+                if (parsed.text.len > 0) {
+                    ui.key(c, c.print("user-text-{s}-{s}-{x}", .{ chat_id orelse "", p.id, std.hash.Wyhash.hash(0, parsed.text) }));
+                    ui.text(c, parsed.text, st);
+                }
                 for (parsed.paths, 0..) |path, index| {
                     ui.key(c, c.print("user-attachment-{s}-{d}", .{ p.id, index }));
                     sentAttachment(c, a, k, chat_id, path);
@@ -302,7 +370,7 @@ fn user(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, col: f32, 
             else => {},
         };
     }
-    lane(c, k, e, hovered, true);
+    lane(c, a, k, e, hovered, true);
     return c.rects.get(c.node(wrap.index).id);
 }
 
@@ -311,7 +379,7 @@ fn sentAttachment(c: *ui.Context, a: *App, k: theme.Colors, chat_id: ?[]const u8
     const name = @import("app_attachments.zig").displayName(path);
     const image = attachment_images.get(a, chat_id, path);
     const bytes: []const u8 = if (image) |loaded| attachment_images.tileBytes(loaded) else "";
-    const tile = ui.div(c).column().w(56).gap(2);
+    const tile = ui.div(c).column().w(56).gap(2).control();
     defer tile.end();
     {
         const thumb = ui.div(c).row().size(56, 56).center().rounded(8).border(k.border).bg(k.hover).clip();
@@ -353,10 +421,21 @@ fn underLastRow(c: *ui.Context, a: *const App, row: ?ui.Rect, scroll: ?ui.Rect) 
     return m.x >= pane.x and m.x < pane.x + pane.w and m.y >= r.y + r.h and m.y < c.size.h;
 }
 
+/// GPUI's copied-message check lasts 1.2 seconds. Keep only a stable control
+/// id and a deadline, not a borrowed entry id or a frame-arena string.
+pub const CopyFeedback = struct {
+    button: u64 = 0,
+    until: f64 = 0,
+
+    pub fn active(s: CopyFeedback, button: u64, now: f64) bool {
+        return s.button == button and now < s.until;
+    }
+};
+
 /// Under a message: 32 points held for its time and copy button, shown on
 /// hover (`strip`).
-fn lane(c: *ui.Context, k: theme.Colors, e: *const tr.Entry, hovered: bool, right: bool) void {
-    var l = ui.div(c).row().wFull().h(32).pt(8).gap(8).itemsCenter();
+fn lane(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, hovered: bool, right: bool) void {
+    var l = ui.div(c).row().wFull().h(32).pt(8).gap(8).itemsCenter().control();
     if (right) l = l.justifyEnd();
     defer l.end();
     if (!hovered) return;
@@ -364,13 +443,19 @@ fn lane(c: *ui.Context, k: theme.Colors, e: *const tr.Entry, hovered: bool, righ
         const buf = c.alloc().alloc(u8, 32) catch return;
         ui.text(c, formatTimestamp(buf, e.created_ms, @import("accounts.zig").localOffset(e.created_ms)), .{ .size = 12, .line_height = 12 * 1.618, .color = k.muted.alpha(0.55) });
     }
-    if (kit.iconButton(c, k, .copy, .{ .size = 24, .radius = 6, .icon = 14 })) {
+    const button = c.node(l.index).id;
+    const copied = a.view.message_copy.active(button, c.time);
+    if (copied) c.frameIn(@floatCast(a.view.message_copy.until - c.time));
+    if (kit.iconButton(c, k, if (copied) .check else .copy, .{ .size = 24, .radius = 6, .icon = 14 })) {
         var text: std.ArrayList(u8) = .empty;
         for (e.parts.items) |*p| if (p.kind == .text) {
             if (text.items.len > 0) text.appendSlice(c.alloc(), "\n\n") catch {};
             text.appendSlice(c.alloc(), p.text.items) catch {};
         };
         c.clipboard.write(c.clipboard.ctx, text.items);
+        a.view.message_copy = .{ .button = button, .until = c.time + 1.2 };
+        c.changed = true;
+        c.frameIn(0);
     }
 }
 
@@ -382,24 +467,31 @@ const At = struct {
     col: f32,
     /// The scroll box as last laid out.
     scroll: ?ui.Rect = null,
+    /// Whether the row ends its reply. One split by a message sent while
+    /// it worked (steer_order.zig) ends in the piece under the last such
+    /// message: only that piece has the answer's heading and the lane.
+    closes: bool = true,
+    /// The transcript's last row, though its entry isn't the last one.
+    last: bool = false,
 };
 
 fn assistant(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, at: At) void {
-    const last = at.index + 1 == at.entries.len;
+    const last = at.last or at.index + 1 == at.entries.len;
     const col = ui.div(c).column().wFull();
     defer col.end();
     const hovered = col.hovered() or (last and underLastRow(c, a, c.rects.get(c.node(col.index).id), at.scroll));
+    if (c.hot == c.node(col.index).id) c.cursor_hand = false;
     // Its parts 12 apart; the lane right under the last (the row's
     // `strip`, with no gap of its own).
     const parts_box = ui.div(c).column().wFull().gap(12);
-    const answer: Answer = .{ .part = if (compact.finalAnswerPart(e)) |i| &e.parts.items[i] else null };
+    const answer: Answer = .{ .part = if (!at.closes) null else if (compact.finalAnswerPart(e)) |i| &e.parts.items[i] else null };
     if (a.settings.get(.transcript_compact_mode))
         compactParts(c, a, k, e, at, answer)
     else
         partRows(c, a, k, e, e.parts.items, at, last, answer);
     if (e.status == .streaming and e.parts.items.len == 0) ui.text(c, "Working…", .{ .size = 12, .color = k.muted });
     parts_box.end();
-    if (e.status != .streaming) lane(c, k, e, hovered, false);
+    if (e.status != .streaming and at.closes) lane(c, a, k, e, hovered, false);
 }
 
 /// The part a finished reply's answer starts at, which a divider heads,
@@ -466,7 +558,7 @@ fn part(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *const 
         .input => {
             const q = if (p.questions.len > 0) p.questions[0] else null;
             const label = if (q) |x| (if (x.question.len > 0) x.question else x.header) else "Question";
-            @import("view_question.zig").chip(c, k, label, p.resolved);
+            @import("view_question.zig").chip(c, k, label, p.resolved, at.col);
         },
         else => {},
     }
@@ -476,7 +568,7 @@ fn part(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *const 
 /// divider, 12 points over the answer, under a muted "Worked for …" (or
 /// "Final answer") unless compact mode's work line already says it.
 fn answerHeading(c: *ui.Context, k: theme.Colors, e: *const tr.Entry, label: bool) void {
-    const h = ui.div(c).column().wFull().pb(12);
+    const h = ui.div(c).column().wFull().pb(12).control();
     defer h.end();
     if (label) {
         const l = ui.div(c).row().wFull().pt(8).pb(12);
@@ -544,23 +636,27 @@ fn workLine(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, work: 
     const box = ui.div(c).column().wFull();
     defer box.end();
     {
-        const h = kit.pressFeedback(ui.div(c).row().h(26).gap(6).pr(4).itemsCenter().rounded(4).control().hover(k.wash(0.04)));
+        const h = kit.pressFeedback(ui.div(c).row().wFull().h(26).gap(6).pr(4).itemsCenter().rounded(4).clip().control().hover(k.wash(0.04)));
         defer h.end();
         if (h.clicked()) a.view.toggleGroup(a.gpa, override, open);
         const slot = ui.div(c).row().size(22, 18).center();
         @import("view_tool_rows.zig").chevron(c, k, open, 14);
         slot.end();
+        const max_title_w = @import("motion_rules.zig").toolGroupTitleCap(at.col, 28, 8);
+        const title_slot = ui.div(c).row().grow().w(0).clip();
+        defer title_slot.end();
         const st = kit.style(c, 15, 18, .{ .color = if (h.hovered()) k.text else k.muted });
         const settled = if (e.status != .streaming) compact.workedSecs(e) else null;
         if (settled) |s| {
             const lb = c.alloc().alloc(u8, 48) catch return;
-            ui.text(c, compact.workedFor(lb, s), st);
+            kit.fadeText(c, compact.workedFor(lb, s), st, max_title_w);
         } else {
             const lb = c.alloc().alloc(u8, 160) catch return;
+            // Thinking belongs to the piece the reply is still writing.
             const active = e.status == .streaming and for (work) |p| {
-                if (p.kind == .reasoning or (p.kind == .tool and !p.resolved)) break true;
+                if ((p.kind == .reasoning and at.closes) or (p.kind == .tool and !p.resolved)) break true;
             } else false;
-            @import("view_tool_rows.zig").title(c, k, workLabel(c, lb, work), active, h.hovered());
+            @import("view_tool_rows.zig").title(c, k, workLabel(c, lb, work), active, h.hovered(), max_title_w);
         }
     }
     const state = @import("tool_ui_state.zig");
@@ -765,7 +861,7 @@ pub fn noticeChip(c: *ui.Context, k: theme.Colors, label: []const u8, message: [
     // GPUI's edge insets what's inside it; here it's drawn over the box.
     const chip = ui.div(c).column().wFull().rounded(10).px(10 + 1).py(8 + 1).gap(6).border(k.danger.alpha(0.16)).borderW(1).bg(k.danger.alpha(0.05));
     {
-        const h = ui.div(c).row().wFull().gap(8).itemsCenter();
+        const h = ui.div(c).row().wFull().gap(8).itemsCenter().control();
         defer h.end();
         const tile = ui.div(c).row().size(20, 20).center().rounded(6).bg(k.danger.alpha(0.12));
         icons.icon(c, .@"danger-triangle", 12, k.danger_muted.alpha(0.8), 0);
@@ -796,7 +892,7 @@ fn errorChip(c: *ui.Context, a: *App, k: theme.Colors, chat_id: ?[]const u8, mes
     defer chip.end();
     const p = problem orelse return;
     const id = chat_id orelse return;
-    const r = ui.div(c).row().pt(2);
+    const r = ui.div(c).row().pt(2).control();
     defer r.end();
     // `btn_primary` at px(10) py(5) rounded(7), 12 points.
     const b = ui.div(c).row().px(10).py(5).rounded(7).bg(k.solid);
@@ -809,7 +905,7 @@ fn errorChip(c: *ui.Context, a: *App, k: theme.Colors, chat_id: ?[]const u8, mes
 }
 
 fn attachment(c: *ui.Context, k: theme.Colors, icon: icons.Name, label: []const u8) void {
-    const row = ui.div(c).row().gap(6).itemsCenter();
+    const row = ui.div(c).row().gap(6).itemsCenter().control();
     defer row.end();
     icons.icon(c, icon, 14, k.muted, 0);
     ui.text(c, label, .{ .size = 12, .color = k.muted });

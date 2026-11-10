@@ -34,20 +34,39 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
         n += 1;
     }
     var aligned: [tabs.max_panes + 2]f32 = undefined;
+    const in_row = (if (split) |s| s.axis == .horizontal and !s.zoomed else true) and a.view.strip.expanded == null and a.view.chrome.width <= c.size.w - a.view.chrome.x + 0.5;
+    const columns = in_row and chrome.columns(widths[0..n], a.view.chrome.leading, left, 8, &aligned);
     const other_tabs: usize = if (a.tabs.items.items.len > 1) a.tabs.items.items.len - 1 else 0;
     const avail_bar = @max(0, c.size.w - a.view.sidebar_width - left - 8 - 32);
-    const max_other_budget = avail_bar * 0.38;
-    const other_shown: usize = if (other_tabs > 0) @min(other_tabs, @as(usize, @intFromFloat(@max(1, @floor(max_other_budget / 76))))) else 0;
+    const max_other_budget = if (columns)
+        @max(0, @min(aligned[0] * 0.55, aligned[0] - 180))
+    else
+        avail_bar * 0.38;
+    const other_shown: usize = if (other_tabs > 0 and max_other_budget >= 76) @min(other_tabs, @as(usize, @intFromFloat(@max(1, @floor(max_other_budget / 76))))) else 0;
     const other_pill_w: f32 = if (other_shown > 0) @min(128, @max(72, max_other_budget / @as(f32, @floatFromInt(other_shown)) - 4)) else 0;
     const other_reserve: f32 = if (other_shown > 0) @as(f32, @floatFromInt(other_shown)) * (other_pill_w + 4) else 0;
-    const in_row = other_shown == 0 and (if (split) |s| s.axis == .horizontal and !s.zoomed else true) and a.view.strip.expanded == null and a.view.chrome.width <= c.size.w - a.view.chrome.x + 0.5;
-    const columns = in_row and chrome.columns(widths[0..n], a.view.chrome.leading, left, 8, &aligned);
     const shared = @min(chrome.slot_max, chrome.sharedSlotRoom(@max(240, c.size.w - a.view.sidebar_width - other_reserve), left, 8, n));
     ui.key(c, "instrument-strip");
     const row = ui.div(c).fixed().offset(a.view.sidebar_width, 0).w(c.size.w - a.view.sidebar_width).h(chrome.titlebar_height).pt(chrome.top_pad).pl(left).pr(8).row().gap(if (columns) chrome.gutter else 4).itemsCenter().layer(2);
     defer row.end();
-    for (targets[0..n], 0..) |target, ix| slot(c, a, k, target, ix, @max(0, if (columns) aligned[ix] else shared));
-    if (other_shown > 0) {
+    for (targets[0..n], 0..) |target, ix| {
+        if (columns and ix == 0 and other_shown > 0) {
+            ui.key(c, "instrument-col-0");
+            const col0 = ui.div(c).row().size(aligned[0], chrome.tab_height).gap(4).itemsCenter();
+            defer col0.end();
+            slot(c, a, k, target, ix, @max(0, aligned[0] - other_reserve));
+            var rendered: usize = 0;
+            for (0..a.tabs.items.items.len) |ws| {
+                if (ws != a.tabs.active and rendered < other_shown) {
+                    topWorkspacePill(c, a, k, ws, other_pill_w);
+                    rendered += 1;
+                }
+            }
+        } else {
+            slot(c, a, k, target, ix, @max(0, if (columns) aligned[ix] else shared));
+        }
+    }
+    if (!columns and other_shown > 0) {
         var rendered: usize = 0;
         for (0..a.tabs.items.items.len) |ws| {
             if (ws != a.tabs.active and rendered < other_shown) {

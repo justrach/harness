@@ -11,6 +11,7 @@ test {
     _ = @import("veil.zig");
     _ = @import("tools.zig");
     _ = @import("compact.zig");
+    _ = @import("steer_order.zig");
     _ = @import("prompt_history.zig");
     _ = @import("engine_start.zig");
     _ = @import("diff.zig");
@@ -83,6 +84,7 @@ test {
     _ = @import("tests_ui_rail.zig");
     _ = @import("tests_ui_tooltips.zig");
     _ = @import("change_requests.zig");
+    _ = @import("agent_updates.zig");
     _ = @import("tests_ui_change_requests.zig");
     _ = @import("palette.zig");
     _ = @import("tests_ui_palette.zig");
@@ -116,9 +118,12 @@ test {
     _ = @import("tests_ui_tool_tree.zig");
     _ = @import("tests_ui_actions_toolbar.zig");
     _ = @import("tests_ui_sessions.zig");
+    _ = @import("tests_desktop_regressions.zig");
+    _ = @import("view_attachment_drop.zig");
     _ = @import("tests_ui_project_setup.zig");
     _ = @import("tests_ui_open_chooser.zig");
     _ = @import("tests_ui_resize.zig");
+    _ = @import("tests_ui_strip_folder_search.zig");
     _ = @import("tests_tab_layout.zig");
     _ = @import("project_paths.zig");
     _ = @import("graff_update.zig");

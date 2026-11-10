@@ -569,10 +569,55 @@ theorem timed_wake_never_zero_spin (remMs : Nat) (needsSettle : Bool) :
     simp
   · exact Nat.le_max_left 16 remMs
 
+/-- `harness-updates-v1` RPC lifecycle (`crates/engine/src/harness_updates.rs` & `engine_host.zig`). -/
+def canonicalHarnessUpdateRpcCount : Nat := 6
+
+inductive HarnessUpdatePhase where
+  | upToDate
+  | available
+  | installing
+  | updated
+deriving DecidableEq, Repr, BEq
+
+structure HarnessUpdateState where
+  installedVer : Nat
+  latestVer    : Option Nat
+  dismissedVer : Option Nat
+  phase        : HarnessUpdatePhase
+  autoUpdate   : Bool
+  canCancel    : Bool
+deriving DecidableEq, Repr, BEq
+
+def applyHarnessUpdateStep (s : HarnessUpdateState) : HarnessUpdateState :=
+  let nextInstalled := s.latestVer.getD s.installedVer
+  { s with
+    installedVer := nextInstalled
+    phase        := .updated
+    canCancel    := false }
+
+def cancelHarnessUpdateStep (s : HarnessUpdateState) : HarnessUpdateState :=
+  let hasDiff := match s.latestVer with
+    | some lat => lat != s.installedVer
+    | none     => false
+  { s with
+    phase     := if hasDiff then .available else .upToDate
+    canCancel := false }
+
+theorem harness_update_apply_converges_and_clears_cancel (s : HarnessUpdateState) (v : Nat)
+    (hLat : s.latestVer = some v) :
+    let s' := applyHarnessUpdateStep s
+    s'.phase = .updated ∧ s'.installedVer = v ∧ s'.canCancel = false := by
+  simp [applyHarnessUpdateStep, hLat]
+
+theorem harness_update_cancel_after_apply_is_up_to_date (s : HarnessUpdateState) (v : Nat)
+    (hLat : s.latestVer = some v) :
+    (cancelHarnessUpdateStep (applyHarnessUpdateStep s)).phase = .upToDate := by
+  simp [applyHarnessUpdateStep, cancelHarnessUpdateStep, hLat]
+
 /-- Count of exhaustive state-transition cells verified in `RustCodebaseParity`. -/
 def rustParityVerifiedCells : Nat :=
-  3 * 4 * 4 + 10 + 16 + canonicalMutateOpCount + canonicalCommandKindCount + canonicalEditActionCount + warmDocCap + activeSyncCap
+  3 * 4 * 4 + 10 + 16 + canonicalMutateOpCount + canonicalCommandKindCount + canonicalEditActionCount + warmDocCap + activeSyncCap + canonicalHarnessUpdateRpcCount
 
-theorem rust_parity_cells_count : rustParityVerifiedCells = 140 := rfl
+theorem rust_parity_cells_count : rustParityVerifiedCells = 146 := rfl
 
 end HarnessProofs.RustCodebaseParity

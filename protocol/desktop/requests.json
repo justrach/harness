@@ -51,6 +51,12 @@
     {"name": "delete a project action", "method": "DeleteProjectAction", "stream": false, "params": {"spaceId":"space-parity","actionId":"test"}},
     {"name": "merge a Graff worktree back", "method": "GraffWorktreeAction", "stream": false, "params": {"chatId":"chat-parity","action":"merge"}},
     {"name": "watch a branch's pull request", "method": "WatchCheckoutChangeRequest", "stream": true, "params": {"cwd":"$DIR","branch":"main"}},
-    {"name": "merge a branch's pull request", "method": "MergeChangeRequest", "stream": false, "params": {"cwd":"$DIR","branch":"main","number":90}}
+    {"name": "merge a branch's pull request", "method": "MergeChangeRequest", "stream": false, "params": {"cwd":"$DIR","branch":"main","number":90}},
+    {"name": "watch agent CLI updates", "method": "WatchHarnessUpdates", "stream": true, "params": {"targetDeviceId":"host-parity"}},
+    {"name": "check agent CLI updates", "method": "CheckHarnessUpdates", "stream": false, "params": {"harness":"claude-code","targetDeviceId":"host-parity"}},
+    {"name": "apply an agent CLI update", "method": "ApplyHarnessUpdate", "stream": false, "params": {"harness":"claude-code","targetDeviceId":"host-parity"}},
+    {"name": "cancel an agent CLI update", "method": "CancelHarnessUpdate", "stream": false, "params": {"harness":"claude-code","targetDeviceId":"host-parity"}},
+    {"name": "dismiss an agent CLI update", "method": "DismissHarnessUpdate", "stream": false, "params": {"harness":"claude-code","version":"2.1.322","targetDeviceId":"host-parity"}},
+    {"name": "set agent CLI auto-update policy", "method": "SetHarnessUpdatePolicy", "stream": false, "params": {"harness":"claude-code","autoUpdate":true,"targetDeviceId":"host-parity"}}
   ]
 }

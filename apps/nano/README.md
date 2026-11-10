@@ -14,7 +14,8 @@ client codegraff uses. For now it fetches the newest release's manifest.
 
 - Sidebar: your spaces and their chats, newest first, with each chat's status
   (working, waiting for you, errored). **Add folder** adds a space on this
-  device.
+  device. Workspaces and their panel tabs stay in ordinary navigation;
+  **Chat history** reopens conversations, including archived ones.
 - Chat: the transcript as it streams in, with Markdown replies (code
   highlighted, with a Copy button), reasoning, and each tool call with how it
   went. In Compact mode, progress stays visible while a turn runs and
@@ -23,7 +24,9 @@ client codegraff uses. For now it fetches the newest release's manifest.
 - Composer: Return sends, Shift-Return starts a new line, **Stop** interrupts a
   running turn. A new chat picks its agent, model, and execution computer
   through **Run on**. Choosing another computer clears an incompatible
-  project; an existing conversation stays on its original host.
+  project; an existing conversation stays on its original host. Drop local
+  files or images into a chat pane to attach them to that pane (24 MB per
+  file), or use the attachment picker. Rejected files show an explanation.
 - Agent rows stay visible and open their live transcript in a side tab without
   leaving the parent chat. Finished agents use their saved transcript, falling
   back to the document feed if the snapshot is unavailable.

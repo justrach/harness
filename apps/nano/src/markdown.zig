@@ -40,6 +40,7 @@ pub const Block = union(enum) {
     paragraph: Inline,
     heading: struct { level: u8, text: Inline },
     code: struct { lang: []const u8, text: []const u8 },
+    math: Inline,
     item: struct { depth: u8, marker: []const u8, task: ?bool = null, text: Inline },
     quote: Inline,
     rule,
@@ -114,6 +115,46 @@ pub const Parser = struct {
                 // A fence still streaming ends at its last full line.
                 try p.blocks.append(p.arena, .{ .code = .{ .lang = lang, .text = std.mem.trimEnd(u8, body.items, "\n ") } });
                 continue;
+            }
+            // Display math (`$$ ... $$` or `\[ ... \]`), once its closing delimiter has arrived.
+            if (std.mem.startsWith(u8, t, "$$") or std.mem.startsWith(u8, t, "\\[")) {
+                const close_delim = if (t[0] == '$') "$$" else "\\]";
+                if (t.len >= 4 and std.mem.endsWith(u8, t, close_delim)) {
+                    const inner = std.mem.trim(u8, t[2 .. t.len - 2], " \t");
+                    if (inner.len > 0) {
+                        try p.flush();
+                        try p.blocks.append(p.arena, .{ .math = try p.mathInline(inner) });
+                        continue;
+                    }
+                } else {
+                    var close_line: ?usize = null;
+                    var j = i + 1;
+                    while (j < lines.items.len) : (j += 1) {
+                        const lt = std.mem.trim(u8, lines.items[j], " \t");
+                        if (std.mem.endsWith(u8, lt, close_delim)) {
+                            close_line = j;
+                            break;
+                        }
+                    }
+                    if (close_line) |end_ix| {
+                        try p.flush();
+                        var body: std.ArrayList(u8) = .empty;
+                        const first_rest = std.mem.trim(u8, t[2..], " \t");
+                        if (first_rest.len > 0) try body.appendSlice(p.arena, first_rest);
+                        var k = i + 1;
+                        while (k <= end_ix) : (k += 1) {
+                            const lt = std.mem.trim(u8, lines.items[k], " \t");
+                            const slice = if (k == end_ix) std.mem.trim(u8, lt[0 .. lt.len - 2], " \t") else lt;
+                            if (slice.len > 0) {
+                                if (body.items.len > 0) try body.append(p.arena, ' ');
+                                try body.appendSlice(p.arena, slice);
+                            }
+                        }
+                        try p.blocks.append(p.arena, .{ .math = try p.mathInline(body.items) });
+                        i = end_ix;
+                        continue;
+                    }
+                }
             }
             // HTML, to the blank line that ends it (a comment to its end).
             if (html.starts(t)) {
@@ -194,6 +235,12 @@ pub const Parser = struct {
         return .{ .text = b.text.items, .spans = b.spans.items, .images = b.images.items, .links = b.links.items };
     }
 
+    fn mathInline(p: *Parser, src: []const u8) !Inline {
+        var b: Builder = .{ .arena = p.arena, .pal = p.pal };
+        try b.emitMath(src, .{});
+        return .{ .text = b.text.items, .spans = b.spans.items, .images = b.images.items, .links = b.links.items, .center = true };
+    }
+
     pub const Builder = struct {
         arena: std.mem.Allocator,
         pal: Palette,
@@ -232,13 +279,38 @@ pub const Parser = struct {
             try b.spans.append(b.arena, span);
         }
 
+        pub fn emitMath(b: *Builder, raw: []const u8, base: Flags) !void {
+            const formatted = try formatLatexMath(b.arena, raw);
+            var idx: usize = 0;
+            while (idx < formatted.len) {
+                const start = idx;
+                const is_var = std.ascii.isAlphabetic(formatted[idx]);
+                while (idx < formatted.len and std.ascii.isAlphabetic(formatted[idx]) == is_var) : (idx += 1) {}
+                var mf = base;
+                if (is_var) mf.italic = true;
+                try b.emit(formatted[start..idx], mf);
+            }
+        }
+
         fn parse(b: *Builder, src: []const u8, f: Flags) anyerror!void {
             var i: usize = 0;
             var plain: usize = 0;
             while (i < src.len) {
                 const ch = src[i];
                 const rest = src[i..];
-                if (ch == '\\' and i + 1 < src.len and std.mem.indexOfScalar(u8, "\\`*_{}[]()#+-.!~|<>", src[i + 1]) != null) {
+                if (ch == '\\' and i + 1 < src.len and (src[i + 1] == '(' or src[i + 1] == '[')) {
+                    const close_delim = if (src[i + 1] == '(') "\\)" else "\\]";
+                    if (std.mem.indexOfPos(u8, src, i + 2, close_delim)) |close| {
+                        if (close > i + 2) {
+                            try b.emit(src[plain..i], f);
+                            try b.emitMath(src[i + 2 .. close], f);
+                            i = close + 2;
+                            plain = i;
+                            continue;
+                        }
+                    }
+                }
+                if (ch == '\\' and i + 1 < src.len and std.mem.indexOfScalar(u8, "\\`$*_{}[]()#+-.!~|<>", src[i + 1]) != null) {
                     try b.emit(src[plain..i], f);
                     plain = i + 1;
                     i += 2;
@@ -249,10 +321,37 @@ pub const Parser = struct {
                     while (i + n < src.len and src[i + n] == '`') n += 1;
                     if (std.mem.indexOf(u8, src[i + n ..], src[i .. i + n])) |close| {
                         try b.emit(src[plain..i], f);
+                        const code_text = std.mem.trim(u8, src[i + n .. i + n + close], " ");
                         var cf = f;
                         cf.code = true;
-                        try b.emit(std.mem.trim(u8, src[i + n .. i + n + close], " "), cf);
+                        const is_code_url = !f.link and @import("browser_url.zig").allowedNavigation(code_text);
+                        if (is_code_url) cf.link = true;
+                        const at: u32 = @intCast(b.text.items.len);
+                        try b.emit(code_text, cf);
+                        if (is_code_url) {
+                            try b.links.append(b.arena, .{ .url = code_text, .start = at, .end = @intCast(b.text.items.len) });
+                        }
                         i += n + close + n;
+                        plain = i;
+                        continue;
+                    }
+                }
+                if (ch == '$' and !f.code) {
+                    if (rest.len >= 4 and rest[1] == '$') {
+                        if (std.mem.indexOfPos(u8, src, i + 2, "$$")) |close| {
+                            const inner = std.mem.trim(u8, src[i + 2 .. close], " \t");
+                            if (inner.len > 0) {
+                                try b.emit(src[plain..i], f);
+                                try b.emitMath(inner, f);
+                                i = close + 2;
+                                plain = i;
+                                continue;
+                            }
+                        }
+                    } else if (inlineMathEnd(src, i)) |close| {
+                        try b.emit(src[plain..i], f);
+                        try b.emitMath(src[i + 1 .. close], f);
+                        i = close + 1;
                         plain = i;
                         continue;
                     }
@@ -302,19 +401,20 @@ pub const Parser = struct {
                     plain = i;
                     continue;
                 };
-                if (!f.link and (std.mem.startsWith(u8, rest, "https://") or std.mem.startsWith(u8, rest, "http://"))) {
-                    var end = i;
-                    while (end < src.len and src[end] != ' ' and src[end] != ')' and src[end] != '>') end += 1;
-                    while (end > i and std.mem.indexOfScalar(u8, ".,;:!?", src[end - 1]) != null) end -= 1;
-                    try b.emit(src[plain..i], f);
-                    var lf = f;
-                    lf.link = true;
-                    const at: u32 = @intCast(b.text.items.len);
-                    try b.emit(src[i..end], lf);
-                    try b.links.append(b.arena, .{ .url = src[i..end], .start = at, .end = @intCast(b.text.items.len) });
-                    i = end;
-                    plain = i;
-                    continue;
+                if (!f.link and (i == 0 or !std.ascii.isAlphanumeric(src[i - 1])) and (ch == 'h' or ch == 'H')) {
+                    const url_len = @import("browser_url.zig").bareUrlLen(rest);
+                    if (url_len > 0) {
+                        const end = i + url_len;
+                        try b.emit(src[plain..i], f);
+                        var lf = f;
+                        lf.link = true;
+                        const at: u32 = @intCast(b.text.items.len);
+                        try b.emit(src[i..end], lf);
+                        try b.links.append(b.arena, .{ .url = src[i..end], .start = at, .end = @intCast(b.text.items.len) });
+                        i = end;
+                        plain = i;
+                        continue;
+                    }
                 }
                 i += 1;
             }
@@ -322,6 +422,326 @@ pub const Parser = struct {
         }
     };
 };
+
+/// Currency-safe closing `$` index for an inline `$ ... $` span starting at `open`.
+/// Returns `null` for `$5 and $10`, `$ 5`, unclosed streaming `$`, or `$` followed by digits.
+pub fn inlineMathEnd(src: []const u8, open: usize) ?usize {
+    if (open + 2 > src.len or src[open] != '$') return null;
+    if (src[open + 1] == '$' or src[open + 1] == ' ' or src[open + 1] == '\t' or src[open + 1] == '\n' or src[open + 1] == '\r') return null;
+    if (open > 0 and (src[open - 1] == '\\' or src[open - 1] == '$' or std.ascii.isAlphanumeric(src[open - 1]))) return null;
+    var j = open + 1;
+    while (j < src.len) : (j += 1) {
+        const ch = src[j];
+        if (ch == '`' or ch == '\n') return null;
+        if (ch == '$') {
+            if (src[j - 1] == '\\') continue;
+            if (j == open + 1 or src[j - 1] == ' ' or src[j - 1] == '\t') return null;
+            if (j + 1 < src.len and (src[j + 1] == '$' or std.ascii.isAlphanumeric(src[j + 1]))) return null;
+            return j;
+        }
+    }
+    return null;
+}
+
+pub fn formatLatexMath(arena: std.mem.Allocator, raw_in: []const u8) ![]const u8 {
+    const raw = std.mem.trim(u8, raw_in, " \t\n\r");
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < raw.len) {
+        if (raw[i] == '\\') {
+            if (i + 1 < raw.len and (raw[i + 1] == '{' or raw[i + 1] == '}' or raw[i + 1] == '$' or raw[i + 1] == '%' or raw[i + 1] == '_' or raw[i + 1] == '&' or raw[i + 1] == '#')) {
+                try out.append(arena, raw[i + 1]);
+                i += 2;
+                continue;
+            }
+            if (i + 1 < raw.len and (raw[i + 1] == ',' or raw[i + 1] == ';' or raw[i + 1] == ':' or raw[i + 1] == ' ')) {
+                try out.append(arena, ' ');
+                i += 2;
+                continue;
+            }
+            if (i + 1 < raw.len and raw[i + 1] == '!') {
+                i += 2;
+                continue;
+            }
+            var end = i + 1;
+            while (end < raw.len and std.ascii.isAlphabetic(raw[end])) : (end += 1) {}
+            const cmd = raw[i + 1 .. end];
+            if (std.mem.eql(u8, cmd, "frac")) {
+                var pos = skipMathSpaces(raw, end);
+                if (takeBraceGroup(raw, pos)) |num| {
+                    pos = skipMathSpaces(raw, num.next);
+                    if (takeBraceGroup(raw, pos)) |den| {
+                        const n_fmt = try formatLatexMath(arena, num.inner);
+                        const d_fmt = try formatLatexMath(arena, den.inner);
+                        const wrap_n = needsParenInFraction(n_fmt);
+                        const wrap_d = needsParenInFraction(d_fmt);
+                        if (wrap_n) try out.append(arena, '(');
+                        try out.appendSlice(arena, n_fmt);
+                        if (wrap_n) try out.append(arena, ')');
+                        try out.append(arena, '/');
+                        if (wrap_d) try out.append(arena, '(');
+                        try out.appendSlice(arena, d_fmt);
+                        if (wrap_d) try out.append(arena, ')');
+                        i = den.next;
+                        continue;
+                    }
+                }
+            } else if (std.mem.eql(u8, cmd, "sqrt")) {
+                const pos = skipMathSpaces(raw, end);
+                if (takeBraceGroup(raw, pos)) |arg| {
+                    const inner = try formatLatexMath(arena, arg.inner);
+                    const multi_cp = (std.unicode.utf8CountCodepoints(inner) catch inner.len) > 1;
+                    try out.appendSlice(arena, "√");
+                    if (multi_cp) try out.append(arena, '(');
+                    try out.appendSlice(arena, inner);
+                    if (multi_cp) try out.append(arena, ')');
+                    i = arg.next;
+                    continue;
+                }
+            } else if (std.mem.eql(u8, cmd, "text") or std.mem.eql(u8, cmd, "mathrm") or std.mem.eql(u8, cmd, "mathbf") or std.mem.eql(u8, cmd, "mathcal") or std.mem.eql(u8, cmd, "operatorname")) {
+                const pos = skipMathSpaces(raw, end);
+                if (takeBraceGroup(raw, pos)) |arg| {
+                    try out.appendSlice(arena, arg.inner);
+                    i = arg.next;
+                    continue;
+                }
+            } else if (std.mem.eql(u8, cmd, "left") or std.mem.eql(u8, cmd, "right")) {
+                i = skipMathSpaces(raw, end);
+                if (i < raw.len and raw[i] == '.') i += 1;
+                continue;
+            } else if (latexSymbol(cmd)) |sym| {
+                try out.appendSlice(arena, sym);
+                i = end;
+                continue;
+            } else if (cmd.len > 0) {
+                try out.appendSlice(arena, cmd);
+                i = end;
+                continue;
+            }
+        }
+        if ((raw[i] == '^' or raw[i] == '_') and i + 1 < raw.len) {
+            const is_sup = raw[i] == '^';
+            if (takeBraceGroup(raw, i + 1)) |grp| {
+                const inner = try formatLatexMath(arena, grp.inner);
+                if (!try appendScript(arena, &out, inner, is_sup)) {
+                    const multi_cp = (std.unicode.utf8CountCodepoints(inner) catch inner.len) > 1;
+                    try out.append(arena, raw[i]);
+                    if (multi_cp) try out.append(arena, '(');
+                    try out.appendSlice(arena, inner);
+                    if (multi_cp) try out.append(arena, ')');
+                }
+                i = grp.next;
+                continue;
+            } else if (raw[i + 1] != '\\') {
+                const tok = raw[i + 1 .. i + 2];
+                if (!try appendScript(arena, &out, tok, is_sup)) {
+                    try out.append(arena, raw[i]);
+                    try out.appendSlice(arena, tok);
+                }
+                i += 2;
+                continue;
+            }
+        }
+        if (raw[i] == '{' or raw[i] == '}') {
+            i += 1;
+            continue;
+        }
+        if (raw[i] == '\n' or raw[i] == '\r' or raw[i] == '\t') {
+            if (out.items.len > 0 and out.items[out.items.len - 1] != ' ') try out.append(arena, ' ');
+            i += 1;
+            continue;
+        }
+        try out.append(arena, raw[i]);
+        i += 1;
+    }
+    return out.items;
+}
+
+fn skipMathSpaces(s: []const u8, from: usize) usize {
+    var i = from;
+    while (i < s.len and (s[i] == ' ' or s[i] == '\t')) : (i += 1) {}
+    return i;
+}
+
+fn takeBraceGroup(s: []const u8, from: usize) ?struct { inner: []const u8, next: usize } {
+    if (from >= s.len or s[from] != '{') return null;
+    var depth: usize = 1;
+    var i = from + 1;
+    while (i < s.len) : (i += 1) {
+        if (s[i] == '\\' and i + 1 < s.len) {
+            i += 1;
+            continue;
+        }
+        if (s[i] == '{') depth += 1 else if (s[i] == '}') {
+            depth -= 1;
+            if (depth == 0) return .{ .inner = s[from + 1 .. i], .next = i + 1 };
+        }
+    }
+    return null;
+}
+
+fn needsParenInFraction(s: []const u8) bool {
+    for (s) |ch| {
+        if (ch == ' ' or ch == '+' or ch == '-' or ch == '=') return true;
+    }
+    return false;
+}
+
+fn appendScript(arena: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8, is_sup: bool) !bool {
+    if (s.len == 0) return true;
+    for (s) |ch| {
+        if ((is_sup and supChar(ch) == null) or (!is_sup and subChar(ch) == null)) return false;
+    }
+    for (s) |ch| {
+        try out.appendSlice(arena, if (is_sup) supChar(ch).? else subChar(ch).?);
+    }
+    return true;
+}
+
+fn supChar(ch: u8) ?[]const u8 {
+    return switch (ch) {
+        '0' => "⁰",
+        '1' => "¹",
+        '2' => "²",
+        '3' => "³",
+        '4' => "⁴",
+        '5' => "⁵",
+        '6' => "⁶",
+        '7' => "⁷",
+        '8' => "⁸",
+        '9' => "⁹",
+        '+' => "⁺",
+        '-' => "⁻",
+        '=' => "⁼",
+        '(' => "⁽",
+        ')' => "⁾",
+        'n' => "ⁿ",
+        'i' => "ⁱ",
+        else => null,
+    };
+}
+
+fn subChar(ch: u8) ?[]const u8 {
+    return switch (ch) {
+        '0' => "₀",
+        '1' => "₁",
+        '2' => "₂",
+        '3' => "₃",
+        '4' => "₄",
+        '5' => "₅",
+        '6' => "₆",
+        '7' => "₇",
+        '8' => "₈",
+        '9' => "₉",
+        '+' => "₊",
+        '-' => "₋",
+        '=' => "₌",
+        '(' => "₍",
+        ')' => "₎",
+        'a' => "ₐ",
+        'e' => "ₑ",
+        'i' => "ᵢ",
+        'j' => "ⱼ",
+        'k' => "ₖ",
+        'm' => "ₘ",
+        'n' => "ₙ",
+        'o' => "ₒ",
+        'p' => "ₚ",
+        'r' => "ᵣ",
+        's' => "ₛ",
+        't' => "ₜ",
+        'u' => "ᵤ",
+        'v' => "ᵥ",
+        'x' => "ₓ",
+        else => null,
+    };
+}
+
+fn latexSymbol(cmd: []const u8) ?[]const u8 {
+    const map = std.StaticStringMap([]const u8).initComptime(.{
+        .{ "alpha", "α" },
+        .{ "beta", "β" },
+        .{ "gamma", "γ" },
+        .{ "delta", "δ" },
+        .{ "epsilon", "ε" },
+        .{ "varepsilon", "ε" },
+        .{ "zeta", "ζ" },
+        .{ "eta", "η" },
+        .{ "theta", "θ" },
+        .{ "vartheta", "θ" },
+        .{ "iota", "ι" },
+        .{ "kappa", "κ" },
+        .{ "lambda", "λ" },
+        .{ "mu", "μ" },
+        .{ "nu", "ν" },
+        .{ "xi", "ξ" },
+        .{ "pi", "π" },
+        .{ "rho", "ρ" },
+        .{ "sigma", "σ" },
+        .{ "tau", "τ" },
+        .{ "upsilon", "υ" },
+        .{ "phi", "φ" },
+        .{ "varphi", "φ" },
+        .{ "chi", "χ" },
+        .{ "psi", "ψ" },
+        .{ "omega", "ω" },
+        .{ "Gamma", "Γ" },
+        .{ "Delta", "Δ" },
+        .{ "Theta", "Θ" },
+        .{ "Lambda", "Λ" },
+        .{ "Xi", "Ξ" },
+        .{ "Pi", "Π" },
+        .{ "Sigma", "Σ" },
+        .{ "Phi", "Φ" },
+        .{ "Psi", "Ψ" },
+        .{ "Omega", "Ω" },
+        .{ "int", "∫" },
+        .{ "sum", "∑" },
+        .{ "prod", "∏" },
+        .{ "infty", "∞" },
+        .{ "partial", "∂" },
+        .{ "nabla", "∇" },
+        .{ "pm", "±" },
+        .{ "mp", "∓" },
+        .{ "times", "×" },
+        .{ "div", "÷" },
+        .{ "cdot", "·" },
+        .{ "dots", "…" },
+        .{ "ldots", "…" },
+        .{ "cdots", "⋯" },
+        .{ "leq", "≤" },
+        .{ "le", "≤" },
+        .{ "geq", "≥" },
+        .{ "ge", "≥" },
+        .{ "neq", "≠" },
+        .{ "ne", "≠" },
+        .{ "approx", "≈" },
+        .{ "equiv", "≡" },
+        .{ "sim", "∼" },
+        .{ "to", "→" },
+        .{ "rightarrow", "→" },
+        .{ "leftarrow", "←" },
+        .{ "leftrightarrow", "↔" },
+        .{ "Rightarrow", "⇒" },
+        .{ "Leftarrow", "⇐" },
+        .{ "Leftrightarrow", "⇔" },
+        .{ "iff", "⇔" },
+        .{ "mapsto", "↦" },
+        .{ "in", "∈" },
+        .{ "notin", "∉" },
+        .{ "subset", "⊂" },
+        .{ "subseteq", "⊆" },
+        .{ "cup", "∪" },
+        .{ "cap", "∩" },
+        .{ "emptyset", "∅" },
+        .{ "forall", "∀" },
+        .{ "exists", "∃" },
+        .{ "neg", "¬" },
+        .{ "land", "∧" },
+        .{ "lor", "∨" },
+    });
+    return map.get(cmd);
+}
 
 /// Where `mark` closes, after `from`: not after a space, not escaped.
 fn closing(src: []const u8, from: usize, mark: []const u8) ?usize {

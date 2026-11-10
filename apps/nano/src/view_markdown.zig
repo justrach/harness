@@ -94,6 +94,7 @@ pub fn markdown(c: *ui.Context, colors: theme.Colors, src: []const u8) void {
     const src_in = if (active_streaming) veil_mod.balanceStreamingMarkdown(c.alloc(), src) else src;
     const blocks = md.parse(c.alloc(), src_in, .{ .code = k.accent, .code_bg = k.accent_wash, .link = k.text, .muted = k.muted });
     const col = ui.div(c).column().wFull();
+    c.node(col.index).style.selectable = true;
     defer col.end();
     for (blocks, 0..) |b, i| {
         // Items of a list sit 4 apart (the list's `gap(4)`); other blocks
@@ -127,7 +128,7 @@ fn rich(c: *ui.Context, in: md.Inline, style: ui.TextStyle) void {
         current_elem_ix += 1;
         break :blk veil_mod.applyVeil(c.alloc(), in.text.len, in.spans, v_spans, st.color orelse k.text);
     } else in.spans;
-    if (in.links.len == 0 or link_owner == null) return ui.richText(c, in.text, spans, st);
+    if (in.links.len == 0) return ui.richText(c, in.text, spans, st);
     const has_navigable_link = for (in.links) |link| {
         if (@import("browser_url.zig").allowedNavigation(link.url)) break true;
     } else false;
@@ -137,8 +138,11 @@ fn rich(c: *ui.Context, in: md.Inline, style: ui.TextStyle) void {
     const at = c.nodes.items.len;
     ui.richText(c, in.text, spans, st);
     const rect = c.rects.get(c.node(@intCast(at)).id) orelse {
-        const owner = link_owner.?;
-        if (owner.app.window == null or owner.app.offscreen) c.changed = true else if (c.frame <= 1) c.frameIn(0);
+        if (link_owner) |owner| {
+            if (owner.app.window == null or owner.app.offscreen) c.changed = true else if (c.frame <= 1) c.frameIn(0);
+        } else {
+            c.changed = true;
+        }
         return;
     };
     const origin = c.rects.get(c.node(area.index).id) orelse return;
@@ -158,8 +162,11 @@ fn rich(c: *ui.Context, in: md.Inline, style: ui.TextStyle) void {
             const action = c.interact(hit.index, .{ .focusable = true });
             const activate = action.clicked or (action.focused and (c.shortcut(.{ .key = ui.Shortcut.enter }) or c.shortcut(.{ .key = ' ' })));
             if (activate) {
-                const owner = link_owner.?;
-                @import("app_browser.zig").openLink(owner.app, owner.parent, link.url);
+                if (link_owner) |owner| {
+                    @import("app_browser.zig").openLink(owner.app, owner.parent, link.url);
+                } else {
+                    _ = nanoui.shell.openUrl(link.url);
+                }
                 c.changed = true;
             }
         }
@@ -215,6 +222,12 @@ fn block(c: *ui.Context, b: md.Block, first: bool) void {
             rich(c, in, st);
         },
         .rule => _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null),
+        .math => |in| {
+            ui.key(c, "md-math-block");
+            const box = ui.div(c).row().wFull().px(14).py(10).rounded(8).bg(k.ink(0.03)).justifyCenter();
+            defer box.end();
+            rich(c, in, kit.style(c, 16, 24, .{ .wrap = true }));
+        },
         .code => |code| codeBlock(c, code.lang, code.text),
         .table => |t| table(c, t.header, t.rows),
     }
@@ -225,7 +238,7 @@ fn item(c: *ui.Context, it: @FieldType(md.Block, "item")) void {
     defer r.end();
     {
         // The marker's column, 18 points at least, so wrapped lines hang.
-        const m = ui.div(c).row().minW(18).h(c.text.lineHeight(body)).itemsCenter();
+        const m = ui.div(c).row().minW(18).h(c.text.lineHeight(body)).itemsCenter().control();
         defer m.end();
         if (it.task) |done| {
             icons.icon(c, .check, 13, if (done) k.success else k.muted, 0);
@@ -256,7 +269,7 @@ fn codeBlock(c: *ui.Context, lang: []const u8, src: []const u8) void {
     defer box.end();
     {
         // `CODE_HEADER_HEIGHT` 28 with its `border_b_1`, the hairline under it.
-        const h = ui.div(c).row().wFull().h(28 - 1).pl(12).pr(5).gap(2).itemsCenter().bg(k.code_header);
+        const h = ui.div(c).row().wFull().h(28 - 1).pl(12).pr(5).gap(2).itemsCenter().bg(k.code_header).control();
         defer h.end();
         ui.text(c, if (lang.len > 0) lang else "code", .{ .size = 11, .color = k.muted });
         ui.spacer(c);
@@ -313,13 +326,15 @@ fn table(c: *ui.Context, header: []const md.Inline, rows: []const []const md.Inl
     // share of the row. Equal fill made a narrow pane wrap one word a line,
     // so the rest of the cell — the text on the right — never appeared.
     var content: [16]f32 = @splat(0);
+    var min_words: [16]f32 = @splat(0);
     const n = @min(cols, content.len);
-    measureTable(c, header, &content, n, true);
-    for (rows) |r| measureTable(c, r, &content, n, false);
+    measureTable(c, header, &content, &min_words, n, true);
+    for (rows) |r| measureTable(c, r, &content, &min_words, n, false);
     const box = ui.div(c).column().wFull().p(1).rounded(8).border(k.border);
-    const room = if (c.rects.get(c.node(box.index).id)) |r| @max(0, r.w - 2) else 0;
+    const fallback_room = if (link_owner) |o| @max(220, @min(@import("view_transcript.zig").paneWidth(c, o.app) - 32, @import("view_transcript.zig").column_w) - 2) else 0;
+    const room = if (c.rects.get(c.node(box.index).id)) |r| @max(0, r.w - 2) else fallback_room;
     var widths: [16]f32 = @splat(0);
-    columnWidths(content[0..n], room, widths[0..n]);
+    columnWidthsWithWords(content[0..n], min_words[0..n], room, widths[0..n]);
     defer box.end();
     tableRow(c, header, widths[0..n], true, false);
     for (rows, 0..) |r, i| tableRow(c, r, widths[0..n], false, i % 2 == 1);
@@ -331,7 +346,7 @@ fn tableCols(header: []const md.Inline, rows: []const []const md.Inline) usize {
     return n;
 }
 
-fn measureTable(c: *ui.Context, cells: []const md.Inline, content: []f32, n: usize, head: bool) void {
+fn measureTable(c: *ui.Context, cells: []const md.Inline, content: []f32, min_words: []f32, n: usize, head: bool) void {
     var st = body;
     st.size = 13;
     st.leading = 1.35;
@@ -341,21 +356,92 @@ fn measureTable(c: *ui.Context, cells: []const md.Inline, content: []f32, n: usi
     for (cells, 0..) |cell, i| {
         if (i >= n) break;
         content[i] = @max(content[i], richWidth(c, cell, st, 0, cell.text.len));
+        min_words[i] = @max(min_words[i], longestWordWidth(c, cell, st));
     }
 }
 
-/// Content-proportional column widths (`table_columns` / `flex_grow(natural)`).
-/// `room` 0 is the first frame, before layout: use the content width so a
-/// cell is not crushed to one word. Later frames share the table's width.
+/// Width of the widest whitespace-delimited word token in `cell` (capped at
+/// 136pt so a long path/URL does not force a wide column floor, while ordinary
+/// words like "Comprehensive" or "conversations" never wrap mid-word).
+fn longestWordWidth(c: *ui.Context, cell: md.Inline, st: ui.TextStyle) f32 {
+    var best: f32 = 0;
+    var i: usize = 0;
+    const s = cell.text;
+    while (i < s.len) {
+        while (i < s.len and (s[i] == ' ' or s[i] == '\t' or s[i] == '\n' or s[i] == '\r')) : (i += 1) {}
+        const start = i;
+        while (i < s.len and s[i] != ' ' and s[i] != '\t' and s[i] != '\n' and s[i] != '\r') : (i += 1) {}
+        if (i > start) {
+            const w = @ceil(richWidth(c, cell, st, start, i));
+            best = @max(best, @min(w, 136));
+        }
+    }
+    return best;
+}
+
+/// Content-proportional column widths (`table_columns` / `flex_grow(natural)`),
+/// with Taffy-style per-column minimum floors (`TABLE_MIN_COLUMN_WIDTH = 96`
+/// plus longest-word protection) and demand capped at `room` so multi-sentence
+/// prose columns cannot crush a label column into mid-word character wrapping.
 fn columnWidths(content: []const f32, room: f32, out: []f32) void {
+    var zero_words: [16]f32 = @splat(0);
+    columnWidthsWithWords(content, zero_words[0..content.len], room, out);
+}
+
+fn columnWidthsWithWords(content: []const f32, min_words: []const f32, room: f32, out: []f32) void {
+    const n = content.len;
+    if (n == 0) return;
     var sum: f32 = 0;
-    for (content) |n| sum += @max(n, 48);
+    for (content) |w| sum += @max(w, 48);
     if (sum < 1 or room < 1) {
-        for (content, 0..) |n, i| out[i] = @max(n, 48) + 20;
+        for (content, 0..) |w, i| out[i] = @max(w, 48) + 20;
         return;
     }
-    const fit = room / sum;
-    for (content, 0..) |n, i| out[i] = @max(n, 48) * fit;
+
+    // Per-column natural width, demand weight (capped at `room` because no
+    // column in a table of width `room` can render wider than `room` on one
+    // line), and minimum floor (at least 96pt or longest word + 22pt padding,
+    // bounded by the column's own natural width and a fair share of `room`).
+    var weights: [16]f32 = @splat(0);
+    var floors: [16]f32 = @splat(0);
+    const max_floor = room / @as(f32, @floatFromInt(n)) * 0.85;
+    var floor_sum: f32 = 0;
+    for (content, 0..) |w, i| {
+        const nat = @max(w, 48);
+        weights[i] = @min(nat, room);
+        const word_pad = if (i < min_words.len and min_words[i] > 0) min_words[i] + 22 else 0;
+        const desired_floor = @min(nat, @max(96, @min(word_pad, 158)));
+        floors[i] = @min(desired_floor, max_floor);
+        floor_sum += floors[i];
+    }
+    if (floor_sum > room and floor_sum > 0) {
+        const scale = room / floor_sum;
+        for (0..n) |i| floors[i] *= scale;
+    }
+
+    var locked: [16]bool = @splat(false);
+    var remaining_room = room;
+    var pass: usize = 0;
+    while (pass < n) : (pass += 1) {
+        var weight_sum: f32 = 0;
+        for (0..n) |i| if (!locked[i]) {
+            weight_sum += weights[i];
+        };
+        if (weight_sum <= 0) break;
+        var any_locked = false;
+        for (0..n) |i| if (!locked[i]) {
+            const share = remaining_room * (weights[i] / weight_sum);
+            if (share < floors[i]) {
+                out[i] = floors[i];
+                locked[i] = true;
+                remaining_room = @max(0, remaining_room - floors[i]);
+                any_locked = true;
+            } else {
+                out[i] = share;
+            }
+        };
+        if (!any_locked) break;
+    }
 }
 
 fn tableRow(c: *ui.Context, cells: []const md.Inline, widths: []const f32, head: bool, zebra: bool) void {
@@ -383,4 +469,15 @@ test "a wide table cell keeps its share instead of an equal slice" {
     try std.testing.expectApproxEqAbs(@as(f32, 520), widths[0] + widths[1] + widths[2], 0.5);
     columnWidths(&content, 0, &widths);
     try std.testing.expect(widths[0] >= 400);
+}
+
+test "a label column beside multi-sentence prose columns keeps its word floor in a split pane" {
+    const content = [_]f32{ 230, 1100, 950 };
+    const min_words = [_]f32{ 104, 88, 92 };
+    var widths: [3]f32 = undefined;
+    columnWidthsWithWords(&content, &min_words, 460, &widths);
+    try std.testing.expect(widths[0] >= 126);
+    try std.testing.expect(widths[1] >= 150);
+    try std.testing.expect(widths[2] >= 150);
+    try std.testing.expectApproxEqAbs(@as(f32, 460), widths[0] + widths[1] + widths[2], 0.5);
 }

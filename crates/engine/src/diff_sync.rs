@@ -163,6 +163,8 @@ struct DiffSyncInner {
     /// `add_entry` it — the second insert silently replaces the first entry,
     /// discarding its checksum state and kicking a redundant full capture.
     reconcile_gate: tokio::sync::Mutex<()>,
+    /// Bounds concurrent git diff/status subprocess fan-out across checkouts on repair ticks.
+    capture_gate: tokio::sync::Semaphore,
     /// cwd → resolved checkout identity. See [`resolve_identity`].
     identities: Mutex<HashMap<String, CheckoutIdentity>>,
     /// How long an entry may sit chat-less before reconcile removes it.
@@ -220,6 +222,7 @@ impl CheckoutDiffSync {
                 http: reqwest::Client::new(),
                 entries: Mutex::new(HashMap::new()),
                 reconcile_gate: tokio::sync::Mutex::new(()),
+                capture_gate: tokio::sync::Semaphore::new(4),
                 identities: Mutex::new(HashMap::new()),
                 orphan_grace,
                 diffs_tx,
@@ -414,7 +417,7 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
     // Dedupe resolution within this pass — many chats share one checkout.
     let mut resolved: HashMap<String, Option<CheckoutIdentity>> = HashMap::new();
     for chat in chats {
-        if chat.device_id != inner.device_id {
+        if chat.archived || chat.device_id != inner.device_id {
             continue;
         }
         let Some(cwd) = chat.cwd.clone() else {
@@ -680,6 +683,9 @@ async fn entry_task(
 // ---------------------------------------------------------------------------
 
 async fn sync_entry(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) {
+    let Ok(_permit) = inner.capture_gate.acquire().await else {
+        return;
+    };
     let snapshot = match capture_diff(&inner.repos, &entry.identity.root).await {
         Ok(snapshot) => snapshot,
         Err(err) => {

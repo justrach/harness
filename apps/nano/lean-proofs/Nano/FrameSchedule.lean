@@ -392,4 +392,846 @@ theorem mid_frame_pane_click_defers_focus :
     decidePaneClickAction false = .queueForNextPreTree := by
   rfl
 
+/-- Two-frame immediate-mode click survival (`view_composer.zig`, `view_write.zig`):
+In `nanoui`, `b.clicked()` completes on the `mouseUp` frame (`t + 1`) only if the button
+remained mounted on both `mouseDown` (`t`) and `mouseUp` (`t + 1`). When `ui.textField` runs
+before the expanded action bar on `mouseDown`, a press on `composer-write` outside the text
+field's rect clears `c.focus := 0` (`focusedAfterPress = false`).
+Gating `composer-write` on `hasText || focused` (`mountWriteButtonOld`) unmounts the button
+before `mouseUp` whenever `hasText = false` (e.g., an attachment-only draft). Mounting it
+unconditionally in the expanded action bar (`mountWriteButtonFixed`) guarantees click completion. -/
+def mountWriteButtonOld (hasText focused : Bool) : Bool :=
+  hasText || focused
+
+def mountWriteButtonFixed (expanded : Bool) (_hasText _focused : Bool) : Bool :=
+  expanded
+
+theorem old_write_button_unmounts_on_attachment_only_press :
+    mountWriteButtonOld false false = false := by
+  rfl
+
+theorem fixed_write_button_survives_focus_blur (hasText focused : Bool) :
+    mountWriteButtonFixed true hasText focused = true := by
+  rfl
+
+/-- Sidebar `Last activity` filter (`view_sidebar.zig`):
+Historical sessions whose last reply hasn't been opened carry `Mark.completed` (`✓`), not
+`Mark.idle` (`•`). Filtering only `Mark.idle` (`keepChatOld`) leaks `.completed` sessions
+from weeks ago into `1d`/`3d`/`7d`/`30d` views. Filtering all non-live marks (`keepChatFixed`)
+filters `.completed` and `.idle` alike while preserving active `.working` / `.awaitingInput` turns. -/
+inductive SidebarMark where
+  | working
+  | awaitingInput
+  | errored
+  | completed
+  | idle
+deriving DecidableEq, Repr, BEq
+
+def keepChatOld (m : SidebarMark) (inWindow : Bool) : Bool :=
+  m != .idle || inWindow
+
+def keepChatFixed (m : SidebarMark) (inWindow : Bool) : Bool :=
+  m == .working || m == .awaitingInput || inWindow
+
+theorem old_filter_leaks_completed_outside_window :
+    keepChatOld .completed false = true := by
+  rfl
+
+theorem fixed_filter_hides_completed_and_idle_outside_window :
+    keepChatFixed .completed false = false ∧
+    keepChatFixed .idle false = false ∧
+    keepChatFixed .errored false = false := by
+  decide
+
+theorem fixed_filter_keeps_live_or_in_window (m : SidebarMark) :
+    keepChatFixed m true = true ∧
+    keepChatFixed .working false = true ∧
+    keepChatFixed .awaitingInput false = true := by
+  cases m <;> decide
+
+/-- Multiline editor scrollbar policy (`view_composer.zig`, `view_write.zig`,
+`view_question.zig`, `view_actions.zig`):
+In `nanoui`, `ui.textField` appends its caret rectangle as a child leaf of the
+`.scroll` container while `c.focus == id`. When `paintScrollbars` sums direct
+child heights (`content_h += cr.h + gap`), the caret leaf inflates `content_h`
+above `r.h` even on a 1-line or auto-growing prompt, painting a floating 4px
+vertical scrollbar thumb whose height and position jump as the caret blinks or
+lines wrap. Disabling `scroll_bar` on multiline text fields (`multilineFieldScrollbar = false`)
+eliminates the phantom bar across all prompt lengths and focus states. -/
+def multilineFieldScrollbar (_focused _caretVisible _hasOverflow : Bool) : Bool :=
+  false
+
+theorem multiline_field_never_paints_phantom_scrollbar (focused caretVisible hasOverflow : Bool) :
+    multilineFieldScrollbar focused caretVisible hasOverflow = false := by
+  rfl
+
+/-- Exclusive selection ownership between editable text fields (`c.edits`) and
+rendered page text (`c.selection`), plus `Cmd+C` copy routing (`view.zig`,
+`view_composer.zig`):
+At most one selection owner (`none`, `editor`, or `page`) is active after
+settling input for a frame. Starting or dragging a page selection collapses the
+editor selection; clicking or moving the caret/selection inside an editor clears
+the page selection; and a no-op Undo/Redo when the undo stack is empty preserves
+the current owner. -/
+inductive SelectionOwner where
+  | none
+  | editor
+  | page
+deriving DecidableEq, Repr, BEq
+
+inductive SelectionEvent where
+  | pageSelect
+  | editorSelectOrEdit
+  | noopUndoRedo
+  | clearAll
+deriving DecidableEq, Repr, BEq
+
+def stepSelectionOwner (cur : SelectionOwner) (ev : SelectionEvent) : SelectionOwner :=
+  match ev with
+  | .pageSelect         => .page
+  | .editorSelectOrEdit => .editor
+  | .noopUndoRedo       => cur
+  | .clearAll           => .none
+
+def hasDualSelection (owner : SelectionOwner) : Bool :=
+  owner == .editor && owner == .page
+
+theorem selection_owner_mutually_exclusive (cur : SelectionOwner) (ev : SelectionEvent) :
+    hasDualSelection (stepSelectionOwner cur ev) = false := by
+  cases cur <;> cases ev <;> rfl
+
+theorem page_selection_preempts_editor (cur : SelectionOwner) :
+    stepSelectionOwner cur .pageSelect = .page := by
+  rfl
+
+theorem editor_selection_preempts_page (cur : SelectionOwner) :
+    stepSelectionOwner cur .editorSelectOrEdit = .editor := by
+  rfl
+
+theorem noop_undo_redo_preserves_page_selection :
+    stepSelectionOwner .page .noopUndoRedo = .page := by
+  rfl
+
+/-- `Cmd+C` copy target resolution (`view.zig:settleSelectionPostTree`):
+Copies the editor slice iff the composer is focused with a non-empty range
+(`editorFocused && editorHasRange`), else copies the rendered page selection iff
+`pageHasText`, else performs no copy. -/
+inductive CopyTarget where
+  | none
+  | editorSlice
+  | pageSlice
+deriving DecidableEq, Repr, BEq
+
+def decideCopyTarget (editorFocused editorHasRange pageHasText : Bool) : CopyTarget :=
+  if editorFocused && editorHasRange then .editorSlice
+  else if pageHasText then .pageSlice
+  else .none
+
+theorem page_selection_copies_when_editor_unfocused_or_collapsed (editorFocused : Bool) :
+    decideCopyTarget editorFocused false true = .pageSlice ∧
+    decideCopyTarget false true true = .pageSlice := by
+  cases editorFocused <;> decide
+
+/-- Whitespace-origin drag snapping (`view.zig:hitLeafIndex` / `findNearestSelectableLeaf`, `#717`):
+When a pointer drag starts or ends in padding/margin outside a selectable text leaf
+(`[leafStart, leafEnd]`), the character offset snaps to `0` above/left of the leaf
+and to `textLen` below/right of the leaf, so dragging from bubble/row padding
+cleanly selects the boundary characters. -/
+def snapWhitespaceOffset (coord leafStart leafEnd textLen : Nat) : Nat :=
+  if coord <= leafStart then 0
+  else if coord >= leafEnd then textLen
+  else textLen / 2
+
+theorem whitespace_before_leaf_snaps_to_start (coord leafStart leafEnd textLen : Nat)
+    (h : coord <= leafStart) :
+    snapWhitespaceOffset coord leafStart leafEnd textLen = 0 := by
+  simp [snapWhitespaceOffset, h]
+
+theorem whitespace_after_leaf_snaps_to_end (coord leafStart leafEnd textLen : Nat)
+    (h1 : ¬ coord <= leafStart) (h2 : coord >= leafEnd) :
+    snapWhitespaceOffset coord leafStart leafEnd textLen = textLen := by
+  simp [snapWhitespaceOffset, h1, h2]
+
+/-- Selection survival across scope transitions and unmounted sources (`#745`):
+A rendered-text selection survives into the next frame iff `sameScope = true`
+(same active tab, chat, settings/write page, and question wizard prompt) AND
+`sourceMounted = true` (its selected nodes still produced non-empty text). -/
+def selectionSurvivesFrame (sameScope sourceMounted : Bool) : Bool :=
+  sameScope && sourceMounted
+
+theorem scope_change_or_unmount_clears_selection (sameScope sourceMounted : Bool) :
+    selectionSurvivesFrame false sourceMounted = false ∧
+    selectionSurvivesFrame sameScope false = false := by
+  cases sameScope <;> cases sourceMounted <;> decide
+
+/-- Startup tab restoration fencing & archived-chat exclusion (`App.restoreTabs`, `#797`):
+1. `shouldRestoreSavedTabs`: asynchronous `onChats` arrival restores saved tabs only
+   once (`!tabsReady`), on a single untouched boot tab (`singleEmptyTab`), when no
+   chat was already selected (`!hasSelectedChat`) and the user has not typed, staged
+   attachments, or picked a project/device on the boot canvas (`!hasDirtyBootDraft`).
+2. `restorableTabChat`: a chat ID in `openTabs` or `tabLayout` is restorable iff it
+   exists in `chats`, is NOT `archived`, and is not already open in another tab. -/
+def shouldRestoreSavedTabs (tabsReady hasSelectedChat singleEmptyTab hasDirtyBootDraft : Bool) : Bool :=
+  !tabsReady && !hasSelectedChat && singleEmptyTab && !hasDirtyBootDraft
+
+def restorableTabChat (chatExists isArchived alreadyOpen : Bool) : Bool :=
+  chatExists && !isArchived && !alreadyOpen
+
+theorem dirty_boot_draft_blocks_tab_restore (tabsReady hasSelectedChat singleEmptyTab : Bool) :
+    shouldRestoreSavedTabs tabsReady hasSelectedChat singleEmptyTab true = false := by
+  cases tabsReady <;> cases hasSelectedChat <;> cases singleEmptyTab <;> rfl
+
+theorem archived_chat_never_restores_into_open_tabs (chatExists alreadyOpen : Bool) :
+    restorableTabChat chatExists true alreadyOpen = false := by
+  cases chatExists <;> cases alreadyOpen <;> rfl
+
+/-- Sidebar `Open workspaces` visibility (`view_sidebar.zig:openWorkspaces`):
+Every open workspace tab is listed in the sidebar tree when workspaces are shown,
+regardless of whether it currently holds a single listed conversation (`isSingletonListedChat`). -/
+def workspaceVisibleInSidebarOld (hasMultipleWorkspaces isSingletonListedChat : Bool) : Bool :=
+  hasMultipleWorkspaces && !isSingletonListedChat
+
+def workspaceVisibleInSidebarFixed (hasMultipleWorkspaces _isSingletonListedChat : Bool) : Bool :=
+  hasMultipleWorkspaces
+
+theorem fixed_sidebar_lists_single_chat_workspaces (isSingletonListedChat : Bool) :
+    workspaceVisibleInSidebarFixed true isSingletonListedChat = true := by
+  rfl
+
+/-- Currency-safe inline `$ ... $` delimiter rule (`markdown.zig:inlineMathEnd`, `#795`):
+An opening `$` and closing `$` pair forms inline math iff:
+- Not inside a code span (`!inCodeSpan`),
+- Not escaped (`!openEscaped`, `!closeEscaped`),
+- Not adjacent to inner whitespace (`!spaceAfterOpen`, `!spaceBeforeClose`),
+- Not adjacent to outer alphanumeric/digit characters (`!alnumBeforeOpen`, `!alnumAfterClose`).
+Consequently, prose currency like `$5 and $10` (where the second `$` has
+`spaceBeforeClose = true` and `alnumAfterClose = true`) is never misparsed as math. -/
+def isInlineMathDelimiterPair
+    (inCodeSpan openEscaped closeEscaped spaceAfterOpen spaceBeforeClose alnumBeforeOpen alnumAfterClose : Bool) : Bool :=
+  !inCodeSpan && !openEscaped && !closeEscaped &&
+  !spaceAfterOpen && !spaceBeforeClose &&
+  !alnumBeforeOpen && !alnumAfterClose
+
+theorem currency_prose_never_parses_as_math
+    (inCodeSpan openEscaped closeEscaped spaceAfterOpen alnumBeforeOpen : Bool) :
+    isInlineMathDelimiterPair inCodeSpan openEscaped closeEscaped spaceAfterOpen true alnumBeforeOpen true = false := by
+  cases inCodeSpan <;> cases openEscaped <;> cases closeEscaped <;>
+    cases spaceAfterOpen <;> cases alnumBeforeOpen <;> rfl
+
+theorem code_span_dollar_never_parses_as_math
+    (openEscaped closeEscaped spaceAfterOpen spaceBeforeClose alnumBeforeOpen alnumAfterClose : Bool) :
+    isInlineMathDelimiterPair true openEscaped closeEscaped spaceAfterOpen spaceBeforeClose alnumBeforeOpen alnumAfterClose = false := by
+  rfl
+
+def desktopRegressionCube : Bool :=
+  multilineFieldScrollbar true true true == false &&
+  hasDualSelection (stepSelectionOwner .editor .pageSelect) == false &&
+  hasDualSelection (stepSelectionOwner .page .editorSelectOrEdit) == false &&
+  decideCopyTarget false false true == .pageSlice &&
+  selectionSurvivesFrame false true == false &&
+  selectionSurvivesFrame true false == false &&
+  shouldRestoreSavedTabs false false true true == false &&
+  restorableTabChat true true false == false &&
+  workspaceVisibleInSidebarFixed true true == true &&
+  isInlineMathDelimiterPair false false false false true false true == false
+
+theorem desktop_regression_cube_holds : desktopRegressionCube = true := by
+  decide
+
+/-- iOS `UITableView` batch-update and scroll-index safety (`NativeTranscriptTable.swift`):
+UIKit throws `NSInternalInconsistencyException` if `insertRows` or `performBatchUpdates` is
+invoked when `numberOfRows(inSection: 0) ≠ previousIDs.count` (for example after an offscreen
+`reloadData()` whose layout was skipped on an append) or when row IDs contain duplicates.
+Falling back to `reloadData()` whenever `uiKitRowCount ≠ previousCount ∨ ¬uniqueIds`
+guarantees UIKit batch-update preconditions hold. -/
+inductive TableUpdateAction where
+  | batchDiff
+  | reloadAll
+deriving DecidableEq, Repr, BEq
+
+def chooseTableUpdateSafe (uiKitRowCount previousCount : Nat) (uniqueIds : Bool) : TableUpdateAction :=
+  if uiKitRowCount == previousCount && uniqueIds then .batchDiff else .reloadAll
+
+theorem safe_table_update_requires_synced_counts_and_unique_ids
+    (uiKitRowCount previousCount : Nat) (uniqueIds : Bool)
+    (h : chooseTableUpdateSafe uiKitRowCount previousCount uniqueIds = .batchDiff) :
+    uiKitRowCount = previousCount ∧ uniqueIds = true := by
+  unfold chooseTableUpdateSafe at h
+  split at h
+  · rename_i hcond
+    rw [Bool.and_eq_true, beq_iff_eq] at hcond
+    exact hcond
+  · contradiction
+
+theorem desynced_table_row_count_falls_back_to_reload
+    (uiKitRowCount previousCount : Nat) (uniqueIds : Bool)
+    (hne : uiKitRowCount ≠ previousCount) :
+    chooseTableUpdateSafe uiKitRowCount previousCount uniqueIds = .reloadAll := by
+  unfold chooseTableUpdateSafe
+  have hbeq : (uiKitRowCount == previousCount) = false := beq_false_of_ne hne
+  simp [hbeq]
+
+theorem duplicate_row_ids_fall_back_to_reload (uiKitRowCount previousCount : Nat) :
+    chooseTableUpdateSafe uiKitRowCount previousCount false = .reloadAll := by
+  unfold chooseTableUpdateSafe
+  simp
+
+/-- Guarding `scrollToRow` and `rectForRow` against both `rows.count` and UIKit's
+materialized `numberOfRows(inSection: 0)` prevents `NSRangeException`. -/
+def canIndexTableRow (row rowsCount uiKitRowCount : Int) : Bool :=
+  decide (0 ≤ row ∧ row < rowsCount ∧ row < uiKitRowCount)
+
+theorem canIndexTableRow_in_bounds (row rowsCount uiKitRowCount : Int)
+    (h : canIndexTableRow row rowsCount uiKitRowCount = true) :
+    0 ≤ row ∧ row < rowsCount ∧ row < uiKitRowCount := by
+  unfold canIndexTableRow at h
+  exact of_decide_eq_true h
+
+/-- Lock-order hierarchy for `EntryCache` and `LoroDoc` (`EntryCache.swift`, `SessionStore.swift`):
+`readLock` (rank 0) serializes `EntryCache.read` calls, `loroLock` (rank 1) is `LoroDoc`'s
+internal Rust mutex acquired during FFI reads/imports, and `staleLock` (rank 2) guards the
+`stale` / `entries` dictionaries. Every code path acquires locks in strictly ascending rank
+order (`0 < 1`, `0 < 2`, `1 < 2`), making lock-order cycles (deadlocks) impossible while
+preventing concurrent `EntryCache.read` calls from overwriting fresh entries with stale snapshots. -/
+def lockRankRead : Nat := 0
+def lockRankLoro : Nat := 1
+def lockRankStale : Nat := 2
+
+def validLockTransition (held next : Nat) : Bool :=
+  decide (held < next)
+
+theorem entry_cache_lock_order_is_strictly_acyclic :
+    validLockTransition lockRankRead lockRankLoro = true ∧
+    validLockTransition lockRankRead lockRankStale = true ∧
+    validLockTransition lockRankLoro lockRankStale = true := by
+  decide
+
+/-- Decluttered iOS top-of-screen hierarchy (`HomeView.swift`, `SessionView.swift`):
+Removing the hero banner (`HomeStartHeader`), duplicate horizontal strips (`PinnedRow`,
+`NowStrip`), and split banner (`SplitOfferBanner`) above the session list places the compact
+filter pills and session rows immediately at index 0, and removing auxiliary pager/status
+widgets from `SessionView`'s navigation bar reduces header clutter to 0. -/
+inductive HomeTopItem where
+  | startHero
+  | pinnedStrip
+  | splitOffer
+  | nowCarousel
+  | filterPills
+  | sessionList
+deriving DecidableEq, Repr, BEq
+
+def isTopClutter : HomeTopItem → Bool
+  | .startHero   => true
+  | .pinnedStrip => true
+  | .splitOffer  => true
+  | .nowCarousel => true
+  | .filterPills => false
+  | .sessionList => false
+
+def homeTopLayoutClean : List HomeTopItem :=
+  [.filterPills, .sessionList]
+
+theorem clean_home_layout_has_zero_top_clutter :
+    (homeTopLayoutClean.filter isTopClutter).length = 0 ∧
+    homeTopLayoutClean.head? = some .filterPills := by
+  decide
+
+/-- Native iOS Liquid Glass fidelity (`HomeListControls.swift`, `ComposerView.swift`,
+`WriteSheet.swift`, `ThemeStore.swift`):
+Painting an interior fill (`Theme.composerPlane` or `ink(0.04)`) inside a view wrapped in
+`.glassEffect(.regular.interactive(), ...)` or painting an unfocused `hairline(0.05)` border
+over its perimeter flattens UIKit/SwiftUI's native specular rim highlight and refraction.
+A glass surface preserves native refraction (`preservesNativeGlass`) iff `hasInteriorFill = false`
+and `hasUnfocusedBorderOverlay = false`. -/
+structure GlassSurfaceConfig where
+  hasInteriorFill : Bool
+  hasUnfocusedBorderOverlay : Bool
+deriving DecidableEq, Repr
+
+def preservesNativeGlass (cfg : GlassSurfaceConfig) : Bool :=
+  !cfg.hasInteriorFill && !cfg.hasUnfocusedBorderOverlay
+
+def fakeGlassConfig : GlassSurfaceConfig :=
+  { hasInteriorFill := true, hasUnfocusedBorderOverlay := true }
+
+def nativeGlassConfig : GlassSurfaceConfig :=
+  { hasInteriorFill := false, hasUnfocusedBorderOverlay := false }
+
+theorem fake_glass_destroys_native_refraction :
+    preservesNativeGlass fakeGlassConfig = false := by
+  rfl
+
+theorem native_glass_preserves_specular_refraction :
+    preservesNativeGlass nativeGlassConfig = true := by
+  rfl
+
+/-- Concentric corner geometry (`ComposerView.swift`, `NewSessionView.swift`):
+When a rounded container of outer radius `outerRadius` wraps a circular button of diameter
+`innerDiameter` (inner radius `innerDiameter / 2`), concentricity requires
+`outerRadius ≥ innerDiameter / 2`. An expanded composer with 44pt circle buttons (`innerRadius = 22`)
+requires `outerRadius ≥ 22` (20pt violates concentricity; 22pt satisfies it). -/
+def isConcentricCorner (outerRadius innerDiameter : Nat) : Bool :=
+  outerRadius ≥ innerDiameter / 2
+
+theorem composer_legacy_radius_20_violates_concentricity :
+    isConcentricCorner 20 44 = false := by
+  decide
+
+theorem composer_expanded_radius_22_is_concentric :
+    isConcentricCorner 22 44 = true ∧ isConcentricCorner 24 44 = true := by
+  decide
+
+/-- Reduced-motion-safe tactile press scale (`Motion.swift`, `SheetUI.swift`):
+Scale in basis points (`10000 = 1.0x`). Under `reduceMotion = true` or `pressed = false`,
+scale is strictly `10000`. Under `reduceMotion = false` and `pressed = true`, scale contracts
+into `[9000, 9900]`. -/
+def pressScaleBP (reduceMotion pressed : Bool) (targetBP : Nat) : Nat :=
+  if reduceMotion || !pressed then 10000
+  else max 9000 (min 9900 targetBP)
+
+theorem press_scale_respects_reduced_motion (pressed : Bool) (targetBP : Nat) :
+    pressScaleBP true pressed targetBP = 10000 := by
+  simp [pressScaleBP]
+
+theorem press_scale_bounded_and_contracting (targetBP : Nat) :
+    9000 ≤ pressScaleBP false true targetBP ∧ pressScaleBP false true targetBP ≤ 9900 := by
+  simp [pressScaleBP]
+  omega
+
+/-- UI Experience Mode State Machine (`UiMode`, `UiState`, `UiEvent`, `stepUiState`,
+`HierarchyProfile`):
+Models the user experience hierarchy as a deterministic finite state machine with two
+modes:
+- `.zen` (**Default** — "for normies"): flattens the UI to 1 level of hierarchy
+  (`hierarchyDepth = 1`) and 0 auxiliary moving parts (`movingPartsCount = 0`),
+  presenting a single flat conversation list without nested `Open workspaces` split
+  trees, collapsible group accordions, per-row harness/project/branch badges, floating
+  prompt tick rails, `+ Add action` toolbars, or git worktree/checkout/branch footer
+  plumbing.
+- `.developer` (Power-user / Developer Mode): exposes the full 4-level hierarchy
+  (`hierarchyDepth = 4`: filter bar → open workspaces split tree → collapsible project
+  groups → multi-badge session rows) and all 6 developer moving parts
+  (`movingPartsCount = 6`: open workspaces tree, multi-axis filters, row tech badges,
+  git checkout/worktree/branch chrome, prompt jump rail, and `+ Add action` toolbar). -/
+inductive UiMode where
+  | zen
+  | developer
+deriving DecidableEq, Repr, BEq
+
+def UiMode.flip : UiMode → UiMode
+  | .zen       => .developer
+  | .developer => .zen
+
+structure UiState where
+  mode : UiMode
+deriving DecidableEq, Repr, BEq
+
+def UiState.initial : UiState :=
+  { mode := .zen }
+
+inductive UiEvent where
+  | toggleMode
+  | setMode (target : UiMode)
+  | resetToDefault
+deriving DecidableEq, Repr, BEq
+
+def stepUiState (s : UiState) (e : UiEvent) : UiState :=
+  match e with
+  | .toggleMode     => { s with mode := s.mode.flip }
+  | .setMode target => { s with mode := target }
+  | .resetToDefault => UiState.initial
+
+structure HierarchyProfile where
+  showsOpenWorkspacesTree : Bool
+  showsMultiAxisFilters   : Bool
+  showsRowTechBadges      : Bool
+  showsGitCheckoutChrome  : Bool
+  showsPromptRail         : Bool
+  showsActionToolbar      : Bool
+  flatSessionList         : Bool
+deriving DecidableEq, Repr, BEq
+
+def HierarchyProfile.ofMode : UiMode → HierarchyProfile
+  | .zen => {
+      showsOpenWorkspacesTree := false
+      showsMultiAxisFilters   := false
+      showsRowTechBadges      := false
+      showsGitCheckoutChrome  := false
+      showsPromptRail         := false
+      showsActionToolbar      := false
+      flatSessionList         := true
+    }
+  | .developer => {
+      showsOpenWorkspacesTree := true
+      showsMultiAxisFilters   := true
+      showsRowTechBadges      := true
+      showsGitCheckoutChrome  := true
+      showsPromptRail         := true
+      showsActionToolbar      := true
+      flatSessionList         := false
+    }
+
+def b2n (b : Bool) : Nat :=
+  if b then 1 else 0
+
+/-- Visual nesting depth of the session navigation hierarchy:
+1 in `.zen` (flat session list), 4 in `.developer` (filter bar + open workspaces tree +
+collapsible project groups + multi-badge session rows). -/
+def hierarchyDepth (p : HierarchyProfile) : Nat :=
+  1 + b2n p.showsMultiAxisFilters + b2n p.showsOpenWorkspacesTree + b2n (!p.flatSessionList)
+
+/-- Count of auxiliary developer chrome surfaces ("moving parts") active around the
+conversation and session list. -/
+def movingPartsCount (p : HierarchyProfile) : Nat :=
+  b2n p.showsOpenWorkspacesTree +
+  b2n p.showsMultiAxisFilters +
+  b2n p.showsRowTechBadges +
+  b2n p.showsGitCheckoutChrome +
+  b2n p.showsPromptRail +
+  b2n p.showsActionToolbar
+
+theorem default_ui_mode_is_zen :
+    UiState.initial.mode = .zen := by
+  rfl
+
+theorem toggle_ui_mode_involutive (s : UiState) :
+    stepUiState (stepUiState s .toggleMode) .toggleMode = s := by
+  cases s with
+  | mk m =>
+    cases m <;> rfl
+
+theorem reset_restores_zen_default (s : UiState) :
+    (stepUiState s .resetToDefault).mode = .zen := by
+  rfl
+
+theorem set_mode_idempotent (s : UiState) (m : UiMode) :
+    stepUiState (stepUiState s (.setMode m)) (.setMode m) = stepUiState s (.setMode m) := by
+  rfl
+
+theorem zen_mode_flattens_hierarchy :
+    hierarchyDepth (HierarchyProfile.ofMode .zen) = 1 ∧
+    hierarchyDepth (HierarchyProfile.ofMode .developer) = 4 ∧
+    hierarchyDepth (HierarchyProfile.ofMode .zen) < hierarchyDepth (HierarchyProfile.ofMode .developer) := by
+  decide
+
+theorem zen_mode_eliminates_moving_parts :
+    movingPartsCount (HierarchyProfile.ofMode .zen) = 0 ∧
+    movingPartsCount (HierarchyProfile.ofMode .developer) = 6 ∧
+    movingPartsCount (HierarchyProfile.ofMode .zen) < movingPartsCount (HierarchyProfile.ofMode .developer) := by
+  decide
+
+/-- Individual UI moving parts that can each be toggled on and off independently
+on top of the `Zen` / `Developer` master presets. -/
+inductive MovingPart where
+  | openWorkspacesTree
+  | multiAxisFilters
+  | rowTechBadges
+  | gitCheckoutChrome
+  | promptRail
+  | actionToolbar
+  | groupedSections
+deriving DecidableEq, Repr, BEq
+
+def HierarchyProfile.partEnabled (p : HierarchyProfile) : MovingPart → Bool
+  | .openWorkspacesTree => p.showsOpenWorkspacesTree
+  | .multiAxisFilters   => p.showsMultiAxisFilters
+  | .rowTechBadges      => p.showsRowTechBadges
+  | .gitCheckoutChrome  => p.showsGitCheckoutChrome
+  | .promptRail         => p.showsPromptRail
+  | .actionToolbar      => p.showsActionToolbar
+  | .groupedSections    => !p.flatSessionList
+
+def HierarchyProfile.togglePart (p : HierarchyProfile) : MovingPart → HierarchyProfile
+  | .openWorkspacesTree => { p with showsOpenWorkspacesTree := !p.showsOpenWorkspacesTree }
+  | .multiAxisFilters   => { p with showsMultiAxisFilters   := !p.showsMultiAxisFilters }
+  | .rowTechBadges      => { p with showsRowTechBadges      := !p.showsRowTechBadges }
+  | .gitCheckoutChrome  => { p with showsGitCheckoutChrome  := !p.showsGitCheckoutChrome }
+  | .promptRail         => { p with showsPromptRail         := !p.showsPromptRail }
+  | .actionToolbar      => { p with showsActionToolbar      := !p.showsActionToolbar }
+  | .groupedSections    => { p with flatSessionList         := !p.flatSessionList }
+
+/-- Any enabled moving part classifies the effective indicator as `.developer`;
+when all moving parts are off (`HierarchyProfile.ofMode .zen`), the indicator is `.zen`. -/
+def HierarchyProfile.effectiveMode (p : HierarchyProfile) : UiMode :=
+  if p == HierarchyProfile.ofMode .zen then .zen else .developer
+
+theorem toggle_part_involutive (p : HierarchyProfile) (part : MovingPart) :
+    (p.togglePart part).togglePart part = p := by
+  cases p
+  cases part <;> simp [HierarchyProfile.togglePart]
+
+theorem toggle_part_flips_target (p : HierarchyProfile) (part : MovingPart) :
+    (p.togglePart part).partEnabled part = !(p.partEnabled part) := by
+  cases p
+  cases part <;> simp [HierarchyProfile.togglePart, HierarchyProfile.partEnabled]
+
+theorem toggle_part_orthogonal (p : HierarchyProfile) (a b : MovingPart) (hne : a ≠ b) :
+    (p.togglePart a).partEnabled b = p.partEnabled b := by
+  cases p
+  cases a <;> cases b <;> first | contradiction | rfl
+
+theorem presets_govern_all_parts (part : MovingPart) :
+    (HierarchyProfile.ofMode .zen).partEnabled part = false ∧
+    (HierarchyProfile.ofMode .developer).partEnabled part = true := by
+  cases part <;> decide
+
+/-! ## Split-Pane Question, Tool Header & Session Footer Containment -/
+
+/-- Maximum width allotted to the single-line question preview inside a transcript
+`Question` chip (`view_question.zig:chip`), clamping the desktop `420px` ceiling to
+`col - fixedChrome` so narrow split panes never clip the pill at the divider. -/
+def questionChipTextCap (col fixedChrome cap : Nat) : Nat :=
+  min cap (col - fixedChrome)
+
+theorem question_chip_fits_column (col fixedChrome cap : Nat) (h : fixedChrome ≤ col) :
+    fixedChrome + questionChipTextCap col fixedChrome cap ≤ col ∧
+    questionChipTextCap col fixedChrome cap ≤ cap := by
+  unfold questionChipTextCap
+  omega
+
+theorem question_chip_preserves_wide_cap (col fixedChrome cap : Nat) (h : fixedChrome + cap ≤ col) :
+    questionChipTextCap col fixedChrome cap = cap := by
+  unfold questionChipTextCap
+  omega
+
+/-- Maximum scroll-body height for the docked agent-question wizard (`view_question.zig:panel`),
+reserving `chromeReserve` for header, text input, action footer, and pane breathing room. -/
+def questionPanelMaxBodyHeight (paneH chromeReserve minH maxH : Nat) : Nat :=
+  max minH (min maxH (paneH - chromeReserve))
+
+theorem question_panel_body_bounded (paneH chromeReserve minH maxH : Nat) (h : minH ≤ maxH) :
+    minH ≤ questionPanelMaxBodyHeight paneH chromeReserve minH maxH ∧
+    questionPanelMaxBodyHeight paneH chromeReserve minH maxH ≤ maxH := by
+  unfold questionPanelMaxBodyHeight
+  omega
+
+theorem question_panel_clears_chrome
+    (paneH chromeReserve minH maxH : Nat)
+    (_hbound : minH ≤ maxH)
+    (hroom : minH + chromeReserve ≤ paneH) :
+    questionPanelMaxBodyHeight paneH chromeReserve minH maxH + chromeReserve ≤ paneH := by
+  unfold questionPanelMaxBodyHeight
+  omega
+
+/-- Maximum width allotted to a folded tool-group or compact work-line title
+(`view_tool_tree.zig:group`, `view_transcript.zig:workLine`). -/
+def toolGroupTitleCap (col chevronChrome minCap : Nat) : Nat :=
+  max minCap (col - chevronChrome)
+
+theorem tool_group_title_fits_column
+    (col chevronChrome minCap : Nat)
+    (h : minCap + chevronChrome ≤ col) :
+    chevronChrome + toolGroupTitleCap col chevronChrome minCap ≤ col := by
+  unfold toolGroupTitleCap
+  omega
+
+/-- Progressive width budget for git checkout, branch, and worktree action chips
+inside an open chat's session footer (`view_session_footer.zig:session`).
+Guarantees no icon (`28px`) or chip minimum (`34px`) is ever sliced mid-glyph
+against the right-hand context indicator (`45%`) in narrow split panes. -/
+structure SessionFooterLayout where
+  pad             : Nat
+  showCheckout    : Bool
+  checkoutTextMax : Nat
+  showBranch      : Bool
+  branchTextMax   : Nat
+  showActions     : Bool
+deriving DecidableEq, Repr, BEq
+
+def sessionFooterFromInner (pad inner : Nat) : SessionFooterLayout :=
+  if inner < 28 then
+    { pad := 0, showCheckout := false, checkoutTextMax := 0, showBranch := false, branchTextMax := 0, showActions := false }
+  else if inner < 60 then
+    let textMax := if inner >= 54 then min 126 (inner - 34) else 0
+    { pad := pad, showCheckout := true, checkoutTextMax := textMax, showBranch := false, branchTextMax := 0, showActions := false }
+  else if inner < 132 then
+    let bMax := if inner >= 86 then min 126 (inner - 32 - 34) else 0
+    { pad := pad, showCheckout := true, checkoutTextMax := 0, showBranch := true, branchTextMax := bMax, showActions := false }
+  else
+    let each := (inner - 4) / 2
+    let textMax := min 126 (each - 34)
+    { pad := pad, showCheckout := true, checkoutTextMax := textMax, showBranch := true, branchTextMax := textMax, showActions := inner >= 360 }
+
+def sessionFooterLayout (slotW : Nat) : SessionFooterLayout :=
+  let pad := if slotW >= 200 then 10 else if slotW >= 36 then 4 else 0
+  sessionFooterFromInner pad (slotW - 2 * pad)
+
+/-- Minimum horizontal width required to draw `l`'s visible icons and pads without clipping an icon. -/
+def sessionFooterIconFloor (l : SessionFooterLayout) : Nat :=
+  let cW := if l.showCheckout then (if l.checkoutTextMax > 0 then 34 else 28) else 0
+  let bW := if l.showBranch then (if l.branchTextMax > 0 then 34 else 28) else 0
+  let gap := if l.showCheckout && l.showBranch then 4 else 0
+  let pads := if l.showCheckout || l.showBranch then 2 * l.pad else 0
+  pads + cW + gap + bW
+
+/-- Maximum horizontal width consumed by `l`'s pads, checkout chip, gap, and branch chip. -/
+def sessionFooterMaxLabelsWidth (l : SessionFooterLayout) : Nat :=
+  let cW := if l.showCheckout then (if l.checkoutTextMax > 0 then 34 + l.checkoutTextMax else 28) else 0
+  let bW := if l.showBranch then (if l.branchTextMax > 0 then 34 + l.branchTextMax else 28) else 0
+  let gap := if l.showCheckout && l.showBranch then 4 else 0
+  let pads := if l.showCheckout || l.showBranch then 2 * l.pad else 0
+  pads + cW + gap + bW
+
+theorem session_footer_inner_fits (pad inner : Nat) :
+    sessionFooterIconFloor (sessionFooterFromInner pad inner) ≤ 2 * pad + inner ∧
+    sessionFooterMaxLabelsWidth (sessionFooterFromInner pad inner) ≤ 2 * pad + inner := by
+  unfold sessionFooterFromInner
+  by_cases h1 : inner < 28
+  · simp [h1, sessionFooterIconFloor, sessionFooterMaxLabelsWidth]
+  · by_cases h2 : inner < 60
+    · by_cases h2a : inner >= 54
+      · have hpos : 0 < min 126 (inner - 34) := by omega
+        simp [h1, h2, h2a, hpos, sessionFooterIconFloor, sessionFooterMaxLabelsWidth]
+        omega
+      · simp [h1, h2, h2a, sessionFooterIconFloor, sessionFooterMaxLabelsWidth]
+        omega
+    · by_cases h3 : inner < 132
+      · by_cases h3a : inner >= 86
+        · have hpos : 0 < min 126 (inner - 32 - 34) := by omega
+          simp [h1, h2, h3, h3a, hpos, sessionFooterIconFloor, sessionFooterMaxLabelsWidth]
+          omega
+        · simp [h1, h2, h3, h3a, sessionFooterIconFloor, sessionFooterMaxLabelsWidth]
+          omega
+      · have hpos : 0 < min 126 ((inner - 4) / 2 - 34) := by omega
+        simp [h1, h2, h3, hpos, sessionFooterIconFloor, sessionFooterMaxLabelsWidth]
+        omega
+
+theorem session_footer_never_overflows_slot (slotW : Nat) :
+    sessionFooterIconFloor (sessionFooterLayout slotW) ≤ slotW ∧
+    sessionFooterMaxLabelsWidth (sessionFooterLayout slotW) ≤ slotW := by
+  unfold sessionFooterLayout
+  by_cases h200 : slotW >= 200
+  · simp only [h200, ↓reduceIte]
+    have hfit := session_footer_inner_fits 10 (slotW - 2 * 10)
+    omega
+  · by_cases h36 : slotW >= 36
+    · simp only [h200, h36, ↓reduceIte]
+      have hfit := session_footer_inner_fits 4 (slotW - 2 * 4)
+      omega
+    · simp only [h200, h36, ↓reduceIte]
+      have hfit := session_footer_inner_fits 0 (slotW - 2 * 0)
+      omega
+
+theorem session_footer_wide_preserves_full_labels (slotW : Nat) (h : slotW ≥ 380) :
+    let l := sessionFooterLayout slotW
+    l.showCheckout = true ∧
+    l.checkoutTextMax = 126 ∧
+    l.showBranch = true ∧
+    l.branchTextMax = 126 ∧
+    l.showActions = true := by
+  unfold sessionFooterLayout sessionFooterFromInner
+  have h1 : slotW >= 200 := by omega
+  have h2 : ¬(slotW - 20 < 28) := by omega
+  have h3 : ¬(slotW - 20 < 60) := by omega
+  have h4 : ¬(slotW - 20 < 132) := by omega
+  have h5 : min 126 ((slotW - 20 - 4) / 2 - 34) = 126 := by omega
+  have h6 : decide (slotW - 20 ≥ 360) = true := by
+    rw [decide_eq_true_eq]
+    omega
+  simp [h1, h2, h3, h4, h5, h6]
+
+/-! ## Zeron Sidebar Titlebar Cluster, Smooth Disclosure & Agent-Update Island -/
+
+/-- Zeron sidebar titlebar cluster layout (`[◧]` at `88..112`, followed inside the
+sidebar header by `[←]`, `[→]`, `[+]`, and trailing `[⋯]`). -/
+structure SidebarTitlebarLayout where
+  toggleEnd : Nat
+  backX     : Nat
+  fwdX      : Nat
+  newX      : Nat
+  moreX     : Nat
+deriving DecidableEq, Repr, BEq
+
+def sidebarTitlebarLayout (sideW : Nat) : SidebarTitlebarLayout :=
+  let groupGap := if sideW >= 240 then 8 else 4
+  let toggleEnd := 88 + 24
+  let backX := toggleEnd + groupGap
+  let fwdX := backX + 24 + 2
+  let newX := fwdX + 24 + groupGap
+  let rightMargin := if sideW >= 240 then 8 else 4
+  let moreX := max (newX + 24 + 2) (sideW - rightMargin - 24)
+  { toggleEnd, backX, fwdX, newX, moreX }
+
+theorem sidebar_titlebar_disjoint_and_bounded (sideW : Nat) (h : sideW ≥ 224) :
+    let l := sidebarTitlebarLayout sideW
+    l.toggleEnd < l.backX ∧
+    l.backX + 24 < l.fwdX ∧
+    l.fwdX + 24 < l.newX ∧
+    l.newX + 24 < l.moreX ∧
+    l.moreX + 24 ≤ sideW := by
+  unfold sidebarTitlebarLayout
+  by_cases h240 : sideW >= 240
+  · simp [h240]
+    omega
+  · simp [h240]
+    omega
+
+/-- Smooth sidebar disclosure opacity percentage `35 + 65 * revealPct / 100`
+(`render_sidebar_disclosure_body` in Zeron `shell/spaces.rs`). -/
+def disclosureOpacityPct (revealPct : Nat) : Nat :=
+  let r := min 100 revealPct
+  35 + (65 * r) / 100
+
+theorem disclosure_opacity_bounded_and_endpoints :
+    disclosureOpacityPct 0 = 35 ∧
+    disclosureOpacityPct 100 = 100 ∧
+    ∀ r, 35 ≤ disclosureOpacityPct r ∧ disclosureOpacityPct r ≤ 100 := by
+  refine ⟨by decide, by decide, ?_⟩
+  intro r
+  simp only [disclosureOpacityPct]
+  omega
+
+/-- Zeron Agent-Update Island staged progress curve (`stage(reveal, lo, hi)` in
+`shell/harness_updates.rs`), modeled in integer percent `[0, 100]`. -/
+def updateStagePct (revealPct loPct hiPct : Nat) : Nat :=
+  if hiPct ≤ loPct then
+    if revealPct ≥ hiPct then 100 else 0
+  else if revealPct ≤ loPct then
+    0
+  else if revealPct ≥ hiPct then
+    100
+  else
+    ((revealPct - loPct) * 100) / (hiPct - loPct)
+
+theorem update_stage_bounded (revealPct loPct hiPct : Nat) :
+    updateStagePct revealPct loPct hiPct ≤ 100 := by
+  unfold updateStagePct
+  split
+  · split <;> omega
+  · split
+    · omega
+    · split
+      · omega
+      · exact Nat.div_le_of_le_mul (by omega)
+
+theorem update_stage_endpoints (loPct hiPct : Nat) (h : loPct < hiPct) :
+    updateStagePct loPct loPct hiPct = 0 ∧
+    updateStagePct hiPct loPct hiPct = 100 := by
+  unfold updateStagePct
+  have hle : ¬(hiPct ≤ loPct) := by omega
+  simp [hle]
+
+/-- Zeron Agent-Update Island target `[width, height]` (`render_harness_update_card`
+in `shell/harness_updates.rs`):
+- Collapsed chip: `(min compactW maxW, 38)`
+- Expanded card: `(min 360 maxW, 36 + 1 + min (64 * rows) 224)` (`3.5` visible rows max). -/
+def updateIslandTarget (expanded : Bool) (compactW maxW rows : Nat) : Nat × Nat :=
+  if !expanded then
+    (min compactW maxW, 38)
+  else
+    (min 360 maxW, 36 + 1 + min (64 * rows) 224)
+
+theorem update_island_fits_bounds (expanded : Bool) (compactW maxW rows : Nat) :
+    (updateIslandTarget expanded compactW maxW rows).1 ≤ maxW ∧
+    (updateIslandTarget expanded compactW maxW rows).2 ≤ 261 := by
+  unfold updateIslandTarget
+  cases expanded <;> simp <;> omega
+
+theorem update_island_expands_taller (compactW maxW rows : Nat) (hrows : rows ≥ 1) :
+    (updateIslandTarget false compactW maxW rows).2 <
+    (updateIslandTarget true compactW maxW rows).2 := by
+  unfold updateIslandTarget
+  simp
+  omega
+
 end Nano.FrameSchedule

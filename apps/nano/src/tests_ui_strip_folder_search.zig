@@ -11,6 +11,10 @@ test "release folder menu: Cmd D opens a focused searchable folder menu under it
     defer h.deinit();
     h.press(.{ .key = 'd', .cmd = true });
     try testing.expect(h.a.view.strip.menu == .folder);
+    const right_pane_x = h.a.view.chrome.x + h.a.view.chrome.chat_width * 0.5;
+    try testing.expect((h.a.view.strip.anchor orelse return error.MissingFolderAnchor).x >= right_pane_x);
+    const search_field = h.t.findText("Search folders…") orelse return error.MissingFolderSearch;
+    try testing.expect(search_field.x >= right_pane_x);
     try testing.expectEqual(@as(usize, 1), h.a.view.strip.target.chat);
     const anchor = h.a.view.strip.anchor orelse return error.MissingFolderAnchor;
     try testing.expect(anchor.y >= 5 and anchor.y + anchor.h <= 42);
@@ -26,12 +30,61 @@ test "release folder menu: Cmd D opens a focused searchable folder menu under it
     try testing.expectEqual(h.a.view.composer_id, h.t.ctx.focus);
 }
 
+test "release folder menu: text-field Enter confirms the filtered project and returns focus" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.press(.{ .key = 'd', .cmd = true });
+    h.t.typeText("field notes");
+    h.t.settle(1);
+    h.t.key(.enter);
+    h.t.settle(1);
+    if (std.c.getenv("NANO_FOLDER_ENTER_SNAPSHOT")) |path| try h.t.screenshot(std.mem.span(path));
+    try testing.expect(h.a.view.strip.menu == null);
+    try testing.expectEqualStrings("local-project", h.a.newChatSpace().?.id);
+    try testing.expectEqual(h.a.view.composer_id, h.t.ctx.focus);
+    try testing.expectEqualStrings("", h.a.composer.text());
+}
+
+test "release folder menu: text-field Enter activates the current row and both actions in either menu" {
+    for ([_]bool{ false, true }) |footer| {
+        for (0..3) |index| {
+            var h: Harness = undefined;
+            try h.init(true);
+            defer h.deinit();
+            h.a.newTab();
+            strip.open(&h.a, .folder, .{ .chat = 0 }, .{ .x = 350, .y = if (footer) 700 else 5, .w = 100, .h = 32 });
+            h.a.view.strip.footer_folder = footer;
+            h.t.settle(2);
+            for (0..index) |_| h.press(.{ .key = ui.Shortcut.down });
+            h.t.key(.enter);
+            h.t.settle(1);
+            try testing.expect(h.a.view.strip.menu == null);
+            if (index == 0) {
+                try testing.expectEqualStrings("local-project", h.a.newChatSpace().?.id);
+                try testing.expectEqual(h.a.view.composer_id, h.t.ctx.focus);
+            } else if (index == (if (footer) @as(usize, 2) else 1)) {
+                try testing.expect(h.a.new_no_project);
+                try testing.expect(h.a.newChatSpace() == null);
+                try testing.expectEqual(h.a.view.composer_id, h.t.ctx.focus);
+            } else {
+                try testing.expect(h.a.view.open_chooser.open);
+                try testing.expectEqual(@import("app_open_chooser.zig").Intent.new_project, h.a.view.open_chooser.intent);
+            }
+        }
+    }
+}
+
 test "release folder menu: Escape accepts the inherited folder and returns typing to the composer" {
     var h: Harness = undefined;
     try h.init(true);
     defer h.deinit();
     h.press(.{ .key = 'd', .cmd = true });
     try testing.expect(h.a.view.strip.menu == .folder);
+    const right_pane_x = h.a.view.chrome.x + h.a.view.chrome.chat_width * 0.5;
+    try testing.expect((h.a.view.strip.anchor orelse return error.MissingFolderAnchor).x >= right_pane_x);
+    const search_field = h.t.findText("Search folders…") orelse return error.MissingFolderSearch;
+    try testing.expect(search_field.x >= right_pane_x);
     h.press(.{ .key = ui.Shortcut.escape });
     h.t.typeText("A synthetic new-panel prompt");
     h.t.settle(1);
@@ -46,6 +99,10 @@ test "release folder menu: one Cmd W closes the panel Cmd D made even while sear
     defer h.deinit();
     h.press(.{ .key = 'd', .cmd = true });
     try testing.expect(h.a.view.strip.menu == .folder);
+    const right_pane_x = h.a.view.chrome.x + h.a.view.chrome.chat_width * 0.5;
+    try testing.expect((h.a.view.strip.anchor orelse return error.MissingFolderAnchor).x >= right_pane_x);
+    const search_field = h.t.findText("Search folders…") orelse return error.MissingFolderSearch;
+    try testing.expect(search_field.x >= right_pane_x);
     h.press(.{ .key = 'w', .cmd = true });
     try testing.expectEqual(@as(usize, 1), strip.chatCount(&h.a));
     try testing.expectEqualStrings("a", h.a.selected.?);
@@ -62,6 +119,10 @@ test "release folder menu: pane navigation dismisses search and preserves each c
     h.t.settle(1);
     h.press(.{ .key = 'd', .cmd = true });
     try testing.expect(h.a.view.strip.menu == .folder);
+    const right_pane_x = h.a.view.chrome.x + h.a.view.chrome.chat_width * 0.5;
+    try testing.expect((h.a.view.strip.anchor orelse return error.MissingFolderAnchor).x >= right_pane_x);
+    const search_field = h.t.findText("Search folders…") orelse return error.MissingFolderSearch;
+    try testing.expect(search_field.x >= right_pane_x);
     h.t.typeText("field");
     h.press(.{ .key = '[', .cmd = true });
     try testing.expect(h.a.view.strip.menu == null);
@@ -80,6 +141,10 @@ test "release folder menu: Cmd L accepts the inherited folder and focuses its co
     defer h.deinit();
     h.press(.{ .key = 'd', .cmd = true });
     try testing.expect(h.a.view.strip.menu == .folder);
+    const right_pane_x = h.a.view.chrome.x + h.a.view.chrome.chat_width * 0.5;
+    try testing.expect((h.a.view.strip.anchor orelse return error.MissingFolderAnchor).x >= right_pane_x);
+    const search_field = h.t.findText("Search folders…") orelse return error.MissingFolderSearch;
+    try testing.expect(search_field.x >= right_pane_x);
     h.press(.{ .key = 'l', .cmd = true });
     h.t.typeText("Type directly");
     try testing.expect(h.a.view.strip.menu == null);

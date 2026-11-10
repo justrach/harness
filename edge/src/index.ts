@@ -62,6 +62,8 @@ import { AUTH_ORG_HEADER, RoomActor, roomStore } from "./room-actor";
 import { ROOM_ID, RoomError, memberKey, newRoomId } from "./room-core";
 import { sweepExpiredRooms } from "./room-store-pg";
 import { crashReportRoute } from "./crash-reports";
+import { releaseRoute } from "./releases";
+import { readCapped, readJsonCapped, withoutToken } from "./body";
 import { personalOrgId } from "./auth";
 import installSh from "./install.sh";
 
@@ -189,7 +191,9 @@ const roomRoute = async (
       if (parts[1] === "wakes") return json({ wakes: await store.pendingWakes(auth.userId, limit(100)) });
     }
     if (parts[0] === "rooms" && parts[1] === "wakes" && parts[2] === "ack" && request.method === "POST") {
-      const body = (await request.json().catch(() => null)) as { ids?: unknown; dropped?: unknown } | null;
+      const read = await readJsonCapped(request, MAX_ROOM_BODY_BYTES);
+      if (!read.ok && read.error === "too_large") return json({ error: "too_large" }, 413);
+      const body = (read.ok ? read.value : null) as { ids?: unknown; dropped?: unknown } | null;
       const ids = Array.isArray(body?.ids) ? body.ids.filter((id): id is number => Number.isInteger(id)).slice(0, 500) : [];
       await store.ackWakes(auth.userId, ids, Math.floor(Date.now() / 1000), body?.dropped === true);
       return json({ ok: true, acked: ids.length });
@@ -252,29 +256,8 @@ export default {
         }
       });
     }
-    if (
-      parts[0] === "releases" &&
-      parts.length >= 2 &&
-      (request.method === "GET" || request.method === "HEAD")
-    ) {
-      const key = decodeURIComponent(url.pathname.slice("/releases/".length));
-      if (key.length === 0 || key.includes("..")) return json({ error: "bad request" }, 400);
-      const object = await env.RELEASES.get(key);
-      if (!object) return json({ error: "not_found" }, 404);
-      // latest.txt / manifest.json flip on release; artifacts are immutable by name.
-      const mutable = key.endsWith(".txt") || key.endsWith(".json");
-      const headers = new Headers({
-        "content-type": key.endsWith(".txt")
-          ? "text/plain; charset=utf-8"
-          : key.endsWith(".json")
-            ? "application/json"
-            : "application/octet-stream",
-        "content-length": String(object.size),
-        "cache-control": mutable ? "public, max-age=60" : "public, max-age=86400, immutable",
-        etag: object.httpEtag
-      });
-      return new Response(request.method === "HEAD" ? null : object.body, { headers });
-    }
+    const release = await releaseRoute(request, env, url, parts);
+    if (release) return release;
 
     // ── CodeGraff auth routes (pre-bearer: exchange/refresh/callback have no
     //    access token yet; the org routes verify the bearer themselves) ─────
@@ -370,7 +353,7 @@ export default {
       if (parts.length === 3 && routes[parts[2]]?.includes(request.method)) {
         // Query carries through (`seqCovered` on POST /checkpoint), as do
         // headers (`x-chat2-frontier`, `range`).
-        return forward(env.CHAT_ROOMS, room, request, auth.userId, `/${parts[2]}`, url.search);
+        return forward(env.CHAT_ROOMS, room, request, auth.userId, `/${parts[2]}`, withoutToken(url.search));
       }
       return json({ error: "not found" }, 404);
     }
@@ -466,17 +449,17 @@ export default {
       // One round trip on any network that passes HTTPS at all, where the
       // WS upgrade needs 4 and a cooperative middlebox.
       if (parts[2] === "rows" && request.method === "GET") {
-        return forward(env.REGISTRY_ROOMS, room, request, auth.userId, "/rows", url.search);
+        return forward(env.REGISTRY_ROOMS, room, request, auth.userId, "/rows", withoutToken(url.search));
       }
       // Push over plain HTTPS — the WS push's fallback twin (LWW clocks
       // make replays no-ops, so at-least-once delivery is safe).
       if (parts[2] === "push" && request.method === "POST") {
-        return forward(env.REGISTRY_ROOMS, room, request, auth.userId, "/push", url.search);
+        return forward(env.REGISTRY_ROOMS, room, request, auth.userId, "/push", withoutToken(url.search));
       }
       // A phone's APNs token + notification choices (POST), or removal on
       // sign-out / turning notifications off (DELETE). `?device=` required.
       if (parts[2] === "push-target" && (request.method === "POST" || request.method === "DELETE")) {
-        return forward(env.REGISTRY_ROOMS, room, request, auth.userId, "/push-target", url.search);
+        return forward(env.REGISTRY_ROOMS, room, request, auth.userId, "/push-target", withoutToken(url.search));
       }
       // Operator wipe. Unlike the CRDT rooms this needs no recipe: clients
       // detect the seq regression on their next hello and re-seed the table
@@ -535,10 +518,10 @@ export default {
       }
       const key = `blob/${auth.userId}/${parts[1]}/${partId}`;
       if (request.method === "PUT") {
-        const body = await request.arrayBuffer();
         // Outputs are 4KiB-capped at the harness boundary; diffs can run
         // larger but a sidecar entry is one tool result, never a dump.
-        if (body.byteLength > MAX_TOOL_BLOB_BYTES) return json({ error: "too_large" }, 413);
+        const body = await readCapped(request, MAX_TOOL_BLOB_BYTES);
+        if (!body) return json({ error: "too_large" }, 413);
         await env.BLOBS.put(key, body, {
           httpMetadata: {
             contentType: request.headers.get("content-type") ?? "text/plain; charset=utf-8"

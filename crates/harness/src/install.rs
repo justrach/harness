@@ -1,8 +1,8 @@
 //! Explicit, user-requested CLI installation. Catalog probes never call this module's executor.
 use std::{path::PathBuf, time::Duration};
 
-use tokio::io::{AsyncRead, AsyncReadExt};
 use harness_proto::HarnessId;
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::{
     CancellationToken, Harness, HarnessError, StderrTail,
@@ -208,6 +208,21 @@ pub fn installed(id: HarnessId) -> bool {
         Exo => crate::AcpHarness::exo().installed(),
         Mock => false,
     }
+}
+
+/// Resolve the installed agent CLI binary on this device for version/update probes.
+pub fn resolve_executable(id: HarnessId) -> Option<PathBuf> {
+    if !installed(id) {
+        return None;
+    }
+    let (cli, _) = cli_and_dir(id);
+    crate::executable::find_on_paths(cli, Vec::new()).or_else(|| {
+        if id == HarnessId::Cursor {
+            crate::executable::find_on_paths("agent", Vec::new())
+        } else {
+            None
+        }
+    })
 }
 
 fn invalidate_versions(id: HarnessId) {
@@ -471,10 +486,21 @@ mod tests {
             }
         }
         assert_eq!(methods(HarnessId::Devin, Platform::Mac)[0], Method::Brew);
-        assert_eq!(methods(HarnessId::Graff, Platform::Mac), [Method::GraffRelease]);
-        assert_eq!(methods(HarnessId::Graff, Platform::Unix), [Method::GraffRelease]);
+        assert_eq!(
+            methods(HarnessId::Graff, Platform::Mac),
+            [Method::GraffRelease]
+        );
+        assert_eq!(
+            methods(HarnessId::Graff, Platform::Unix),
+            [Method::GraffRelease]
+        );
         assert!(methods(HarnessId::Graff, Platform::Windows).is_empty());
-        assert!(!available(Method::GraffRelease, Platform::Mac, &|p| p != "tar", true));
+        assert!(!available(
+            Method::GraffRelease,
+            Platform::Mac,
+            &|p| p != "tar",
+            true
+        ));
         assert!(matches!(
             methods(HarnessId::Codex, Platform::Unix)[0],
             Method::Shell(_, "sh")

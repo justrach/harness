@@ -60,6 +60,7 @@ pub fn open(a: *App) void {
     if (a.view.write_open or a.wizard != null or a.queue_edit != null) return;
     a.view.write_open = true;
     a.view.write_focus = true;
+    a.view.focus_composer = false;
     a.picker = .none;
     a.redraw();
 }
@@ -84,17 +85,24 @@ pub fn button(c: *ui.Context, a: *App, k: theme.Colors) void {
     ui.key(c, "composer-write");
     var buf: [24]u8 = undefined;
     const t = c.print("Expand editor  {s}", .{@import("shortcuts.zig").badge(&buf, toggle_combo)});
-    const b = tip.on(@import("view_kit.zig").listenerHover(&a.view.hovers, ui.div(c).row().size(32, 32).center().roundedFull(), k.ink(0.10)).div, k, .{ .text = t });
-    defer b.end();
-    icons.icon(c, .@"expand-arrows", 16, k.muted, 0);
-    if (b.clicked()) open(a);
+    if (@import("view_kit.zig").iconButton(c, k, .@"expand-arrows", .{
+        .size = 28,
+        .radius = 14,
+        .icon = 16,
+        .tip = .{ .text = t },
+    })) open(a);
 }
 
 /// The page replaces the pane without painting over its rounded surface.
 pub fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
     if (c.shortcut(.{ .key = ui.Shortcut.escape }) or c.shortcut(toggle)) return close(a);
     ui.key(c, "write-page");
-    const root = ui.div(c).column().wFull().grow().h(0);
+    const enter = ui.motion.frame(c, .{
+        .initial = .{ .opacity = 0, .scale = 0.992 },
+        .target = .{ .opacity = 1, .scale = 1 },
+        .transition = .{ .tween = .{ .duration = 0.14, .ease = .ease_out } },
+    });
+    const root = ui.div(c).column().wFull().grow().h(0).motion(enter);
     defer root.end();
     toolbar(c, a, k, w);
     if (a.noticeText()) |n| {
@@ -119,6 +127,11 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
             c.focus = c.peekId(null);
             a.view.write_focus = false;
         }
+        const field_id = c.peekId(null);
+        const prev_edit = c.edits.get(field_id);
+        const prev_caret: ?usize = if (prev_edit) |e| e.caret else null;
+        const prev_anchor: ?usize = if (prev_edit) |e| e.anchor else null;
+        const field_index: u32 = @intCast(c.nodes.items.len);
         const r = ui.textField(c, &a.composer, .{
             .placeholder = "Do anything\u{2026}",
             .width = .fill,
@@ -131,6 +144,21 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
             .caret = @import("view_composer.zig").message_caret,
             .caret_color = k.accent,
         });
+        c.node(field_index).style.scroll_bar = false;
+        _ = c.scrollbars.remove(field_id);
+        if (c.edits.get(field_id)) |e| {
+            const clicked_field = c.input.pressed and c.input.button == .left and !c.input.secondary and !c.right_press and c.hot == field_id;
+            const moved_selection = prev_caret != null and (e.caret != prev_caret.? or e.anchor != prev_anchor.?);
+            if (clicked_field or r.changed or moved_selection) c.selection.clear();
+        }
+        if (r.focused and c.shortcut(.{ .key = 'a', .cmd = true })) {
+            if (c.edits.getPtr(field_id)) |e| {
+                e.anchor = 0;
+                e.caret = a.composer.text().len;
+                c.selection.clear();
+                c.changed = true;
+            }
+        }
         // Enter always inserts a line here, regardless of composer settings.
         if (r.submitted) {
             _ = a.composer.insert(r.caret, "\n");

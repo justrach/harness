@@ -276,6 +276,13 @@ const home_key: u21 = 0xF729;
 const end_key: u21 = 0xF72B;
 
 pub fn keys(c: *ui.Context, a: *App) void {
+    if (@import("view.zig").boundShortcut(c, a, "openModelPicker")) {
+        a.picker = .none;
+        a.view.focus_composer = true;
+        c.changed = true;
+        a.redraw();
+        return;
+    }
     const p = &a.view.model_picker;
     const S = ui.Shortcut;
     if (p.stage) |st| {

@@ -52,6 +52,7 @@ import { createBlobStore, getJsonBlob, putJsonBlob, type BlobStore } from "./blo
 import { appendUpdateRow, ensureUpdateLog, readUpdateRows } from "./update-log";
 import { AUTH_USER_HEADER, ROOM_KIND_HEADER, type Env } from "./env";
 import { isPurge, wipeObject } from "./purge";
+import { readJsonCapped } from "./body";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const RETAIN_MS = RETAIN_DAYS * DAY_MS;
@@ -66,6 +67,10 @@ const FRAGMENT_BYTES = 200_000;
  * applies the same discipline inbound (crates/sync MAX_FRAGMENT_COUNT). */
 const MAX_REASSEMBLED_BYTES = 32 * 1024 * 1024;
 const MAX_FRAGMENT_COUNT = 4096;
+/** The host's diff sidecar (`POST /diff`): its patch is at most 3 MiB before
+ * JSON escaping (diff_sync.rs `MAX_PATCH_BYTES`), which can multiply control
+ * bytes by six, and its file summaries ride beside it. */
+const MAX_DIFF_SIDECAR_BYTES = 24 * 1024 * 1024;
 /** Keep a rolling ~5 weeks of daily frontier checkpoints. */
 const MAX_CHECKPOINTS = 36;
 /** Isolate-wide poisoned-wasm strike counter — MODULE state on purpose: every
@@ -336,7 +341,9 @@ export class SessionRoom implements DurableObject {
         if (!owner) this.setMeta("owner", userId);
         else if (owner !== userId) return json({ error: "forbidden" }, 403);
       }
-      putJsonBlob(this.blobs, "diff", await request.json());
+      const body = await readJsonCapped(request, MAX_DIFF_SIDECAR_BYTES);
+      if (!body.ok) return json({ error: body.error }, body.status);
+      putJsonBlob(this.blobs, "diff", body.value);
       return json({ ok: true });
     }
     if (url.pathname === "/snapshot" && request.method === "GET") {

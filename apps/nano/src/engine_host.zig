@@ -57,6 +57,7 @@ pub const WatchKind = enum {
     queue,
     auth_status,
     sidebar_prefs,
+    harness_updates,
 };
 
 /// Process-wide sync admission budget & `ACTIVE_SYNC_CAP` scheduler rules
@@ -119,10 +120,10 @@ pub const SyncBudget = struct {
 pub const max_committed_uploads_cache: usize = 8;
 
 /// Exhaustive 1:1 RPC method table matching `crates/rpc/src/lib.rs` (`pub mod methods`,
-/// 148 canonical methods) plus 5 compatibility aliases (153 total), dispatched in O(1)
+/// 154 canonical methods) plus 5 compatibility aliases (159 total), dispatched in O(1)
 /// via `rpc_method_map`.
 pub const RpcMethod = enum {
-    // 148 canonical methods from crates/rpc/src/lib.rs:
+    // 154 canonical methods from crates/rpc/src/lib.rs:
     WatchPreviews,
     ListHarnesses,
     CancelInstall,
@@ -271,6 +272,12 @@ pub const RpcMethod = enum {
     ApplyUpdate,
     CheckForUpdates,
     QueueUpdate,
+    WatchHarnessUpdates,
+    CheckHarnessUpdates,
+    ApplyHarnessUpdate,
+    CancelHarnessUpdate,
+    DismissHarnessUpdate,
+    SetHarnessUpdatePolicy,
     // 5 compatibility aliases:
     GetAuthStatus,
     GetCodegraffStatus,
@@ -428,6 +435,12 @@ pub const rpc_method_map = std.StaticStringMap(RpcMethod).initComptime(.{
     .{ "ApplyUpdate", .ApplyUpdate },
     .{ "CheckForUpdates", .CheckForUpdates },
     .{ "QueueUpdate", .QueueUpdate },
+    .{ "WatchHarnessUpdates", .WatchHarnessUpdates },
+    .{ "CheckHarnessUpdates", .CheckHarnessUpdates },
+    .{ "ApplyHarnessUpdate", .ApplyHarnessUpdate },
+    .{ "CancelHarnessUpdate", .CancelHarnessUpdate },
+    .{ "DismissHarnessUpdate", .DismissHarnessUpdate },
+    .{ "SetHarnessUpdatePolicy", .SetHarnessUpdatePolicy },
     // 5 compatibility aliases:
     .{ "GetAuthStatus", .GetAuthStatus },
     .{ "GetCodegraffStatus", .GetCodegraffStatus },
@@ -611,6 +624,25 @@ pub const ProjectActionRecord = struct {
     }
 };
 
+pub const HarnessUpdateRecord = struct {
+    harness: []u8,
+    installed_version: ?[]u8 = null,
+    latest_version: ?[]u8 = null,
+    dismissed_version: ?[]u8 = null,
+    phase: []const u8 = "upToDate",
+    auto_update: bool = false,
+    can_apply: bool = true,
+    can_cancel: bool = false,
+    checked_at_ms: i64 = 0,
+
+    pub fn deinit(self: *HarnessUpdateRecord, gpa: Allocator) void {
+        gpa.free(self.harness);
+        if (self.installed_version) |v| gpa.free(v);
+        if (self.latest_version) |v| gpa.free(v);
+        if (self.dismissed_version) |v| gpa.free(v);
+    }
+};
+
 pub const EngineHost = struct {
     /// Maximum warm `SessionDoc` handles kept in memory (`WARM_DOC_CAP = 12` in `crates/engine/src/doc_host.rs`).
     pub const warm_doc_cap: usize = 12;
@@ -642,6 +674,7 @@ pub const EngineHost = struct {
     spaces: std.ArrayList(SpaceRecord) = .empty,
     chats: std.ArrayList(ChatRecord) = .empty,
     actions: std.ArrayList(ProjectActionRecord) = .empty,
+    harness_updates: std.ArrayList(HarnessUpdateRecord) = .empty,
     watches: std.ArrayList(WatchSubscription) = .empty,
     pushed_frames: std.ArrayList(PushedStreamItem) = .empty,
     mutex: std.Io.Mutex = .init,
@@ -766,6 +799,8 @@ pub const EngineHost = struct {
         self.chats.deinit(self.gpa);
         for (self.actions.items) |*a| a.deinit(self.gpa);
         self.actions.deinit(self.gpa);
+        for (self.harness_updates.items) |*hu| hu.deinit(self.gpa);
+        self.harness_updates.deinit(self.gpa);
         for (self.watches.items) |*w| w.deinit(self.gpa);
         self.watches.deinit(self.gpa);
         for (self.pushed_frames.items) |*p| p.deinit(self.gpa);
@@ -829,7 +864,11 @@ pub const EngineHost = struct {
             host.broadcastWatch(.auth_status, null, st_json) catch {};
         } else |_| {}
         if (host.auth.signed_in) {
-            _ = host.syncFromEdgeRegistry(io);
+            if (host.bg_sync_enabled) {
+                _ = host.sync_wake_seq.fetchAdd(1, .acq_rel);
+            } else {
+                _ = host.syncFromEdgeRegistry(io);
+            }
         }
     }
 
@@ -1176,7 +1215,7 @@ pub const EngineHost = struct {
             .EngineInfo => {
                 return .{ .unary_json = try std.fmt.allocPrint(
                     self.gpa,
-                    "{{\"version\":{f},\"deviceId\":{f},\"deviceName\":{f},\"platform\":\"macos\",\"workspaceScope\":{f},\"capabilities\":[\"queueEdit\",\"queueReorder\",\"steerMidTurn\"]}}",
+                    "{{\"version\":{f},\"deviceId\":{f},\"deviceName\":{f},\"platform\":\"macos\",\"workspaceScope\":{f},\"capabilities\":[\"queueEdit\",\"queueReorder\",\"steerMidTurn\",\"harness-updates-v1\"]}}",
                     .{ json.fmt(build_info.version, .{}), json.fmt(self.device_id, .{}), json.fmt(self.device_name, .{}), json.fmt(self.workspace_scope, .{}) },
                 ) };
             },
@@ -1283,7 +1322,11 @@ pub const EngineHost = struct {
                 try self.broadcastWatch(.auth_status, null, st_json);
                 if (self.io) |io| {
                     if (self.auth.codegraff_client_id != null and self.auth.signed_in) {
-                        _ = self.syncFromEdgeRegistry(io);
+                        if (self.bg_sync_enabled) {
+                            _ = self.sync_wake_seq.fetchAdd(1, .acq_rel);
+                        } else {
+                            _ = self.syncFromEdgeRegistry(io);
+                        }
                     }
                 }
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"ok\":true,\"workspaceScope\":\"synced\"}") };
@@ -1756,7 +1799,11 @@ pub const EngineHost = struct {
                 try self.broadcastWatch(.auth_status, null, st_json);
                 if (self.io) |io| {
                     if (self.auth.codegraff_client_id != null and self.auth.signed_in) {
-                        _ = self.syncFromEdgeRegistry(io);
+                        if (self.bg_sync_enabled) {
+                            _ = self.sync_wake_seq.fetchAdd(1, .acq_rel);
+                        } else {
+                            _ = self.syncFromEdgeRegistry(io);
+                        }
                     }
                 }
                 return .{ .unary_json = try std.fmt.allocPrint(
@@ -2407,6 +2454,114 @@ pub const EngineHost = struct {
                 _ = requireStr(obj, "targetDeviceId") orelse return .{ .err = .{ .bad_params = "missing targetDeviceId" } };
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"ok\":true}") };
             },
+            .WatchHarnessUpdates => {
+                if (params == .object) {
+                    if (requireStr(params.object, "targetDeviceId")) |td| {
+                        if (!std.mem.eql(u8, td, self.device_id)) {
+                            return .{ .err = .{ .exec_error = "target device not connected" } };
+                        }
+                    }
+                }
+                if (call_id != 0) try self.registerWatch(call_id, .harness_updates, null);
+                return self.oneStreamItem(true, try self.harnessUpdatesJson());
+            },
+            .CheckHarnessUpdates => {
+                if (params == .object) {
+                    if (requireStr(params.object, "targetDeviceId")) |td| {
+                        if (!std.mem.eql(u8, td, self.device_id)) {
+                            return .{ .err = .{ .exec_error = "target device not connected" } };
+                        }
+                    }
+                    if (requireStr(params.object, "harness")) |hid| {
+                        const rec = try self.getOrCreateHarnessUpdate(hid);
+                        rec.checked_at_ms = self.nowMs();
+                    } else {
+                        for (self.harness_updates.items) |*rec| rec.checked_at_ms = self.nowMs();
+                    }
+                }
+                const snap = try self.harnessUpdatesJson();
+                errdefer self.gpa.free(snap);
+                try self.broadcastWatch(.harness_updates, null, snap);
+                return .{ .unary_json = snap };
+            },
+            .ApplyHarnessUpdate => {
+                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
+                if (requireStr(obj, "targetDeviceId")) |td| {
+                    if (!std.mem.eql(u8, td, self.device_id)) {
+                        return .{ .err = .{ .exec_error = "target device not connected" } };
+                    }
+                }
+                const hid = requireStr(obj, "harness") orelse return .{ .err = .{ .bad_params = "missing harness" } };
+                const rec = try self.getOrCreateHarnessUpdate(hid);
+                if (rec.latest_version) |lat| {
+                    const copy = try self.gpa.dupe(u8, lat);
+                    if (rec.installed_version) |old| self.gpa.free(old);
+                    rec.installed_version = copy;
+                }
+                rec.phase = "updated";
+                rec.can_cancel = false;
+                rec.checked_at_ms = self.nowMs();
+                const snap = try self.harnessUpdatesJson();
+                errdefer self.gpa.free(snap);
+                try self.broadcastWatch(.harness_updates, null, snap);
+                return .{ .unary_json = snap };
+            },
+            .CancelHarnessUpdate => {
+                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
+                if (requireStr(obj, "targetDeviceId")) |td| {
+                    if (!std.mem.eql(u8, td, self.device_id)) {
+                        return .{ .err = .{ .exec_error = "target device not connected" } };
+                    }
+                }
+                const hid = requireStr(obj, "harness") orelse return .{ .err = .{ .bad_params = "missing harness" } };
+                const rec = try self.getOrCreateHarnessUpdate(hid);
+                const has_diff = if (rec.latest_version) |lat|
+                    (if (rec.installed_version) |inst| !std.mem.eql(u8, inst, lat) else true)
+                else
+                    false;
+                rec.phase = if (has_diff) "available" else "upToDate";
+                rec.can_cancel = false;
+                const snap = try self.harnessUpdatesJson();
+                errdefer self.gpa.free(snap);
+                try self.broadcastWatch(.harness_updates, null, snap);
+                return .{ .unary_json = snap };
+            },
+            .DismissHarnessUpdate => {
+                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
+                if (requireStr(obj, "targetDeviceId")) |td| {
+                    if (!std.mem.eql(u8, td, self.device_id)) {
+                        return .{ .err = .{ .exec_error = "target device not connected" } };
+                    }
+                }
+                const hid = requireStr(obj, "harness") orelse return .{ .err = .{ .bad_params = "missing harness" } };
+                const rec = try self.getOrCreateHarnessUpdate(hid);
+                if (requireStr(obj, "version") orelse rec.latest_version) |ver| {
+                    const copy = try self.gpa.dupe(u8, ver);
+                    if (rec.dismissed_version) |old| self.gpa.free(old);
+                    rec.dismissed_version = copy;
+                }
+                const snap = try self.harnessUpdatesJson();
+                errdefer self.gpa.free(snap);
+                try self.broadcastWatch(.harness_updates, null, snap);
+                return .{ .unary_json = snap };
+            },
+            .SetHarnessUpdatePolicy => {
+                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
+                if (requireStr(obj, "targetDeviceId")) |td| {
+                    if (!std.mem.eql(u8, td, self.device_id)) {
+                        return .{ .err = .{ .exec_error = "target device not connected" } };
+                    }
+                }
+                const hid = requireStr(obj, "harness") orelse return .{ .err = .{ .bad_params = "missing harness" } };
+                const auto_val = obj.get("autoUpdate") orelse return .{ .err = .{ .bad_params = "missing autoUpdate" } };
+                if (auto_val != .bool) return .{ .err = .{ .bad_params = "autoUpdate must be boolean" } };
+                const rec = try self.getOrCreateHarnessUpdate(hid);
+                rec.auto_update = auto_val.bool;
+                const snap = try self.harnessUpdatesJson();
+                errdefer self.gpa.free(snap);
+                try self.broadcastWatch(.harness_updates, null, snap);
+                return .{ .unary_json = snap };
+            },
             .OpenTerminal => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
                 const tid = requireStr(obj, "terminalId") orelse "term-1";
@@ -2769,34 +2924,7 @@ pub const EngineHost = struct {
             },
             .deleteChat => {
                 const chat_id = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
-                var i: usize = 0;
-                while (i < self.chats.items.len) {
-                    if (std.mem.eql(u8, self.chats.items[i].id, chat_id)) {
-                        self.chats.items[i].deinit(self.gpa);
-                        _ = self.chats.orderedRemove(i);
-                        break;
-                    }
-                    i += 1;
-                }
-                // Reclaim in-memory SessionDoc, persisted SQLite snapshot/outbox, and target watches
-                // (Lean Theorem `complete_delete_zero_leak_and_no_resurrection`).
-                if (self.docs.fetchRemove(chat_id)) |kv| {
-                    self.gpa.free(kv.key);
-                    var doc = kv.value;
-                    doc.deinit();
-                }
-                if (self.remote_tails.fetchRemove(chat_id)) |rt_kv| {
-                    self.gpa.free(rt_kv.key);
-                    self.gpa.free(rt_kv.value);
-                }
-                self.store.deleteDoc(chat_id);
-                self.removeTargetWatches(chat_id);
-                if (self.focused_chat_id) |fid| {
-                    if (std.mem.eql(u8, fid, chat_id)) {
-                        self.gpa.free(fid);
-                        self.focused_chat_id = null;
-                    }
-                }
+                _ = self.deleteChat(chat_id);
                 const ch_json = try self.chatsJson();
                 defer self.gpa.free(ch_json);
                 try self.broadcastWatch(.chats, null, ch_json);
@@ -2832,6 +2960,103 @@ pub const EngineHost = struct {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"ok\":true}") };
             },
         }
+    }
+
+    pub fn deleteChat(self: *EngineHost, chat_id: []const u8) bool {
+        var removed = false;
+        var i: usize = 0;
+        while (i < self.chats.items.len) {
+            if (std.mem.eql(u8, self.chats.items[i].id, chat_id)) {
+                self.chats.items[i].deinit(self.gpa);
+                _ = self.chats.orderedRemove(i);
+                removed = true;
+                break;
+            }
+            i += 1;
+        }
+        if (self.docs.fetchRemove(chat_id)) |kv| {
+            self.gpa.free(kv.key);
+            var doc = kv.value;
+            doc.deinit();
+            removed = true;
+        }
+        if (self.remote_tails.fetchRemove(chat_id)) |rt_kv| {
+            self.gpa.free(rt_kv.key);
+            self.gpa.free(rt_kv.value);
+        }
+        self.store.deleteDoc(chat_id);
+        self.removeTargetWatches(chat_id);
+        if (self.focused_chat_id) |fid| {
+            if (std.mem.eql(u8, fid, chat_id)) {
+                self.gpa.free(fid);
+                self.focused_chat_id = null;
+            }
+        }
+        return removed;
+    }
+
+    pub fn deleteSpace(self: *EngineHost, space_id: []const u8) bool {
+        var i: usize = 0;
+        while (i < self.spaces.items.len) {
+            if (std.mem.eql(u8, self.spaces.items[i].id, space_id)) {
+                self.spaces.items[i].deinit(self.gpa);
+                _ = self.spaces.orderedRemove(i);
+                return true;
+            }
+            i += 1;
+        }
+        return false;
+    }
+
+    pub fn forgetDevice(self: *EngineHost, dev_id: []const u8) bool {
+        var i: usize = 0;
+        while (i < self.devices.items.len) {
+            if (std.mem.eql(u8, self.devices.items[i].id, dev_id)) {
+                self.devices.items[i].deinit(self.gpa);
+                _ = self.devices.orderedRemove(i);
+                return true;
+            }
+            i += 1;
+        }
+        return false;
+    }
+
+    pub fn getOrCreateHarnessUpdate(self: *EngineHost, harness: []const u8) !*HarnessUpdateRecord {
+        for (self.harness_updates.items) |*rec| {
+            if (std.mem.eql(u8, rec.harness, harness)) return rec;
+        }
+        const h_copy = try self.gpa.dupe(u8, harness);
+        errdefer self.gpa.free(h_copy);
+        try self.harness_updates.append(self.gpa, .{
+            .harness = h_copy,
+            .checked_at_ms = self.nowMs(),
+        });
+        return &self.harness_updates.items[self.harness_updates.items.len - 1];
+    }
+
+    pub fn harnessUpdatesJson(self: *const EngineHost) ![]u8 {
+        var aw: std.Io.Writer.Allocating = .init(self.gpa);
+        errdefer aw.deinit();
+        const w = &aw.writer;
+        try w.writeAll("{\"statuses\":[");
+        for (self.harness_updates.items, 0..) |rec, idx| {
+            if (idx > 0) try w.writeByte(',');
+            try w.print(
+                "{{\"harness\":{f},\"installKind\":\"managed\",\"phase\":{f},\"autoUpdate\":{},\"canApply\":{},\"canCancel\":{}",
+                .{ json.fmt(rec.harness, .{}), json.fmt(rec.phase, .{}), rec.auto_update, rec.can_apply, rec.can_cancel },
+            );
+            if (rec.installed_version) |inst| try w.print(",\"installedVersion\":{f}", .{json.fmt(inst, .{})});
+            if (rec.latest_version) |lat| try w.print(",\"latestVersion\":{f}", .{json.fmt(lat, .{})});
+            if (rec.dismissed_version) |dis| try w.print(",\"dismissedVersion\":{f}", .{json.fmt(dis, .{})});
+            if (rec.checked_at_ms > 0) {
+                var cbuf: [32]u8 = undefined;
+                const crfc = auth_host.formatRfc3339Ms(&cbuf, rec.checked_at_ms);
+                try w.print(",\"checkedAt\":{f}", .{json.fmt(crfc, .{})});
+            }
+            try w.writeByte('}');
+        }
+        try w.writeAll("]}");
+        return aw.toOwnedSlice();
     }
 
     pub fn devicesJson(self: *const EngineHost) ![]u8 {
@@ -3027,58 +3252,451 @@ pub const EngineHost = struct {
         return aw.toOwnedSlice();
     }
 
-    /// Pull the signed-in organization's cloud Workspace Registry (`GET {edge_url}/registry/{orgId}/rows?since=0`),
-    /// hydrating synced `devices`, `spaces`, `chats`, and `sessions` 1:1 with `crates/doc/src/registry.rs`,
-    /// and broadcasting updated `Watch*` frames to connected UI clients.
+    fn ensureRegistryOrgCursor(self: *EngineHost, org_id: []const u8) void {
+        if (self.registry_org_id) |cur| {
+            if (std.mem.eql(u8, cur, org_id)) return;
+            self.gpa.free(cur);
+            self.registry_org_id = null;
+        }
+        self.registry_seq = 0;
+        self.registry_org_id = self.gpa.dupe(u8, org_id) catch null;
+    }
+
+    fn writePrivateCacheFile(io: std.Io, path: []const u8, body: []const u8) void {
+        if (std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true })) |f| {
+            defer f.close(io);
+            f.writeStreamingAll(io, body) catch {};
+        } else |_| {
+            return;
+        }
+        if (comptime @import("builtin").os.tag != .windows) {
+            var path_z: [1024]u8 = undefined;
+            if (path.len + 1 <= path_z.len) {
+                @memcpy(path_z[0..path.len], path);
+                path_z[path.len] = 0;
+                _ = std.c.chmod(@ptrCast(&path_z), 0o600);
+            }
+        }
+    }
+
+    pub fn clearDiskSyncCaches(self: *const EngineHost) void {
+        const io = self.io orelse return;
+        const dir = self.data_dir orelse return;
+        if (std.fmt.allocPrint(self.gpa, "{s}/registry-cache.json", .{dir})) |p| {
+            defer self.gpa.free(p);
+            std.Io.Dir.cwd().deleteFile(io, p) catch {};
+        } else |_| {}
+        if (std.fmt.allocPrint(self.gpa, "{s}/tails", .{dir})) |tp| {
+            defer self.gpa.free(tp);
+            std.Io.Dir.cwd().deleteTree(io, tp) catch {};
+        } else |_| {}
+    }
+
+    fn tailDiskCachePathAlloc(gpa: Allocator, data_dir: []const u8, chat_id: []const u8) ![]u8 {
+        const h = std.hash.Fnv1a_64.hash(chat_id);
+        return std.fmt.allocPrint(gpa, "{s}/tails/{x:0>16}.json", .{ data_dir, h });
+    }
+
+    fn invalidateCachedTail(self: *EngineHost, chat_id: []const u8) void {
+        if (self.remote_tails.fetchRemove(chat_id)) |kv| {
+            self.gpa.free(kv.key);
+            self.gpa.free(kv.value);
+        }
+        if (self.io) |io| {
+            if (self.data_dir) |dir| {
+                if (tailDiskCachePathAlloc(self.gpa, dir, chat_id)) |p| {
+                    defer self.gpa.free(p);
+                    std.Io.Dir.cwd().deleteFile(io, p) catch {};
+                } else |_| {}
+            }
+        }
+    }
+
+    /// Instant O(1) memory + SSD lookup for a synced chat's transcript tail (`messages` JSON array).
+    pub fn lookupCachedTailJson(self: *EngineHost, chat_id: []const u8) ?[]const u8 {
+        if (self.remote_tails.get(chat_id)) |cached| return cached;
+        const io = self.io orelse return null;
+        const dir = self.data_dir orelse return null;
+        const path = tailDiskCachePathAlloc(self.gpa, dir, chat_id) catch return null;
+        defer self.gpa.free(path);
+
+        const raw = std.Io.Dir.cwd().readFileAlloc(io, path, self.gpa, .limited(8 * 1024 * 1024)) catch return null;
+        defer self.gpa.free(raw);
+
+        var parsed = json.parseFromSlice(json.Value, self.gpa, raw, .{}) catch return null;
+        defer parsed.deinit();
+        if (parsed.value != .object) return null;
+        const cid = regOptStr(parsed.value.object, "chatId") orelse return null;
+        if (!std.mem.eql(u8, cid, chat_id)) return null;
+        const msgs_val = parsed.value.object.get("messages") orelse return null;
+        if (msgs_val != .array) return null;
+
+        const msgs_json = std.fmt.allocPrint(self.gpa, "{f}", .{json.fmt(msgs_val, .{})}) catch return null;
+        return self.storeCachedTailInMemoryOwned(chat_id, msgs_json, false);
+    }
+
+    fn storeCachedTailInMemoryOwned(self: *EngineHost, chat_id: []const u8, msgs_json: []u8, write_disk: bool) ?[]const u8 {
+        if (write_disk) {
+            if (self.io) |io| {
+                if (self.data_dir) |dir| {
+                    if (std.fmt.allocPrint(self.gpa, "{s}/tails", .{dir})) |tails_dir| {
+                        defer self.gpa.free(tails_dir);
+                        std.Io.Dir.cwd().createDirPath(io, tails_dir) catch {};
+                    } else |_| {}
+                    if (tailDiskCachePathAlloc(self.gpa, dir, chat_id)) |path| {
+                        defer self.gpa.free(path);
+                        if (std.fmt.allocPrint(self.gpa, "{{\"chatId\":{f},\"messages\":{s}}}", .{ json.fmt(chat_id, .{}), msgs_json })) |disk_body| {
+                            defer self.gpa.free(disk_body);
+                            writePrivateCacheFile(io, path, disk_body);
+                        } else |_| {}
+                    } else |_| {}
+                }
+            }
+        }
+
+        if (self.remote_tails.getPtr(chat_id)) |existing_val| {
+            self.gpa.free(existing_val.*);
+            existing_val.* = msgs_json;
+            return existing_val.*;
+        }
+
+        // Keep remote_tails strictly bounded (cap at 128 cached transcripts).
+        if (self.remote_tails.count() >= 128) {
+            var it = self.remote_tails.iterator();
+            if (it.next()) |first| {
+                const evict_k = first.key_ptr.*;
+                if (self.remote_tails.fetchRemove(evict_k)) |old| {
+                    self.gpa.free(old.key);
+                    self.gpa.free(old.value);
+                }
+            }
+        }
+
+        const key_copy = self.gpa.dupe(u8, chat_id) catch {
+            self.gpa.free(msgs_json);
+            return null;
+        };
+        self.remote_tails.put(self.gpa, key_copy, msgs_json) catch {
+            self.gpa.free(key_copy);
+            self.gpa.free(msgs_json);
+            return null;
+        };
+        return self.remote_tails.get(chat_id);
+    }
+
+    /// Load `{data_dir}/registry-cache.json` on startup in < 0.5ms so `harness-engine` binds
+    /// its IPC port immediately with full synced state and resumes delta sync from `?since={seq}`.
+    pub fn loadPersistedRegistryCache(self: *EngineHost, io: std.Io) bool {
+        const dir = self.data_dir orelse return false;
+        const expected_org = self.auth.org_id orelse return false;
+        const path = std.fmt.allocPrint(self.gpa, "{s}/registry-cache.json", .{dir}) catch return false;
+        defer self.gpa.free(path);
+
+        const raw = std.Io.Dir.cwd().readFileAlloc(io, path, self.gpa, .limited(32 * 1024 * 1024)) catch return false;
+        defer self.gpa.free(raw);
+
+        var parsed = json.parseFromSlice(json.Value, self.gpa, raw, .{}) catch return false;
+        defer parsed.deinit();
+        if (parsed.value != .object) return false;
+        const cached_org = regOptStr(parsed.value.object, "orgId") orelse return false;
+        if (!std.mem.eql(u8, cached_org, expected_org)) return false;
+
+        return self.applyRegistryResponseJson(expected_org, raw, false);
+    }
+
+    fn saveRegistryCacheFile(self: *const EngineHost) void {
+        const io = self.io orelse return;
+        const dir = self.data_dir orelse return;
+        const org_id = self.registry_org_id orelse self.auth.org_id orelse return;
+
+        var aw: std.Io.Writer.Allocating = .init(self.gpa);
+        defer aw.deinit();
+        const w = &aw.writer;
+
+        w.print("{{\"orgId\":{f},\"seq\":{d},\"rows\":[", .{ json.fmt(org_id, .{}), self.registry_seq }) catch return;
+        var row_cnt: usize = 0;
+
+        for (self.devices.items) |d| {
+            if (row_cnt > 0) w.writeByte(',') catch return;
+            row_cnt += 1;
+            w.print(
+                "{{\"kind\":\"devices\",\"id\":{f},\"deleted\":false,\"fields\":{{\"id\":{f},\"name\":{f},\"platform\":{f},\"version\":{f},\"lastSeenAt\":{d},\"createdAt\":{d}}}}}",
+                .{
+                    json.fmt(d.id, .{}),
+                    json.fmt(d.id, .{}),
+                    json.fmt(d.name, .{}),
+                    json.fmt(d.platform, .{}),
+                    json.fmt(d.version, .{}),
+                    d.last_seen_at_ms,
+                    d.created_at_ms,
+                },
+            ) catch return;
+        }
+
+        for (self.spaces.items) |s| {
+            if (std.mem.eql(u8, s.id, "space-zig-default")) continue;
+            if (row_cnt > 0) w.writeByte(',') catch return;
+            row_cnt += 1;
+            w.print(
+                "{{\"kind\":\"spaces\",\"id\":{f},\"deleted\":false,\"fields\":{{\"id\":{f},\"deviceId\":{f},\"path\":{f},\"name\":{f},\"gitDetected\":{},\"checkoutId\":{f},\"createdAt\":{d}}}}}",
+                .{
+                    json.fmt(s.id, .{}),
+                    json.fmt(s.id, .{}),
+                    json.fmt(s.device_id, .{}),
+                    json.fmt(s.path, .{}),
+                    json.fmt(s.name, .{}),
+                    s.git_detected,
+                    json.fmt(s.checkout_id, .{}),
+                    s.created_at_ms,
+                },
+            ) catch return;
+        }
+
+        for (self.chats.items) |c| {
+            if (row_cnt > 0) w.writeByte(',') catch return;
+            row_cnt += 1;
+            const sc = c.source_context_json orelse "null";
+            w.print(
+                "{{\"kind\":\"chats\",\"id\":{f},\"deleted\":false,\"fields\":{{\"id\":{f},\"deviceId\":{f},\"spaceId\":{f},\"title\":{f},\"archived\":{},\"parentChatId\":{f},\"cwd\":{f},\"branch\":{f},\"lastMessagePreview\":{f},\"harnessSessionId\":{f},\"createdAt\":{d},\"lastMessageAt\":{d},\"lastPromptAt\":{d},\"lastSeenAt\":{d},\"sourceContext\":{s},\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f},\"chatMode\":{}}}}}}}",
+                .{
+                    json.fmt(c.id, .{}),
+                    json.fmt(c.id, .{}),
+                    json.fmt(c.device_id, .{}),
+                    json.fmt(c.space_id, .{}),
+                    json.fmt(c.title, .{}),
+                    c.archived,
+                    json.fmt(c.parent_chat_id, .{}),
+                    json.fmt(c.cwd, .{}),
+                    json.fmt(c.branch, .{}),
+                    json.fmt(c.preview, .{}),
+                    json.fmt(c.harness_session_id, .{}),
+                    c.created_at_ms,
+                    c.last_message_at_ms,
+                    c.last_prompt_at_ms,
+                    c.last_seen_at_ms,
+                    sc,
+                    json.fmt(c.harness, .{}),
+                    json.fmt(c.model, .{}),
+                    json.fmt(c.reasoning, .{}),
+                    c.chat_mode,
+                },
+            ) catch return;
+
+            if (c.activity_status) |st| {
+                w.print(
+                    ",{{\"kind\":\"sessions\",\"id\":{f},\"deleted\":false,\"fields\":{{\"chatId\":{f},\"status\":{f},\"startedAt\":{d},\"updatedAt\":{d}}}}}",
+                    .{
+                        json.fmt(c.id, .{}),
+                        json.fmt(c.id, .{}),
+                        json.fmt(st, .{}),
+                        c.activity_started_at_ms,
+                        c.activity_updated_at_ms,
+                    },
+                ) catch return;
+            }
+        }
+
+        w.writeAll("]}") catch return;
+        const path = std.fmt.allocPrint(self.gpa, "{s}/registry-cache.json", .{dir}) catch return;
+        defer self.gpa.free(path);
+        writePrivateCacheFile(io, path, aw.written());
+    }
+
+    /// Pull the signed-in organization's cloud Workspace Registry (`GET {edge_url}/registry/{orgId}/rows?since={seq}`),
+    /// reusing warm HTTP/2 connections (`auth.h2_pool`) and applying delta rows in O(N + R) hash-indexed time.
     pub fn syncFromEdgeRegistry(self: *EngineHost, io: std.Io) bool {
         if (!self.auth.signed_in) return false;
         const edge_raw = self.auth.edge_url orelse return false;
-        const org_id = self.auth.org_id orelse return false;
+        const org_id_slice = self.auth.org_id orelse return false;
+        const org_id = self.gpa.dupe(u8, org_id_slice) catch return false;
+        defer self.gpa.free(org_id);
+        self.ensureRegistryOrgCursor(org_id);
+
         const tok0 = self.auth.ensureAccessToken(io, false) orelse return false;
 
         const base = std.mem.trimEnd(u8, edge_raw, "/");
         const enc_org = auth_host.urlEncodeAlloc(self.gpa, org_id) catch return false;
         defer self.gpa.free(enc_org);
-        const url = std.fmt.allocPrint(self.gpa, "{s}/registry/{s}/rows?since=0", .{ base, enc_org }) catch return false;
+        const url = std.fmt.allocPrint(
+            self.gpa,
+            "{s}/registry/{s}/rows?since={d}",
+            .{ base, enc_org, self.registry_seq },
+        ) catch return false;
         defer self.gpa.free(url);
 
-        var resp = auth_host.AuthManager.edgeRequest(self.gpa, io, "GET", url, tok0, null) catch return false;
+        var resp = auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "GET", url, tok0, &.{}, null) catch return false;
         if (resp.status == 401) {
             resp.deinit(self.gpa);
             const tok1 = self.auth.ensureAccessToken(io, true) orelse return false;
-            resp = auth_host.AuthManager.edgeRequest(self.gpa, io, "GET", url, tok1, null) catch return false;
+            resp = auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "GET", url, tok1, &.{}, null) catch return false;
         }
         defer resp.deinit(self.gpa);
         if (resp.status != 200) return false;
 
-        var parsed = json.parseFromSlice(json.Value, self.gpa, resp.body, .{}) catch return false;
+        return self.applyRegistryResponseJson(org_id, resp.body, true);
+    }
+
+    /// Lock-free network variant of `syncFromEdgeRegistry` for the background sync loop:
+    /// snapshots auth credentials under `self.mutex` (< 2µs), executes the HTTP/2 delta fetch
+    /// completely outside `self.mutex`, and re-acquires `self.mutex` (< 200µs) only if delta rows arrived.
+    pub fn syncFromEdgeRegistryUnlocked(self: *EngineHost, io: std.Io) bool {
+        var gen: u64 = 0;
+        var edge_copy: ?[]u8 = null;
+        var org_copy: ?[]u8 = null;
+        var tok_copy: ?[]u8 = null;
+        var since_seq: u64 = 0;
+        defer {
+            if (edge_copy) |s| self.gpa.free(s);
+            if (org_copy) |s| self.gpa.free(s);
+            if (tok_copy) |s| self.gpa.free(s);
+        }
+
+        {
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
+            if (self.stop_requested or !self.auth.signed_in) return false;
+            const er = self.auth.edge_url orelse return false;
+            const oid = self.auth.org_id orelse return false;
+            self.ensureRegistryOrgCursor(oid);
+            const tok = self.auth.ensureAccessToken(io, false) orelse return false;
+            gen = self.auth.generation;
+            since_seq = self.registry_seq;
+            edge_copy = self.gpa.dupe(u8, er) catch return false;
+            org_copy = self.gpa.dupe(u8, oid) catch return false;
+            tok_copy = self.gpa.dupe(u8, tok) catch return false;
+        }
+
+        const base = std.mem.trimEnd(u8, edge_copy.?, "/");
+        const enc_org = auth_host.urlEncodeAlloc(self.gpa, org_copy.?) catch return false;
+        defer self.gpa.free(enc_org);
+        const url = std.fmt.allocPrint(
+            self.gpa,
+            "{s}/registry/{s}/rows?since={d}",
+            .{ base, enc_org, since_seq },
+        ) catch return false;
+        defer self.gpa.free(url);
+
+        var resp = auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "GET", url, tok_copy.?, &.{}, null) catch return false;
+        if (resp.status == 401) {
+            resp.deinit(self.gpa);
+            var refreshed_tok: ?[]u8 = null;
+            defer if (refreshed_tok) |rt| self.gpa.free(rt);
+            {
+                self.mutex.lockUncancelable(io);
+                defer self.mutex.unlock(io);
+                if (self.stop_requested or !self.auth.signed_in or self.auth.generation != gen) return false;
+                if (self.auth.ensureAccessToken(io, true)) |t1| {
+                    refreshed_tok = self.gpa.dupe(u8, t1) catch null;
+                }
+            }
+            const t1 = refreshed_tok orelse return false;
+            resp = auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "GET", url, t1, &.{}, null) catch return false;
+        }
+        defer resp.deinit(self.gpa);
+        if (resp.status != 200) return false;
+
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        if (self.stop_requested or !self.auth.signed_in or self.auth.generation != gen) return false;
+        return self.applyRegistryResponseJson(org_copy.?, resp.body, true);
+    }
+
+    /// Apply a `/registry/{orgId}/rows` JSON response using O(1) hash-indexed lookups and delta-cursor
+    /// fast-skip (`rows.len == 0` -> 0 allocations, 0 JSON serializations, 0 redundant broadcasts).
+    pub fn applyRegistryResponseJson(self: *EngineHost, org_id: []const u8, body: []const u8, persist_disk: bool) bool {
+        self.ensureRegistryOrgCursor(org_id);
+
+        var parsed = json.parseFromSlice(json.Value, self.gpa, body, .{}) catch return false;
         defer parsed.deinit();
         if (parsed.value != .object) return false;
-        const rows_val = parsed.value.object.get("rows") orelse return false;
+        const obj = parsed.value.object;
+        const rows_val = obj.get("rows") orelse return false;
         if (rows_val != .array) return false;
 
-        // Pass 1: devices, spaces, chats
-        for (rows_val.array.items) |row_val| {
+        if (obj.get("seq")) |sv| {
+            if (sv == .integer and sv.integer >= 0) {
+                const next_seq: u64 = @intCast(sv.integer);
+                if (next_seq > self.registry_seq) self.registry_seq = next_seq;
+            }
+        }
+
+        const rows = rows_val.array.items;
+        // O(1) delta fast-path: quiet poll (`rows == []`) skips all index construction, JSON encoding & broadcasts.
+        if (rows.len == 0) return true;
+
+        var dev_idx: std.StringHashMapUnmanaged(usize) = .empty;
+        defer dev_idx.deinit(self.gpa);
+        dev_idx.ensureTotalCapacity(self.gpa, @intCast(self.devices.items.len + 16)) catch {};
+        for (self.devices.items, 0..) |d, i| dev_idx.put(self.gpa, d.id, i) catch {};
+
+        var space_idx: std.StringHashMapUnmanaged(usize) = .empty;
+        defer space_idx.deinit(self.gpa);
+        space_idx.ensureTotalCapacity(self.gpa, @intCast(self.spaces.items.len + 16)) catch {};
+        for (self.spaces.items, 0..) |s, i| space_idx.put(self.gpa, s.id, i) catch {};
+
+        var chat_idx: std.StringHashMapUnmanaged(usize) = .empty;
+        defer chat_idx.deinit(self.gpa);
+        chat_idx.ensureTotalCapacity(self.gpa, @intCast(self.chats.items.len + rows.len)) catch {};
+        for (self.chats.items, 0..) |c, i| chat_idx.put(self.gpa, c.id, i) catch {};
+
+        var dirty_devices = false;
+        var dirty_spaces = false;
+        var dirty_chats = false;
+        var dirty_sessions = false;
+
+        // Pass 1: O(1) indexed upserts & tombstone deletions for devices, spaces, chats
+        for (rows) |row_val| {
             if (row_val != .object) continue;
             const ro = row_val.object;
-            if (ro.get("deleted")) |dv| if (dv == .bool and dv.bool) continue;
             const kind = regOptStr(ro, "kind") orelse continue;
             const row_id = regOptStr(ro, "id") orelse continue;
+            const is_deleted = if (ro.get("deleted")) |dv| (dv == .bool and dv.bool) else false;
+
+            if (is_deleted) {
+                if (std.mem.eql(u8, kind, "chats")) {
+                    if (self.deleteChat(row_id)) {
+                        dirty_chats = true;
+                        dirty_sessions = true;
+                        chat_idx.clearRetainingCapacity();
+                        for (self.chats.items, 0..) |c, i| chat_idx.put(self.gpa, c.id, i) catch {};
+                    }
+                } else if (std.mem.eql(u8, kind, "spaces")) {
+                    if (self.deleteSpace(row_id)) {
+                        dirty_spaces = true;
+                        space_idx.clearRetainingCapacity();
+                        for (self.spaces.items, 0..) |s, i| space_idx.put(self.gpa, s.id, i) catch {};
+                    }
+                } else if (std.mem.eql(u8, kind, "devices")) {
+                    if (self.forgetDevice(row_id)) {
+                        dirty_devices = true;
+                        dev_idx.clearRetainingCapacity();
+                        for (self.devices.items, 0..) |d, i| dev_idx.put(self.gpa, d.id, i) catch {};
+                    }
+                }
+                continue;
+            }
+
             const fv = ro.get("fields") orelse continue;
             if (fv != .object) continue;
             const f = fv.object;
 
             if (std.mem.eql(u8, kind, "devices")) {
-                self.upsertSyncedDevice(row_id, f) catch continue;
+                if (self.upsertSyncedDeviceIndexed(row_id, f, &dev_idx)) |_| {
+                    dirty_devices = true;
+                } else |_| {}
             } else if (std.mem.eql(u8, kind, "spaces")) {
-                self.upsertSyncedSpace(row_id, f) catch continue;
+                if (self.upsertSyncedSpaceIndexed(row_id, f, &space_idx)) |_| {
+                    dirty_spaces = true;
+                } else |_| {}
             } else if (std.mem.eql(u8, kind, "chats")) {
-                self.upsertSyncedChat(row_id, f) catch continue;
+                if (self.upsertSyncedChatIndexed(row_id, f, &chat_idx)) |_| {
+                    dirty_chats = true;
+                } else |_| {}
             }
         }
 
-        // Pass 2: sessions (attached to synced chats)
-        for (rows_val.array.items) |row_val| {
+        // Pass 2: O(1) indexed session status attachment (`chat_idx.get(cid)`)
+        for (rows) |row_val| {
             if (row_val != .object) continue;
             const ro = row_val.object;
             if (ro.get("deleted")) |dv| if (dv == .bool and dv.bool) continue;
@@ -3090,19 +3708,18 @@ pub const EngineHost = struct {
             const f = fv.object;
 
             const cid = regOptStr(f, "chatId") orelse row_id;
-            const status = regOptStr(f, "status") orelse "idle";
-            const started_ms = regOptEpochMs(f, "startedAt");
-            const updated_ms = regOptEpochMs(f, "updatedAt");
-            for (self.chats.items) |*c| {
-                if (std.mem.eql(u8, c.id, cid)) {
-                    if (self.gpa.dupe(u8, status)) |scopy| {
-                        if (c.activity_status) |old| self.gpa.free(old);
-                        c.activity_status = scopy;
-                    } else |_| {}
-                    if (started_ms > 0) c.activity_started_at_ms = started_ms;
-                    if (updated_ms > 0) c.activity_updated_at_ms = updated_ms;
-                    break;
-                }
+            if (chat_idx.get(cid)) |c_i| {
+                const c = &self.chats.items[c_i];
+                const status = regOptStr(f, "status") orelse "idle";
+                const started_ms = regOptEpochMs(f, "startedAt");
+                const updated_ms = regOptEpochMs(f, "updatedAt");
+                if (self.gpa.dupe(u8, status)) |scopy| {
+                    if (c.activity_status) |old| self.gpa.free(old);
+                    c.activity_status = scopy;
+                    dirty_sessions = true;
+                } else |_| {}
+                if (started_ms > 0) c.activity_started_at_ms = started_ms;
+                if (updated_ms > 0) c.activity_updated_at_ms = updated_ms;
             }
         }
 
@@ -3124,6 +3741,7 @@ pub const EngineHost = struct {
                     if (std.mem.eql(u8, self.spaces.items[idx].id, "space-zig-default")) {
                         self.spaces.items[idx].deinit(self.gpa);
                         _ = self.spaces.orderedRemove(idx);
+                        dirty_spaces = true;
                         break;
                     }
                     idx += 1;
@@ -3131,27 +3749,99 @@ pub const EngineHost = struct {
             }
         }
 
-        if (self.devicesJson()) |dj| {
-            defer self.gpa.free(dj);
-            self.broadcastWatch(.devices, null, dj) catch {};
-        } else |_| {}
-        if (self.spacesJson()) |spj| {
-            defer self.gpa.free(spj);
-            self.broadcastWatch(.spaces, null, spj) catch {};
-        } else |_| {}
-        if (self.chatsJson()) |chj| {
-            defer self.gpa.free(chj);
-            self.broadcastWatch(.chats, null, chj) catch {};
-        } else |_| {}
-        if (self.sessionsJson()) |sj| {
-            defer self.gpa.free(sj);
-            self.broadcastWatch(.sessions, null, sj) catch {};
-        } else |_| {}
+        if (dirty_devices) {
+            if (self.devicesJson()) |dj| {
+                defer self.gpa.free(dj);
+                self.broadcastWatch(.devices, null, dj) catch {};
+            } else |_| {}
+        }
+        if (dirty_spaces) {
+            if (self.spacesJson()) |spj| {
+                defer self.gpa.free(spj);
+                self.broadcastWatch(.spaces, null, spj) catch {};
+            } else |_| {}
+        }
+        if (dirty_chats) {
+            if (self.chatsJson()) |chj| {
+                defer self.gpa.free(chj);
+                self.broadcastWatch(.chats, null, chj) catch {};
+            } else |_| {}
+        }
+        if (dirty_chats or dirty_sessions) {
+            if (self.sessionsJson()) |sj| {
+                defer self.gpa.free(sj);
+                self.broadcastWatch(.sessions, null, sj) catch {};
+            } else |_| {}
+        }
+
+        if (persist_disk and (dirty_devices or dirty_spaces or dirty_chats or dirty_sessions)) {
+            self.saveRegistryCacheFile();
+        }
 
         return true;
     }
 
-    fn upsertSyncedDevice(self: *EngineHost, row_id: []const u8, f: json.ObjectMap) !void {
+    /// Reference O(N^2) linear-scan + unconditional full-rescan path preserved solely so
+    /// performance shape tests (`AGENTS.md`) can assert `fast_path >= 10x * slow_path` on synthetic data.
+    pub fn applyRegistryRowsNaiveLinearForBench(self: *EngineHost, body: []const u8) bool {
+        var parsed = json.parseFromSlice(json.Value, self.gpa, body, .{}) catch return false;
+        defer parsed.deinit();
+        if (parsed.value != .object) return false;
+        const rows_val = parsed.value.object.get("rows") orelse return false;
+        if (rows_val != .array) return false;
+
+        for (rows_val.array.items) |row_val| {
+            if (row_val != .object) continue;
+            const ro = row_val.object;
+            if (ro.get("deleted")) |dv| if (dv == .bool and dv.bool) continue;
+            const kind = regOptStr(ro, "kind") orelse continue;
+            const row_id = regOptStr(ro, "id") orelse continue;
+            const fv = ro.get("fields") orelse continue;
+            if (fv != .object) continue;
+            const f = fv.object;
+            if (std.mem.eql(u8, kind, "devices")) {
+                self.upsertSyncedDeviceIndexed(row_id, f, null) catch continue;
+            } else if (std.mem.eql(u8, kind, "spaces")) {
+                self.upsertSyncedSpaceIndexed(row_id, f, null) catch continue;
+            } else if (std.mem.eql(u8, kind, "chats")) {
+                self.upsertSyncedChatIndexed(row_id, f, null) catch continue;
+            }
+        }
+        for (rows_val.array.items) |row_val| {
+            if (row_val != .object) continue;
+            const ro = row_val.object;
+            if (ro.get("deleted")) |dv| if (dv == .bool and dv.bool) continue;
+            const kind = regOptStr(ro, "kind") orelse continue;
+            if (!std.mem.eql(u8, kind, "sessions")) continue;
+            const row_id = regOptStr(ro, "id") orelse continue;
+            const fv = ro.get("fields") orelse continue;
+            if (fv != .object) continue;
+            const f = fv.object;
+            const cid = regOptStr(f, "chatId") orelse row_id;
+            const status = regOptStr(f, "status") orelse "idle";
+            for (self.chats.items) |*c| {
+                if (std.mem.eql(u8, c.id, cid)) {
+                    if (self.gpa.dupe(u8, status)) |scopy| {
+                        if (c.activity_status) |old| self.gpa.free(old);
+                        c.activity_status = scopy;
+                    } else |_| {}
+                    break;
+                }
+            }
+        }
+        if (self.devicesJson()) |dj| self.gpa.free(dj) else |_| {}
+        if (self.spacesJson()) |spj| self.gpa.free(spj) else |_| {}
+        if (self.chatsJson()) |chj| self.gpa.free(chj) else |_| {}
+        if (self.sessionsJson()) |sj| self.gpa.free(sj) else |_| {}
+        return true;
+    }
+
+    fn upsertSyncedDeviceIndexed(
+        self: *EngineHost,
+        row_id: []const u8,
+        f: json.ObjectMap,
+        idx_map: ?*std.StringHashMapUnmanaged(usize),
+    ) !void {
         const id = regOptStr(f, "id") orelse row_id;
         const name = regOptStr(f, "name") orelse "Unknown device";
         const platform = regOptStr(f, "platform") orelse "";
@@ -3159,23 +3849,29 @@ pub const EngineHost = struct {
         const last_seen_ms = regOptEpochMs(f, "lastSeenAt");
         const created_ms = regOptEpochMs(f, "createdAt");
 
-        for (self.devices.items) |*d| {
-            if (std.mem.eql(u8, d.id, id)) {
-                const n_c = try self.gpa.dupe(u8, name);
-                errdefer self.gpa.free(n_c);
-                const p_c = try self.gpa.dupe(u8, platform);
-                errdefer self.gpa.free(p_c);
-                const v_c = if (version) |v| try self.gpa.dupe(u8, v) else null;
-                self.gpa.free(d.name);
-                self.gpa.free(d.platform);
-                if (d.version) |old| self.gpa.free(old);
-                d.name = n_c;
-                d.platform = p_c;
-                d.version = v_c;
-                if (last_seen_ms > 0) d.last_seen_at_ms = last_seen_ms;
-                if (created_ms > 0) d.created_at_ms = created_ms;
-                return;
+        const existing_pos: ?usize = if (idx_map) |m| m.get(id) else blk: {
+            for (self.devices.items, 0..) |d, i| {
+                if (std.mem.eql(u8, d.id, id)) break :blk i;
             }
+            break :blk null;
+        };
+
+        if (existing_pos) |pos| {
+            const d = &self.devices.items[pos];
+            const n_c = try self.gpa.dupe(u8, name);
+            errdefer self.gpa.free(n_c);
+            const p_c = try self.gpa.dupe(u8, platform);
+            errdefer self.gpa.free(p_c);
+            const v_c = if (version) |v| try self.gpa.dupe(u8, v) else null;
+            self.gpa.free(d.name);
+            self.gpa.free(d.platform);
+            if (d.version) |old| self.gpa.free(old);
+            d.name = n_c;
+            d.platform = p_c;
+            d.version = v_c;
+            if (last_seen_ms > 0) d.last_seen_at_ms = last_seen_ms;
+            if (created_ms > 0) d.created_at_ms = created_ms;
+            return;
         }
 
         const id_c = try self.gpa.dupe(u8, id);
@@ -3186,6 +3882,7 @@ pub const EngineHost = struct {
         errdefer self.gpa.free(p_c);
         const v_c = if (version) |v| try self.gpa.dupe(u8, v) else null;
         errdefer if (v_c) |v| self.gpa.free(v);
+        const new_idx = self.devices.items.len;
         try self.devices.append(self.gpa, .{
             .id = id_c,
             .name = n_c,
@@ -3194,9 +3891,15 @@ pub const EngineHost = struct {
             .last_seen_at_ms = last_seen_ms,
             .created_at_ms = created_ms,
         });
+        if (idx_map) |m| m.put(self.gpa, id_c, new_idx) catch {};
     }
 
-    fn upsertSyncedSpace(self: *EngineHost, row_id: []const u8, f: json.ObjectMap) !void {
+    fn upsertSyncedSpaceIndexed(
+        self: *EngineHost,
+        row_id: []const u8,
+        f: json.ObjectMap,
+        idx_map: ?*std.StringHashMapUnmanaged(usize),
+    ) !void {
         const id = regOptStr(f, "id") orelse row_id;
         const path = regOptStr(f, "path") orelse return;
         const dev_id = regOptStr(f, "deviceId") orelse self.device_id;
@@ -3205,27 +3908,33 @@ pub const EngineHost = struct {
         const checkout_id = regOptStr(f, "checkoutId");
         const created_ms = regOptEpochMs(f, "createdAt");
 
-        for (self.spaces.items) |*s| {
-            if (std.mem.eql(u8, s.id, id)) {
-                const d_c = try self.gpa.dupe(u8, dev_id);
-                errdefer self.gpa.free(d_c);
-                const p_c = try self.gpa.dupe(u8, path);
-                errdefer self.gpa.free(p_c);
-                const n_c = try self.gpa.dupe(u8, name);
-                errdefer self.gpa.free(n_c);
-                const co_c = if (checkout_id) |co| try self.gpa.dupe(u8, co) else null;
-                self.gpa.free(s.device_id);
-                self.gpa.free(s.path);
-                self.gpa.free(s.name);
-                if (s.checkout_id) |old| self.gpa.free(old);
-                s.device_id = d_c;
-                s.path = p_c;
-                s.name = n_c;
-                s.git_detected = git;
-                s.checkout_id = co_c;
-                if (created_ms > 0) s.created_at_ms = created_ms;
-                return;
+        const existing_pos: ?usize = if (idx_map) |m| m.get(id) else blk: {
+            for (self.spaces.items, 0..) |s, i| {
+                if (std.mem.eql(u8, s.id, id)) break :blk i;
             }
+            break :blk null;
+        };
+
+        if (existing_pos) |pos| {
+            const s = &self.spaces.items[pos];
+            const d_c = try self.gpa.dupe(u8, dev_id);
+            errdefer self.gpa.free(d_c);
+            const p_c = try self.gpa.dupe(u8, path);
+            errdefer self.gpa.free(p_c);
+            const n_c = try self.gpa.dupe(u8, name);
+            errdefer self.gpa.free(n_c);
+            const co_c = if (checkout_id) |co| try self.gpa.dupe(u8, co) else null;
+            self.gpa.free(s.device_id);
+            self.gpa.free(s.path);
+            self.gpa.free(s.name);
+            if (s.checkout_id) |old| self.gpa.free(old);
+            s.device_id = d_c;
+            s.path = p_c;
+            s.name = n_c;
+            s.git_detected = git;
+            s.checkout_id = co_c;
+            if (created_ms > 0) s.created_at_ms = created_ms;
+            return;
         }
 
         const id_c = try self.gpa.dupe(u8, id);
@@ -3238,6 +3947,7 @@ pub const EngineHost = struct {
         errdefer self.gpa.free(n_c);
         const co_c = if (checkout_id) |co| try self.gpa.dupe(u8, co) else null;
         errdefer if (co_c) |co| self.gpa.free(co);
+        const new_idx = self.spaces.items.len;
         try self.spaces.append(self.gpa, .{
             .id = id_c,
             .device_id = d_c,
@@ -3247,9 +3957,15 @@ pub const EngineHost = struct {
             .checkout_id = co_c,
             .created_at_ms = created_ms,
         });
+        if (idx_map) |m| m.put(self.gpa, id_c, new_idx) catch {};
     }
 
-    fn upsertSyncedChat(self: *EngineHost, row_id: []const u8, f: json.ObjectMap) !void {
+    fn upsertSyncedChatIndexed(
+        self: *EngineHost,
+        row_id: []const u8,
+        f: json.ObjectMap,
+        idx_map: ?*std.StringHashMapUnmanaged(usize),
+    ) !void {
         const id = regOptStr(f, "id") orelse row_id;
         const dev_id = regOptStr(f, "deviceId") orelse self.device_id;
         const space_id = regOptStr(f, "spaceId");
@@ -3319,27 +4035,259 @@ pub const EngineHost = struct {
         rec.last_prompt_at_ms = last_prompt_ms;
         rec.last_seen_at_ms = last_seen_ms;
 
-        for (self.chats.items) |*existing| {
-            if (std.mem.eql(u8, existing.id, id)) {
-                rec.pinned = existing.pinned;
-                if (existing.activity_status) |st| {
-                    rec.activity_status = st;
-                    existing.activity_status = null;
-                }
-                rec.activity_started_at_ms = existing.activity_started_at_ms;
-                rec.activity_updated_at_ms = existing.activity_updated_at_ms;
-                existing.deinit(self.gpa);
-                existing.* = rec;
-                return;
+        const existing_pos: ?usize = if (idx_map) |m| m.get(id) else blk: {
+            for (self.chats.items, 0..) |c, i| {
+                if (std.mem.eql(u8, c.id, id)) break :blk i;
             }
+            break :blk null;
+        };
+
+        if (existing_pos) |pos| {
+            const existing = &self.chats.items[pos];
+            if (last_msg_ms > existing.last_message_at_ms and existing.last_message_at_ms > 0) {
+                self.invalidateCachedTail(id);
+            }
+            rec.pinned = existing.pinned;
+            if (existing.activity_status) |st| {
+                rec.activity_status = st;
+                existing.activity_status = null;
+            }
+            rec.activity_started_at_ms = existing.activity_started_at_ms;
+            rec.activity_updated_at_ms = existing.activity_updated_at_ms;
+            existing.deinit(self.gpa);
+            existing.* = rec;
+            if (idx_map) |m| m.put(self.gpa, existing.id, pos) catch {};
+            return;
         }
+        const new_idx = self.chats.items.len;
         try self.chats.append(self.gpa, rec);
+        if (idx_map) |m| m.put(self.gpa, self.chats.items[new_idx].id, new_idx) catch {};
     }
 
-    /// Fetch `/chat2/{chatId}/tail` from the edge server and cache the `messages` JSON array
-    /// so opening any cloud-synced chat renders its full transcript immediately.
+    fn fetchChatTailBodyOutsideLock(
+        self: *EngineHost,
+        io: std.Io,
+        edge_raw: []const u8,
+        tok0: []const u8,
+        gen: u64,
+        chat_id: []const u8,
+    ) ?[]u8 {
+        const base = std.mem.trimEnd(u8, edge_raw, "/");
+        const enc_cid = auth_host.urlEncodeAlloc(self.gpa, chat_id) catch return null;
+        defer self.gpa.free(enc_cid);
+        const url = std.fmt.allocPrint(self.gpa, "{s}/chat2/{s}/tail", .{ base, enc_cid }) catch return null;
+        defer self.gpa.free(url);
+
+        var resp = auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "GET", url, tok0, &.{}, null) catch return null;
+        if (resp.status == 401) {
+            resp.deinit(self.gpa);
+            var t1_copy: ?[]u8 = null;
+            defer if (t1_copy) |t| self.gpa.free(t);
+            {
+                self.mutex.lockUncancelable(io);
+                defer self.mutex.unlock(io);
+                if (self.stop_requested or !self.auth.signed_in or self.auth.generation != gen) return null;
+                if (self.auth.ensureAccessToken(io, true)) |t1| {
+                    t1_copy = self.gpa.dupe(u8, t1) catch null;
+                }
+            }
+            const t1 = t1_copy orelse return null;
+            resp = auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "GET", url, t1, &.{}, null) catch return null;
+        }
+        defer resp.deinit(self.gpa);
+        if (resp.status != 200) return null;
+
+        var parsed = json.parseFromSlice(json.Value, self.gpa, resp.body, .{}) catch return null;
+        defer parsed.deinit();
+        if (parsed.value != .object) return null;
+        const msgs_val = parsed.value.object.get("messages") orelse return null;
+        if (msgs_val != .array) return null;
+        return std.fmt.allocPrint(self.gpa, "{f}", .{json.fmt(msgs_val, .{})}) catch null;
+    }
+
+    fn spawnAsyncTailFetch(self: *EngineHost, chat_id: []const u8) bool {
+        const io = self.io orelse return false;
+        const edge_raw = self.auth.edge_url orelse return false;
+        const tok = self.auth.ensureAccessToken(io, false) orelse return false;
+
+        const TailWorkerCtx = struct {
+            host: *EngineHost,
+            wio: std.Io,
+            gen: u64,
+            edge: []u8,
+            token: []u8,
+            cid: []u8,
+
+            fn run(ctx: *@This()) void {
+                const host = ctx.host;
+                const gpa = host.gpa;
+                defer {
+                    gpa.free(ctx.edge);
+                    gpa.free(ctx.token);
+                    gpa.free(ctx.cid);
+                    gpa.destroy(ctx);
+                    _ = host.bg_workers_active.fetchSub(1, .acq_rel);
+                }
+                const msgs_json = host.fetchChatTailBodyOutsideLock(ctx.wio, ctx.edge, ctx.token, ctx.gen, ctx.cid) orelse return;
+                host.mutex.lockUncancelable(ctx.wio);
+                defer host.mutex.unlock(ctx.wio);
+                if (host.stop_requested or !host.auth.signed_in or host.auth.generation != ctx.gen) {
+                    gpa.free(msgs_json);
+                    return;
+                }
+                if (host.storeCachedTailInMemoryOwned(ctx.cid, msgs_json, true)) |stored| {
+                    if (std.fmt.allocPrint(gpa, "{{\"historyPending\":false,\"reset\":{s}}}", .{stored})) |frame_json| {
+                        defer gpa.free(frame_json);
+                        host.broadcastWatch(.doc_messages, ctx.cid, frame_json) catch {};
+                    } else |_| {}
+                }
+            }
+        };
+
+        const ctx = self.gpa.create(TailWorkerCtx) catch return false;
+        const edge_c = self.gpa.dupe(u8, edge_raw) catch {
+            self.gpa.destroy(ctx);
+            return false;
+        };
+        const tok_c = self.gpa.dupe(u8, tok) catch {
+            self.gpa.free(edge_c);
+            self.gpa.destroy(ctx);
+            return false;
+        };
+        const cid_c = self.gpa.dupe(u8, chat_id) catch {
+            self.gpa.free(edge_c);
+            self.gpa.free(tok_c);
+            self.gpa.destroy(ctx);
+            return false;
+        };
+        ctx.* = .{
+            .host = self,
+            .wio = io,
+            .gen = self.auth.generation,
+            .edge = edge_c,
+            .token = tok_c,
+            .cid = cid_c,
+        };
+        _ = self.bg_workers_active.fetchAdd(1, .acq_rel);
+        if (std.Thread.spawn(.{}, TailWorkerCtx.run, .{ctx})) |th| {
+            th.detach();
+            return true;
+        } else |_| {
+            _ = self.bg_workers_active.fetchSub(1, .acq_rel);
+            self.gpa.free(edge_c);
+            self.gpa.free(tok_c);
+            self.gpa.free(cid_c);
+            self.gpa.destroy(ctx);
+            return false;
+        }
+    }
+
+    /// Prefetch `/chat2/{chatId}/tail` for the `max_chats` most recently active uncached synced chats
+    /// across up to 4 concurrent warm HTTP/2 streams without holding `self.mutex` during network I/O.
+    pub fn prefetchRecentChatTailsUnlocked(self: *EngineHost, io: std.Io, max_chats: usize) void {
+        const Candidate = struct { id: []u8, ts: i64 };
+        var candidates: std.ArrayList(Candidate) = .empty;
+        defer {
+            for (candidates.items) |c| self.gpa.free(c.id);
+            candidates.deinit(self.gpa);
+        }
+
+        var gen: u64 = 0;
+        var edge_copy: ?[]u8 = null;
+        var tok_copy: ?[]u8 = null;
+        defer {
+            if (edge_copy) |e| self.gpa.free(e);
+            if (tok_copy) |t| self.gpa.free(t);
+        }
+
+        {
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
+            if (self.stop_requested or !self.auth.signed_in) return;
+            const er = self.auth.edge_url orelse return;
+            const tok = self.auth.ensureAccessToken(io, false) orelse return;
+            gen = self.auth.generation;
+            edge_copy = self.gpa.dupe(u8, er) catch return;
+            tok_copy = self.gpa.dupe(u8, tok) catch return;
+
+            for (self.chats.items) |c| {
+                if (c.archived) continue;
+                if (self.docs.contains(c.id) or self.store.loadSnapshot(c.id) != null) continue;
+                if (self.lookupCachedTailJson(c.id) != null) continue;
+                const ts = @max(c.last_message_at_ms, c.created_at_ms);
+                const id_c = self.gpa.dupe(u8, c.id) catch continue;
+                candidates.append(self.gpa, .{ .id = id_c, .ts = ts }) catch {
+                    self.gpa.free(id_c);
+                    continue;
+                };
+            }
+        }
+
+        if (candidates.items.len == 0) return;
+        std.mem.sort(Candidate, candidates.items, {}, struct {
+            fn desc(_: void, a: Candidate, b: Candidate) bool {
+                return a.ts > b.ts;
+            }
+        }.desc);
+
+        const limit = @min(candidates.items.len, max_chats);
+        var next_idx = std.atomic.Value(usize).init(0);
+
+        const BatchWorker = struct {
+            host: *EngineHost,
+            wio: std.Io,
+            wgen: u64,
+            edge: []const u8,
+            tok: []const u8,
+            items: []const Candidate,
+            cursor: *std.atomic.Value(usize),
+
+            fn run(ctx: @This()) void {
+                while (!ctx.host.stop_requested) {
+                    const idx = ctx.cursor.fetchAdd(1, .monotonic);
+                    if (idx >= ctx.items.len) return;
+                    const cid = ctx.items[idx].id;
+                    const msgs = ctx.host.fetchChatTailBodyOutsideLock(ctx.wio, ctx.edge, ctx.tok, ctx.wgen, cid) orelse continue;
+                    ctx.host.mutex.lockUncancelable(ctx.wio);
+                    defer ctx.host.mutex.unlock(ctx.wio);
+                    if (ctx.host.stop_requested or !ctx.host.auth.signed_in or ctx.host.auth.generation != ctx.wgen) {
+                        ctx.host.gpa.free(msgs);
+                        return;
+                    }
+                    if (ctx.host.storeCachedTailInMemoryOwned(cid, msgs, true)) |stored| {
+                        if (std.fmt.allocPrint(ctx.host.gpa, "{{\"historyPending\":false,\"reset\":{s}}}", .{stored})) |frame_json| {
+                            defer ctx.host.gpa.free(frame_json);
+                            ctx.host.broadcastWatch(.doc_messages, cid, frame_json) catch {};
+                        } else |_| {}
+                    }
+                }
+            }
+        };
+
+        const worker_count = @min(@as(usize, 4), limit);
+        const wctx = BatchWorker{
+            .host = self,
+            .wio = io,
+            .wgen = gen,
+            .edge = edge_copy.?,
+            .tok = tok_copy.?,
+            .items = candidates.items[0..limit],
+            .cursor = &next_idx,
+        };
+        var threads: [3]?std.Thread = .{ null, null, null };
+        for (0..worker_count - 1) |ti| {
+            threads[ti] = std.Thread.spawn(.{}, BatchWorker.run, .{wctx}) catch null;
+        }
+        BatchWorker.run(wctx);
+        for (threads) |th_opt| {
+            if (th_opt) |th| th.join();
+        }
+    }
+
+    /// Fetch `/chat2/{chatId}/tail` from the edge server over warm HTTP/2 and cache the `messages` JSON array
+    /// in memory and on disk so opening any cloud-synced chat renders its full transcript immediately.
     pub fn fetchEdgeChatTailMessagesJson(self: *EngineHost, chat_id: []const u8) ?[]const u8 {
-        if (self.remote_tails.get(chat_id)) |cached| return cached;
+        if (self.lookupCachedTailJson(chat_id)) |cached| return cached;
         const io = self.io orelse return null;
         if (!self.auth.signed_in) return null;
         const edge_raw = self.auth.edge_url orelse return null;
@@ -3351,11 +4299,11 @@ pub const EngineHost = struct {
         const url = std.fmt.allocPrint(self.gpa, "{s}/chat2/{s}/tail", .{ base, enc_cid }) catch return null;
         defer self.gpa.free(url);
 
-        var resp = auth_host.AuthManager.edgeRequest(self.gpa, io, "GET", url, tok0, null) catch return null;
+        var resp = auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "GET", url, tok0, &.{}, null) catch return null;
         if (resp.status == 401) {
             resp.deinit(self.gpa);
             const tok1 = self.auth.ensureAccessToken(io, true) orelse return null;
-            resp = auth_host.AuthManager.edgeRequest(self.gpa, io, "GET", url, tok1, null) catch return null;
+            resp = auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "GET", url, tok1, &.{}, null) catch return null;
         }
         defer resp.deinit(self.gpa);
         if (resp.status != 200) return null;
@@ -3367,30 +4315,7 @@ pub const EngineHost = struct {
         if (msgs_val != .array) return null;
 
         const msgs_json = std.fmt.allocPrint(self.gpa, "{f}", .{json.fmt(msgs_val, .{})}) catch return null;
-        errdefer self.gpa.free(msgs_json);
-
-        // Keep remote_tails strictly bounded (cap at 64 cached transcripts).
-        if (self.remote_tails.count() >= 64) {
-            var it = self.remote_tails.iterator();
-            if (it.next()) |first| {
-                const evict_k = first.key_ptr.*;
-                if (self.remote_tails.fetchRemove(evict_k)) |old| {
-                    self.gpa.free(old.key);
-                    self.gpa.free(old.value);
-                }
-            }
-        }
-
-        const key_copy = self.gpa.dupe(u8, chat_id) catch {
-            self.gpa.free(msgs_json);
-            return null;
-        };
-        self.remote_tails.put(self.gpa, key_copy, msgs_json) catch {
-            self.gpa.free(key_copy);
-            self.gpa.free(msgs_json);
-            return null;
-        };
-        return self.remote_tails.get(chat_id);
+        return self.storeCachedTailInMemoryOwned(chat_id, msgs_json, true);
     }
 
     fn regOptStr(o: json.ObjectMap, key: []const u8) ?[]const u8 {
@@ -3917,8 +4842,8 @@ test "1:1 Rust RPC parity (all 153 methods), O(1) dispatch, and Lean-verified ze
     defer arena.deinit();
     const a = arena.allocator();
 
-    // 1. Verify O(1) static map contains all 148 canonical Rust RPC methods + 5 compatibility aliases = 153.
-    try testing.expectEqual(@as(usize, 153), rpc_method_map.kvs.len);
+    // 1. Verify O(1) static map contains all 154 canonical Rust RPC methods + 5 compatibility aliases = 159.
+    try testing.expectEqual(@as(usize, 159), rpc_method_map.kvs.len);
 
     var host = try EngineHost.init(gpa, "dev-parity", "ParityHost");
     defer host.deinit();
@@ -4246,7 +5171,7 @@ test "Mechanical 1:1 source-of-truth verification against crates/rpc/src/lib.rs,
     defer arena.deinit();
     const a = arena.allocator();
 
-    // 1. Parse `crates/rpc/src/lib.rs` `pub mod methods` directly from disk and verify all 148 RPC methods exist in `rpc_method_map`.
+    // 1. Parse `crates/rpc/src/lib.rs` `pub mod methods` directly from disk and verify all 154 RPC methods exist in `rpc_method_map`.
     const rpc_lib_rs = try std.Io.Dir.cwd().readFileAlloc(io, "../../crates/rpc/src/lib.rs", a, .limited(256 * 1024));
     const mod_start = std.mem.indexOf(u8, rpc_lib_rs, "pub mod methods {") orelse return error.MissingMethodsMod;
     const mod_end_rel = std.mem.indexOfPos(u8, rpc_lib_rs, mod_start, "\n}") orelse return error.MissingMethodsEnd;
@@ -4263,7 +5188,7 @@ test "Mechanical 1:1 source-of-truth verification against crates/rpc/src/lib.rs,
         try testing.expect(rpc_method_map.get(method_name) != null);
         rust_method_count += 1;
     }
-    try testing.expectEqual(@as(usize, 148), rust_method_count);
+    try testing.expectEqual(@as(usize, 154), rust_method_count);
 
     // 2. Parse `crates/engine/src/rpc.rs` `enum MutateParams` and `enum FinishQueuedMessageEditAction` directly from disk.
     const engine_rpc_rs = try std.Io.Dir.cwd().readFileAlloc(io, "../../crates/engine/src/rpc.rs", a, .limited(512 * 1024));
@@ -4785,4 +5710,56 @@ test "Headed browser OAuth loopback callback (SignIn -> /callback -> autoSelectO
     try testing.expectEqualStrings("cg_sk_synthetic_device_2", host.auth.codegraff_api_key.?);
     try testing.expect(!host.auth.codegraff_pending);
     host.mutex.unlock(io);
+}
+
+test "harness-updates-v1 capability and stateful Watch/Check/Policy/Dismiss/Apply/Cancel lifecycle" {
+    const gpa = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var host = try EngineHost.init(gpa, "dev-updates", "Synthetic Zig Studio");
+    defer host.deinit();
+
+    // 1. EngineInfo advertises `harness-updates-v1`.
+    const info = try host.handle("EngineInfo", json.Value{ .object = .empty });
+    defer gpa.free(info.unary_json);
+    try testing.expect(std.mem.indexOf(u8, info.unary_json, "\"harness-updates-v1\"") != null);
+
+    // 2. Seed an available Claude Code update and subscribe via WatchHarnessUpdates.
+    {
+        const rec = try host.getOrCreateHarnessUpdate("claude-code");
+        rec.installed_version = try gpa.dupe(u8, "2.1.319");
+        rec.latest_version = try gpa.dupe(u8, "2.1.322");
+        rec.phase = "available";
+        rec.can_apply = true;
+        rec.can_cancel = true;
+    }
+    var watch_out = try host.handleWithId(77, "WatchHarnessUpdates", json.Value{ .object = .empty });
+    defer watch_out.stream_items_json.deinit(gpa);
+    try testing.expect(watch_out.stream_items_json.checked);
+    try testing.expect(std.mem.indexOf(u8, watch_out.stream_items_json.items[0], "\"installedVersion\":\"2.1.319\"") != null);
+    try testing.expect(std.mem.indexOf(u8, watch_out.stream_items_json.items[0], "\"latestVersion\":\"2.1.322\"") != null);
+
+    // 3. SetHarnessUpdatePolicy, DismissHarnessUpdate, CancelHarnessUpdate, and ApplyHarnessUpdate push live frames.
+    const pol_p = try json.parseFromSliceLeaky(json.Value, a, "{\"harness\":\"claude-code\",\"autoUpdate\":true}", .{});
+    const pol_out = try host.handle("SetHarnessUpdatePolicy", pol_p);
+    defer gpa.free(pol_out.unary_json);
+    try testing.expect(std.mem.indexOf(u8, pol_out.unary_json, "\"autoUpdate\":true") != null);
+
+    const dis_p = try json.parseFromSliceLeaky(json.Value, a, "{\"harness\":\"claude-code\",\"version\":\"2.1.322\"}", .{});
+    const dis_out = try host.handle("DismissHarnessUpdate", dis_p);
+    defer gpa.free(dis_out.unary_json);
+    try testing.expect(std.mem.indexOf(u8, dis_out.unary_json, "\"dismissedVersion\":\"2.1.322\"") != null);
+
+    const can_p = try json.parseFromSliceLeaky(json.Value, a, "{\"harness\":\"claude-code\"}", .{});
+    const can_out = try host.handle("CancelHarnessUpdate", can_p);
+    defer gpa.free(can_out.unary_json);
+    try testing.expect(std.mem.indexOf(u8, can_out.unary_json, "\"phase\":\"available\"") != null);
+
+    const app_out = try host.handle("ApplyHarnessUpdate", can_p);
+    defer gpa.free(app_out.unary_json);
+    try testing.expect(std.mem.indexOf(u8, app_out.unary_json, "\"phase\":\"updated\"") != null);
+    try testing.expect(std.mem.indexOf(u8, app_out.unary_json, "\"installedVersion\":\"2.1.322\"") != null);
+    try testing.expectEqual(@as(usize, 4), host.pushed_frames.items.len);
 }

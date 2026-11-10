@@ -33,7 +33,7 @@ pub const H2SessionPool = struct {
     pub const max_idle: usize = 8;
 
     mutex: std.Io.Mutex = .init,
-    slots: [max_idle]?*http_zig.Session = .{null} ** max_idle,
+    slots: [max_idle]?*http_zig.Session = @splat(null),
     hits: std.atomic.Value(u64) = .init(0),
     misses: std.atomic.Value(u64) = .init(0),
 

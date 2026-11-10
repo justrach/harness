@@ -93,13 +93,14 @@ struct SelectableText: UIViewRepresentable {
             let proposedWidth: CGFloat
             if wraps, let width = proposal.width {
                 proposedWidth = width
+            } else if let cached = naturalWidth {
+                proposedWidth = cached
             } else {
-                if naturalWidth == nil {
-                    naturalWidth = ceil(text.boundingRect(
-                        with: CGSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude),
-                        options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil).width)
-                }
-                proposedWidth = naturalWidth!
+                let measured = ceil(text.boundingRect(
+                    with: CGSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude),
+                    options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil).width)
+                naturalWidth = measured
+                proposedWidth = measured
             }
             let width = max(1, proposedWidth)
             if let size = measurements[width] { return size }

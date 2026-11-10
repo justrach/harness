@@ -15,6 +15,7 @@ fn hasTint(t: *ui.Tester, tint: ui.Color) bool {
 }
 
 test "Frosted glass changes the shell live but keeps the writing plane opaque" {
+    if (comptime builtin.os.tag != .macos and builtin.os.tag != .windows) return error.SkipZigTest;
     @import("theme.zig").registerFonts();
     var a: App = .init(testing.allocator, testing.io, 1);
     defer a.deinit();

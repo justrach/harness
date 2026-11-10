@@ -38,7 +38,17 @@ pub fn docked(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (a.wizard != null) {
         const q = ui.div(c).column().offset(0, lift);
         defer q.end();
-        return @import("view_question.zig").panel(c, a, k, w);
+        // The question may be taller than its pane (a split, a short
+        // window): it is told the room the dock has, the pane as last laid
+        // out less the bars the conversation shares it with.
+        const actions = @import("view_actions.zig");
+        const pane = c.node(outer.index).parent;
+        c.node(pane).layout_dependent = true;
+        const pane_h = if (c.rects.get(c.node(pane).id)) |r| r.h else c.size.h;
+        return @import("view_question.zig").panel(c, a, k, w, .{
+            .height = pane_h - actions.toolbarHeight(a) - actions.dockHeight(a),
+            .dock = outer.index,
+        });
     }
     const expanded = attachments.count(a) > 0 or composerFlip(
         a.view.composer_expanded,
@@ -147,7 +157,10 @@ pub fn pill(c: *ui.Context, a: *App, k: theme.Colors, w: f32, shape: Shape, corn
     defer box.end();
     // The whole writing plane focuses the input, including its padding.
     // Picker controls keep their own focus when they open.
-    if (box.clicked() and a.picker == .none) a.view.focus_composer = true;
+    if (box.clicked() and a.picker == .none and !a.view.write_open) {
+        a.view.focus_composer = true;
+        c.selection.clear();
+    }
     if (c.rects.get(c.node(box.index).id)) |r| a.view.composer_anchor = r else if (a.window == null) c.animationFrame();
     if (shape == .expanded) attachmentStrip(c, a, k, w);
     {
@@ -177,11 +190,13 @@ pub fn pill(c: *ui.Context, a: *App, k: theme.Colors, w: f32, shape: Shape, corn
     const actions = ui.div(c).row().wFull().h(42).px(12).pt(2).pb(8).itemsCenter();
     defer actions.end();
     attachButtons(c, a, k);
-    // The Write page, while there's a draft or the field has the keys.
-    if (a.composer.text().len > 0 or focused) {
-        _ = c.leaf(.{ .width = .{ .px = 2 } }, .none, null);
-        @import("view_write.zig").button(c, a, k);
-    }
+    // Keep the expand button mounted whenever the composer is expanded
+    // (`fixed_write_button_survives_focus_blur` in `Nano/FrameSchedule.lean`),
+    // so `ui.textField` blurring `c.focus` on `mouseDown` never unmounts
+    // `composer-write` before `mouseUp` completes `clicked()`.
+    _ = c.leaf(.{ .width = .{ .px = 2 } }, .none, null);
+    @import("view_write.zig").button(c, a, k);
+    if (a.view.write_open) a.view.focus_composer = false;
     ui.spacer(c);
     send(c, a, k);
 }
@@ -246,8 +261,12 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
     attachments.paste(c, a);
     const field_id = c.peekId(null);
     keepFocus(c, a, field_id);
+    const prev_edit = c.edits.get(field_id);
+    const prev_caret: ?usize = if (prev_edit) |e| e.caret else null;
+    const prev_anchor: ?usize = if (prev_edit) |e| e.anchor else null;
     const viewport = transcript_view.paneHeight(c, a) orelse c.size.h;
     const max_lines: u16 = @intFromFloat(@max(1, @min(11, @floor(viewport * 0.35 / 22.75))));
+    const field_index: u32 = @intCast(c.nodes.items.len);
     const r = ui.textField(c, &a.composer, .{
         .placeholder = placeholder,
         .width = .fill,
@@ -262,7 +281,22 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
         .caret = message_caret,
         .caret_color = k.accent,
     });
+    c.node(field_index).style.scroll_bar = false;
+    _ = c.scrollbars.remove(field_id);
     _ = c.anims.remove(field_id);
+    if (c.edits.get(field_id)) |e| {
+        const clicked_field = c.input.pressed and c.input.button == .left and !c.input.secondary and !c.right_press and c.hot == field_id;
+        const moved_selection = prev_caret != null and (e.caret != prev_caret.? or e.anchor != prev_anchor.?);
+        if (clicked_field or r.changed or moved_selection) c.selection.clear();
+    }
+    if (r.focused and c.shortcut(.{ .key = 'a', .cmd = true })) {
+        if (c.edits.getPtr(field_id)) |e| {
+            e.anchor = 0;
+            e.caret = a.composer.text().len;
+            c.selection.clear();
+            c.changed = true;
+        }
+    }
     // "Send messages with" (Settings › Shortcuts): Enter sends, or starts a
     // new line and ⌘↩ sends (`composerSendBehavior`).
     a.view.composer_caret = r.caret;
@@ -327,7 +361,10 @@ fn recall(c: *ui.Context, a: *App, id: u64) void {
     if (!history.wantsStep(&a.prompt_nav, text, delta, f.caret, f.anchor, f.marked != null)) return;
     _ = c.shortcut(s);
     const next = a.prompt_nav.step(a.gpa, a.transcript.entries.items, text, delta) catch return;
-    if (next) |t| a.composer.set(t);
+    if (next) |t| {
+        a.composer.set(t);
+        c.selection.clear();
+    }
 }
 
 /// The composer has the keys after the window moves to another chat, pane
@@ -347,8 +384,9 @@ fn keepFocus(c: *ui.Context, a: *App, id: u64) void {
 }
 
 /// The model chip: what the next message runs on, 24 tall at the footer's
-/// leading edge (`PickerKind::HarnessModel`'s trigger).
-pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) void {
+/// leading edge (`PickerKind::HarnessModel`'s trigger). Returns the width
+/// it takes this frame, for the footer to share out the rest.
+pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) f32 {
     const mp = @import("model_picker.zig");
     const t = a.target();
     const room = @max(80, transcript_view.paneWidth(c, a) - 32 - 100);
@@ -375,6 +413,11 @@ pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) void {
 
     var base = ui.div(c).row().h(24).maxW(max_chip_w).px(6).gap(6).itemsCenter().rounded(8).clip();
     if (width_sample.moving) base = base.w(width_sample.value);
+    // At rest it is its content: the glyph (the 5-point loader until an
+    // agent is known) in its insets, the label's gap (kept even for no
+    // label), and the words.
+    const glyph_w: f32 = if (!unresolved and a.harnesses.items.len == 0 and !chat_harness) 5 else 16;
+    const drawn_w = if (width_sample.moving) @min(width_sample.value, max_chip_w) else @min(@max(wanted_w - 16, 12 + 6) + glyph_w, max_chip_w);
     // GPUI's trigger uses on_hover: closing by keyboard doesn't move the
     // pointer and must not clear the wash until the pointer actually moves.
     const b = kit.listenerHover(&a.view.hovers, if (a.picker != .none) base.bg(k.hover) else base, k.hover).div;
@@ -390,7 +433,7 @@ pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (unresolved) {
         icons.icon(c, .terminal, 16, k.muted, 0);
         _ = c.leaf(.{ .width = .{ .px = 0 } }, .none, null);
-        return;
+        return drawn_w;
     }
     if (a.harnesses.items.len == 0 and !chat_harness) {
         kit.snake(c, k);
@@ -406,7 +449,7 @@ pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (label_loading) {
         // A failed catalog has nothing to name: no label, no ghost bar.
         if (failed) _ = c.leaf(.{ .width = .{ .px = 0 } }, .none, null) else skeleton(c);
-        return;
+        return drawn_w;
     }
     // `hover_blend`: the label brightens under the pointer, rolling Scritto-style when changed.
     // Re-read after `togglePickerCompact` in case opening the picker synced `a.models`.
@@ -415,13 +458,25 @@ pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) void {
     const live_suffix: ?[]const u8 = if (!unresolved and !label_loading) (if (live_t.reasoning) |level| rules.reasoningLabel(level) else null) else suffix_text;
     kit.rollText(c, "composer-model-label", live_label, .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight, .color = if (b.hovered()) k.text else k.text.alpha(0.9) });
     if (live_suffix) |sfx| kit.rollText(c, "composer-effort-suffix", sfx, .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight, .color = k.muted.alpha(0.7) });
+    return drawn_w;
+}
+
+/// Whether the footer has a follow-up switch to draw.
+pub fn followUpShown(a: *const App) bool {
+    return @import("app_queue.zig").targetSteersMidTurn(a);
+}
+
+/// "Steer" or "Queue", as the follow-up switch says it.
+pub fn followUpLabel(a: *const App) []const u8 {
+    return if (@import("app_queue.zig").followUpBehavior(a) == .steer) "Steer" else "Queue";
 }
 
 /// Follow-up mode switch in the composer footer: shows whether a message
 /// sent during a live turn will Steer or Queue, and toggles on click.
-pub fn followUpChip(c: *ui.Context, a: *App, k: theme.Colors) void {
+/// `glyph_only` leaves its word to the tooltip where the footer is narrow.
+pub fn followUpChip(c: *ui.Context, a: *App, k: theme.Colors, glyph_only: bool) void {
     const queue_mod = @import("app_queue.zig");
-    if (!queue_mod.targetSteersMidTurn(a)) return;
+    if (!followUpShown(a)) return;
     const mode = queue_mod.followUpBehavior(a);
     const is_steer = mode == .steer;
     const hint = if (is_steer)
@@ -435,7 +490,7 @@ pub fn followUpChip(c: *ui.Context, a: *App, k: theme.Colors) void {
     const hot = b.hovered();
     const color = if (hot) k.text.alpha(0.85) else if (is_steer) k.text.alpha(0.78) else k.muted.alpha(0.7);
     icons.icon(c, if (is_steer) .@"fast-tier" else .@"queue-drag-handle", 12, color, 0);
-    ui.text(c, if (is_steer) "Steer" else "Queue", .{
+    if (!glyph_only) ui.text(c, followUpLabel(a), .{
         .size = 12,
         .line_height = 12 * 1.618,
         .weight = theme.ui_medium_weight,

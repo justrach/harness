@@ -263,3 +263,29 @@ pub fn watchChangeRequest(p: @import("change_requests.zig").WatchParams) Request
 pub fn mergeChangeRequest(p: @import("change_requests.zig").MergeParams) Request(@import("change_requests.zig").MergeParams) {
     return .{ .method = "MergeChangeRequest", .params = p };
 }
+
+// ── agent CLI updates ────────────────────────────────────────────────
+
+pub fn watchHarnessUpdates(host: ?[]const u8) Request(struct { targetDeviceId: ?[]const u8 }) {
+    return .{ .method = "WatchHarnessUpdates", .params = .{ .targetDeviceId = host } };
+}
+
+pub fn checkHarnessUpdates(harness: ?[]const u8, host: ?[]const u8) Request(struct { harness: ?[]const u8, targetDeviceId: ?[]const u8 }) {
+    return .{ .method = "CheckHarnessUpdates", .params = .{ .harness = harness, .targetDeviceId = host } };
+}
+
+pub fn applyHarnessUpdate(harness: []const u8, host: ?[]const u8) Request(struct { harness: []const u8, targetDeviceId: ?[]const u8 }) {
+    return .{ .method = "ApplyHarnessUpdate", .params = .{ .harness = harness, .targetDeviceId = host } };
+}
+
+pub fn cancelHarnessUpdate(harness: []const u8, host: ?[]const u8) Request(struct { harness: []const u8, targetDeviceId: ?[]const u8 }) {
+    return .{ .method = "CancelHarnessUpdate", .params = .{ .harness = harness, .targetDeviceId = host } };
+}
+
+pub fn dismissHarnessUpdate(harness: []const u8, version: ?[]const u8, host: ?[]const u8) Request(struct { harness: []const u8, version: ?[]const u8, targetDeviceId: ?[]const u8 }) {
+    return .{ .method = "DismissHarnessUpdate", .params = .{ .harness = harness, .version = version, .targetDeviceId = host } };
+}
+
+pub fn setHarnessUpdatePolicy(harness: []const u8, auto_update: bool, host: ?[]const u8) Request(struct { harness: []const u8, autoUpdate: bool, targetDeviceId: ?[]const u8 }) {
+    return .{ .method = "SetHarnessUpdatePolicy", .params = .{ .harness = harness, .autoUpdate = auto_update, .targetDeviceId = host } };
+}

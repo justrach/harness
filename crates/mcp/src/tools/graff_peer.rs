@@ -101,7 +101,7 @@ impl PeerSend for GraffCli {
 
 /// `GRAFF_EXECUTABLE`, else the managed `~/.harness/bin/graff` Harness runs
 /// chats with, else `graff` on PATH.
-fn graff_executable() -> PathBuf {
+pub(super) fn graff_executable() -> PathBuf {
     if let Some(path) = std::env::var_os("GRAFF_EXECUTABLE").filter(|p| !p.is_empty()) {
         return path.into();
     }

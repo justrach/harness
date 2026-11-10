@@ -187,6 +187,9 @@ fn folderMenu(c: *ui.Context, a: *App, k: theme.Colors, anchor: ui.Rect) void {
             state.reveal = true;
             if (state.search_scroll != 0) c.scroll.put(c.gpa, state.search_scroll, 0) catch {};
         }
+        // Plain Return arrives through NSTextInputClient as a field submission,
+        // not a shortcut. Activate the same row and deferred action as a click.
+        if (result.submitted) state.activate = true;
     }
     ui.div(c).h(4).wFull().end();
     const current = strip.folder(a, target);

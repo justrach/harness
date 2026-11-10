@@ -21,7 +21,7 @@ pub const Result = union(enum) {
     passed: []const u8,
 
     pub fn washed(r: Result) bool {
-        return r == .failed or r == .passed;
+        return r == .passed;
     }
 };
 
