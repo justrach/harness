@@ -216,6 +216,61 @@ pub fn signIn(a: *App) void {
     a.request(requests.none("CodegraffSignIn"), .of(App, a, onSignIn));
 }
 
+/// "Enable sync": starts workspace sync sign-in (`SignIn`) and refreshes
+/// `EngineInfo` / `AuthStatus`.
+pub fn enableSync(a: *App) void {
+    a.view.account_menu = false;
+    a.request(requests.none("SignIn"), .of(App, a, onEnableSync));
+}
+
+fn onEnableSync(a: *App, _: u64, r: rpc.Reply) void {
+    switch (r) {
+        .ok => |v| {
+            a.account.scope = .synced;
+            if (v == .object) {
+                if (str(v.object, "url")) |url| {
+                    if (url.len > 0) _ = nanoui.shell.openUrl(url);
+                }
+            }
+            if (a.account.w_auth) |w| {
+                a.engine.cancel(w);
+                a.account.w_auth = null;
+            }
+            watch(a);
+            refresh(a);
+        },
+        .err => |e| {
+            var buf: [200]u8 = undefined;
+            a.setNotice(std.fmt.bufPrint(&buf, "Enable sync: {s}", .{e}) catch e);
+        },
+        else => {},
+    }
+    a.redraw();
+}
+
+/// "Sign out": signs out of workspace sync (`SignOut`).
+pub fn signOut(a: *App) void {
+    a.view.account_menu = false;
+    a.request(requests.none("SignOut"), .of(App, a, onSignOut));
+}
+
+fn onSignOut(a: *App, _: u64, r: rpc.Reply) void {
+    switch (r) {
+        .ok => {
+            if (a.account.user) |*u| u.deinit(a.gpa);
+            a.account.user = null;
+            a.account.scope = .local;
+            refresh(a);
+        },
+        .err => |e| {
+            var buf: [200]u8 = undefined;
+            a.setNotice(std.fmt.bufPrint(&buf, "Sign out: {s}", .{e}) catch e);
+        },
+        else => {},
+    }
+    a.redraw();
+}
+
 fn onSignIn(a: *App, _: u64, r: rpc.Reply) void {
     switch (r) {
         .ok => |v| {

@@ -161,8 +161,8 @@ fn accountMenu(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
     }
     switch (m.codegraff) {
         .account => |who| if (menuRow(c, k, .global, k.accent, c.print("Codegraff · {s}", .{who}), 1)) {
-            a.view.account_menu = false;
-            a.setNotice("Settings aren't in Harness Nano yet: Codegraff is in Harness's Settings › Agents.");
+            a.settings.setSection(.agents);
+            @import("view_settings.zig").open(a);
         },
         .pending => if (menuRow(c, k, .global, k.muted, "Waiting for browser… (click to reopen)", 0.7)) account.signIn(a),
         .sign_in => if (menuRow(c, k, .global, k.muted, "Sign in with Codegraff", 1)) account.signIn(a),
@@ -174,11 +174,10 @@ fn accountMenu(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
             .sign_out => menuRow(c, k, .@"logout-2", k.muted, "Sign out", 1),
         };
         if (clicked) {
-            a.view.account_menu = false;
-            a.setNotice(switch (act) {
-                .enable_sync => "Turning on sync isn't in Harness Nano yet: use Harness.",
-                .sign_out => "Signing out isn't in Harness Nano yet: use Harness.",
-            });
+            switch (act) {
+                .enable_sync => account.enableSync(a),
+                .sign_out => account.signOut(a),
+            }
         }
         separator(c, a, w);
     }

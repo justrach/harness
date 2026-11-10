@@ -1551,6 +1551,14 @@ impl AcpHarness {
             .kill_on_drop(true);
         let child = crate::process::retry_busy(|| cmd.spawn()).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
+                if let Some(dir) = cwd.filter(|c| !c.is_empty())
+                    && !Path::new(dir).exists()
+                {
+                    return HarnessError::Io(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("Project folder is missing: {dir}"),
+                    ));
+                }
                 HarnessError::NotInstalled(crate::executable::binary_hint(&exe))
             } else {
                 HarnessError::Io(e)
