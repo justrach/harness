@@ -1371,6 +1371,8 @@ mod tests {
         sessions: Mutex<Vec<Value>>,
         /// Transcript entries by chat id, in place of the shared two-message one.
         transcripts: Mutex<std::collections::HashMap<String, Value>>,
+        /// The engine's `BotsState`, for an engine that has the person's own bots.
+        own_bots: Mutex<Option<Value>>,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -1444,6 +1446,17 @@ mod tests {
                       "status": "complete",
                       "parts": [{ "kind": "text", "id": "t", "text": "hello back" }] }
                 ]})),
+                "BotsState" => match self.own_bots.lock().unwrap().clone() {
+                    Some(state) => RpcReply::Value(state),
+                    None => return Err(RpcError::UnknownMethod(method.into())),
+                },
+                "RunBot" => {
+                    self.writes
+                        .lock()
+                        .unwrap()
+                        .push((method.to_owned(), params.clone()));
+                    RpcReply::Value(json!({ "chatId": "chat-standing", "bot": params["bot"] }))
+                }
                 methods::MUTATE | methods::QUEUE_COMMAND | methods::QUEUE_MESSAGE => {
                     self.writes
                         .lock()
@@ -2239,6 +2252,71 @@ mod tests {
             writes[2].1["command"]["request"]["prompt"],
             "You are triage, a graff Bot.\n\n[routine r1] label what came in"
         );
+    }
+
+    #[tokio::test]
+    async fn the_persons_own_bots_run_in_their_standing_chat_through_the_engine() {
+        let world = Arc::new(World::default());
+        *world.own_bots.lock().unwrap() = Some(json!({ "bots": [
+            { "name": "ada", "job": "Coordinate.", "primary": true, "routines": [] },
+            { "name": "triage", "job": "Label new issues (yours)", "project": "/repo/atlas", "routines": [] }
+        ]}));
+        // No chat to take a project from: the person's own bots still list.
+        let (tools, fake) = bot_tools(world.clone(), Origin::default());
+        let listed = tools.call("list_bots", json!({})).await.unwrap();
+        assert_eq!(listed["yours"][0]["name"], "ada");
+        assert!(listed.get("bots").is_none());
+        assert!(
+            fake.calls.lock().unwrap().is_empty(),
+            "no project, no graff"
+        );
+
+        // By name and no project, the engine runs it; nothing is created here.
+        let ran = tools
+            .call(
+                "run_bot",
+                json!({ "bot": "ada", "message": "draft the notes" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ran["chatId"], "chat-standing");
+        assert_eq!(ran["standingChat"], true);
+        {
+            let writes = world.writes.lock().unwrap();
+            assert_eq!(writes.len(), 1);
+            assert_eq!(writes[0].0, "RunBot");
+            assert_eq!(
+                writes[0].1,
+                json!({ "bot": "ada", "message": "draft the notes" })
+            );
+        }
+        let err = tools
+            .call("run_bot", json!({ "bot": "ada" }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("message or routine"), "{err}");
+
+        // A named project means that project's bot, even with the same name.
+        world.writes.lock().unwrap().clear();
+        let ran = tools
+            .call(
+                "run_bot",
+                json!({ "project": "comet", "bot": "triage", "message": "what is new?" }),
+            )
+            .await
+            .unwrap();
+        assert!(ran.get("standingChat").is_none());
+        assert_eq!(world.writes.lock().unwrap()[0].1["op"], "createChat");
+
+        // In a chat, both lists come back.
+        let origin = Origin {
+            chat_id: Some("chat-beta-2".into()),
+            device_id: None,
+        };
+        let (tools, _) = bot_tools(world, origin);
+        let listed = tools.call("list_bots", json!({})).await.unwrap();
+        assert_eq!(listed["bots"].as_array().unwrap().len(), 2);
+        assert_eq!(listed["yours"].as_array().unwrap().len(), 2);
     }
 
     #[test]
