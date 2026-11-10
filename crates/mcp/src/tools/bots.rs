@@ -34,12 +34,12 @@ pub(super) fn catalog() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "list_bots",
-            description: "graff Bots in a project: standing roles that each hold one job and keep their own memory, work log and scheduled routines (.graff/bots). Shows each bot's routines, when each runs next, and which are due now. Create and edit bots with `graff bot` in the project folder.",
+            description: "graff Bots in a project: standing roles that each hold one job and keep their own memory, work log and scheduled routines (.graff/bots). Shows each bot's routines, when each runs next, and which are due now. Create and edit bots with `graff bot` in the project folder. Without a project it also lists the person's own bots (`yours`): they work in any project and each has one standing chat.",
             input_schema: json!({ "type": "object", "properties": { "project": project } }),
         },
         ToolDef {
             name: "run_bot",
-            description: "Start one run of a bot as a new graff chat in its project, so its work, approvals and result are visible there. Pass message to give it a task, or routine to run one of its routines now without moving the routine's schedule. Returns the new chat id.",
+            description: "Start one run of a bot as a new graff chat in its project, so its work, approvals and result are visible there. Pass message to give it a task, or routine to run one of its routines now without moving the routine's schedule. Returns the new chat id. When no project is named and the bot is one of the person's own (list_bots `yours`), the turn goes into that bot's standing chat instead.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -243,8 +243,27 @@ impl Tools {
         rows("list", &out)
     }
 
+    /// The person's own bots (codegraff ADR 0334), which the engine keeps
+    /// and runs, each in one standing chat. None from an engine without them.
+    async fn own_bots(&self) -> Vec<Value> {
+        match self.harness.call("BotsState", json!({})).await {
+            Ok(state) => state["bots"].as_array().cloned().unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     async fn list_bots(&self, args: ProjectArgs) -> anyhow::Result<Value> {
-        let space = self.bot_space(&args.project).await?;
+        let yours = if given(&args.project).is_none() {
+            self.own_bots().await
+        } else {
+            Vec::new()
+        };
+        let space = match self.bot_space(&args.project).await {
+            Ok(space) => space,
+            // No project to look in, but the person's own bots need none.
+            Err(_) if !yours.is_empty() => return Ok(json!({ "yours": yours })),
+            Err(err) => return Err(err),
+        };
         let folder = Path::new(&space.path);
         let bots = self.bots_in(&space).await?;
         let routines: Vec<Routine> = rows(
@@ -286,6 +305,9 @@ impl Tools {
             "project": { "id": space.id, "name": space.display_name(), "path": space.path },
             "bots": listed,
         });
+        if !yours.is_empty() {
+            result["yours"] = json!(yours);
+        }
         if bots.is_empty() {
             result["note"] = json!(
                 "No bots in this project yet. Create one in its folder: graff bot create NAME \"the one job it holds\""
@@ -295,6 +317,23 @@ impl Tools {
     }
 
     async fn run_bot(&self, args: RunArgs) -> anyhow::Result<Value> {
+        // One of the person's own bots, when no project is named: the engine
+        // puts the turn into that bot's standing chat.
+        if given(&args.project).is_none() {
+            let name = args.bot.trim();
+            let own = self.own_bots().await;
+            if own.iter().any(|b| b["name"].as_str() == Some(name)) {
+                let mut params = json!({ "bot": name });
+                match (given(&args.message), given(&args.routine)) {
+                    (Some(message), None) => params["message"] = json!(message),
+                    (None, Some(id)) => params["routine"] = json!(id),
+                    _ => bail!("pass message or routine, one of them"),
+                }
+                let mut ran = self.harness.call("RunBot", params).await?;
+                ran["standingChat"] = json!(true);
+                return Ok(ran);
+            }
+        }
         let space = self.bot_space(&args.project).await?;
         let folder = Path::new(&space.path);
         let name = args.bot.trim();
