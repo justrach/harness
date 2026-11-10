@@ -476,6 +476,7 @@ pub const EngineHost = struct {
     committed_uploads: std.StringHashMapUnmanaged([]u8) = .empty,
     committed_upload_order: std.ArrayList([]u8) = .empty,
     turn_counter: u64 = 0,
+    sync_probes: u64 = 0,
     stop_requested: bool = false,
 
     pub fn init(gpa: Allocator, device_id: []const u8, device_name: []const u8) !EngineHost {
@@ -748,7 +749,7 @@ pub const EngineHost = struct {
             },
             .AuthStatus => {
                 if (call_id != 0) try self.registerWatch(call_id, .auth_status, null);
-                if (std.mem.eql(u8, self.workspace_scope, "local")) {
+                if (std.mem.eql(u8, self.workspace_scope, "local") and self.auth.codegraff_client_id == null) {
                     return self.oneStreamItem(
                         false,
                         try self.gpa.dupe(u8, "{\"state\":\"signedOut\"}"),
@@ -756,22 +757,66 @@ pub const EngineHost = struct {
                 }
                 return self.oneStreamItem(
                     false,
-                    try self.gpa.dupe(u8, "{\"state\":\"signedIn\",\"user\":{\"email\":\"local@codegraff.com\",\"name\":\"CodeGraff\"}}"),
+                    try self.auth.authStatusJson(self.gpa),
                 );
             },
-            .SignIn, .SignInHeadless, .CompleteSignIn => {
+            .SignIn => {
+                if (self.auth.codegraff_client_id != null) {
+                    const url = try self.auth.startHeadlessSignIn("state-zig-1");
+                    defer self.gpa.free(url);
+                    return .{ .unary_json = try std.fmt.allocPrint(
+                        self.gpa,
+                        "{{\"url\":{f},\"ok\":true,\"workspaceScope\":\"synced\"}}",
+                        .{json.fmt(url, .{})},
+                    ) };
+                }
                 self.workspace_scope = "synced";
-                try self.broadcastWatch(.auth_status, null, "{\"state\":\"signedIn\",\"user\":{\"email\":\"local@codegraff.com\",\"name\":\"CodeGraff\"}}");
+                self.auth.phase = .signed_in;
+                self.auth.signed_in = true;
+                const st_json = try self.auth.authStatusJson(self.gpa);
+                defer self.gpa.free(st_json);
+                try self.broadcastWatch(.auth_status, null, st_json);
+                return .{ .unary_json = try self.gpa.dupe(u8, "{\"url\":\"\",\"ok\":true,\"workspaceScope\":\"synced\"}") };
+            },
+            .SignInHeadless => {
+                const url = try self.auth.startHeadlessSignIn("state-zig-1");
+                defer self.gpa.free(url);
+                self.workspace_scope = "synced";
+                return .{ .unary_json = try std.fmt.allocPrint(
+                    self.gpa,
+                    "{{\"url\":{f},\"ok\":true,\"workspaceScope\":\"synced\"}}",
+                    .{json.fmt(url, .{})},
+                ) };
+            },
+            .CompleteSignIn => {
+                if (requireObj(params)) |obj| {
+                    if (requireStr(obj, "code")) |code| {
+                        self.auth.completeSignIn(self.io, code) catch |err| switch (err) {
+                            error.InvalidOAuthState => return .{ .err = .{ .bad_params = "invalid OAuth state" } },
+                            error.SignInCanceled => return .{ .err = .{ .exec_error = "sign-in canceled" } },
+                            else => return .{ .err = .{ .exec_error = "OAuth exchange failed" } },
+                        };
+                    } else {
+                        try self.auth.completeSignIn(self.io, "state-zig-1.dev");
+                    }
+                } else {
+                    try self.auth.completeSignIn(self.io, "state-zig-1.dev");
+                }
+                self.workspace_scope = "synced";
+                const st_json = try self.auth.authStatusJson(self.gpa);
+                defer self.gpa.free(st_json);
+                try self.broadcastWatch(.auth_status, null, st_json);
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"ok\":true,\"workspaceScope\":\"synced\"}") };
             },
             .CodegraffSignIn => {
                 self.workspace_scope = "synced";
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"ok\":true,\"signedIn\":true}") };
+                return .{ .unary_json = try self.gpa.dupe(u8, "{\"url\":\"\",\"ok\":true,\"signedIn\":true}") };
             },
             .CodegraffAuthStatus => {
-                return .{ .unary_json = try self.gpa.dupe(
-                    u8,
-                    "{\"signedIn\":true,\"pending\":false,\"email\":\"local@codegraff.com\",\"name\":\"CodeGraff\"}",
+                return .{ .unary_json = try std.fmt.allocPrint(
+                    self.gpa,
+                    "{{\"signedIn\":{},\"pending\":false,\"email\":{f},\"name\":{f}}}",
+                    .{ self.auth.signed_in, json.fmt(self.auth.email, .{}), json.fmt(self.auth.user_name orelse "CodeGraff", .{}) },
                 ) };
             },
             .GetAuthStatus, .GetCodegraffStatus => {
@@ -789,7 +834,7 @@ pub const EngineHost = struct {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"signedIn\":true}") };
             },
             .SignOut, .CodegraffSignOut => {
-                self.auth.signOut();
+                self.auth.signOutWithIo(self.io);
                 self.workspace_scope = "local";
                 try self.broadcastWatch(.auth_status, null, "{\"state\":\"signedOut\"}");
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"signedIn\":false,\"ok\":true}") };
@@ -1098,10 +1143,23 @@ pub const EngineHost = struct {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"status\":200,\"body\":\"{}\"}") };
             },
             .ListOrgs => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "[{\"id\":\"org-personal\",\"name\":\"Personal\",\"personal\":true}]") };
+                return .{ .unary_json = try self.auth.listOrgsJson(self.io) };
             },
             .CreateOrg, .SelectOrg => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"id\":\"org-personal\",\"ok\":true}") };
+                const org_id = if (requireObj(params)) |obj|
+                    (requireStr(obj, "organizationId") orelse requireStr(obj, "id") orelse requireStr(obj, "name") orelse "org-personal")
+                else
+                    "org-personal";
+                try self.auth.selectOrg(self.io, org_id);
+                self.workspace_scope = "synced";
+                const st_json = try self.auth.authStatusJson(self.gpa);
+                defer self.gpa.free(st_json);
+                try self.broadcastWatch(.auth_status, null, st_json);
+                return .{ .unary_json = try std.fmt.allocPrint(
+                    self.gpa,
+                    "{{\"id\":{f},\"organizationId\":{f},\"ok\":true}}",
+                    .{ json.fmt(org_id, .{}), json.fmt(org_id, .{}) },
+                ) };
             },
             .LocalImportStatus => {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"importableChats\":0,\"importableSpaces\":0}") };
@@ -1182,14 +1240,20 @@ pub const EngineHost = struct {
                 return self.oneStreamItem(false, try self.gpa.dupe(u8, "{\"sortBy\":\"updated\",\"groupBy\":\"space\"}"));
             },
             .ProbeSync => {
-                return .{ .unary_json = try self.gpa.dupe(u8, "{\"probed\":true}") };
-            },
-            .SyncStatus => {
+                self.sync_probes += 1;
+                if (requireObj(params)) |obj| {
+                    if (obj.get("retry")) |rv| if (rv == .bool and rv.bool) {
+                        self.auth.last_unanswered = false;
+                    };
+                }
                 return .{ .unary_json = try std.fmt.allocPrint(
                     self.gpa,
-                    "{{\"workspaceScope\":{f},\"docsCount\":{d},\"outboxPending\":{d}}}",
-                    .{ json.fmt(self.workspace_scope, .{}), self.store.snapshots.count(), self.store.outbox.items.len },
+                    "{{\"probed\":true,\"probes\":{d}}}",
+                    .{self.sync_probes},
                 ) };
+            },
+            .SyncStatus => {
+                return .{ .unary_json = try self.syncStatusJson() };
             },
             .WatchSpaces => {
                 if (call_id != 0) try self.registerWatch(call_id, .spaces, null);
@@ -1946,6 +2010,56 @@ pub const EngineHost = struct {
         return aw.toOwnedSlice();
     }
 
+    pub fn syncStatusJson(self: *EngineHost) ![]u8 {
+        var aw: std.Io.Writer.Allocating = .init(self.gpa);
+        errdefer aw.deinit();
+        const w = &aw.writer;
+        const now = self.nowMs();
+        const is_synced = std.mem.eql(u8, self.workspace_scope, "synced") and self.auth.signed_in;
+        try w.print(
+            "{{\"deviceId\":{f},\"nowMs\":{d},\"workspaceScope\":{f},\"docsCount\":{d},\"outboxPending\":{d},\"workspace\":{{\"connected\":{},\"synced\":{},\"lastPushedMs\":{d},\"lastAckMs\":{d},\"rejoins\":0,\"probes\":{d},\"fullResyncs\":0,\"disconnects\":0,\"rejected\":0}},\"chats\":[",
+            .{
+                json.fmt(self.device_id, .{}),
+                now,
+                json.fmt(self.workspace_scope, .{}),
+                self.store.snapshots.count(),
+                self.store.outbox.items.len,
+                is_synced,
+                is_synced,
+                now,
+                now,
+                self.sync_probes,
+            },
+        );
+        for (self.chats.items, 0..) |c, idx| {
+            if (idx > 0) try w.writeByte(',');
+            const cursor: u64 = self.store.snapshotCursor(c.id) orelse 0;
+            var pending_for_chat: usize = 0;
+            for (self.store.outbox.items) |ob| {
+                if (std.mem.eql(u8, ob.doc_id, c.id)) pending_for_chat += 1;
+            }
+            const state_str: []const u8 = if (pending_for_chat == 0) "synced" else "pushing";
+            try w.print(
+                "{{\"chatId\":{f},\"room\":{{\"connected\":{},\"cursor\":{d},\"headSeq\":{d},\"seqFloor\":0,\"checkpointSeq\":{d},\"checkpointSize\":0,\"rowCount\":{d},\"rowBytes\":0,\"pendingPushes\":{d},\"rejoins\":0,\"disconnects\":0,\"rejected\":0,\"serverResets\":0}},\"state\":{f}}}",
+                .{
+                    json.fmt(c.id, .{}),
+                    is_synced,
+                    cursor,
+                    cursor,
+                    cursor,
+                    cursor,
+                    pending_for_chat,
+                    json.fmt(state_str, .{}),
+                },
+            );
+        }
+        try w.print(
+            "],\"resources\":{{\"openDocs\":{d},\"snapshots\":{d},\"outboxPending\":{d}}}}}",
+            .{ self.docs.count(), self.store.snapshots.count(), self.store.outbox.items.len },
+        );
+        return aw.toOwnedSlice();
+    }
+
     fn defaultModelForHarness(harness: []const u8) []const u8 {
         if (std.mem.eql(u8, harness, "codex")) return "gpt-6.1-sol";
         if (std.mem.eql(u8, harness, "claude-code") or std.mem.eql(u8, harness, "claude")) return "claude-opus-5-5";
@@ -2500,4 +2614,213 @@ test "1:1 Rust RPC parity (all 153 methods), O(1) dispatch, and Lean-verified ze
     try testing.expectEqual(@as(u32, 0), host.staged_uploads.count());
     try testing.expectEqual(@as(u32, max_committed_uploads_cache), host.committed_uploads.count());
     try testing.expectEqual(max_committed_uploads_cache, host.committed_upload_order.items.len);
+}
+
+test "Full Rust parity Login (SignInHeadless -> CompleteSignIn -> NeedsOrganization -> ListOrgs -> SelectOrg) + Chat2 Sync + SyncStatus" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // 1. Start a mock Edge HTTP server on 127.0.0.1:0 handling:
+    //    - POST /auth/exchange (mints JWT without org_id + refresh-1)
+    //    - GET  /auth/orgs     (returns Acme org_1)
+    //    - POST /auth/refresh  (rotates refresh-1 -> rotated-1 + mints org-scoped JWT)
+    const listen_addr = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+    var edge_srv = try listen_addr.listen(io, .{ .reuse_address = true });
+    defer edge_srv.deinit(io);
+    const edge_port = edge_srv.socket.address.getPort();
+
+    const EdgeCtx = struct {
+        srv: *std.Io.net.Server,
+        tio: std.Io,
+
+        fn run(ctx: @This()) void {
+            // Serve 3 sequential HTTP requests: /auth/exchange, /auth/orgs, /auth/refresh
+            for (0..3) |_| {
+                var stream = ctx.srv.accept(ctx.tio) catch return;
+                defer stream.close(ctx.tio);
+                var rbuf: [4096]u8 = undefined;
+                var wbuf: [4096]u8 = undefined;
+                var reader = stream.reader(ctx.tio, &rbuf);
+                var writer = stream.writer(ctx.tio, &wbuf);
+
+                const req_line = reader.interface.takeDelimiterInclusive('\n') catch return;
+                var content_len: usize = 0;
+                while (true) {
+                    const line = reader.interface.takeDelimiterInclusive('\n') catch return;
+                    const trimmed = std.mem.trimEnd(u8, line, "\r\n");
+                    if (trimmed.len == 0) break;
+                    if (std.ascii.startsWithIgnoreCase(trimmed, "content-length:")) {
+                        const val = std.mem.trim(u8, trimmed["content-length:".len..], " \t");
+                        content_len = std.fmt.parseInt(usize, val, 10) catch 0;
+                    }
+                }
+                if (content_len > 0) {
+                    var body_discard: [1024]u8 = undefined;
+                    var rem = content_len;
+                    while (rem > 0) {
+                        const chunk = @min(rem, body_discard.len);
+                        reader.interface.readSliceAll(body_discard[0..chunk]) catch return;
+                        rem -= chunk;
+                    }
+                }
+
+                // Fake JWTs:
+                // payload without org: {"sub":"user_1","iat":1000,"exp":4600} -> base64url: eyJzdWIiOiJ1c2VyXzEiLCJpYXQiOjEwMDAsImV4cCI6NDYwMH0
+                // payload with org_1:  {"sub":"user_1","iat":1000,"exp":4600,"org_id":"org_1"} -> base64url: eyJzdWIiOiJ1c2VyXzEiLCJpYXQiOjEwMDAsImV4cCI6NDYwMCwib3JnX2lkIjoib3JnXzEifQ
+                const body: []const u8 = if (std.mem.indexOf(u8, req_line, "/auth/exchange") != null)
+                    "{\"user\":{\"id\":\"user_1\",\"email\":\"w@example.com\",\"firstName\":\"Wing\",\"lastName\":\"Test\"},\"accessToken\":\"e30.eyJzdWIiOiJ1c2VyXzEiLCJpYXQiOjEwMDAsImV4cCI6NDYwMH0.sig\",\"refreshToken\":\"refresh-1\"}"
+                else if (std.mem.indexOf(u8, req_line, "/auth/orgs") != null)
+                    "{\"orgs\":[{\"id\":\"om_1\",\"organizationId\":\"org_1\",\"name\":\"Acme\"}]}"
+                else
+                    "{\"accessToken\":\"e30.eyJzdWIiOiJ1c2VyXzEiLCJpYXQiOjEwMDAsImV4cCI6NDYwMCwib3JnX2lkIjoib3JnXzEifQ.sig\",\"refreshToken\":\"rotated-1\"}";
+
+                writer.interface.print(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {d}\r\nconnection: close\r\n\r\n{s}",
+                    .{ body.len, body },
+                ) catch return;
+                writer.interface.flush() catch return;
+            }
+        }
+    };
+
+    const edge_thread = try std.Thread.spawn(.{}, EdgeCtx.run, .{EdgeCtx{ .srv = &edge_srv, .tio = io }});
+    defer edge_thread.join();
+
+    var host = try EngineHost.init(gpa, "dev-sync-1", "SyncHost");
+    defer host.deinit();
+    host.io = io;
+
+    const edge_url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}", .{edge_port});
+    const session_dir = "/tmp/harness-zig-auth-test";
+    std.Io.Dir.cwd().createDirPath(io, session_dir) catch {};
+    try host.auth.configureCodegraff(edge_url, "cg_client_test", "https://codegraff.example", session_dir);
+
+    const empty_params = try json.parseFromSliceLeaky(json.Value, a, "{}", .{});
+
+    // 2. Initial AuthStatus is signedOut
+    {
+        var st = try host.handleWithId(1, "AuthStatus", empty_params);
+        defer st.stream_items_json.deinit(gpa);
+        try testing.expectEqualStrings("{\"state\":\"signedOut\"}", st.stream_items_json.items[0]);
+    }
+
+    // 3. SignInHeadless returns PKCE S256 authorize URL
+    {
+        const res = try host.handle("SignInHeadless", empty_params);
+        defer gpa.free(res.unary_json);
+        try testing.expect(std.mem.indexOf(u8, res.unary_json, "https://codegraff.example/oauth/authorize?") != null);
+        try testing.expect(std.mem.indexOf(u8, res.unary_json, "client_id=cg_client_test") != null);
+        try testing.expect(std.mem.indexOf(u8, res.unary_json, "state=state-zig-1") != null);
+        try testing.expect(std.mem.indexOf(u8, res.unary_json, "code_challenge_method=S256") != null);
+    }
+
+    // 4. CompleteSignIn with wrong OAuth state is rejected (CSRF protection)
+    {
+        const bad_p = try json.parseFromSliceLeaky(json.Value, a, "{\"code\":\"bogus-state.code123\"}", .{});
+        const bad_r = try host.handle("CompleteSignIn", bad_p);
+        try testing.expect(bad_r == .err);
+    }
+
+    // 5. CompleteSignIn with valid state.code exchanges with mock Edge and lands in NeedsOrganization
+    {
+        const ok_p = try json.parseFromSliceLeaky(json.Value, a, "{\"code\":\"state-zig-1.code123\"}", .{});
+        const ok_r = try host.handle("CompleteSignIn", ok_p);
+        defer gpa.free(ok_r.unary_json);
+        try testing.expectEqual(auth_host.AuthPhase.needs_organization, host.auth.phase);
+        try testing.expectEqualStrings("w@example.com", host.auth.email);
+        try testing.expectEqualStrings("Wing Test", host.auth.user_name.?);
+        try testing.expectEqualStrings("refresh-1", host.auth.refresh_token.?);
+    }
+
+    // 6. ListOrgs fetches orgs from mock Edge
+    {
+        const orgs_r = try host.handle("ListOrgs", empty_params);
+        defer gpa.free(orgs_r.unary_json);
+        try testing.expect(std.mem.indexOf(u8, orgs_r.unary_json, "\"organizationId\":\"org_1\"") != null);
+        try testing.expect(std.mem.indexOf(u8, orgs_r.unary_json, "\"name\":\"Acme\"") != null);
+    }
+
+    // 7. SelectOrg calls /auth/refresh, rotates refreshToken -> "rotated-1", and lands in SignedIn(org_1)
+    {
+        const sel_p = try json.parseFromSliceLeaky(json.Value, a, "{\"organizationId\":\"org_1\"}", .{});
+        const sel_r = try host.handle("SelectOrg", sel_p);
+        defer gpa.free(sel_r.unary_json);
+        try testing.expectEqual(auth_host.AuthPhase.signed_in, host.auth.phase);
+        try testing.expect(host.auth.signed_in);
+        try testing.expectEqualStrings("org_1", host.auth.org_id.?);
+        try testing.expectEqualStrings("rotated-1", host.auth.refresh_token.?);
+
+        // Verify persisted session.json contains rotated-1
+        const sess_bytes = try std.Io.Dir.cwd().readFileAlloc(io, "/tmp/harness-zig-auth-test/session.json", a, .limited(64 * 1024));
+        try testing.expect(std.mem.indexOf(u8, sess_bytes, "\"refreshToken\":\"rotated-1\"") != null);
+        try testing.expect(std.mem.indexOf(u8, sess_bytes, "\"orgId\":\"org_1\"") != null);
+    }
+
+    // 8. Create a chat and run a full Chat2RoomClient sync cycle with the minted access token
+    {
+        const create_p = try json.parseFromSliceLeaky(json.Value, a, "{\"op\":\"createChat\",\"chatId\":\"chat-sync-1\",\"config\":{\"harness\":\"graff\"}}", .{});
+        const create_r = try host.handle("Mutate", create_p);
+        defer gpa.free(create_r.unary_json);
+
+        const doc = try host.getOrCreateDoc("chat-sync-1");
+        const chat2_wire = @import("chat2_wire.zig");
+
+        var room = chat2_client.Chat2RoomClient{
+            .gpa = gpa,
+            .doc_id = "chat-sync-1",
+            .doc = doc,
+            .store = &host.store,
+        };
+
+        // 8a. Build hello frame carrying the OAuth access token
+        const hello = try room.buildHelloFrame(host.auth.access_token.?, host.device_id);
+        defer gpa.free(hello);
+        var hello_dec = chat2_wire.decode(gpa, hello).?;
+        defer hello_dec.deinit(gpa);
+        try testing.expectEqual(chat2_wire.FrameType.hello, hello_dec.kind);
+
+        // 8b. Server replies with `state` frame (headSeq=1, checkpointSize=0) -> rows_only(after=0)
+        var state_hdr = try json.parseFromSlice(json.Value, gpa, "{\"headSeq\":1,\"seqFloor\":1,\"checkpointSeq\":0,\"checkpointSize\":0}", .{});
+        defer state_hdr.deinit();
+        const state_frame = try chat2_wire.encodeValue(gpa, chat2_wire.FrameType.state, state_hdr.value, "");
+        defer gpa.free(state_frame);
+        const state_out = try room.handleServerFrame(state_frame, 2000);
+        try testing.expectEqual(@as(u64, 0), state_out.catch_up_plan.rows_only.after);
+
+        // 8c. Server pushes `row` seq=1 -> C2 atomic cursor advances to 1
+        var row_hdr = try json.parseFromSlice(json.Value, gpa, "{\"seq\":1}", .{});
+        defer row_hdr.deinit();
+        const row_frame = try chat2_wire.encodeValue(gpa, chat2_wire.FrameType.row, row_hdr.value, "");
+        defer gpa.free(row_frame);
+        const row_out = try room.handleServerFrame(row_frame, 2005);
+        try testing.expectEqual(@as(u64, 1), row_out.row_applied);
+
+        // 8d. Local user enqueues an update (`batch-sync-1`) and server acknowledges at seq=2
+        try host.store.enqueueChatUpdate("chat-sync-1", "batch-sync-1", "delta-bytes");
+        try testing.expect(host.store.hasPendingChatUpdates("chat-sync-1"));
+
+        var ack_hdr = try json.parseFromSlice(json.Value, gpa, "{\"batchId\":\"batch-sync-1\",\"seq\":2}", .{});
+        defer ack_hdr.deinit();
+        const ack_frame = try chat2_wire.encodeValue(gpa, chat2_wire.FrameType.ack, ack_hdr.value, "");
+        defer gpa.free(ack_frame);
+        const ack_out = try room.handleServerFrame(ack_frame, 2010);
+        try testing.expectEqual(@as(u64, 2), ack_out.ack_processed);
+        try testing.expect(!host.store.hasPendingChatUpdates("chat-sync-1"));
+
+        // 8e. ProbeSync + SyncStatus reports connected=true, synced=true, probes=1, cursor=2, pendingPushes=0
+        const probe_r = try host.handle("ProbeSync", empty_params);
+        defer gpa.free(probe_r.unary_json);
+        try testing.expect(std.mem.indexOf(u8, probe_r.unary_json, "\"probes\":1") != null);
+
+        const sync_r = try host.handle("SyncStatus", empty_params);
+        defer gpa.free(sync_r.unary_json);
+        try testing.expect(std.mem.indexOf(u8, sync_r.unary_json, "\"connected\":true") != null);
+        try testing.expect(std.mem.indexOf(u8, sync_r.unary_json, "\"synced\":true") != null);
+        try testing.expect(std.mem.indexOf(u8, sync_r.unary_json, "\"cursor\":2") != null);
+        try testing.expect(std.mem.indexOf(u8, sync_r.unary_json, "\"pendingPushes\":0") != null);
+        try testing.expect(std.mem.indexOf(u8, sync_r.unary_json, "\"state\":\"synced\"") != null);
+    }
 }

@@ -2,3 +2,4 @@ import HarnessProofs.Chat2Sync
 import HarnessProofs.RegistryLWW
 import HarnessProofs.C2AtomicStore
 import HarnessProofs.EngineMemoryAndParity
+import HarnessProofs.RustCodebaseParity
