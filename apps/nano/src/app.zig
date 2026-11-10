@@ -1667,6 +1667,12 @@ pub const App = struct {
             return @import("view_palette.zig").toggle(a, .replace_current);
         }
         if (prompt.len == 0 or a.engine.state != .connected) return;
+        if (a.selected == null and !a.new_chat_mode and !a.new_no_project and
+            a.space != null and a.newChatSpace() == null)
+        {
+            a.setNotice("This project's details are not available yet. Wait for sync or choose another project.");
+            return a.redraw();
+        }
         // A plain chat with no Auto tier would fall to graff's own default.
         if (@import("app_agent.zig").chatSendBlocked(a)) return;
         if (a.queues()) {

@@ -139,6 +139,9 @@ test "unified strip: Cmd T opens a new top-level tab and restores the split draf
     h.a.splitPane(.horizontal);
     h.a.composer.set("A parked synthetic prompt");
     h.press(.{ .key = 't', .cmd = true });
+    try testing.expect(h.a.view.open_chooser.open);
+    @import("app_open_chooser.zig").choose(&h.a, "local-project");
+    h.t.settle(1);
     try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
     try testing.expect(h.a.tabs.layout() == null);
     try testing.expectEqualStrings("", h.a.composer.text());
@@ -450,6 +453,9 @@ test "session hierarchy nests all tabs under the session in sidebar and shows si
     h.a.splitPane(.horizontal);
     h.a.openChat("b", null);
     h.press(.{ .key = 't', .cmd = true });
+    try testing.expect(h.a.view.open_chooser.open);
+    @import("app_open_chooser.zig").choose(&h.a, "local-project");
+    h.t.settle(1);
     try testing.expect(h.a.tabs.layout() == null);
     try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
     // Top strip on the new canvas shows the split session ("Beta", "2 split panes") AND the new tab ("New tab")!

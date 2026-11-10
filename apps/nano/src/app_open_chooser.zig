@@ -9,13 +9,15 @@ const Allocator = std.mem.Allocator;
 
 pub const Intent = enum {
     new_tab,
+    /// Cmd+T keeps the entire source split in its own top-level tab.
+    new_workspace_tab,
     split_right,
     split_down,
     new_project,
 
     pub fn title(i: Intent) []const u8 {
         return switch (i) {
-            .new_tab => "New session",
+            .new_tab, .new_workspace_tab => "New session",
             .split_right => "Split to the right",
             .split_down => "Split below",
             .new_project => "Open a project",
@@ -137,13 +139,21 @@ pub fn choose(a: *App, space_id: ?[]const u8) void {
     const s = &a.view.open_chooser;
     if (!s.open) return;
     const intent = s.intent;
+    const axis: ?tabs.Axis = switch (intent) {
+        .split_right => .horizontal,
+        .split_down => .vertical,
+        else => null,
+    };
+    // The layout may have changed while the destination sheet was open.
+    // A refused split must not turn the source into a new-chat canvas.
+    if (axis) |direction| if (!a.tabs.canSplit(direction)) return close(a);
     const device = s.device;
     s.open = false;
     // Creating a tab or pane copies the outgoing chat's destination, so the
     // explicit choice is applied to the fresh draft afterwards.
     switch (intent) {
         .new_tab => a.addChatTab(false),
-        .new_project => a.newTab(),
+        .new_project, .new_workspace_tab => a.newTab(),
         .split_right => a.splitPane(.horizontal),
         .split_down => a.splitPane(.vertical),
     }
@@ -161,8 +171,9 @@ pub fn chooseProjectless(a: *App) void {
 pub fn newProject(a: *App) void {
     const s = &a.view.open_chooser;
     const device = s.device orelse a.device_id;
-    if (!setDestination(a, device, null)) return;
     s.open = false;
-    @import("app_project_setup.zig").open(a);
+    // The sheet owns this tentative computer pick. Do not overwrite the
+    // source draft before the project form is completed (or cancelled).
+    @import("app_project_setup.zig").openOnDevice(a, device);
     a.redraw();
 }

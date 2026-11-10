@@ -52,7 +52,7 @@ pub const all = [_]Shortcut{
     .{ .key = "toggleFiles", .group = .panels, .title = "Toggle files panel", .description = "Show or hide the files panel for the current session.", .default = "mod-e" },
     .{ .key = "toggleTerminal", .group = .panels, .title = "Toggle terminal", .description = "Show or hide the terminal for the current session.", .default = "mod-j" },
     .{ .key = "splitTerminal", .group = .panels, .title = "Split terminal right", .description = "Split the focused terminal to the right, like Ghostty ⌘D.", .default = "mod-d" },
-    .{ .key = "splitTerminalDown", .group = .panels, .title = "Split terminal down", .description = "Split the focused terminal downward.", .default = "mod-shift-d" },
+    .{ .key = "splitTerminalDown", .group = .panels, .title = "Split terminal down", .description = "Split the focused terminal downward.", .default = "" },
     .{ .key = "newSession", .group = .sessions, .title = "New chat", .description = "Open a new chat tab, preserving the current chat and split layout.", .default = "mod-t" },
     .{ .key = "openModelPicker", .group = .sessions, .title = "Open model picker", .description = "Open the model picker for the current session.", .default = "mod-/" },
     .{ .key = "nextSession", .group = .sessions, .title = "Next tab or session", .description = "Switch to the next tab when two or more are open; otherwise select the next session in the sidebar.", .default = "ctrl-tab" },
@@ -83,7 +83,6 @@ pub const Fixed = struct { title: []const u8, keys: []const u8 };
 pub const fixed_label = "Panes, tabs and the composer";
 pub const fixed = [_]Fixed{
     .{ .title = "Split the chat to the right", .keys = "Cmd+D" },
-    .{ .title = "Split the chat down", .keys = "Cmd+Shift+D" },
     .{ .title = "Close the pane (back to one column)", .keys = "Cmd+W" },
     .{ .title = "Next pane", .keys = "Cmd+]" },
     .{ .title = "Previous pane", .keys = "Cmd+[" },

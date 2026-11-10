@@ -2,7 +2,7 @@
 //! on the left, the open chat on the right with its header in the title
 //! bar's row, and over both the title bar's buttons: the sidebar toggle,
 //! back and forward through the tabs, and a new tab. A split tab shows its
-//! panes side by side (⌘D) or stacked (⌘⇧D), each its share of the column.
+//! panes side by side (⌘D) or stacked via the panel menu.
 const std = @import("std");
 const nanoui = @import("nanoui");
 const ui = nanoui.ui;
@@ -480,7 +480,7 @@ fn neighbor(c: *ui.Context, a: *App, k: theme.Colors, ix: usize, chat_id: ?[]con
     return false;
 }
 
-/// ⌘B the sidebar, ⌘T or ⌘N a new tab; ⌘D and ⌘⇧D split the chat, ⌘[ and
+/// ⌘B the sidebar, ⌘T or ⌘N a new tab; ⌘D splits the chat, ⌘[ and
 /// ⌘] step through its panes (through tabs with none), ⌥⌘ and ⌃⌘ with an
 /// arrow focus and resize them, ⌃⌘= evens them, ⌘⇧↩ zooms one; ⌘W closes
 /// the pane, then the tab; Escape closes what is open
@@ -601,7 +601,7 @@ fn keys(c: *ui.Context, a: *App) void {
     }
     if (a.selected != null and c.shortcut(.{ .key = 'e', .cmd = true })) @import("app_files.zig").toggle(a);
     if (a.selected != null and c.shortcut(.{ .key = 'r', .cmd = true })) @import("app_panels.zig").toggleHost(a);
-    if (c.shortcut(.{ .key = 't', .cmd = true }) or c.shortcut(.{ .key = 'n', .cmd = true })) a.newTab();
+    if (c.shortcut(.{ .key = 't', .cmd = true }) or c.shortcut(.{ .key = 'n', .cmd = true })) @import("app_open_chooser.zig").open(a, .new_workspace_tab);
     if (c.shortcut(.{ .key = 'j', .cmd = true, .shift = true })) strip.nextAttention(a);
     for (0..@min(strip.count(a), 6)) |ix| {
         if (c.shortcut(.{ .key = @as(u21, '1') + @as(u21, @intCast(ix)), .cmd = true, .alt = true })) {
@@ -625,7 +625,6 @@ fn keys(c: *ui.Context, a: *App) void {
     // Close without archiving (⌥⌘W, rebindable): never asks, never archives.
     if (closeOnlyPressed(c, a)) a.closeArchiving(false);
     if (c.shortcut(.{ .key = 'd', .cmd = true })) strip.splitChoosingFolder(a, .horizontal);
-    if (c.shortcut(.{ .key = 'd', .cmd = true, .shift = true })) strip.splitChoosingFolder(a, .vertical);
     if (c.shortcut(.{ .key = S.enter, .cmd = true, .shift = true })) strip.queue(a, .{ .zoom = strip.active(a) });
     if (c.shortcut(.{ .key = '=', .cmd = true, .ctrl = true })) {
         a.tabs.equalize();

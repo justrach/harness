@@ -118,6 +118,7 @@ test {
     _ = @import("tests_ui_sessions.zig");
     _ = @import("tests_ui_project_setup.zig");
     _ = @import("tests_ui_open_chooser.zig");
+    _ = @import("tests_ui_project_shortcuts.zig");
     _ = @import("tests_ui_resize.zig");
     _ = @import("tests_tab_layout.zig");
     _ = @import("project_paths.zig");
