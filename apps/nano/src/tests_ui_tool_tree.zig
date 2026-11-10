@@ -73,7 +73,7 @@ test "expanded tree results live beside the command, not in a duplicate list" {
     defer h.deinit();
     try h.click(summary);
     try testing.expect(h.t.hasText("48 passed"));
-    try testing.expect(h.t.hasText("1 failed"));
+    try testing.expect(!h.t.hasText("1 failed"));
     try testing.expect(h.t.hasText("2 matches"));
     try testing.expect(h.t.hasText("2 files"));
     try testing.expect(h.t.hasText("+8"));
@@ -92,6 +92,64 @@ test "expanded tree results live beside the command, not in a duplicate list" {
     try testing.expect(!h.t.hasText("Tool access"));
 }
 
+test "failed tool rows keep red labels and error details without failure chrome" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"reply","role":"assistant","status":"complete","parts":[{"id":"read","kind":"tool","call":{"kind":"readFile","path":"src/missing.zig"},"resolved":true,"isError":true,"output":"Synthetic file not found"}]}]}
+    , .{});
+    defer parsed.deinit();
+    try h.a.transcript.apply(parsed.value);
+    h.t.settle(1);
+    var buf: [320]u8 = undefined;
+    const parts = h.a.transcript.entries.items[0].parts.items;
+    try h.click(@import("tools.zig").label(&buf, parts));
+    try testing.expect(!h.t.hasText("failed"));
+    const result = @import("tool_rows.zig").result(h.t.ctx.alloc(), &parts[0], null);
+    try testing.expect(result == .failed);
+    try testing.expect(!result.washed());
+    try testing.expect(parts[0].is_error);
+    try h.click("Read");
+    try testing.expect(h.t.hasText("Synthetic file not found"));
+    try h.click("Read");
+    try testing.expect(!h.t.hasText("Synthetic file not found"));
+}
+
+const FailureChrome = struct {
+    label: []const u8,
+    dark: bool,
+    progress: f32,
+    emitted: usize = 0,
+
+    fn view(probe: *@This(), c: *ui.Context) void {
+        const k = @import("theme.zig").colors(probe.dark);
+        const result: @import("tool_rows.zig").Result = .{ .failed = probe.label };
+        const before = c.nodes.items.len;
+        @import("view_tool_rows.zig").trail(c, k, result, probe.progress);
+        @import("view_tool_rows.zig").wash(c, k, result, 300, 28, probe.progress);
+        probe.emitted = c.nodes.items.len - before;
+    }
+};
+
+test "failure chrome emits no badge wash or spacing for any label theme or animation phase" {
+    for ([_]bool{ false, true }) |dark| {
+        for ([_][]const u8{ "failed", "1 failed", "42 failed", "Failed: 7", "Permission denied", "" }) |label| {
+            for ([_]f32{ 0, 0.5, 1 }) |progress| {
+                var probe: FailureChrome = .{ .label = label, .dark = dark, .progress = progress };
+                var t: ui.Tester = undefined;
+                try t.init(testing.allocator, .init(&probe, FailureChrome.view), .{ .width = 300, .height = 40, .dark = dark });
+                defer t.deinit();
+                for ([_]bool{ false, true }) |reduce| {
+                    t.ctx.reduced_motion = reduce;
+                    t.frame();
+                    try testing.expectEqual(@as(usize, 0), probe.emitted);
+                }
+            }
+        }
+    }
+}
+
 test "access map opens from the footer and shows real call input and output" {
     var h: Harness = undefined;
     try h.init();
@@ -101,6 +159,7 @@ test "access map opens from the footer and shows real call input and output" {
     try testing.expect(h.a.panels.host_open);
     try testing.expectEqual(@import("app_panels.zig").TabKind.tool_access, h.a.panels.activeTab().?.kind);
     try testing.expect(h.t.hasText("3/5 tools · 6 calls"));
+    try testing.expect(!h.t.hasText("Failed"));
     try h.click("Terminal");
     try testing.expect(h.t.hasText("INPUT"));
     try testing.expect(h.t.hasText("OUTPUT"));

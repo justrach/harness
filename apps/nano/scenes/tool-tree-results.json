@@ -145,7 +145,7 @@
       "expect": "48 passed"
     },
     {
-      "expect": "1 failed"
+      "expect": "zig build check"
     },
     {
       "expect": "2 matches"

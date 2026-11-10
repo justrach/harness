@@ -21,7 +21,7 @@ pub const Result = union(enum) {
     passed: []const u8,
 
     pub fn washed(r: Result) bool {
-        return r == .failed or r == .passed;
+        return r == .passed;
     }
 };
 
@@ -246,6 +246,26 @@ test "tree results require real output and matching command exit status" {
     try std.testing.expect(result(a, &p, null) == .settled);
     p.resolved = false;
     try std.testing.expectEqual(@as(?u64, null), result(a, &p, null).running);
+}
+
+test "every tool kind keeps failure semantics without a failure wash regardless of cause" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (std.enums.values(tr.ToolKind)) |kind| {
+        for ([_][]const u8{ "", "File not found", "Permission denied", "Authentication required", "Network timeout", "Invalid arguments", "Cancelled", "3 failed", "Failed: 7", "48 passed; 0 failed" }) |output| {
+            var p: tr.Part = .{ .id = @constCast("synthetic"), .kind = .tool, .tool = kind, .resolved = true, .is_error = true, .output = @constCast(output) };
+            const r = result(a, &p, null);
+            try std.testing.expect(r != .passed);
+            try std.testing.expect(!r.washed());
+            // Output sidecars and old snapshots without a resolved flag
+            // must not introduce a different failure decoration.
+            p.output_ref = @constCast("synthetic-sidecar");
+            try std.testing.expect(!result(a, &p, null).washed());
+            p.resolved = false;
+            try std.testing.expect(!result(a, &p, null).washed());
+        }
+    }
 }
 
 test "search counts only complete real match lines, not summary prose" {

@@ -195,13 +195,8 @@ fn nodeCard(c: *ui.Context, a: *App, k: theme.Colors, node: access.Node) void {
     {
         const row = ui.div(c).row().wFull().gap(8).itemsCenter();
         defer row.end();
-        icons.icon(c, node.family.icon(), 14, k.muted, 0);
-        ui.text(c, node.family.name(), .{ .size = 13, .weight = .semibold, .color = k.text });
-        if (node.failed) {
-            const failed = ui.div(c).row().h(18).px(6).itemsCenter().rounded(6).bg(k.danger);
-            defer failed.end();
-            ui.text(c, "Failed", .{ .size = 11, .color = .hex(0xffffff) });
-        }
+        icons.icon(c, node.family.icon(), 14, if (node.failed) k.danger else k.muted, 0);
+        ui.text(c, node.family.name(), .{ .size = 13, .weight = .semibold, .color = if (node.failed) k.danger else k.text });
     }
     ui.text(c, node.subtitle(c.alloc()), .{ .size = 11, .color = k.muted });
     if (card.clicked()) {
