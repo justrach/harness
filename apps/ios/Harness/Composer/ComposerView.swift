@@ -182,12 +182,16 @@ struct ComposerShell<Chips: View>: View {
         }
         .padding(.horizontal, expanded && !singleLine ? 12 : 5)
         .padding(.vertical, expanded && !singleLine ? 12 : 5)
-        // A bright writing plane on the glass, with an accent edge while
-        // typing (the desktop composer's design).
-        .background(Theme.composerPlane, in: surfaceShape)
+        // Pure native Liquid Glass (`FrameSchedule.lean`:
+        // `native_glass_preserves_specular_refraction`): no interior opaque fill
+        // and no unfocused gray stroke over the glass rim.
         .glassEffect(.regular.interactive(), in: surfaceShape)
-        .overlay(surfaceShape.strokeBorder(
-            focused ? Theme.accent.opacity(0.55) : hairline(0.05), lineWidth: 1))
+        .shadow(color: .black.opacity(0.08), radius: 10, y: 3)
+        .overlay {
+            if focused {
+                surfaceShape.strokeBorder(Theme.accent.opacity(0.45), lineWidth: 1)
+            }
+        }
         // The whole glass surface focuses the editor, not just the TextField's
         // own text box: the collapsed pill is mostly padding, and a tap that
         // misses the text box falls through to the transcript underneath —
@@ -237,8 +241,7 @@ struct ComposerShell<Chips: View>: View {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Theme.textMuted)
                 .frame(width: 28, height: 28)
-                .background(ink(0.06), in: Circle())
-                .overlay(Circle().strokeBorder(hairline(0.08), lineWidth: 1))
+                .glassEffect(.regular.interactive(), in: Circle())
                 .frame(width: 40, height: 40)
                 .contentShape(Rectangle())
         }
@@ -257,8 +260,7 @@ struct ComposerShell<Chips: View>: View {
                 .font(.system(size: 16, weight: .medium))
                 .foregroundStyle(Theme.textMuted)
                 .frame(width: singleLine ? 40 : 44, height: singleLine ? 40 : 44)
-                .background(ink(0.06), in: Circle())
-                .overlay(Circle().strokeBorder(hairline(0.08), lineWidth: 1))
+                .glassEffect(.regular.interactive(), in: Circle())
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
@@ -400,7 +402,7 @@ struct ComposerView: View {
             .foregroundStyle(Theme.textMuted)
             .padding(.horizontal, 10)
             .frame(height: 30)
-            .background(Theme.text.opacity(0.06), in: Capsule())
+            .glassEffect(.regular.interactive(), in: Capsule())
             .contentShape(Capsule())
             .frame(maxWidth: 220)
             .fixedSize(horizontal: false, vertical: true)

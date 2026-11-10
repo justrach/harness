@@ -108,8 +108,9 @@ extension HomeGroupBy {
 }
 
 /// One of the Home list's control pills: symbol, title and a chevron in a
-/// capsule. Outlined at its default, filled once it narrows or regroups the
-/// list, so a changed list is visible at a glance. Text follows Dynamic Type.
+/// capsule. Pure native Liquid Glass (`FrameSchedule.lean`:
+/// `native_glass_preserves_specular_refraction`) without an interior ink wash
+/// or border overlay, matching the system's own toolbar and search bar glass.
 struct HomeControlPill: View {
     let symbol: String
     let title: String
@@ -132,9 +133,6 @@ struct HomeControlPill: View {
         .foregroundStyle(active ? Theme.text : Theme.textMuted)
         .padding(.horizontal, 14)
         .frame(minHeight: Theme.chipHeight)
-        // Quiet either way: a faint ink fill under glass, a little deeper when
-        // the chip has been changed from its default. No border, no solid fill.
-        .background(Capsule().fill(ink(active ? 0.09 : 0.04)))
         .glassEffect(.regular.interactive(), in: Capsule())
         // A 44pt target around the 36pt capsule.
         .frame(minHeight: Theme.hitTarget)

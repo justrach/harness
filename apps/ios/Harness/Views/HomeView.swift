@@ -694,19 +694,11 @@ struct HomeView: View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 8) {
                 projectMenu
-                if showsGrouping {
-                    groupPill
-                    activityPill
-                }
+                if showsGrouping { groupPill }
             }
             VStack(alignment: .leading, spacing: 6) {
                 projectMenu
-                if showsGrouping {
-                    HStack(spacing: 8) {
-                        groupPill
-                        activityPill
-                    }
-                }
+                if showsGrouping { groupPill }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -754,6 +746,9 @@ struct HomeView: View {
     /// space.)
     private var groupPill: some View {
         let grouping = HomeGroupBy(rawValue: groupByRaw) ?? .none
+        let pillTitle = activityWindow == .all
+            ? grouping.pillTitle
+            : "\(grouping.pillTitle) · \(activityWindow.label)"
         return Menu {
             Picker(selection: $groupByRaw) {
                 ForEach(HomeGroupBy.allCases) { option in
@@ -763,8 +758,22 @@ struct HomeView: View {
                 Text("Group by")
             }
             .pickerStyle(.inline)
+            Menu {
+                Picker(selection: $activityWindow) {
+                    ForEach(HomeActivityWindow.allCases) { option in
+                        Text(option.label).tag(option)
+                    }
+                } label: {
+                    Text("Last activity")
+                }
+                .pickerStyle(.inline)
+            } label: {
+                Label(activityWindow == .all ? "Last activity" : "Last activity: \(activityWindow.label)",
+                      systemImage: "clock.arrow.circlepath")
+            }
         } label: {
-            HomeControlPill(symbol: grouping.symbol, title: grouping.pillTitle, active: grouping != .status)
+            HomeControlPill(symbol: grouping.symbol, title: pillTitle,
+                            active: grouping != .status || activityWindow != .all)
         }
         .buttonStyle(.plain)
         .fixedSize()
@@ -772,28 +781,6 @@ struct HomeView: View {
         .accessibilityValue(grouping.label)
         .accessibilityHint("Chooses how the list is grouped")
         .accessibilityIdentifier("home-group-by")
-    }
-
-    private var activityPill: some View {
-        Menu {
-            Picker(selection: $activityWindow) {
-                ForEach(HomeActivityWindow.allCases) { option in
-                    Text(option.label).tag(option)
-                }
-            } label: {
-                Text("Last activity")
-            }
-            .pickerStyle(.inline)
-        } label: {
-            let title = activityWindow == .all ? "Last activity" : activityWindow.label
-            HomeControlPill(symbol: "clock.arrow.circlepath", title: title, active: activityWindow != .all)
-        }
-        .buttonStyle(.plain)
-        .fixedSize()
-        .accessibilityLabel("Last activity")
-        .accessibilityValue(activityWindow.label)
-        .accessibilityHint("Filters sessions by recent activity")
-        .accessibilityIdentifier("home-activity-filter")
     }
 
     private func deviceTag(_ space: Space) -> String {

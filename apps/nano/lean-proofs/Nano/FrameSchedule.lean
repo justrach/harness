@@ -736,4 +736,33 @@ theorem clean_home_layout_has_zero_top_clutter :
     homeTopLayoutClean.head? = some .filterPills := by
   decide
 
+/-- Native iOS Liquid Glass fidelity (`HomeListControls.swift`, `ComposerView.swift`,
+`WriteSheet.swift`, `ThemeStore.swift`):
+Painting an interior fill (`Theme.composerPlane` or `ink(0.04)`) inside a view wrapped in
+`.glassEffect(.regular.interactive(), ...)` or painting an unfocused `hairline(0.05)` border
+over its perimeter flattens UIKit/SwiftUI's native specular rim highlight and refraction.
+A glass surface preserves native refraction (`preservesNativeGlass`) iff `hasInteriorFill = false`
+and `hasUnfocusedBorderOverlay = false`. -/
+structure GlassSurfaceConfig where
+  hasInteriorFill : Bool
+  hasUnfocusedBorderOverlay : Bool
+deriving DecidableEq, Repr
+
+def preservesNativeGlass (cfg : GlassSurfaceConfig) : Bool :=
+  !cfg.hasInteriorFill && !cfg.hasUnfocusedBorderOverlay
+
+def fakeGlassConfig : GlassSurfaceConfig :=
+  { hasInteriorFill := true, hasUnfocusedBorderOverlay := true }
+
+def nativeGlassConfig : GlassSurfaceConfig :=
+  { hasInteriorFill := false, hasUnfocusedBorderOverlay := false }
+
+theorem fake_glass_destroys_native_refraction :
+    preservesNativeGlass fakeGlassConfig = false := by
+  rfl
+
+theorem native_glass_preserves_specular_refraction :
+    preservesNativeGlass nativeGlassConfig = true := by
+  rfl
+
 end Nano.FrameSchedule

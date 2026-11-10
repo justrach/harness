@@ -823,8 +823,7 @@ struct ComposerChip: View {
             }
             .padding(.horizontal, 13)
             .frame(height: 40)
-            .background(ink(0.08), in: Capsule())
-            .overlay(Capsule().strokeBorder(hairline(0.08), lineWidth: 1))
+            .glassEffect(.regular.interactive(), in: Capsule())
         }
         .buttonStyle(ChipPressButtonStyle())
     }
@@ -883,8 +882,7 @@ struct ZeronModelTierPill: View {
                 .buttonStyle(ChipPressButtonStyle())
             }
         }
-        .background(ink(0.08), in: Capsule())
-        .overlay(Capsule().strokeBorder(hairline(0.08), lineWidth: 1))
+        .glassEffect(.regular.interactive(), in: Capsule())
     }
 }
 
@@ -906,8 +904,7 @@ struct ComposerSteerChip: View {
             }
             .padding(.horizontal, 12)
             .frame(height: 40)
-            .background(ink(0.08), in: Capsule())
-            .overlay(Capsule().strokeBorder(hairline(0.08), lineWidth: 1))
+            .glassEffect(.regular.interactive(), in: Capsule())
         }
         .buttonStyle(ChipPressButtonStyle())
         .accessibilityIdentifier("composer-steer-mode")
