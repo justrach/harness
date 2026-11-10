@@ -6,6 +6,7 @@
 //! - `Nano/ScrollFollow.lean`  (200-cell scroll-follow & stick-end quiescence cube)
 //! - `Nano/Tween.lean`         (30-cell C⁰ retarget continuity & viewport culling cube)
 //! - `Nano/StripMenu.lean`     (slot chip width conservation, scrim top, menu focus cube)
+//! - `Nano/FooterChips.lean`   (4806-cell draft footer chip allocation & split-window cube)
 //!
 //! Designed with zero `App` dependency so the motion and scroll kernels can be
 //! shared directly with `nanoui`.
@@ -306,6 +307,115 @@ pub fn capShadowDownwardBleed(foot: f32, r: f32, blur_reach: f32, interior_maske
     return (foot + blur_reach) - foot;
 }
 
+/// Two 8px insets around a 12px glyph (`Nano.FooterChips.iconW`).
+pub const footer_icon_w: f32 = 28;
+pub const footer_chip_gap: f32 = 4;
+/// A label is never ellipsized below this; the control drops to its glyph.
+pub const footer_min_label: f32 = 96;
+pub const footer_rank_count: usize = 6;
+/// Controls ranked below this give up their words before any label is
+/// shortened (`Nano.FooterChips.freeCollapse`).
+pub const footer_free_collapse: usize = 2;
+/// The composer width from which the draft footer centers its row.
+pub const footer_wide_w: f32 = 540;
+
+/// A draft footer control (`Nano.FooterChips.Chip`).
+pub const FooterChip = struct {
+    /// Everything but its words: insets, glyph, gaps, chevron.
+    chrome: f32,
+    /// Its words' natural width.
+    text: f32,
+    /// How soon it gives way, lowest first.
+    rank: usize,
+};
+
+/// Where a control lands (`Nano.FooterChips.Slot`).
+pub const FooterSlot = struct {
+    /// 0 leaves the control out.
+    w: f32 = 0,
+    /// The width its words may take; 0 draws its glyph alone.
+    label: f32 = 0,
+};
+
+/// One candidate layout (`Nano.FooterChips.layout`), returning its
+/// `totalW`: the drawn controls and the gaps between them.
+fn footerLayout(collapse: usize, hide: usize, cap: f32, chips: []const FooterChip, out: []FooterSlot) f32 {
+    var total: f32 = 0;
+    var shown: f32 = 0;
+    for (chips, out) |chip, *slot| {
+        const label = @min(@max(0, @ceil(chip.text)), cap);
+        slot.* = if (chip.rank < hide)
+            .{}
+        else if (chip.rank < collapse)
+            .{ .w = footer_icon_w }
+        else
+            .{ .w = chip.chrome + label, .label = label };
+        if (slot.w > 0) {
+            total += slot.w;
+            shown += 1;
+        }
+    }
+    return total + @max(0, shown - 1) * footer_chip_gap;
+}
+
+/// Width allocation for the controls after the model chip in a new chat's
+/// footer (`Nano.FooterChips.footerChipWidths`), into `out`. The first
+/// layout that fits `room` wins: every label whole; the
+/// `footer_free_collapse` lowest-ranked controls reduced to glyphs, one by
+/// one; the remaining labels ellipsized to a shared cap no shorter than
+/// `footer_min_label`; the same with the next lowest-ranked reduced to
+/// glyphs, one by one; then glyphs only, leaving out the lowest-ranked.
+///
+/// Guarantees (`never_overflows`, `footer_conservation_holds`,
+/// `footer_split_windows_hold` in `Nano/FooterChips.lean`):
+/// 1. What is drawn never exceeds `room`, at any width.
+/// 2. When the natural widths fit, nothing is shortened.
+/// 3. A control is whole, a bare glyph, or left out. Never partly cut.
+/// 4. While the glyphs alone fit, no control is left out.
+pub fn footerChipWidths(room_in: f32, chips: []const FooterChip, out: []FooterSlot) void {
+    std.debug.assert(out.len == chips.len);
+    const room = @max(0, @floor(room_in));
+    var top: f32 = 0;
+    for (chips) |chip| top = @max(top, @ceil(chip.text));
+    const low = @min(footer_min_label, top);
+    var collapse: usize = 0;
+    while (collapse < footer_free_collapse) : (collapse += 1) {
+        if (footerLayout(collapse, 0, top, chips, out) <= room) return;
+    }
+    while (collapse <= footer_rank_count) : (collapse += 1) {
+        // The total only grows with the cap: a stage whose shortest labels
+        // overflow has no cap that fits.
+        if (footerLayout(collapse, 0, low, chips, out) > room) continue;
+        var cap = top;
+        while (cap > low) : (cap -= 1) {
+            if (footerLayout(collapse, 0, cap, chips, out) <= room) return;
+        }
+        _ = footerLayout(collapse, 0, low, chips, out);
+        return;
+    }
+    var hide: usize = 0;
+    while (hide <= footer_rank_count) : (hide += 1) {
+        if (footerLayout(footer_rank_count, hide, 0, chips, out) <= room) return;
+    }
+    for (out) |*slot| slot.* = .{};
+}
+
+/// The draft footer row's gap (`Nano.FooterChips.rowGap`).
+pub fn footerRowGap(w: f32) f32 {
+    return if (w >= footer_wide_w) 6 else 4;
+}
+
+/// The width left for the controls in a composer `w` wide
+/// (`Nano.FooterChips.footerRoom`): less the row's two 10px insets, the
+/// model chip and its gap, the wide row's 3px separator, and a chat note.
+/// Proven (`footer_row_within_composer`) to keep the row inside `w`.
+pub fn footerRoom(w: f32, model_w: f32, note_w: f32) f32 {
+    const gap = footerRowGap(w);
+    const lead = model_w + gap + (if (w >= footer_wide_w) 3 + gap else 0);
+    const tail = if (note_w > 0) gap + note_w else 0;
+    return @max(0, w - (20 + lead + tail));
+}
+
 pub const BillingTier = enum { plan, local, credits, api };
 
 /// Model picker billing tier rank (`Nano.FrameSchedule.billingRank`):
@@ -541,4 +651,260 @@ test "lean ScrollFollow and Tween kernels: stickEndScroll quiescence and C0 reta
     try std.testing.expect(workspaceVisibleInSidebar(true, true));
     try std.testing.expect(!isInlineMathDelimiterPair(false, false, false, false, true, false, true));
     try std.testing.expect(isInlineMathDelimiterPair(false, false, false, false, false, false, false));
+}
+
+const footer_mode: FooterChip = .{ .chrome = 34, .text = 30, .rank = 4 };
+const footer_follow: FooterChip = .{ .chrome = 33, .text = 33, .rank = 1 };
+const footer_computer: FooterChip = .{ .chrome = 52, .text = 98, .rank = 0 };
+const footer_project: FooterChip = .{ .chrome = 52, .text = 45, .rank = 2 };
+const footer_checkout: FooterChip = .{ .chrome = 52, .text = 79, .rank = 3 };
+const footer_branch: FooterChip = .{ .chrome = 52, .text = 60, .rank = 5 };
+const footer_long_project: FooterChip = .{ .chrome = 52, .text = 228, .rank = 2 };
+const footer_long_branch: FooterChip = .{ .chrome = 52, .text = 228, .rank = 5 };
+const footer_screenshot = [_]FooterChip{ footer_mode, footer_follow, footer_computer, footer_project, footer_checkout, footer_branch };
+/// `Nano.FooterChips.chipSets`.
+const footer_sets = [_][]const FooterChip{
+    &.{ footer_mode, footer_computer },
+    &.{ footer_mode, footer_computer, footer_project },
+    &.{ footer_mode, footer_follow, footer_computer, footer_project },
+    &.{ footer_mode, footer_computer, footer_project, footer_checkout, footer_branch },
+    &footer_screenshot,
+    &.{ footer_mode, footer_follow, footer_computer, footer_long_project, footer_checkout, footer_long_branch },
+};
+
+fn footerTotal(slots: []const FooterSlot) f32 {
+    var total: f32 = 0;
+    var shown: f32 = 0;
+    for (slots) |s| if (s.w > 0) {
+        total += s.w;
+        shown += 1;
+    };
+    return total + @max(0, shown - 1) * footer_chip_gap;
+}
+
+test "lean FooterChips kernel: the reported split pane keeps all six controls whole" {
+    var out: [6]FooterSlot = undefined;
+    footerChipWidths(415, &footer_screenshot, &out);
+    const want = [_][2]f32{ .{ 64, 30 }, .{ 28, 0 }, .{ 28, 0 }, .{ 28, 0 }, .{ 131, 79 }, .{ 112, 60 } };
+    for (want, out) |w, s| {
+        try std.testing.expectEqual(w[0], s.w);
+        try std.testing.expectEqual(w[1], s.label);
+    }
+    try std.testing.expectEqual(@as(f32, 411), footerTotal(&out));
+
+    // `long_ref_is_whole_before_the_computer_keeps_its_words`.
+    const long_ref = [_]FooterChip{ footer_mode, .{ .chrome = 52, .text = 140, .rank = 0 }, footer_project, footer_checkout, .{ .chrome = 52, .text = 170, .rank = 5 } };
+    footerChipWidths(622, &long_ref, out[0..5]);
+    try std.testing.expectEqual(FooterSlot{ .w = 28 }, out[1]);
+    try std.testing.expectEqual(FooterSlot{ .w = 222, .label = 170 }, out[4]);
+
+    // `split_1440_keeps_every_control`: two panes beside the sidebar, three without it.
+    try std.testing.expectEqual(@as(f32, 371), footerRoom(566, 160, 0));
+    try std.testing.expectEqual(@as(f32, 264), footerRoom(448, 160, 0));
+    footerChipWidths(264, &footer_screenshot, &out);
+    for (out) |s| try std.testing.expectEqual(footer_icon_w, s.w);
+
+    // Past the computer and the follow-up switch, long labels share one
+    // cap before another control gives up its words.
+    const long = footer_sets[5];
+    footerChipWidths(700, long, &out);
+    try std.testing.expectEqual(@as(f32, 162), out[3].label);
+    try std.testing.expectEqual(@as(f32, 162), out[5].label);
+    try std.testing.expectEqual(@as(f32, 28), out[1].w);
+    try std.testing.expectEqual(@as(f32, 28), out[2].w);
+    try std.testing.expectEqual(@as(f32, 79), out[4].label);
+
+    // Too narrow for the glyphs: the ref is the last to go.
+    footerChipWidths(30, &footer_screenshot, &out);
+    for (out[0..5]) |s| try std.testing.expectEqual(@as(f32, 0), s.w);
+    try std.testing.expectEqual(footer_icon_w, out[5].w);
+    footerChipWidths(0, &footer_screenshot, &out);
+    try std.testing.expectEqual(@as(f32, 0), footerTotal(&out));
+}
+
+test "lean FooterChips kernel: conservation, widening and rank order hold over every slot width" {
+    var buf: [6]FooterSlot = undefined;
+    var next_buf: [6]FooterSlot = undefined;
+    for (footer_sets) |chips| {
+        const out = buf[0..chips.len];
+        const next = next_buf[0..chips.len];
+        var natural: f32 = 0;
+        for (chips) |chip| natural += chip.chrome + chip.text;
+        natural += @as(f32, @floatFromInt(chips.len - 1)) * footer_chip_gap;
+        const icons = @as(f32, @floatFromInt(chips.len)) * footer_icon_w + @as(f32, @floatFromInt(chips.len - 1)) * footer_chip_gap;
+        var room: f32 = 0;
+        while (room <= 800) : (room += 1) {
+            footerChipWidths(room, chips, out);
+            footerChipWidths(room + 1, chips, next);
+            try std.testing.expect(footerTotal(out) <= room);
+            var shown: usize = 0;
+            var labelled: usize = 0;
+            var next_shown: usize = 0;
+            var next_labelled: usize = 0;
+            for (chips, out, next) |chip, s, n| {
+                if (natural <= room) try std.testing.expectEqual(FooterSlot{ .w = chip.chrome + chip.text, .label = chip.text }, s);
+                // Whole, a bare glyph, or left out.
+                if (s.w != 0 and s.label == 0) try std.testing.expectEqual(footer_icon_w, s.w);
+                if (s.label != 0) {
+                    try std.testing.expectEqual(chip.chrome + s.label, s.w);
+                    try std.testing.expect(s.label == chip.text or (s.label >= footer_min_label and s.label < chip.text));
+                }
+                if (icons <= room) try std.testing.expect(s.w > 0);
+                shown += @intFromBool(s.w > 0);
+                labelled += @intFromBool(s.label > 0);
+                next_shown += @intFromBool(n.w > 0);
+                next_labelled += @intFromBool(n.label > 0);
+                for (chips, out) |lower, t| if (lower.rank < chip.rank) {
+                    if (s.w == 0) try std.testing.expectEqual(@as(f32, 0), t.w);
+                    if (s.label == 0) try std.testing.expectEqual(@as(f32, 0), t.label);
+                };
+            }
+            try std.testing.expect(shown <= next_shown);
+            try std.testing.expect(labelled <= next_labelled);
+        }
+    }
+}
+
+test "lean FooterChips kernel: the footer row ends inside the composer in every split" {
+    var buf: [6]FooterSlot = undefined;
+    for ([_]f32{ 1024, 1200, 1280, 1440, 1512, 1728, 1920 }) |window_w| {
+        for ([_]f32{ 0, 244 }) |sidebar_w| {
+            for ([_]f32{ 1, 2, 3 }) |panes| {
+                const pane = @floor((window_w - sidebar_w) / panes);
+                const w = @max(@min(736 + 32, pane) - 32, 0);
+                for ([_]f32{ 34, 79, 120, 160, 200, 248 }) |model_natural| {
+                    const model_w = @min(model_natural, @min(248, @max(80, pane - 132)));
+                    const room = footerRoom(w, model_w, 0);
+                    const lead = model_w + footerRowGap(w) + (if (w >= footer_wide_w) 3 + footerRowGap(w) else 0);
+                    for (footer_sets) |chips| {
+                        const out = buf[0..chips.len];
+                        footerChipWidths(room, chips, out);
+                        try std.testing.expect(20 + lead + footerTotal(out) <= w);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// UI Experience Mode State Machine (`FrameSchedule.lean`: `UiMode`, `UiState`,
+/// `UiEvent`, `stepUiState`, `HierarchyProfile`).
+/// - `.zen` (**Default** — "for normies"): 1 level of hierarchy (`hierarchyDepth == 1`),
+///   0 auxiliary moving parts (`movingPartsCount == 0`).
+/// - `.developer` (Power-user / Developer Mode): 4 levels of hierarchy
+///   (`hierarchyDepth == 4`) and all 6 developer moving parts (`movingPartsCount == 6`).
+pub const UiMode = enum {
+    zen,
+    developer,
+
+    pub fn key(m: UiMode) []const u8 {
+        return switch (m) {
+            .zen => "zen",
+            .developer => "developer",
+        };
+    }
+
+    pub fn label(m: UiMode) []const u8 {
+        return switch (m) {
+            .zen => "Zen",
+            .developer => "Developer",
+        };
+    }
+
+    pub fn flip(m: UiMode) UiMode {
+        return switch (m) {
+            .zen => .developer,
+            .developer => .zen,
+        };
+    }
+};
+
+pub const UiState = struct {
+    mode: UiMode = .zen,
+
+    pub const initial: UiState = .{ .mode = .zen };
+};
+
+pub const UiEvent = union(enum) {
+    toggle_mode,
+    set_mode: UiMode,
+    reset_to_default,
+};
+
+pub fn stepUiState(s: UiState, e: UiEvent) UiState {
+    return switch (e) {
+        .toggle_mode => .{ .mode = s.mode.flip() },
+        .set_mode => |target| .{ .mode = target },
+        .reset_to_default => UiState.initial,
+    };
+}
+
+pub const HierarchyProfile = struct {
+    shows_open_workspaces_tree: bool,
+    shows_multi_axis_filters: bool,
+    shows_row_tech_badges: bool,
+    shows_git_checkout_chrome: bool,
+    shows_prompt_rail: bool,
+    shows_action_toolbar: bool,
+    flat_session_list: bool,
+
+    pub fn ofMode(m: UiMode) HierarchyProfile {
+        return switch (m) {
+            .zen => .{
+                .shows_open_workspaces_tree = false,
+                .shows_multi_axis_filters = false,
+                .shows_row_tech_badges = false,
+                .shows_git_checkout_chrome = false,
+                .shows_prompt_rail = false,
+                .shows_action_toolbar = false,
+                .flat_session_list = true,
+            },
+            .developer => .{
+                .shows_open_workspaces_tree = true,
+                .shows_multi_axis_filters = true,
+                .shows_row_tech_badges = true,
+                .shows_git_checkout_chrome = true,
+                .shows_prompt_rail = true,
+                .shows_action_toolbar = true,
+                .flat_session_list = false,
+            },
+        };
+    }
+};
+
+pub fn hierarchyDepth(p: HierarchyProfile) usize {
+    return 1 +
+        @as(usize, @intFromBool(p.shows_multi_axis_filters)) +
+        @as(usize, @intFromBool(p.shows_open_workspaces_tree)) +
+        @as(usize, @intFromBool(!p.flat_session_list));
+}
+
+pub fn movingPartsCount(p: HierarchyProfile) usize {
+    return @as(usize, @intFromBool(p.shows_open_workspaces_tree)) +
+        @as(usize, @intFromBool(p.shows_multi_axis_filters)) +
+        @as(usize, @intFromBool(p.shows_row_tech_badges)) +
+        @as(usize, @intFromBool(p.shows_git_checkout_chrome)) +
+        @as(usize, @intFromBool(p.shows_prompt_rail)) +
+        @as(usize, @intFromBool(p.shows_action_toolbar));
+}
+
+test "lean UiMode state machine: default is zen, toggle is involutive, and zen flattens hierarchy" {
+    try std.testing.expectEqual(UiMode.zen, UiState.initial.mode);
+    for ([_]UiMode{ .zen, .developer }) |m| {
+        const s: UiState = .{ .mode = m };
+        try std.testing.expectEqual(s, stepUiState(stepUiState(s, .toggle_mode), .toggle_mode));
+        try std.testing.expectEqual(UiMode.zen, stepUiState(s, .reset_to_default).mode);
+        try std.testing.expectEqual(
+            stepUiState(s, .{ .set_mode = m }),
+            stepUiState(stepUiState(s, .{ .set_mode = m }), .{ .set_mode = m }),
+        );
+    }
+    const zen = HierarchyProfile.ofMode(.zen);
+    const dev = HierarchyProfile.ofMode(.developer);
+    try std.testing.expectEqual(@as(usize, 1), hierarchyDepth(zen));
+    try std.testing.expectEqual(@as(usize, 4), hierarchyDepth(dev));
+    try std.testing.expect(hierarchyDepth(zen) < hierarchyDepth(dev));
+    try std.testing.expectEqual(@as(usize, 0), movingPartsCount(zen));
+    try std.testing.expectEqual(@as(usize, 6), movingPartsCount(dev));
+    try std.testing.expect(movingPartsCount(zen) < movingPartsCount(dev));
 }

@@ -798,4 +798,126 @@ theorem press_scale_bounded_and_contracting (targetBP : Nat) :
   simp [pressScaleBP]
   omega
 
+/-- UI Experience Mode State Machine (`UiMode`, `UiState`, `UiEvent`, `stepUiState`,
+`HierarchyProfile`):
+Models the user experience hierarchy as a deterministic finite state machine with two
+modes:
+- `.zen` (**Default** — "for normies"): flattens the UI to 1 level of hierarchy
+  (`hierarchyDepth = 1`) and 0 auxiliary moving parts (`movingPartsCount = 0`),
+  presenting a single flat conversation list without nested `Open workspaces` split
+  trees, collapsible group accordions, per-row harness/project/branch badges, floating
+  prompt tick rails, `+ Add action` toolbars, or git worktree/checkout/branch footer
+  plumbing.
+- `.developer` (Power-user / Developer Mode): exposes the full 4-level hierarchy
+  (`hierarchyDepth = 4`: filter bar → open workspaces split tree → collapsible project
+  groups → multi-badge session rows) and all 6 developer moving parts
+  (`movingPartsCount = 6`: open workspaces tree, multi-axis filters, row tech badges,
+  git checkout/worktree/branch chrome, prompt jump rail, and `+ Add action` toolbar). -/
+inductive UiMode where
+  | zen
+  | developer
+deriving DecidableEq, Repr, BEq
+
+def UiMode.flip : UiMode → UiMode
+  | .zen       => .developer
+  | .developer => .zen
+
+structure UiState where
+  mode : UiMode
+deriving DecidableEq, Repr, BEq
+
+def UiState.initial : UiState :=
+  { mode := .zen }
+
+inductive UiEvent where
+  | toggleMode
+  | setMode (target : UiMode)
+  | resetToDefault
+deriving DecidableEq, Repr, BEq
+
+def stepUiState (s : UiState) (e : UiEvent) : UiState :=
+  match e with
+  | .toggleMode     => { s with mode := s.mode.flip }
+  | .setMode target => { s with mode := target }
+  | .resetToDefault => UiState.initial
+
+structure HierarchyProfile where
+  showsOpenWorkspacesTree : Bool
+  showsMultiAxisFilters   : Bool
+  showsRowTechBadges      : Bool
+  showsGitCheckoutChrome  : Bool
+  showsPromptRail         : Bool
+  showsActionToolbar      : Bool
+  flatSessionList         : Bool
+deriving DecidableEq, Repr, BEq
+
+def HierarchyProfile.ofMode : UiMode → HierarchyProfile
+  | .zen => {
+      showsOpenWorkspacesTree := false
+      showsMultiAxisFilters   := false
+      showsRowTechBadges      := false
+      showsGitCheckoutChrome  := false
+      showsPromptRail         := false
+      showsActionToolbar      := false
+      flatSessionList         := true
+    }
+  | .developer => {
+      showsOpenWorkspacesTree := true
+      showsMultiAxisFilters   := true
+      showsRowTechBadges      := true
+      showsGitCheckoutChrome  := true
+      showsPromptRail         := true
+      showsActionToolbar      := true
+      flatSessionList         := false
+    }
+
+def b2n (b : Bool) : Nat :=
+  if b then 1 else 0
+
+/-- Visual nesting depth of the session navigation hierarchy:
+1 in `.zen` (flat session list), 4 in `.developer` (filter bar + open workspaces tree +
+collapsible project groups + multi-badge session rows). -/
+def hierarchyDepth (p : HierarchyProfile) : Nat :=
+  1 + b2n p.showsMultiAxisFilters + b2n p.showsOpenWorkspacesTree + b2n (!p.flatSessionList)
+
+/-- Count of auxiliary developer chrome surfaces ("moving parts") active around the
+conversation and session list. -/
+def movingPartsCount (p : HierarchyProfile) : Nat :=
+  b2n p.showsOpenWorkspacesTree +
+  b2n p.showsMultiAxisFilters +
+  b2n p.showsRowTechBadges +
+  b2n p.showsGitCheckoutChrome +
+  b2n p.showsPromptRail +
+  b2n p.showsActionToolbar
+
+theorem default_ui_mode_is_zen :
+    UiState.initial.mode = .zen := by
+  rfl
+
+theorem toggle_ui_mode_involutive (s : UiState) :
+    stepUiState (stepUiState s .toggleMode) .toggleMode = s := by
+  cases s with
+  | mk m =>
+    cases m <;> rfl
+
+theorem reset_restores_zen_default (s : UiState) :
+    (stepUiState s .resetToDefault).mode = .zen := by
+  rfl
+
+theorem set_mode_idempotent (s : UiState) (m : UiMode) :
+    stepUiState (stepUiState s (.setMode m)) (.setMode m) = stepUiState s (.setMode m) := by
+  rfl
+
+theorem zen_mode_flattens_hierarchy :
+    hierarchyDepth (HierarchyProfile.ofMode .zen) = 1 ∧
+    hierarchyDepth (HierarchyProfile.ofMode .developer) = 4 ∧
+    hierarchyDepth (HierarchyProfile.ofMode .zen) < hierarchyDepth (HierarchyProfile.ofMode .developer) := by
+  decide
+
+theorem zen_mode_eliminates_moving_parts :
+    movingPartsCount (HierarchyProfile.ofMode .zen) = 0 ∧
+    movingPartsCount (HierarchyProfile.ofMode .developer) = 6 ∧
+    movingPartsCount (HierarchyProfile.ofMode .zen) < movingPartsCount (HierarchyProfile.ofMode .developer) := by
+  decide
+
 end Nano.FrameSchedule

@@ -327,7 +327,12 @@ struct ComposerView: View {
     let runLive: Bool
     /// iPhone Duo: Stop lives in the status pill (DuoChat), so Send never turns into Stop.
     @AppStorage(DuoChat.foldableKey) private var duoChat = false
+    @AppStorage(HomeUiMode.storageKey) private var uiModeRaw = HomeUiMode.zen.rawValue
     let questionClosedAtMs: Int64?
+
+    private var showsGitChrome: Bool {
+        HomeHierarchyProfile.ofMode(HomeUiMode(rawValue: uiModeRaw) ?? .zen).showsGitCheckoutChrome
+    }
 
     // What was typed and not sent comes back with the chat (DraftStore).
     @State private var text: String
@@ -565,10 +570,10 @@ struct ComposerView: View {
                 focusTick: DuoComposerFocus.shared.tick(chat.id),
                 onExpand: { showWrite = true }
             ) {
-                if let pullRequest = model.changeRequest(for: chat) {
+                if showsGitChrome, let pullRequest = model.changeRequest(for: chat) {
                     PullRequestBadge(summary: pullRequest, surface: .composer)
                 }
-                if let branch = chat.branch?.trimmingCharacters(in: .whitespacesAndNewlines),
+                if showsGitChrome, let branch = chat.branch?.trimmingCharacters(in: .whitespacesAndNewlines),
                    !branch.isEmpty {
                     BranchContextChip(branch: branch)
                 }

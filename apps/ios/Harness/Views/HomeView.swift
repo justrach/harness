@@ -40,7 +40,22 @@ struct HomeView: View {
     @State private var groupByRaw = UserDefaults.standard.string(forKey: "homeGroupBy")
         .flatMap(HomeGroupBy.init(rawValue:))?.rawValue ?? HomeGroupBy.status.rawValue
     @State private var activityWindow: HomeActivityWindow = .all
+    @AppStorage(HomeUiMode.storageKey) private var uiModeRaw = HomeUiMode.zen.rawValue
     @AppStorage("homeCollapsedGroups") private var collapsedGroupsRaw = ""
+
+    private var uiMode: HomeUiMode {
+        HomeUiMode(rawValue: uiModeRaw) ?? HomeUiState.initial.mode
+    }
+
+    private var hierarchyProfile: HomeHierarchyProfile {
+        HomeHierarchyProfile.ofMode(uiMode)
+    }
+
+    private func sendUiEvent(_ event: HomeUiEvent) {
+        withAnimation(Motion.resort) {
+            uiModeRaw = HomeListControls.stepUiState(HomeUiState(mode: uiMode), event).mode.rawValue
+        }
+    }
     // Not persisted: a filter left on across launches reads as lost sessions.
     @State private var searchText = ""
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -691,19 +706,54 @@ struct HomeView: View {
     /// choice used to sit alone in the nav bar as "All", the grouping alone on
     /// this row as "Time". At large text sizes the pair stacks.
     @ViewBuilder private func listControls(showsGrouping: Bool) -> some View {
-        GlassEffectContainer(spacing: 8) {
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 8) {
-                    projectMenu
-                    if showsGrouping { groupPill }
-                }
-                VStack(alignment: .leading, spacing: 6) {
-                    projectMenu
-                    if showsGrouping { groupPill }
+        let showFilters = hierarchyProfile.showsMultiAxisFilters
+        let hasProjectScope = selectedSpace != nil || projectlessSelected
+        ScrollView(.horizontal, showsIndicators: false) {
+            GlassEffectContainer(spacing: 6) {
+                HStack(spacing: 6) {
+                    if showFilters || hasProjectScope { projectMenu.fixedSize() }
+                    if showFilters && showsGrouping { groupPill }
+                    uiModePill
                 }
             }
         }
+        .scrollClipDisabled()
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Experience mode switcher (`FrameSchedule.lean`: `UiMode.zen` default for
+    /// a calm flat list, `UiMode.developer` for multi-level filters & git chrome).
+    private var uiModePill: some View {
+        Menu {
+            Section("Experience mode") {
+                Button {
+                    sendUiEvent(.setMode(.zen))
+                } label: {
+                    if uiMode == .zen {
+                        Label("Zen (Simple)", systemImage: "checkmark")
+                    } else {
+                        Label("Zen (Simple)", systemImage: "sparkles")
+                    }
+                }
+                Button {
+                    sendUiEvent(.setMode(.developer))
+                } label: {
+                    if uiMode == .developer {
+                        Label("Developer (Full hierarchy)", systemImage: "checkmark")
+                    } else {
+                        Label("Developer (Full hierarchy)", systemImage: "terminal")
+                    }
+                }
+            }
+        } label: {
+            HomeControlPill(symbol: uiMode.symbol, title: uiMode.pillTitle,
+                            active: uiMode == .developer)
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .accessibilityLabel("Experience mode")
+        .accessibilityValue(uiMode.label)
+        .accessibilityIdentifier("home-ui-mode")
     }
 
     /// Scopes the session list to one project. Rows are Buttons, not a Picker:
@@ -835,7 +885,9 @@ struct HomeView: View {
                                                         indicator: { model.indicator(for: $0) },
                                                         nowMs: nowMs())
         let chats = HomeFilter.apply(activityFiltered, query: searchText, names: model.homeFilterNames)
-        let grouping = HomeGroupBy(rawValue: groupByRaw) ?? .none
+        let grouping: HomeGroupBy = hierarchyProfile.flatSessionList
+            ? .none
+            : (HomeGroupBy(rawValue: groupByRaw) ?? .none)
         if HomeListControls.showsRow(hasSessions: !model.overviewChats.isEmpty,
                                      hasProjects: !model.spaces.isEmpty,
                                      projectSelected: selectedSpace != nil || projectlessSelected) {
@@ -928,7 +980,7 @@ struct HomeView: View {
     private func sessionRow(_ chat: Chat) -> some View {
         // Location shows even when scoped — without it the row's
         // first line is just a floating dot and a timestamp.
-        ChatRow(chat: chat, showLocation: true) {
+        ChatRow(chat: chat, showLocation: true, showsCodeDetails: hierarchyProfile.showsRowTechBadges) {
             open(.chat(chat.id))
         }
         .listRowBackground(
@@ -991,6 +1043,7 @@ struct ChatRow: View {
     @Environment(AppModel.self) private var model
     let chat: Chat
     var showLocation: Bool
+    var showsCodeDetails: Bool = false
     let onSelect: () -> Void
 
     private var subline: Color { Theme.textMuted.opacity(0.7) }
@@ -1001,9 +1054,8 @@ struct ChatRow: View {
         let _ = model.connectivity.pulse
         let indicator = model.indicator(for: chat)
         let sendState = model.sendState(for: chat)
-        // Less by default (#417, #614): the PR badge lives in the session's
-        // composer, one tap away, not on every row.
-        let pullRequest = ChatRow.showsCodeDetails ? model.changeRequest(for: chat) : nil
+        // Zen mode hides per-row git/PR badges; Developer mode exposes them.
+        let pullRequest = showsCodeDetails ? model.changeRequest(for: chat) : nil
         ZStack(alignment: .bottomTrailing) {
             Button(action: onSelect) {
                 content(indicator: indicator, sendState: sendState,
@@ -1088,9 +1140,9 @@ struct ChatRow: View {
                 // spinner rides bottom-right. Always laid out, so every row is
                 // the same height. Left out while rows show less: the corner
                 // already says Working.
-                if ChatRow.showsCodeDetails {
+                if showsCodeDetails {
                 HStack(spacing: 4) {
-                    if ChatRow.showsCodeDetails,
+                    if showsCodeDetails,
                        let branch = chat.branch?.trimmingCharacters(in: .whitespaces), !branch.isEmpty {
                         LineIconView(.gitBranch, size: 11, color: subline)
                         Text(branch)

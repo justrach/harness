@@ -507,3 +507,107 @@ test "desktop parity projectless drafts retain a footer computer picker" {
     try testing.expect(h.a.view.strip.device_anchor.?.y > 38);
     try testing.expect(h.t.hasText("No project"));
 }
+
+/// A draft in a project with git: the footer's full set of controls.
+fn gitDraft(h: *Harness) !void {
+    const spaces = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"synthetic-git","deviceId":"synthetic-device","name":"synthetic","path":"/work/synthetic","gitDetected":true}]
+    , .{});
+    defer spaces.deinit();
+    try h.a.spaces.replace(spaces.value);
+    if (h.a.space) |old| h.a.gpa.free(old);
+    h.a.space = try h.a.gpa.dupe(u8, "synthetic-git");
+    h.a.new_ref = try h.a.gpa.dupe(u8, "main");
+    h.a.select(null, null);
+    h.t.settle(1);
+    // Anchors are the frame before's: one more so they are this layout's.
+    h.t.frame();
+}
+
+/// The footer's controls after the model chip: every 20-point box in its
+/// 24-point row.
+fn footerControls(h: *Harness, out: []ui.Rect) ![]ui.Rect {
+    const model = h.a.view.chip_anchor orelse return error.NoModelChip;
+    var n: usize = 0;
+    for (h.t.ctx.nodes.items) |node| {
+        const r = node.rect;
+        if (r.h != 20 or r.w <= 0 or r.y < model.y or r.y + r.h > model.y + 24 or r.x < model.x + model.w) continue;
+        if (n >= out.len) return error.ExtraFooterControl;
+        out[n] = r;
+        n += 1;
+    }
+    return out[0..n];
+}
+
+test "draft footer controls end inside the composer in split panes" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try gitDraft(&h);
+    var buf: [8]ui.Rect = undefined;
+
+    // Unsplit there is room: every control keeps its words.
+    for ([_][]const u8{ "Code", "synthetic", "New worktree", "From main" }) |label| try testing.expect(h.t.hasText(label));
+    try testing.expectEqual(@as(usize, 5), (try footerControls(&h, &buf)).len);
+
+    h.a.splitPane(.horizontal);
+    h.t.settle(1);
+    for ([_]f32{ 1440, 1200, 1000, 900 }) |window_w| {
+        h.t.resize(window_w, 780);
+        h.t.settle(1);
+        if (window_w == 1200) h.snap("draft-footer-split-pane");
+        const pill = h.a.view.composer_anchor orelse return error.NoComposer;
+        const controls = try footerControls(&h, &buf);
+        // Mode, computer, project, checkout and ref: none left out, none
+        // past the row's 10-point inset, each whole or its 28-point glyph.
+        try testing.expectEqual(@as(usize, 5), controls.len);
+        for (controls, 0..) |r, i| {
+            try testing.expect(r.x + r.w <= pill.x + pill.w - 10 + 0.01);
+            try testing.expect(r.w >= 28);
+            if (i > 0) try testing.expectApproxEqAbs(@as(f32, 4), r.x - controls[i - 1].x - controls[i - 1].w, 0.01);
+        }
+        // The ref is the last to give up its words.
+        if (window_w >= 1000) try testing.expect(h.t.hasText("From main"));
+    }
+
+    // 900 points wide: the checkout is a glyph that still opens its menu,
+    // and says what it is.
+    try testing.expect(!h.t.hasText("New worktree"));
+    const checkout = h.a.view.checkout_anchor orelse return error.NoCheckoutChip;
+    try testing.expectApproxEqAbs(@as(f32, 28), checkout.w, 0.01);
+    h.t.moveTo(checkout.x + checkout.w / 2, checkout.y + checkout.h / 2);
+    h.t.advance(0.56);
+    try testing.expectEqualStrings("New worktree", h.t.tooltipText() orelse return error.NoTooltip);
+    h.t.click(checkout.x + checkout.w / 2, checkout.y + checkout.h / 2);
+    h.t.settle(1);
+    try testing.expect(h.a.view.checkout_menu);
+    try testing.expect(h.t.hasText("Current checkout"));
+}
+
+test "zen mode flattens sidebar and footer hierarchy while developer mode restores full controls" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try gitDraft(&h);
+
+    // Developer mode exposes git checkout/branch chips in the draft footer.
+    try testing.expectEqual(@import("motion_rules.zig").UiMode.developer, h.a.settings.uiMode());
+    try testing.expect(h.t.hasText("New worktree"));
+    try testing.expect(h.t.hasText("From main"));
+
+    // Switching to Zen mode flattens the sidebar to a single list and hides git plumbing in the footer.
+    h.a.settings.applyUiMode(.zen);
+    h.t.settle(0.3);
+    try testing.expectEqual(@import("motion_rules.zig").UiMode.zen, h.a.settings.uiMode());
+    try testing.expectEqual(settings.Organization.in_one_list, h.a.settings.organization());
+    try testing.expect(!h.t.hasText("New worktree"));
+    try testing.expect(!h.t.hasText("From main"));
+
+    // Toggling UI mode returns to Developer mode and restores the full hierarchy.
+    h.a.settings.toggleUiMode();
+    h.t.settle(0.3);
+    try testing.expectEqual(@import("motion_rules.zig").UiMode.developer, h.a.settings.uiMode());
+    try testing.expectEqual(settings.Organization.by_project, h.a.settings.organization());
+    try testing.expect(h.t.hasText("New worktree"));
+    try testing.expect(h.t.hasText("From main"));
+}

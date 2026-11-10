@@ -46,6 +46,120 @@ enum HomeListControls {
     static func showsTopClutter(hasSessions: Bool) -> Bool {
         false
     }
+
+    /// Deterministic state-machine transition (`FrameSchedule.lean`: `stepUiState`).
+    static func stepUiState(_ state: HomeUiState, _ event: HomeUiEvent) -> HomeUiState {
+        switch event {
+        case .toggleMode:
+            return HomeUiState(mode: state.mode.flipped)
+        case .setMode(let target):
+            return HomeUiState(mode: target)
+        case .resetToDefault:
+            return HomeUiState.initial
+        }
+    }
+}
+
+/// UI Experience Mode State Machine (`FrameSchedule.lean`: `UiMode`, `UiState`,
+/// `UiEvent`, `stepUiState`, `HierarchyProfile`).
+/// - `.zen` (**Default** — "for normies"): 1 level of hierarchy (`hierarchyDepth == 1`),
+///   0 auxiliary moving parts (`movingPartsCount == 0`).
+/// - `.developer` (Power-user / Developer Mode): 4 levels of hierarchy
+///   (`hierarchyDepth == 4`) and all 6 developer moving parts (`movingPartsCount == 6`).
+enum HomeUiMode: String, CaseIterable, Identifiable, Equatable {
+    case zen
+    case developer
+
+    static let storageKey = "homeUiMode"
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .zen: return "Zen"
+        case .developer: return "Developer"
+        }
+    }
+
+    var pillTitle: String {
+        switch self {
+        case .zen: return "Zen"
+        case .developer: return "Dev"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .zen: return "sparkles"
+        case .developer: return "terminal"
+        }
+    }
+
+    var flipped: HomeUiMode {
+        switch self {
+        case .zen: return .developer
+        case .developer: return .zen
+        }
+    }
+}
+
+struct HomeUiState: Equatable {
+    var mode: HomeUiMode = .zen
+    static let initial = HomeUiState(mode: .zen)
+}
+
+enum HomeUiEvent: Equatable {
+    case toggleMode
+    case setMode(HomeUiMode)
+    case resetToDefault
+}
+
+struct HomeHierarchyProfile: Equatable {
+    let showsOpenWorkspacesTree: Bool
+    let showsMultiAxisFilters: Bool
+    let showsRowTechBadges: Bool
+    let showsGitCheckoutChrome: Bool
+    let showsPromptRail: Bool
+    let showsActionToolbar: Bool
+    let flatSessionList: Bool
+
+    static func ofMode(_ mode: HomeUiMode) -> HomeHierarchyProfile {
+        switch mode {
+        case .zen:
+            return HomeHierarchyProfile(
+                showsOpenWorkspacesTree: false,
+                showsMultiAxisFilters: false,
+                showsRowTechBadges: false,
+                showsGitCheckoutChrome: false,
+                showsPromptRail: false,
+                showsActionToolbar: false,
+                flatSessionList: true
+            )
+        case .developer:
+            return HomeHierarchyProfile(
+                showsOpenWorkspacesTree: true,
+                showsMultiAxisFilters: true,
+                showsRowTechBadges: true,
+                showsGitCheckoutChrome: true,
+                showsPromptRail: true,
+                showsActionToolbar: true,
+                flatSessionList: false
+            )
+        }
+    }
+
+    var hierarchyDepth: Int {
+        1 + (showsMultiAxisFilters ? 1 : 0) + (showsOpenWorkspacesTree ? 1 : 0) + (!flatSessionList ? 1 : 0)
+    }
+
+    var movingPartsCount: Int {
+        (showsOpenWorkspacesTree ? 1 : 0) +
+        (showsMultiAxisFilters ? 1 : 0) +
+        (showsRowTechBadges ? 1 : 0) +
+        (showsGitCheckoutChrome ? 1 : 0) +
+        (showsPromptRail ? 1 : 0) +
+        (showsActionToolbar ? 1 : 0)
+    }
 }
 
 /// Time-window filter matching the desktop sidebar's `Last activity` menu
@@ -131,7 +245,7 @@ struct HomeControlPill: View {
                 .accessibilityHidden(true)
         }
         .foregroundStyle(active ? Theme.text : Theme.textMuted)
-        .padding(.horizontal, 14)
+        .padding(.horizontal, 11)
         .frame(minHeight: Theme.chipHeight)
         .glassEffect(.regular.interactive(), in: Capsule())
         // A 44pt target around the 36pt capsule.

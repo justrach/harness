@@ -61,8 +61,8 @@ pub fn checkoutOf(chat: workspace.Chat, space: workspace.Space) Checkout {
 pub fn footer(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
     const row = ui.div(c).row().w(w).h(height).px(10).gap(4).itemsCenter().clip();
     defer row.end();
-    @import("view_composer.zig").chip(c, a, k);
-    @import("view_composer.zig").followUpChip(c, a, k);
+    _ = @import("view_composer.zig").chip(c, a, k);
+    @import("view_composer.zig").followUpChip(c, a, k, false);
     {
         const slot = ui.div(c).row().grow().w(0).hFull().itemsCenter().clip();
         defer slot.end();
@@ -72,6 +72,7 @@ pub fn footer(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
 }
 
 fn session(c: *ui.Context, a: *App, k: theme.Colors) void {
+    if (!a.settings.hierarchyProfile().shows_git_checkout_chrome) return;
     const id = a.selected orelse return;
     const chat = a.findChat(id) orelse return;
     const space = a.findSpace(chat.space_id) orelse return;

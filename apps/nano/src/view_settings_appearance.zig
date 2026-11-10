@@ -74,11 +74,20 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
     {
         const cd = card(c, k);
         defer cd.end();
-        const r = set.row(c, k, false, false);
-        defer r.end();
-        set.tile(c, k, .@"eye-closed");
-        words(c, k, "Compact mode", "Fold a turn's thinking, tool calls, and narration into one collapsed row — only the reply shows.", 32);
-        if (switch_(c, k, a.settings.get(.transcript_compact_mode), 0)) a.settings.toggle(.transcript_compact_mode);
+        {
+            const r = set.row(c, k, false, false);
+            defer r.end();
+            set.tile(c, k, .@"eye-closed");
+            words(c, k, "Compact mode", "Fold a turn's thinking, tool calls, and narration into one collapsed row — only the reply shows.", 32);
+            if (switch_(c, k, a.settings.get(.transcript_compact_mode), 0)) a.settings.toggle(.transcript_compact_mode);
+        }
+        {
+            const r = set.row(c, k, true, false);
+            defer r.end();
+            set.tile(c, k, .widget);
+            words(c, k, "Developer mode", "Show open workspace trees, project groups, git worktree/branch controls, prompt rail, and action toolbars. Off keeps Zen mode (a single flat list).", 32);
+            if (switch_(c, k, a.settings.uiMode() == .developer, 0)) a.settings.toggleUiMode();
+        }
     }
     caption(c, k, "Motion");
     motionCard(c, a, k);

@@ -124,4 +124,38 @@ final class HomeListControlsTests: XCTestCase {
         XCTAssertEqual(rows.count, 2)
         XCTAssertEqual(Set(rows.map(\.id)).count, 2, "Duplicate entry IDs must produce unique TranscriptRow IDs")
     }
+
+    func testUiModeStateMachineDefaultsToZenAndFlattensHierarchy() {
+        XCTAssertEqual(HomeUiState.initial.mode, .zen)
+        for mode in HomeUiMode.allCases {
+            let state = HomeUiState(mode: mode)
+            XCTAssertEqual(
+                HomeListControls.stepUiState(
+                    HomeListControls.stepUiState(state, .toggleMode),
+                    .toggleMode
+                ),
+                state
+            )
+            XCTAssertEqual(
+                HomeListControls.stepUiState(state, .resetToDefault).mode,
+                .zen
+            )
+            XCTAssertEqual(
+                HomeListControls.stepUiState(
+                    HomeListControls.stepUiState(state, .setMode(mode)),
+                    .setMode(mode)
+                ),
+                HomeListControls.stepUiState(state, .setMode(mode))
+            )
+        }
+
+        let zen = HomeHierarchyProfile.ofMode(.zen)
+        let dev = HomeHierarchyProfile.ofMode(.developer)
+        XCTAssertEqual(zen.hierarchyDepth, 1)
+        XCTAssertEqual(dev.hierarchyDepth, 4)
+        XCTAssertLessThan(zen.hierarchyDepth, dev.hierarchyDepth)
+        XCTAssertEqual(zen.movingPartsCount, 0)
+        XCTAssertEqual(dev.movingPartsCount, 6)
+        XCTAssertLessThan(zen.movingPartsCount, dev.movingPartsCount)
+    }
 }

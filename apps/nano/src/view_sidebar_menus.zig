@@ -576,6 +576,20 @@ fn view(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
     ui.key(c, "sidebar-view-menu");
     const card = card_(c, k, x, y, w);
     defer card.end();
+    {
+        ui.key(c, "sidebar-view-developer-mode");
+        const dev = a.settings.uiMode() == .developer;
+        var row = ui.div(c).row().wFull().h(30).px(8).gap(10).itemsCenter().rounded(7).hover(k.selected);
+        defer row.end();
+        if (row.clicked()) {
+            m.open = null;
+            a.settings.toggleUiMode();
+            a.redraw();
+        }
+        label(c, k, "Developer mode", row.hovered() or dev);
+        toggle(c, k, dev);
+    }
+    separator(c, k, w);
     for (groups, 0..) |g, gi| {
         ui.key(c, c.print("sidebar-view-group-{d}", .{gi}));
         const open = m.open == gi;

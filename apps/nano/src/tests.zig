@@ -11,6 +11,7 @@ test {
     _ = @import("veil.zig");
     _ = @import("tools.zig");
     _ = @import("compact.zig");
+    _ = @import("steer_order.zig");
     _ = @import("prompt_history.zig");
     _ = @import("engine_start.zig");
     _ = @import("diff.zig");

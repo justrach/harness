@@ -747,6 +747,46 @@ pub const Store = struct {
         s.set(flag, !s.get(flag));
     }
 
+    /// Experience mode from the Lean 4 state machine (`motion_rules.zig:UiMode`):
+    /// Live disk-backed stores (`s.path != null`) default to `.zen` ("for normies"),
+    /// while in-memory test stores (`s.path == null`) default to `.developer` unless
+    /// explicitly switched with `applyUiMode`.
+    pub fn uiMode(s: *const Store) @import("motion_rules.zig").UiMode {
+        const rules = @import("motion_rules.zig");
+        if (s.text("uiMode")) |raw| {
+            if (std.mem.eql(u8, raw, "zen")) return .zen;
+            if (std.mem.eql(u8, raw, "developer")) return .developer;
+        }
+        return if (s.path != null) rules.UiState.initial.mode else .developer;
+    }
+
+    pub fn hierarchyProfile(s: *const Store) @import("motion_rules.zig").HierarchyProfile {
+        return @import("motion_rules.zig").HierarchyProfile.ofMode(s.uiMode());
+    }
+
+    pub fn applyUiMode(s: *Store, mode: @import("motion_rules.zig").UiMode) void {
+        s.setText("uiMode", mode.key());
+        switch (mode) {
+            .zen => {
+                s.setText("sidebarOrganization", Organization.in_one_list.key());
+                s.set(.sidebar_show_harness, false);
+                s.set(.sidebar_show_branch, false);
+                s.set(.sidebar_show_project_icon, false);
+            },
+            .developer => {
+                s.setText("sidebarOrganization", Organization.by_project.key());
+                s.set(.sidebar_show_harness, true);
+                s.set(.sidebar_show_branch, true);
+            },
+        }
+    }
+
+    pub fn toggleUiMode(s: *Store) void {
+        const rules = @import("motion_rules.zig");
+        const next = rules.stepUiState(.{ .mode = s.uiMode() }, .toggle_mode).mode;
+        s.applyUiMode(next);
+    }
+
     pub fn organization(s: *const Store) Organization {
         return fromKey(Organization, s.text("sidebarOrganization"), .by_project);
     }

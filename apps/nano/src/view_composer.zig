@@ -374,8 +374,9 @@ fn keepFocus(c: *ui.Context, a: *App, id: u64) void {
 }
 
 /// The model chip: what the next message runs on, 24 tall at the footer's
-/// leading edge (`PickerKind::HarnessModel`'s trigger).
-pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) void {
+/// leading edge (`PickerKind::HarnessModel`'s trigger). Returns the width
+/// it takes this frame, for the footer to share out the rest.
+pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) f32 {
     const mp = @import("model_picker.zig");
     const t = a.target();
     const room = @max(80, transcript_view.paneWidth(c, a) - 32 - 100);
@@ -402,6 +403,11 @@ pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) void {
 
     var base = ui.div(c).row().h(24).maxW(max_chip_w).px(6).gap(6).itemsCenter().rounded(8).clip();
     if (width_sample.moving) base = base.w(width_sample.value);
+    // At rest it is its content: the glyph (the 5-point loader until an
+    // agent is known) in its insets, the label's gap (kept even for no
+    // label), and the words.
+    const glyph_w: f32 = if (!unresolved and a.harnesses.items.len == 0 and !chat_harness) 5 else 16;
+    const drawn_w = if (width_sample.moving) @min(width_sample.value, max_chip_w) else @min(@max(wanted_w - 16, 12 + 6) + glyph_w, max_chip_w);
     // GPUI's trigger uses on_hover: closing by keyboard doesn't move the
     // pointer and must not clear the wash until the pointer actually moves.
     const b = kit.listenerHover(&a.view.hovers, if (a.picker != .none) base.bg(k.hover) else base, k.hover).div;
@@ -417,7 +423,7 @@ pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (unresolved) {
         icons.icon(c, .terminal, 16, k.muted, 0);
         _ = c.leaf(.{ .width = .{ .px = 0 } }, .none, null);
-        return;
+        return drawn_w;
     }
     if (a.harnesses.items.len == 0 and !chat_harness) {
         kit.snake(c, k);
@@ -433,7 +439,7 @@ pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (label_loading) {
         // A failed catalog has nothing to name: no label, no ghost bar.
         if (failed) _ = c.leaf(.{ .width = .{ .px = 0 } }, .none, null) else skeleton(c);
-        return;
+        return drawn_w;
     }
     // `hover_blend`: the label brightens under the pointer, rolling Scritto-style when changed.
     // Re-read after `togglePickerCompact` in case opening the picker synced `a.models`.
@@ -442,13 +448,25 @@ pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) void {
     const live_suffix: ?[]const u8 = if (!unresolved and !label_loading) (if (live_t.reasoning) |level| rules.reasoningLabel(level) else null) else suffix_text;
     kit.rollText(c, "composer-model-label", live_label, .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight, .color = if (b.hovered()) k.text else k.text.alpha(0.9) });
     if (live_suffix) |sfx| kit.rollText(c, "composer-effort-suffix", sfx, .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight, .color = k.muted.alpha(0.7) });
+    return drawn_w;
+}
+
+/// Whether the footer has a follow-up switch to draw.
+pub fn followUpShown(a: *const App) bool {
+    return @import("app_queue.zig").targetSteersMidTurn(a);
+}
+
+/// "Steer" or "Queue", as the follow-up switch says it.
+pub fn followUpLabel(a: *const App) []const u8 {
+    return if (@import("app_queue.zig").followUpBehavior(a) == .steer) "Steer" else "Queue";
 }
 
 /// Follow-up mode switch in the composer footer: shows whether a message
 /// sent during a live turn will Steer or Queue, and toggles on click.
-pub fn followUpChip(c: *ui.Context, a: *App, k: theme.Colors) void {
+/// `glyph_only` leaves its word to the tooltip where the footer is narrow.
+pub fn followUpChip(c: *ui.Context, a: *App, k: theme.Colors, glyph_only: bool) void {
     const queue_mod = @import("app_queue.zig");
-    if (!queue_mod.targetSteersMidTurn(a)) return;
+    if (!followUpShown(a)) return;
     const mode = queue_mod.followUpBehavior(a);
     const is_steer = mode == .steer;
     const hint = if (is_steer)
@@ -462,7 +480,7 @@ pub fn followUpChip(c: *ui.Context, a: *App, k: theme.Colors) void {
     const hot = b.hovered();
     const color = if (hot) k.text.alpha(0.85) else if (is_steer) k.text.alpha(0.78) else k.muted.alpha(0.7);
     icons.icon(c, if (is_steer) .@"fast-tier" else .@"queue-drag-handle", 12, color, 0);
-    ui.text(c, if (is_steer) "Steer" else "Queue", .{
+    if (!glyph_only) ui.text(c, followUpLabel(a), .{
         .size = 12,
         .line_height = 12 * 1.618,
         .weight = theme.ui_medium_weight,

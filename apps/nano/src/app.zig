@@ -47,6 +47,8 @@ pub const View = struct {
     /// A prompt was just sent: the open chat's transcript goes to its end
     /// and follows the reply again, however far up it was read.
     stick_end: bool = false,
+    /// Where the messages sent while a turn worked arrived in its reply.
+    steer: @import("steer_order.zig").Store = .{},
     /// The jump pill is up. It stays until the reader is near the end.
     jump_shown: bool = false,
     jump_box: u64 = 0,
@@ -1718,7 +1720,11 @@ pub const App = struct {
                 return a.redraw();
             };
             const action = explicit orelse queue_mod.followUpAction(queue_mod.followUpBehavior(a), blocker);
-            if (action == .steer) queue_mod.steer(a, prompt) else queue_mod.queueMessage(a, prompt);
+            if (action == .steer) {
+                queue_mod.steer(a, prompt);
+                // It lands in the transcript, as a prompt does: show it.
+                a.view.stick_end = true;
+            } else queue_mod.queueMessage(a, prompt);
             attachments.clear(a);
             a.composer.clear();
             return a.redraw();

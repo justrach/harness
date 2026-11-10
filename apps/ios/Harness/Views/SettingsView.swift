@@ -7,6 +7,7 @@ struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @AppStorage(PhoneSplit.storageKey) private var phoneSplitRaw = PhoneSplit.off.rawValue
+    @AppStorage(HomeUiMode.storageKey) private var uiModeRaw = HomeUiMode.zen.rawValue
     /// Opens straight onto Crash reports (the `-sheet crashreports` rig).
     @State private var showCrashReports: Bool
     /// The first-run setup, opened again from Agents.
@@ -120,6 +121,11 @@ struct SettingsView: View {
                 // Shown on every device: the choice applies whenever the window is narrow (a phone, iPhone Duo's
                 // outer display, a narrow iPad window). Wide windows always show the list beside the session.
                 Section {
+                    Picker("Experience mode", selection: $uiModeRaw) {
+                        Text("Zen (Default)").tag(HomeUiMode.zen.rawValue)
+                        Text("Developer").tag(HomeUiMode.developer.rawValue)
+                    }
+                    .accessibilityIdentifier("settings-ui-mode")
                     // Through `stored`, so a value saved before Stacked was removed shows as Auto, not blank.
                     Picker("Split view", selection: Binding(get: { PhoneSplit.stored(phoneSplitRaw).rawValue },
                                                             set: { phoneSplitRaw = $0 })) {
@@ -131,7 +137,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Layout")
                 } footer: {
-                    Text("For narrow windows, such as a phone or iPhone Duo's outer display. Shows the session list beside the open session when the window is wide enough, such as in landscape. Off keeps the single screen. Wide windows always show the list beside the session.")
+                    Text("Zen mode keeps a flat, uncluttered session list and hides git worktree/branch plumbing. Developer mode exposes project and status grouping, git checkout and ref pickers, and pull request badges.")
                 }
                 .harnessListRow()
 

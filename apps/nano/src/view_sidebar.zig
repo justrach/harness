@@ -57,6 +57,7 @@ const OpenSession = struct {
 /// Open workspace sessions (`⊞`) and all of their corresponding tabs nested
 /// underneath each session at the top of the ⌘B sidebar.
 fn openWorkspaces(c: *ui.Context, a: *App, k: theme.Colors) void {
+    if (!a.settings.hierarchyProfile().shows_open_workspaces_tree) return;
     var sessions: std.ArrayList(OpenSession) = .empty;
     for (a.tabs.items.items, 0..) |id, ws| {
         if (a.tabs.items.items.len > 1) {
@@ -770,7 +771,8 @@ const Grouping = struct {
     offset: i64 = 0,
 
     fn of(a: *App) Grouping {
-        const org = a.settings.organization();
+        const profile = a.settings.hierarchyProfile();
+        const org = if (profile.flat_session_list) .in_one_list else a.settings.organization();
         const now = a.nowMs();
         if (org != .by_status) return .{ .org = org, .now = now };
         return .{ .org = org, .now = now, .offset = workspace.utcOffsetSeconds(now) };
@@ -849,12 +851,13 @@ const Look = struct {
 
     fn of(a: *const App) Look {
         const s = &a.settings;
+        const tech = s.hierarchyProfile().shows_row_tech_badges;
         return .{
             .compact = s.get(.sidebar_compact),
-            .harness = s.get(.sidebar_show_harness),
-            .icon = s.get(.sidebar_show_project_icon),
-            .label = s.get(.sidebar_show_project_label),
-            .branch = s.get(.sidebar_show_branch),
+            .harness = tech and s.get(.sidebar_show_harness),
+            .icon = tech and s.get(.sidebar_show_project_icon),
+            .label = tech and s.get(.sidebar_show_project_label),
+            .branch = tech and s.get(.sidebar_show_branch),
         };
     }
 

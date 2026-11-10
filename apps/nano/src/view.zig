@@ -330,7 +330,7 @@ fn focused(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (a.selected == null) {
         @import("view_newchat.zig").canvas(c, a, k);
     } else {
-        @import("view_actions.zig").toolbar(c, a, k);
+        if (a.settings.hierarchyProfile().shows_action_toolbar) @import("view_actions.zig").toolbar(c, a, k);
         transcript_view.transcript(c, a, k);
         @import("view_composer.zig").docked(c, a, k);
         @import("view_actions.zig").dock(c, a, k);

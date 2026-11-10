@@ -37,6 +37,13 @@ const Harness = struct {
         h.a.deinit();
     }
 
+    fn snap(h: *Harness, name: []const u8) void {
+        const dir = std.c.getenv("NANO_SNAP_DIR") orelse return;
+        var buf: [1024]u8 = undefined;
+        const path = std.fmt.bufPrint(&buf, "{s}/{s}.png", .{ std.mem.span(dir), name }) catch return;
+        h.t.screenshot(path) catch {};
+    }
+
     fn load(t: *@import("transcript.zig").Transcript) !void {
         var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, frame, .{});
         defer parsed.deinit();
@@ -163,4 +170,72 @@ test "closing a split page leaves no empty panel to close again" {
     try testing.expectEqual(@as(usize, 0), h.a.panels.tabs.items.len);
     try testing.expectEqual(before_chat_width, h.a.view.chrome.chat_width);
     try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
+}
+
+fn applyFrame(t: *@import("transcript.zig").Transcript, text: []const u8) !void {
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, text, .{});
+    defer parsed.deinit();
+    try t.apply(parsed.value);
+}
+
+fn textTop(h: *Harness, text: []const u8) !f32 {
+    return (h.t.findText(text) orelse {
+        std.debug.print("missing text: {s}\n", .{text});
+        return error.TextMissing;
+    }).y;
+}
+
+test "a message sent while the turn works sits where it arrived, with later work under it" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    try applyFrame(&h.a.transcript,
+        \\{"reset":[
+        \\ {"id":"u","role":"user","parts":[{"id":"p","kind":"text","text":"Synthetic question"}]},
+        \\ {"id":"a","role":"assistant","status":"streaming","parts":[{"id":"p0","kind":"text","text":"Synthetic work before the message."}]}
+        \\]}
+    );
+    h.t.settle(1);
+    // The engine writes the message at the document's end at once...
+    try applyFrame(&h.a.transcript,
+        \\{"upsert":[{"after":"a","entry":{"id":"s","role":"user","status":"complete","parts":[{"id":"t0","kind":"text","text":"Synthetic steer"}]}}],"count":3}
+    );
+    h.t.settle(1);
+    // ...and keeps streaming the running reply into the entry before it.
+    try applyFrame(&h.a.transcript,
+        \\{"upsert":[{"after":"u","entry":{"id":"a","role":"assistant","status":"streaming","parts":[
+        \\ {"id":"p0","kind":"text","text":"Synthetic work before the message."},
+        \\ {"id":"p1","kind":"text","text":"Synthetic work after the message."}]}}],"count":3}
+    );
+    h.t.settle(1);
+    {
+        const before = try textTop(&h, "Synthetic work before the message.");
+        const message = try textTop(&h, "Synthetic steer");
+        const after = try textTop(&h, "Synthetic work after the message.");
+        try testing.expect(before < message);
+        try testing.expect(message < after);
+        h.snap("steer-mid-turn");
+    }
+    // The agent takes the message: the reply ends and the next one starts
+    // after it. Each piece keeps its place; a split pane draws the same.
+    try applyFrame(&h.a.transcript,
+        \\{"upsert":[
+        \\ {"after":"u","entry":{"id":"a","role":"assistant","status":"complete","durationMs":4000,"parts":[
+        \\  {"id":"p0","kind":"text","text":"Synthetic work before the message."},
+        \\  {"id":"p1","kind":"text","text":"Synthetic work after the message."}]}},
+        \\ {"after":"s","entry":{"id":"b","role":"assistant","status":"streaming","parts":[{"id":"p0","kind":"text","text":"Synthetic reply to the steer."}]}}
+        \\],"count":4}
+    );
+    for ([_]bool{ false, true }) |split| {
+        if (split) h.a.splitPane(.horizontal);
+        h.t.settle(1);
+        const before = try textTop(&h, "Synthetic work before the message.");
+        const message = try textTop(&h, "Synthetic steer");
+        const after = try textTop(&h, "Synthetic work after the message.");
+        const reply = try textTop(&h, "Synthetic reply to the steer.");
+        try testing.expect(before < message);
+        try testing.expect(message < after);
+        try testing.expect(after < reply);
+        if (!split) h.snap("steer-taken");
+    }
 }

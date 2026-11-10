@@ -73,6 +73,12 @@ struct NewSessionView: View {
 
     private var space: Space? { effectiveDestination.space(in: model.spaces) }
 
+    @AppStorage(HomeUiMode.storageKey) private var uiModeRaw = HomeUiMode.zen.rawValue
+
+    private var showsGitChrome: Bool {
+        HomeHierarchyProfile.ofMode(HomeUiMode(rawValue: uiModeRaw) ?? .zen).showsGitCheckoutChrome
+    }
+
     private var deviceId: String? {
         effectiveDestination.deviceId(spaces: model.spaces, devices: model.devices)
     }
@@ -255,8 +261,9 @@ struct NewSessionView: View {
             }
 
             // Where-it-runs scope row (checkout + base ref), left-aligned
-            // above the composer — the composer pill keeps only the agent chip.
-            if space?.gitDetected == true {
+            // above the composer in Developer mode — Zen mode keeps only the
+            // prompt and model picker.
+            if showsGitChrome, space?.gitDetected == true {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         chip(icon: checkoutIcon, label: checkoutLabel) {
