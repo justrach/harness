@@ -1255,6 +1255,32 @@ test "Settings › GitHub CI: without an engine it says so, with Retry and Refre
     h.snap("github-ci-no-engine");
 }
 
+fn copyLabelIcon(h: *Harness, label: []const u8) !usize {
+    const text = h.t.findText(label) orelse return error.CopyLabelNotFound;
+    for (h.t.ctx.nodes.items, 0..) |node, i| {
+        if (node.content == .image and node.rect.x < text.x and
+            node.rect.x > text.x - 28 and @abs(node.rect.y - text.y) < 12) return i;
+    }
+    return error.CopyIconNotFound;
+}
+
+test "GitHub snippet copy feedback changes its icon and resets" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    openGithubCi(&h);
+    try githubRunners(&h, "{\"available\": true, \"enabled\": true}");
+    const before = h.t.ctx.nodes.items[try copyLabelIcon(&h, "Copy")].content.image;
+    try h.t.clickText("Copy");
+    h.t.frame();
+    try testing.expectEqualStrings(@import("runners.zig").yaml_snippet, h.t.clipboard.items);
+    const copied = h.t.ctx.nodes.items[try copyLabelIcon(&h, "Copied")].content.image;
+    try testing.expect(!std.meta.eql(before, copied));
+    h.t.advance(2);
+    try testing.expect(h.t.hasText("Copy"));
+    try testing.expect(std.meta.eql(before, h.t.ctx.nodes.items[try copyLabelIcon(&h, "Copy")].content.image));
+}
+
 test "Settings › GitHub CI: each answer shows its panel" {
     var h: Harness = undefined;
     try h.init();
@@ -1793,6 +1819,37 @@ test "Settings › Accounts: cloud sandboxes with each one's buttons, Delete ask
     try accountsReply(&h, "feedSandboxes", "{\"enabled\": false, \"sandboxes\": []}");
     try testing.expect(!h.t.hasText("Cloud sandboxes"));
     try testing.expect(!h.t.hasText("Turn off all"));
+}
+
+test "sandbox copy feedback confirms only the copied ID and resets" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.t.resize(1200, 2400);
+    openAccounts(&h);
+    try accountsReply(&h, "feedSandboxes",
+        \\{"enabled":true,"sandboxes":[
+        \\ {"id":"temporary-one","provider":"daytona","state":"paused","tier":"ephemeral"},
+        \\ {"id":"temporary-two","provider":"daytona","state":"paused","tier":"ephemeral"}]}
+    );
+    try h.t.clickText("Copy ID");
+    h.t.frame();
+    try testing.expectEqualStrings("temporary-one", h.t.clipboard.items);
+    try testing.expect(h.t.hasText("Copied"));
+    // The other row has not acquired a tick/label merely by being a copy button.
+    try testing.expect(h.t.hasText("Copy ID"));
+    h.t.advance(0.8);
+    try h.t.clickText("Copied");
+    h.t.advance(0.5);
+    try testing.expect(h.t.hasText("Copied"));
+    h.t.advance(0.8);
+    try testing.expect(!h.t.hasText("Copied"));
+    try h.t.clickText("Copy ID");
+    h.t.frame();
+    try h.t.clickText("Copy ID");
+    h.t.frame();
+    try testing.expectEqualStrings("temporary-two", h.t.clipboard.items);
+    try testing.expect(h.t.hasText("Copied"));
 }
 
 test "a failed MCP server's problem line keeps its row the height of its text" {

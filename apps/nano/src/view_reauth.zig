@@ -36,7 +36,7 @@ pub fn card(c: *ui.Context, a: *App, k: theme.Colors, r: Row) void {
     const chip_view = @import("view_transcript.zig");
     const outer = ui.div(c).column().wFull().py(4);
     defer outer.end();
-    const chat_id = r.chat_id orelse return chip_view.noticeChip(c, k, "ChatGPT sign-in required", r.message).end();
+    const chat_id = r.chat_id orelse return chip_view.noticeChip(c, &a.view.copy_feedback, k, "ChatGPT sign-in required", r.message).end();
     const chat = a.findChat(chat_id);
     const host = if (chat) |ch| ch.device_id orelse "" else "";
     const host_name: []const u8 = if (a.device_id != null and std.mem.eql(u8, a.device_id.?, host))
@@ -45,10 +45,10 @@ pub fn card(c: *ui.Context, a: *App, k: theme.Colors, r: Row) void {
         if (std.mem.eql(u8, d.id, host)) break d.name;
     } else "the chat's computer";
     const step = rr.cardStep(&a.reauth.rec, .{ .host = host, .provider = r.provider }, .{ .chat_id = chat_id, .row_id = r.row_id }, r.later_activity, if (chat) |ch| driver.running(a, ch) else false, if (chat) |ch| driver.hasConfig(ch) else false);
-    if (step == .earlier) return chip_view.noticeChip(c, k, "ChatGPT sign-in required", r.message).end();
+    if (step == .earlier) return chip_view.noticeChip(c, &a.view.copy_feedback, k, "ChatGPT sign-in required", r.message).end();
     // Resolved: the error stays in history, but the card leads.
     if (step == .reconnected) space(c, 24) else {
-        chip_view.noticeChip(c, k, "ChatGPT sign-in required", r.message).end();
+        chip_view.noticeChip(c, &a.view.copy_feedback, k, "ChatGPT sign-in required", r.message).end();
         // The column's gap(8), then `section_card`'s mt(24).
         space(c, 8 + 24);
     }

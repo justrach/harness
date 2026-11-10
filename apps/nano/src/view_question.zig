@@ -44,7 +44,7 @@ pub fn panel(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
             defer qt.end();
             // Agents write questions in Markdown (bold, code spans, lists),
             // as their replies (composer.rs `question_markdown`).
-            @import("view_markdown.zig").markdown(c, k, q.question);
+            @import("view_markdown.zig").markdown(c, k, q.question, &a.view.copy_feedback);
         }
         if (q.multi_select) {
             const hint = ui.div(c).row().pt(4);

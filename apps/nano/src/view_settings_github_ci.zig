@@ -480,7 +480,7 @@ fn intro(c: *ui.Context, a: *App, k: theme.Colors, rs: *const runners.Runners, w
 /// The `runs-on: codegraff` snippet with Copy (`render_snippet`).
 fn snippet(c: *ui.Context, a: *App, k: theme.Colors, inside: bool) void {
     const copied = a.view.github_ci.copied_until != null;
-    const copy: Ghost = .{ .label = if (copied) "Copied" else "Copy", .icon = .copy, .bordered = true };
+    const copy: Ghost = .{ .label = if (copied) "Copied" else "Copy", .icon = if (copied) .check else .copy, .bordered = true };
     if (inside) _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
     const r = ui.div(c).row().wFull().px(20).py(12).gap(12).itemsStart();
     defer r.end();

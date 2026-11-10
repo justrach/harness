@@ -84,11 +84,11 @@ pub fn withLinksVeil(
     active_streaming = streaming;
     veil_now_ms = c.time * 1000.0;
     current_elem_ix = 0;
-    markdown(c, colors, src);
+    markdown(c, colors, src, &a.view.copy_feedback);
 }
 
 /// Draws the Markdown `src`.
-pub fn markdown(c: *ui.Context, colors: theme.Colors, src: []const u8) void {
+pub fn markdown(c: *ui.Context, colors: theme.Colors, src: []const u8, feedback: *kit.CopyFeedback) void {
     k = colors;
     body = kit.style(c, 15, 22.5, .{ .wrap = true });
     const src_in = if (active_streaming) veil_mod.balanceStreamingMarkdown(c.alloc(), src) else src;
@@ -104,7 +104,7 @@ pub fn markdown(c: *ui.Context, colors: theme.Colors, src: []const u8) void {
         }
         current_elem_ix = i * 64;
         ui.key(c, c.print("md-{d}", .{i}));
-        block(c, b, i == 0);
+        block(c, b, i == 0, feedback);
     }
     if (active_veil) |v| {
         v.finishSeeding();
@@ -185,7 +185,7 @@ fn richWidth(c: *ui.Context, in: md.Inline, style: ui.TextStyle, start: usize, e
     return width;
 }
 
-fn block(c: *ui.Context, b: md.Block, first: bool) void {
+fn block(c: *ui.Context, b: md.Block, first: bool, feedback: *kit.CopyFeedback) void {
     switch (b) {
         .paragraph => |in| rich(c, in, body),
         .heading => |h| {
@@ -211,7 +211,7 @@ fn block(c: *ui.Context, b: md.Block, first: bool) void {
             rich(c, in, st);
         },
         .rule => _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null),
-        .code => |code| codeBlock(c, code.lang, code.text),
+        .code => |code| codeBlock(c, code.lang, code.text, feedback),
         .table => |t| table(c, t.header, t.rows),
     }
 }
@@ -241,7 +241,7 @@ fn item(c: *ui.Context, it: @FieldType(md.Block, "item")) void {
     rich(c, it.text, st);
 }
 
-fn codeBlock(c: *ui.Context, lang: []const u8, src: []const u8) void {
+fn codeBlock(c: *ui.Context, lang: []const u8, src: []const u8, feedback: *kit.CopyFeedback) void {
     const is_mermaid = std.ascii.eqlIgnoreCase(lang, "mermaid");
     const parsed_mermaid = if (is_mermaid) @import("mermaid.zig").parse(c.alloc(), src) else @import("mermaid.zig").Diagram{ .other = "" };
     const can_draw_mermaid = is_mermaid and parsed_mermaid.drawable();
@@ -267,7 +267,8 @@ fn codeBlock(c: *ui.Context, lang: []const u8, src: []const u8) void {
             // The fit toggle (`CodeBlockTooltip`); nano's blocks always scroll.
             _ = kit.iconButton(c, k, .@"wrap-text", .{ .size = 22, .radius = 6, .icon = 13, .tip = .{ .text = "Fit content" } });
         }
-        if (kit.iconButton(c, k, .copy, .{ .size = 22, .radius = 5, .icon = 12 })) c.clipboard.write(c.clipboard.ctx, src);
+        ui.key(c, "code-copy");
+        if (kit.copyButton(c, k, feedback, .{ .size = 22, .radius = 5, .icon = 12 })) c.clipboard.write(c.clipboard.ctx, src);
     }
     _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
     if (can_draw_mermaid and !show_source) {

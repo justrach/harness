@@ -31,8 +31,41 @@ pub const IconButton = struct {
     tip: ?@import("view_tooltip.zig").Tip = null,
 };
 
+/// The last successful copy belongs to one mounted control, never a borrowed
+/// message or frame-arena string. All copy icons keep the same 1.2-second tick.
+pub const CopyFeedback = struct {
+    button: u64 = 0,
+    until: f64 = 0,
+
+    pub fn active(s: CopyFeedback, button: u64, now: f64) bool {
+        return s.button == button and now < s.until;
+    }
+
+    pub fn confirm(s: *CopyFeedback, c: *ui.Context, button: u64) void {
+        s.* = .{ .button = button, .until = c.time + 1.2 };
+        c.changed = true;
+        c.frameIn(0);
+    }
+
+    pub fn shown(s: CopyFeedback, c: *ui.Context, button: u64) bool {
+        const copied = s.active(button, c.time);
+        if (copied) c.frameIn(@floatCast(s.until - c.time));
+        return copied;
+    }
+};
+
 /// A square button holding one icon; true when clicked.
 pub fn iconButton(c: *ui.Context, k: theme.Colors, name: icons.Name, o: IconButton) bool {
+    return iconButtonInner(c, k, name, o, null);
+}
+
+/// A copy action with the shared tick/reset feedback. The caller writes the
+/// clipboard on true, and disables the control when there is nothing to copy.
+pub fn copyButton(c: *ui.Context, k: theme.Colors, feedback: *CopyFeedback, o: IconButton) bool {
+    return iconButtonInner(c, k, .copy, o, feedback);
+}
+
+fn iconButtonInner(c: *ui.Context, k: theme.Colors, name: icons.Name, o: IconButton, feedback: ?*CopyFeedback) bool {
     var b = ui.div(c).row().size(o.size, o.size).center().rounded(o.radius);
     if (o.radius * 2 >= o.size) b = b.circular();
     if (o.on) b = b.bg(k.hover) else if (!o.disabled) b = b.hover(k.hover);
@@ -41,7 +74,12 @@ pub fn iconButton(c: *ui.Context, k: theme.Colors, name: icons.Name, o: IconButt
     defer b.end();
     const clicked = b.clicked() and !o.disabled;
     const color = o.color orelse k.muted;
-    icons.icon(c, name, o.icon, if (o.disabled) color.alpha(0.35) else color, 0);
+    const copied = if (feedback) |f| blk: {
+        const id = c.node(b.index).id;
+        if (clicked) f.confirm(c, id);
+        break :blk f.shown(c, id);
+    } else false;
+    icons.icon(c, if (copied) .check else name, o.icon, if (o.disabled) color.alpha(0.35) else color, 0);
     return clicked;
 }
 

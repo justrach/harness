@@ -138,11 +138,14 @@ fn sandboxRow(c: *ui.Context, a: *App, k: theme.Colors, s: sandboxes.Sandbox, no
     const any = busy != null;
     const confirming = if (cl.confirm_delete) |x| std.mem.eql(u8, x, s.id) else false;
     const start = sandboxes.startLabels(s);
+    // Sandbox ids survive feed refreshes/reordering; retain only their hash.
+    const copy_id = std.hash.Wyhash.hash(0x534258, s.id);
+    const copied = a.view.copy_feedback.shown(c, copy_id);
     const G = struct { g: rows.Ghost, what: enum { copy, start, keep, stop, delete } };
     var gs: [5]G = undefined;
     var n: usize = 0;
     if (sandboxes.isTemporary(s)) {
-        gs[n] = .{ .g = .{ .label = "Copy ID", .tip = "Use this ID with sandbox API/tools." }, .what = .copy };
+        gs[n] = .{ .g = .{ .label = if (copied) "Copied" else "Copy ID", .tip = "Use this ID with sandbox API/tools." }, .what = .copy };
         n += 1;
     }
     if (sandboxes.canStart(s)) {
@@ -172,7 +175,10 @@ fn sandboxRow(c: *ui.Context, a: *App, k: theme.Colors, s: sandboxes.Sandbox, no
         kit.ellipsisText(c, sandboxes.detail(c.alloc(), s, now) catch "", st(c, 11.5, .{ .color = k.muted }), w);
     }
     for (gs[0..n]) |x| if (rows.ghost(c, k, x.g)) switch (x.what) {
-        .copy => c.clipboard.write(c.clipboard.ctx, s.id),
+        .copy => {
+            c.clipboard.write(c.clipboard.ctx, s.id);
+            a.view.copy_feedback.confirm(c, copy_id);
+        },
         .start => if (!any) act(a, s.id, "start"),
         .keep => if (!any) act(a, s.id, "keep-running-on"),
         .stop => if (!any) act(a, s.id, "stop"),
