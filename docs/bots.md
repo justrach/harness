@@ -6,6 +6,26 @@ memory, routines it starts by itself, and one standing chat. Bots are graff's
 (`~/.graff/bots`) and owns the wording of every prompt; Harness runs
 `graff bot --user …` and keeps nothing itself.
 
+## Experimental, and off until you turn them on
+
+Settings › Agents has an **Experimental: Bots** card with one switch. It is
+graff's switch (`graff bot enable`, the file `~/.graff/bots/enabled`), so
+turning bots on in a terminal turns them on here and the other way round.
+`GRAFF_BOTS=1` or `=0` in the engine's environment decides instead of the
+file.
+
+While bots are off:
+
+- the engine starts no graff for them, checks no routine, and answers
+  `BotsState` with `enabled: false` and an empty list;
+- `BotDetail`, `RunBot` and every `BotAction` but `enable` and `disable`
+  refuse with "Bots are off. Turn them on in Settings › Agents.";
+- the window draws no Bots group, no catch-up and no bot strip. A bot's
+  standing chat, if it has one from before, is an ordinary chat in the list.
+
+Turning them off keeps every bot, its memory and its routines. The card is
+shown for this device only: another device's switch is flipped there.
+
 ## Where they are
 
 - **The Bots group**, in the sidebar under the chats, on every project
@@ -23,9 +43,9 @@ memory, routines it starts by itself, and one standing chat. Bots are graff's
 
 | RPC | |
 |---|---|
-| `BotsState` | Every bot, its routines, the last check and the last gap. Empty, without starting graff, on a device with no bots. |
+| `BotsState` | Whether bots are on, every bot, its routines, the last check and the last gap. Off: `enabled: false` and nothing else, without starting graff. |
 | `BotDetail {bot}` | Its memory and recent log. |
-| `BotAction {action, …}` | Create, remove, set a field, add or pause a routine, forget a memory entry, clear a missed routine. Returns the state after. |
+| `BotAction {action, …}` | Turn bots on or off (`enable`, `disable`), create, remove, set a field, add or pause a routine, forget a memory entry, clear a missed routine. Returns the state after. |
 | `RunBot {bot, message \| routine}` | Puts a turn into the bot's standing chat, creating it on the first run. |
 
 A run is a turn in the bot's chat. The chat is made in the bot's project on
@@ -69,6 +89,7 @@ enforces. A chat that asks before running tools asks before `run_bot` too.
   is offline.
 - Bots kept in one project's `.graff/bots` are not in the Bots group. The
   `list_bots` and `run_bot` MCP tools still reach them by project.
-- A graff from before per-user bots answers "update graff". An engine from
-  before bots has no Bots group at all.
+- A graff from before per-user bots answers "update graff", under the switch
+  in Settings when that is where it was asked. An engine from before bots has
+  no Bots group and no card.
 - The phone apps do not show bots yet.

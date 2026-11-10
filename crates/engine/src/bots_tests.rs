@@ -8,7 +8,8 @@ use harness_rpc::RpcError;
 
 /// Stands in for `graff bot --user`. Records each command.
 struct FakeCli {
-    store: bool,
+    /// The user's switch: `enable` and `disable` flip it.
+    on: std::sync::atomic::AtomicBool,
     /// The chat graff has on record for `notes`, changed by `set notes chat`.
     notes_chat: Mutex<String>,
     due: Value,
@@ -18,7 +19,7 @@ struct FakeCli {
 impl FakeCli {
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            store: true,
+            on: std::sync::atomic::AtomicBool::new(true),
             notes_chat: Mutex::new(String::new()),
             due: json!([]),
             calls: Mutex::new(Vec::new()),
@@ -61,13 +62,18 @@ impl BotCli for FakeCli {
                 }
                 String::new()
             }
+            ["enable"] | ["disable"] => {
+                self.on
+                    .store(args[0] == "enable", std::sync::atomic::Ordering::SeqCst);
+                String::new()
+            }
             ["missed", "clear", ..] | ["rm", ..] | ["create", ..] | ["about", ..] => String::new(),
             other => return Err(EngineError::Other(format!("unexpected: {}", other.join(" ")))),
         })
     }
 
-    fn has_store(&self) -> bool {
-        self.store
+    fn enabled(&self) -> bool {
+        self.on.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -194,25 +200,45 @@ fn typed_text_always_follows_the_terminator_and_names_are_checked_first() {
 }
 
 #[tokio::test]
-async fn a_device_with_no_bots_never_starts_graff() {
-    let cli = Arc::new(FakeCli {
-        store: false,
-        ..Arc::into_inner(FakeCli::new()).unwrap()
-    });
+async fn bots_are_off_until_turned_on_and_off_starts_nothing() {
+    let cli = FakeCli::new();
+    cli.on.store(false, std::sync::atomic::Ordering::SeqCst);
     let bots = Bots::with_cli(cli.clone());
     let world = World::default();
-    assert_eq!(bots.state().await.unwrap(), BotsState::default());
+    let off = bots.state().await.unwrap();
+    assert!(!off.enabled && off.bots.is_empty());
     assert_eq!(bots.tick(&world).await.unwrap(), 0);
-    assert!(bots.detail("notes").await.is_err());
-    let pause: BotActionParams = serde_json::from_value(
-        json!({ "action": "routinePause", "bot": "notes", "routine": "r1" }),
-    )
-    .unwrap();
-    assert!(bots.act(&world, pause).await.is_err());
+    assert_eq!(bots.detail("notes").await.unwrap_err().to_string(), OFF);
+    let create: BotActionParams =
+        serde_json::from_value(json!({ "action": "create", "bot": "notes", "text": "Draft" }))
+            .unwrap();
+    assert_eq!(bots.act(&world, create).await.unwrap_err().to_string(), OFF);
     let run = run_params(json!({ "bot": "notes", "message": "x" }));
-    assert!(bots.run(&world, run).await.is_err());
-    assert!(cli.said().is_empty());
+    assert_eq!(bots.run(&world, run).await.unwrap_err().to_string(), OFF);
+    assert!(cli.said().is_empty(), "off starts no graff");
     assert!(world.took().is_empty());
+
+    // The one thing off allows is turning them on.
+    let enable: BotActionParams = serde_json::from_value(json!({ "action": "enable" })).unwrap();
+    let on = bots.act(&world, enable).await.unwrap();
+    assert!(on.enabled);
+    assert_eq!(on.bots.len(), 2);
+    assert_eq!(cli.said(), ["enable", "state --json"]);
+
+    let disable: BotActionParams = serde_json::from_value(json!({ "action": "disable" })).unwrap();
+    let off = bots.act(&world, disable).await.unwrap();
+    assert!(!off.enabled && off.bots.is_empty());
+    assert_eq!(bots.tick(&world).await.unwrap(), 0);
+}
+
+#[test]
+fn the_switch_is_graffs_file_unless_the_environment_decides() {
+    assert!(!flag_on(None, false));
+    assert!(flag_on(None, true));
+    assert!(flag_on(Some("1"), false));
+    assert!(flag_on(Some("TRUE"), false));
+    assert!(!flag_on(Some("0"), true));
+    assert!(flag_on(Some("maybe"), true));
 }
 
 #[tokio::test]

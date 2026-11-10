@@ -2,6 +2,9 @@
 //! (`BotsState`; crates/engine/src/bots.rs). Each has one job, its own
 //! memory, routines it starts by itself, and one standing chat.
 //!
+//! Bots are experimental and off until the user turns them on (Settings ›
+//! Agents, or `graff bot enable`). While they are off nothing here is drawn.
+//!
 //! The list is the engine's; what happened while the user was away is
 //! worked out here from it and from the chats and sessions the sidebar
 //! already has, so there is no second copy of anything to drift.
@@ -87,6 +90,9 @@ pub const Page = enum { none, inbox, bot, new };
 pub const Bots = struct {
     /// `absent`: this engine has no bots at all, so nothing is drawn or asked.
     phase: enum { idle, loading, loaded, failed, absent } = .idle,
+    /// The user's switch, as the engine last reported it. Off: no group, no
+    /// page, and the list is empty.
+    enabled: bool = false,
     list: List,
     failure: std.ArrayList(u8) = .empty,
     /// An action's error, over the page; cleared by a click.
@@ -339,6 +345,9 @@ pub fn apply(a: *App, v: json.Value) !void {
     if (v != .object) return error.BadItem;
     const b = &a.bots;
     try b.list.replace(v.object.get("bots") orelse return error.BadItem);
+    b.enabled = flag(v.object, "enabled");
+    // Turned off, perhaps in a terminal: its pages go with it.
+    if (!b.enabled) b.page = .none;
     b.last_check_ms = int(v.object, "lastCheckMs");
     b.gap_from_ms = int(v.object, "gapFromMs");
     b.gap_to_ms = int(v.object, "gapToMs");

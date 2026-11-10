@@ -134,6 +134,7 @@
   ]
  },
  "bots": {
+  "enabled": true,
   "nowMs": 1800000360000,
   "lastCheckMs": 1800000360000,
   "gapFromMs": 1799966460000,

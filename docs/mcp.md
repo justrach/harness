@@ -153,6 +153,11 @@ file and adds its own log line with `graff bot log`.
   dropped and returned as `modelIgnored`.
 - A graff from before bots reads `bot list` as a prompt, so the server checks
   `graff --help` for the command first and refuses with "update graff".
+- Bots are experimental and off until the user turns them on (`graff bot
+  enable`, or Settings › Agents). While they are off the three tools return
+  graff's refusal, "bots are experimental and off. Turn them on with `graff
+  bot enable`", `yours` is empty, and nothing is run. An agent cannot turn
+  them on through these tools.
 - With no `project`, `list_bots` also returns the person's own bots as `yours`
   (the engine's `BotsState`), and `run_bot` for one of those names goes to the
   engine's `RunBot`, which puts the turn into that bot's standing chat. A named

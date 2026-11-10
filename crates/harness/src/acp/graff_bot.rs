@@ -12,7 +12,7 @@ use crate::process::Command;
 /// as a chat, never as a headless child.
 pub const VERBS: &[&str] = &[
     "state", "show", "prompt", "create", "rm", "set", "remember", "forget", "about", "missed",
-    "due", "routine",
+    "due", "routine", "enable", "disable",
 ];
 
 /// A ready-to-spawn `graff bot --user <args…>`. `args[0]` is the verb.

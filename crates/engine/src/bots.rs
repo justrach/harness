@@ -1,6 +1,11 @@
 //! graff Bots on this device (codegraff ADR 0333, 0334): the user's standing
 //! roles in graff's home, each with one job, its own memory and routines.
 //!
+//! Bots are experimental and off until the user turns them on. The switch
+//! is graff's (`graff bot enable`, a file in its home), so the terminal, this
+//! engine and a bot's own chat agree. While it is off the engine starts no
+//! process, checks no routine and reports no bots.
+//!
 //! graff owns the store and the wording of every prompt; this module runs
 //! `graff bot --user …` and keeps nothing itself. What the engine adds:
 //!
@@ -44,14 +49,15 @@ pub const STALE_AFTER_SECS: u64 = 300;
 const SESSION_STALE_SECS: i64 = 45;
 
 pub const TOO_OLD: &str = "This graff can't run bots yet. Update graff to use them here.";
+pub const OFF: &str = "Bots are off. Turn them on in Settings › Agents.";
 
 /// Runs `graff bot --user <args>`.
 #[async_trait]
 pub trait BotCli: Send + Sync {
     async fn run(&self, args: Vec<String>) -> Result<String, EngineError>;
-    /// Whether this device has a bot store at all. Starts no process, so an
-    /// engine with no bots never spawns graff to learn that.
-    fn has_store(&self) -> bool;
+    /// Whether the user has turned bots on. Starts no process, so an engine
+    /// with bots off never spawns graff to learn that.
+    fn enabled(&self) -> bool;
 }
 
 /// The graff this engine runs chats with, under the home it signs graff in.
@@ -88,8 +94,13 @@ impl BotCli for GraffCli {
         refusal(output.status.success(), &stdout, &stderr).map_or(Ok(stdout.clone()), Err)
     }
 
-    fn has_store(&self) -> bool {
-        self.graff_home.join(".graff").join("bots").is_dir()
+    fn enabled(&self) -> bool {
+        // graff's own rule: `GRAFF_BOTS` decides when set, else its switch file.
+        let marker = self.graff_home.join(".graff").join("bots").join("enabled");
+        flag_on(
+            std::env::var("GRAFF_BOTS").ok().as_deref(),
+            marker.is_file(),
+        )
     }
 }
 
@@ -115,6 +126,16 @@ fn refusal(success: bool, stdout: &str, stderr: &str) -> Option<EngineError> {
         text.replace_range(..1, &first.to_uppercase());
     }
     Some(EngineError::Other(text))
+}
+
+/// Whether bots are on: `GRAFF_BOTS=1` or `=0` decides for this process,
+/// else the switch file `graff bot enable` writes.
+fn flag_on(env: Option<&str>, marker: bool) -> bool {
+    match env.map(str::to_ascii_lowercase).as_deref() {
+        Some("1" | "true") => true,
+        Some("0" | "false") => false,
+        _ => marker,
+    }
 }
 
 fn parse<T: DeserializeOwned>(stdout: &str) -> Result<T, EngineError> {
@@ -197,6 +218,8 @@ pub fn action_args(p: &BotActionParams) -> Result<Vec<String>, EngineError> {
         }
     };
     Ok(match p.action {
+        BotVerb::Enable => words(&["enable"]),
+        BotVerb::Disable => words(&["disable"]),
         BotVerb::Create => {
             let mut args = words(&["create", name_of(&p.bot)?]);
             if let Some(project) = p
@@ -282,17 +305,22 @@ impl Bots {
         Self { cli }
     }
 
-    /// Every bot, its routines and the last check. Empty, without starting
-    /// graff, on a device that has never had a bot.
+    /// Every bot, its routines and the last check. Empty and marked off,
+    /// without starting graff, while bots are off.
     pub async fn state(&self) -> Result<BotsState, EngineError> {
-        if !self.cli.has_store() {
+        if !self.cli.enabled() {
             return Ok(BotsState::default());
         }
-        parse(&self.cli.run(words(&["state", "--json"])).await?)
+        let mut state: BotsState = parse(&self.cli.run(words(&["state", "--json"])).await?)?;
+        state.enabled = true;
+        Ok(state)
     }
 
     pub async fn detail(&self, bot: &str) -> Result<BotDetail, EngineError> {
-        if !valid_bot_name(bot) || !self.cli.has_store() {
+        if !self.cli.enabled() {
+            return Err(other(OFF));
+        }
+        if !valid_bot_name(bot) {
             return Err(other("No such bot."));
         }
         parse(&self.cli.run(words(&["show", bot, "--json"])).await?)
@@ -306,9 +334,9 @@ impl Bots {
         p: BotActionParams,
     ) -> Result<BotsState, EngineError> {
         let args = action_args(&p)?;
-        // Only these two can be the first thing a device does with bots.
-        if !self.cli.has_store() && !matches!(p.action, BotVerb::Create | BotVerb::About) {
-            return Err(other("There are no bots on this device yet."));
+        // While bots are off the only thing to do is turn them on.
+        if !self.cli.enabled() && !matches!(p.action, BotVerb::Enable | BotVerb::Disable) {
+            return Err(other(OFF));
         }
         let chat = match p.action {
             BotVerb::Remove => {
@@ -338,6 +366,9 @@ impl Bots {
 
     /// One run of a bot in its standing conversation. Returns the chat.
     pub async fn run(&self, rpc: &dyn RpcService, p: RunBotParams) -> Result<Value, EngineError> {
+        if !self.cli.enabled() {
+            return Err(other(OFF));
+        }
         if !valid_bot_name(&p.bot) {
             return Err(other("No such bot."));
         }
@@ -377,7 +408,7 @@ impl Bots {
     /// let graff record the ones that came due while nothing was checking.
     /// Returns how many turns were started.
     pub async fn tick(&self, rpc: &dyn RpcService) -> Result<usize, EngineError> {
-        if !self.cli.has_store() {
+        if !self.cli.enabled() {
             return Ok(0);
         }
         let stale = STALE_AFTER_SECS.to_string();

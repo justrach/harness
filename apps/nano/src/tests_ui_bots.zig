@@ -28,7 +28,7 @@ const chats =
 
 fn state(comptime gap: bool) []const u8 {
     return std.fmt.comptimePrint(
-        \\{{"nowMs":{d},"lastCheckMs":{d},"gapFromMs":{d},"gapToMs":{d},"about":"Alex. Pacific time.","bots":[
+        \\{{"enabled":true,"nowMs":{d},"lastCheckMs":{d},"gapFromMs":{d},"gapToMs":{d},"about":"Alex. Pacific time.","bots":[
         \\ {{"name":"ada","job":"Coordinate. Don't do their work.","primary":true,"chat":"","routines":[]}},
         \\ {{"name":"deps","job":"Keep dependencies current","project":"/repo/atlas","chat":"c-deps","routines":[]}},
         \\ {{"name":"notes","job":"Draft release notes","project":"/repo/comet","chat":"c-notes","routines":[
@@ -292,7 +292,7 @@ test "a new bot: a name and a job, in the project the sidebar is filtered to" {
 
 test "with no bots the group says so, and an engine without bots draws nothing" {
     var h: Harness = undefined;
-    try h.init("{\"BotsState\":{\"bots\":[]}}");
+    try h.init("{\"BotsState\":{\"enabled\":true,\"bots\":[]}}");
     defer h.deinit();
     try testing.expect(h.t.hasText("Bots"));
     try testing.expect(h.t.containsText("None yet."));
@@ -306,4 +306,53 @@ test "with no bots the group says so, and an engine without bots draws nothing" 
     try testing.expect(!old.t.hasText("Bots"));
     try testing.expect(!old.t.containsText("None yet."));
     try testing.expect(old.t.hasText("Sketch the onboarding flow"));
+}
+
+test "bots are off until turned on in Settings, and off draws nothing" {
+    var h: Harness = undefined;
+    try h.init("{\"BotsState\":{\"enabled\":false,\"bots\":[]},\"BotAction\":" ++ state(true) ++ "}");
+    defer h.deinit();
+    // Off: no group, no way in, and the chats are as they were.
+    try testing.expect(!h.t.hasText("Bots"));
+    try testing.expect(!h.t.containsText("None yet."));
+    try testing.expect(h.t.hasText("Sketch the onboarding flow"));
+    try testing.expectEqual(bots.Page.none, h.a.bots.page);
+    try testing.expect(h.sent("BotAction") == null);
+
+    // The switch is a card in Settings > Agents.
+    @import("view_settings.zig").open(&h.a);
+    h.a.settings.section = .harnesses;
+    h.t.resize(1200, 1400);
+    h.t.settle(2);
+    try testing.expect(h.t.hasText("Experimental: Bots"));
+    h.snap("bots-off-settings");
+    // The switch has no words: it is the first track under the card's title.
+    const card_title = h.t.findText("Experimental: Bots").?;
+    var track: ?ui.Rect = null;
+    for (h.t.ctx.nodes.items) |node| {
+        const r = node.rect;
+        if (r.w == 32 and r.h == 18 and r.y > card_title.y and (track == null or r.y < track.?.y)) track = r;
+    }
+    h.t.click(track.?.x + 16, track.?.y + 9);
+    h.t.settle(2);
+    try testing.expect(has(h.sent("BotAction"), "\"action\":\"enable\""));
+    try testing.expect(h.a.bots.enabled);
+    // Turning them on stays in Settings: the catch-up is a launch's.
+    try testing.expect(h.a.view.settings_open);
+    @import("view_settings.zig").close(&h.a);
+    h.t.settle(2);
+    try testing.expect(h.t.hasText("Bots"));
+    try testing.expect(h.t.hasText("triage"));
+
+    // Off again, as a terminal's `graff bot disable` is seen: the group goes.
+    var off = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{\"enabled\":false,\"bots\":[]}", .{});
+    defer off.deinit();
+    bots.openInbox(&h.a);
+    try bots.apply(&h.a, off.value);
+    h.t.settle(2);
+    try testing.expectEqual(bots.Page.none, h.a.bots.page);
+    try testing.expect(!h.t.hasText("Bots"));
+    try testing.expect(!h.t.hasText("Needs you"));
+    // A bot's standing chat is an ordinary chat while bots are off.
+    try testing.expect(h.t.hasText("triage"));
 }

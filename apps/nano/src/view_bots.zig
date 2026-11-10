@@ -81,8 +81,9 @@ fn botRow(c: *ui.Context, a: *App, k: theme.Colors, bot: bots.Bot, at: i64) void
 pub fn group(c: *ui.Context, a: *App, k: theme.Colors) void {
     bots.sync(a, c);
     const b = &a.bots;
-    // Until the engine has answered there is nothing true to draw.
-    if (b.phase != .loaded) return;
+    // Until the engine has answered there is nothing true to draw, and
+    // while bots are off there is nothing to draw at all.
+    if (b.phase != .loaded or !b.enabled) return;
     const at = bots.now(a);
     const list = b.list.items;
     const its = bots.items(c.alloc(), list, a.chats.items, a.sessions.items, at);

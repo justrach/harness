@@ -74,6 +74,10 @@ pub struct BotRow {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all(serialize = "camelCase", deserialize = "snake_case"))]
 pub struct BotsState {
+    /// Bots are experimental and off until the user turns them on. While
+    /// off the rest is empty, and nothing checks or runs a routine.
+    #[serde(default)]
+    pub enabled: bool,
     #[serde(default)]
     pub now_ms: i64,
     /// When routines were last checked; zero for never.
@@ -121,6 +125,9 @@ pub struct BotDue {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum BotVerb {
+    /// Turn bots on or off for this device. Off keeps every bot.
+    Enable,
+    Disable,
     Create,
     Remove,
     SetJob,

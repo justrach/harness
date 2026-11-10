@@ -42,7 +42,7 @@ impl BotCli for Canned {
         })
     }
 
-    fn has_store(&self) -> bool {
+    fn enabled(&self) -> bool {
         true
     }
 }
