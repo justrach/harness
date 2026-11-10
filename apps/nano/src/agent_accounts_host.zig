@@ -273,56 +273,73 @@ pub const AgentAccountsHost = struct {
             }
         }
 
-        // 5: anthropic ("Anthropic Console")
-        {
-            var signed_in = false;
-            if (io != null) {
-                const rio = io.?;
-                if (self.anthropic_config_dir) |adir| {
-                    signed_in = fileExistsJoin(self.gpa, rio, adir, "credentials/graff-oauth.json") or
-                        fileExistsJoin(self.gpa, rio, adir, "credentials.json");
-                } else if (self.xdg_config_home) |xdg| {
-                    signed_in = fileExistsJoin(self.gpa, rio, xdg, "anthropic/credentials/graff-oauth.json") or
-                        fileExistsJoin(self.gpa, rio, xdg, "anthropic/credentials.json");
-                } else if (home.len > 0) {
-                    signed_in = fileExistsJoin(self.gpa, rio, home, ".config/anthropic/credentials/graff-oauth.json") or
-                        fileExistsJoin(self.gpa, rio, home, ".config/anthropic/credentials.json") or
-                        fileExistsJoin(self.gpa, rio, home, ".graff/credentials/anthropic.json");
-                }
-            }
-            try w.print(
-                ",{{\"id\":\"anthropic\",\"name\":\"Anthropic Console\",\"signedIn\":{},\"account\":null,\"planUsage\":null}}",
-                .{signed_in},
-            );
-        }
-
-        // 6: claude-agent ("Claude Agent", `~/.graff/credentials/claude-agent.json`)
+        // 5: anthropic ("Anthropic Console", `graff_logins.rs::anthropic_credentials_path`)
         {
             var signed_in = false;
             var account_str: ?[]u8 = null;
             defer if (account_str) |s| self.gpa.free(s);
 
-            if (io != null and home.len > 0) {
-                if (readFileJoinAlloc(self.gpa, io.?, home, ".graff/credentials/claude-agent.json")) |raw| {
-                    defer self.gpa.free(raw);
-                    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
-                    if (trimmed.len > 0) {
-                        signed_in = true;
-                        if (json.parseFromSlice(json.Value, self.gpa, trimmed, .{})) |parsed_val| {
-                            var parsed = parsed_val;
-                            defer parsed.deinit();
-                            if (parsed.value == .object) {
-                                if (nonEmptyField(parsed.value.object, "email")) |em| {
-                                    account_str = self.gpa.dupe(u8, em) catch null;
+            if (io != null) {
+                const rio = io.?;
+                var dir_owned: ?[]u8 = null;
+                defer if (dir_owned) |d| self.gpa.free(d);
+                const anth_dir: ?[]const u8 = if (self.anthropic_config_dir) |adir|
+                    adir
+                else if (self.xdg_config_home) |xdg| blk: {
+                    dir_owned = std.fmt.allocPrint(self.gpa, "{s}/anthropic", .{std.mem.trimEnd(u8, xdg, "/")}) catch null;
+                    break :blk dir_owned;
+                } else if (home.len > 0) blk: {
+                    dir_owned = std.fmt.allocPrint(self.gpa, "{s}/.config/anthropic", .{std.mem.trimEnd(u8, home, "/")}) catch null;
+                    break :blk dir_owned;
+                } else null;
+
+                if (anth_dir) |adir| {
+                    const active_raw = readFileJoinAlloc(self.gpa, rio, adir, "active_config");
+                    defer if (active_raw) |ar| self.gpa.free(ar);
+                    const profile = if (active_raw) |ar| blk: {
+                        const t = std.mem.trim(u8, ar, " \t\r\n");
+                        break :blk if (t.len > 0) t else "default";
+                    } else "default";
+                    if (std.fmt.allocPrint(self.gpa, "credentials/{s}.json", .{profile})) |prof_rel| {
+                        defer self.gpa.free(prof_rel);
+                        if (readFileJoinAlloc(self.gpa, rio, adir, prof_rel)) |cred_raw| {
+                            defer self.gpa.free(cred_raw);
+                            signed_in = true;
+                            if (json.parseFromSlice(json.Value, self.gpa, cred_raw, .{})) |pv| {
+                                var p = pv;
+                                defer p.deinit();
+                                if (p.value == .object) {
+                                    if (nonEmptyField(p.value.object, "account_email")) |em| {
+                                        account_str = self.gpa.dupe(u8, em) catch null;
+                                    }
                                 }
-                            }
-                        } else |_| {}
+                            } else |_| {}
+                        }
+                    } else |_| {}
+                    if (!signed_in) {
+                        signed_in = fileExistsJoin(self.gpa, rio, adir, "credentials/graff-oauth.json") or
+                            fileExistsJoin(self.gpa, rio, adir, "credentials.json");
                     }
+                }
+                if (!signed_in and home.len > 0) {
+                    signed_in = fileExistsJoin(self.gpa, rio, home, ".graff/credentials/anthropic.json");
                 }
             }
             try w.print(
-                ",{{\"id\":\"claude-agent\",\"name\":\"Claude Agent\",\"signedIn\":{},\"account\":{f},\"planUsage\":null}}",
+                ",{{\"id\":\"anthropic\",\"name\":\"Anthropic Console\",\"signedIn\":{},\"account\":{f},\"planUsage\":null}}",
                 .{ signed_in, json.fmt(account_str, .{}) },
+            );
+        }
+
+        // 6: claude-agent ("Claude Agent", `~/.graff/credentials/claude-agent.json` marker file)
+        {
+            const signed_in = if (io != null and home.len > 0)
+                fileExistsJoin(self.gpa, io.?, home, ".graff/credentials/claude-agent.json")
+            else
+                false;
+            try w.print(
+                ",{{\"id\":\"claude-agent\",\"name\":\"Claude Agent\",\"signedIn\":{},\"account\":null,\"planUsage\":null}}",
+                .{signed_in},
             );
         }
 
@@ -459,12 +476,14 @@ pub const AgentAccountsHost = struct {
         var windows_owned: ?[]u8 = null;
         defer if (windows_owned) |wo| self.gpa.free(wo);
 
+        var switchable = cached != null;
         const windows_json: []const u8 = if (cached != null and cached.?.fresh)
             cached.?.windows_json
         else if (force_usage) blk: {
             const tok_opt = self.readClaudeAccessTokenAlloc(io);
             defer if (tok_opt) |t| self.gpa.free(t);
             if (tok_opt) |tok| {
+                switchable = true;
                 if (probeClaudeUsageJson(&self.h2_pool, self.gpa, io, self.claude_usage_url, tok)) |probed| {
                     self.putCachedUsage(io, cache_key, now_ms, probed, null) catch {};
                     windows_owned = probed;
@@ -472,17 +491,21 @@ pub const AgentAccountsHost = struct {
                 }
             }
             break :blk if (cached) |c| c.windows_json else "[]";
-        } else "[]";
+        } else blk: {
+            switchable = true;
+            break :blk "[]";
+        };
 
         if (acc_count.* > 0) try w.writeByte(',');
         acc_count.* += 1;
         try w.print(
-            "{{\"id\":{f},\"harness\":\"claude-code\",\"email\":{f},\"displayName\":{f},\"planLabel\":{f},\"active\":true,\"switchable\":false,\"usageWindows\":{s}}}",
+            "{{\"id\":{f},\"harness\":\"claude-code\",\"email\":{f},\"displayName\":{f},\"planLabel\":{f},\"active\":true,\"switchable\":{},\"usageWindows\":{s}}}",
             .{
                 json.fmt(id, .{}),
                 json.fmt(email, .{}),
                 json.fmt(display_name, .{}),
                 json.fmt(plan_label, .{}),
+                switchable,
                 windows_json,
             },
         );
@@ -504,6 +527,19 @@ pub const AgentAccountsHost = struct {
 
         if (comptime builtin.os.tag == .macos) {
             if (self.allow_macos_keychain) {
+                // Probe existence first (`agent_accounts.rs:2457`) so machines with no
+                // Keychain entry never trigger an authorization dialog.
+                const has_item = if (captureProcessStdout(self.gpa, io, &.{
+                    "/usr/bin/security",
+                    "find-generic-password",
+                    "-s",
+                    "Claude Code-credentials",
+                })) |probe_out| blk: {
+                    self.gpa.free(probe_out);
+                    break :blk true;
+                } else false;
+                if (!has_item) return null;
+
                 if (self.user_name) |uname| {
                     if (captureProcessStdout(self.gpa, io, &.{
                         "/usr/bin/security",
@@ -658,7 +694,7 @@ pub const AgentAccountsHost = struct {
         if (acc_count.* > 0) try w.writeByte(',');
         acc_count.* += 1;
         try w.print(
-            "{{\"id\":{f},\"harness\":\"codex\",\"email\":{f},\"displayName\":{f},\"planLabel\":{f},\"active\":true,\"switchable\":false,\"usageWindows\":{s}}}",
+            "{{\"id\":{f},\"harness\":\"codex\",\"email\":{f},\"displayName\":{f},\"planLabel\":{f},\"active\":true,\"switchable\":true,\"usageWindows\":{s}}}",
             .{
                 json.fmt(acct_id, .{}),
                 json.fmt(email, .{}),
@@ -738,7 +774,7 @@ pub const AgentAccountsHost = struct {
         if (acc_count.* > 0) try w.writeByte(',');
         acc_count.* += 1;
         try w.print(
-            "{{\"id\":\"cursor-live\",\"harness\":\"cursor\",\"email\":{f},\"displayName\":null,\"planLabel\":{f},\"active\":true,\"switchable\":false,\"usageWindows\":{s}}}",
+            "{{\"id\":\"cursor-live\",\"harness\":\"cursor\",\"email\":{f},\"displayName\":null,\"planLabel\":{f},\"active\":true,\"switchable\":true,\"usageWindows\":{s}}}",
             .{
                 json.fmt(email, .{}),
                 json.fmt(plan_label, .{}),
