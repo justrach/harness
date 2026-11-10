@@ -38,7 +38,17 @@ pub fn docked(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (a.wizard != null) {
         const q = ui.div(c).column().offset(0, lift);
         defer q.end();
-        return @import("view_question.zig").panel(c, a, k, w);
+        // The question may be taller than its pane (a split, a short
+        // window): it is told the room the dock has, the pane as last laid
+        // out less the bars the conversation shares it with.
+        const actions = @import("view_actions.zig");
+        const pane = c.node(outer.index).parent;
+        c.node(pane).layout_dependent = true;
+        const pane_h = if (c.rects.get(c.node(pane).id)) |r| r.h else c.size.h;
+        return @import("view_question.zig").panel(c, a, k, w, .{
+            .height = pane_h - actions.toolbarHeight(a) - actions.dockHeight(a),
+            .dock = outer.index,
+        });
     }
     const expanded = attachments.count(a) > 0 or composerFlip(
         a.view.composer_expanded,

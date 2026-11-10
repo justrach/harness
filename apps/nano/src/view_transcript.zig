@@ -558,7 +558,7 @@ fn part(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *const 
         .input => {
             const q = if (p.questions.len > 0) p.questions[0] else null;
             const label = if (q) |x| (if (x.question.len > 0) x.question else x.header) else "Question";
-            @import("view_question.zig").chip(c, k, label, p.resolved);
+            @import("view_question.zig").chip(c, k, label, p.resolved, at.col);
         },
         else => {},
     }
