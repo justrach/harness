@@ -128,13 +128,17 @@ fn rich(c: *ui.Context, in: md.Inline, style: ui.TextStyle) void {
         break :blk veil_mod.applyVeil(c.alloc(), in.text.len, in.spans, v_spans, st.color orelse k.text);
     } else in.spans;
     if (in.links.len == 0 or link_owner == null) return ui.richText(c, in.text, spans, st);
+    const has_navigable_link = for (in.links) |link| {
+        if (@import("browser_url.zig").allowedNavigation(link.url)) break true;
+    } else false;
+    if (!has_navigable_link) return ui.richText(c, in.text, spans, st);
     const area = ui.div(c).column().wFull();
     defer area.end();
     const at = c.nodes.items.len;
     ui.richText(c, in.text, spans, st);
     const rect = c.rects.get(c.node(@intCast(at)).id) orelse {
         const owner = link_owner.?;
-        if (owner.app.window == null or owner.app.offscreen) c.changed = true else c.frameIn(0);
+        if (owner.app.window == null or owner.app.offscreen) c.changed = true else if (c.frame <= 1) c.frameIn(0);
         return;
     };
     const origin = c.rects.get(c.node(area.index).id) orelse return;

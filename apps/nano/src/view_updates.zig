@@ -46,6 +46,8 @@ pub const State = struct {
     graff_highlight_lens: [max_highlights]usize = @splat(0),
     graff_highlights_total: usize = 0,
     graff_card_open: bool = true,
+    graff_card_h: ?f32 = null,
+    graff_card_settled: bool = false,
     graff_updating_manual: bool = false,
 
     restart_dismissed: [32]u8 = undefined,
@@ -129,6 +131,8 @@ pub const State = struct {
         else
             0;
         s.graff_card_open = true;
+        s.graff_card_h = null;
+        s.graff_card_settled = false;
         s.graff_updating_manual = false;
         s.dirty = true;
     }
@@ -806,13 +810,19 @@ fn graffNoticeCard(c: *ui.Context, a: *App, k: theme.Colors) void {
     est_h += (note_lines - 1.0) * 16;
 
     ui.key(c, "graff-notice");
-    const card_id = c.peekId(null);
+    const card_id = c.peekId("graff-notice");
     const measured_h: ?f32 = if (c.rects.get(card_id)) |r| (if (r.h > 0 and r.h < 600) r.h else null) else null;
-    if (measured_h == null) c.frameIn(0);
-    const card_h = measured_h orelse est_h;
+    const card_h = measured_h orelse s.graff_card_h orelse est_h;
     const card = @import("view_sidebar_menus.zig").held(kit.shadowLg(ui.div(c).fixed().offset(@max(16, c.size.w - card_w - 16), @max(16, c.size.h - card_h - 16))
         .layer(5).column().w(card_w).p(14).gap(10).rounded(12).border(k.border).borderW(1).bg(k.composer.alpha(1))));
     defer card.end();
+    if (c.rects.get(c.node(card.index).id)) |r| {
+        if (r.h > 0 and r.h < 600) s.graff_card_h = r.h;
+        s.graff_card_settled = true;
+    } else if (measured_h == null and !s.graff_card_settled) {
+        s.graff_card_settled = true;
+        c.frameIn(0);
+    }
 
     // Header: Codegraff mark tile, title, and version step.
     {

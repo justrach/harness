@@ -518,6 +518,17 @@ pub const ProjectActionRecord = struct {
 };
 
 pub const EngineHost = struct {
+    /// Maximum warm `SessionDoc` handles kept in memory (`WARM_DOC_CAP = 12` in `crates/engine/src/doc_host.rs`).
+    pub const warm_doc_cap: usize = 12;
+    /// Soft byte budget across open `SessionDoc` handles (`DOC_LRU_BYTE_BUDGET = 80 MiB` in `crates/doc/src/constants.rs`).
+    pub const doc_lru_byte_budget: usize = 80 * 1024 * 1024;
+    /// Minimum resident attribution per open `SessionDoc` (`DOC_RESIDENT_FLOOR_BYTES = 512 KiB`).
+    pub const doc_resident_floor_bytes: usize = 512 * 1024;
+    /// Expansion factor from snapshot bytes to in-memory structures (`RESIDENT_BYTES_PER_SNAPSHOT_BYTE = 6`).
+    pub const resident_bytes_per_snapshot_byte: usize = 6;
+    /// Maximum active concurrent chat sync rooms (`ACTIVE_SYNC_CAP = 28`).
+    pub const active_sync_cap: usize = 28;
+
     gpa: Allocator,
     io: ?std.Io = null,
     graff_exe: ?[]const u8 = null,
@@ -529,6 +540,8 @@ pub const EngineHost = struct {
     auth: auth_host.AuthManager,
     journal: run_journal.RunJournal,
     docs: std.StringHashMapUnmanaged(session_doc.SessionDoc) = .empty,
+    doc_access_clock: u64 = 0,
+    evicted_docs_total: u64 = 0,
     spaces: std.ArrayList(SpaceRecord) = .empty,
     chats: std.ArrayList(ChatRecord) = .empty,
     actions: std.ArrayList(ProjectActionRecord) = .empty,
@@ -641,6 +654,7 @@ pub const EngineHost = struct {
             if (w.sub_id == sub_id and (self.live_ws_writer == null or w.client_writer == self.live_ws_writer)) {
                 w.deinit(self.gpa);
                 _ = self.watches.orderedRemove(i);
+                self.evictOverBudget(null);
                 return;
             }
             i += 1;
@@ -673,6 +687,7 @@ pub const EngineHost = struct {
                 i += 1;
             }
         }
+        self.evictOverBudget(null);
     }
 
     pub fn broadcastWatch(self: *EngineHost, kind: WatchKind, target_id: ?[]const u8, payload_json: []const u8) !void {
@@ -733,7 +748,84 @@ pub const EngineHost = struct {
         try self.committed_uploads.put(self.gpa, full_path, bytes);
     }
 
+    /// True when `chat_id` is pinned in memory (`crates/engine/src/doc_host.rs` `pinned`,
+    /// Lean Theorem `HarnessProofs.RustCodebaseParity.pinned_doc_never_evicted`):
+    /// watched by a live `WatchDocMessages` or `WatchQueue`, or running an active turn / pending command.
+    pub fn isDocPinned(self: *const EngineHost, chat_id: []const u8) bool {
+        for (self.watches.items) |w| {
+            if (w.kind == .doc_messages or w.kind == .queue) {
+                if (w.target_id) |tid| {
+                    if (std.mem.eql(u8, tid, chat_id)) return true;
+                }
+            }
+        }
+        if (self.docs.getPtr(chat_id)) |doc| {
+            if (doc.hasActiveWork()) return true;
+        }
+        return false;
+    }
+
+    /// Resident byte estimate for a warm doc (`crates/engine/src/doc_host.rs` `doc_resident_estimate`).
+    pub fn docResidentEstimate(self: *const EngineHost, chat_id: []const u8, doc: *const session_doc.SessionDoc) usize {
+        const snap_bytes = if (self.store.loadSnapshot(chat_id)) |s| s.len else 0;
+        const base = @max(snap_bytes, doc.approxPayloadBytes());
+        return @max(base * resident_bytes_per_snapshot_byte, doc_resident_floor_bytes);
+    }
+
+    pub fn totalDocResidentBytes(self: *const EngineHost) usize {
+        var total: usize = 0;
+        var it = self.docs.iterator();
+        while (it.next()) |e| {
+            total += self.docResidentEstimate(e.key_ptr.*, e.value_ptr);
+        }
+        return total;
+    }
+
+    /// Evict oldest-accessed unpinned warm docs until both `docs.count() <= warm_doc_cap`
+    /// and `totalDocResidentBytes() <= doc_lru_byte_budget` (`crates/engine/src/doc_host.rs`
+    /// `evict_over_budget`). Flushes a final snapshot to `DocsStore` before removing.
+    pub fn evictOverBudget(self: *EngineHost, protect_chat_id: ?[]const u8) void {
+        while (self.docs.count() > warm_doc_cap or self.totalDocResidentBytes() > doc_lru_byte_budget) {
+            var victim_key: ?[]const u8 = null;
+            var oldest_seq: u64 = std.math.maxInt(u64);
+            var it = self.docs.iterator();
+            while (it.next()) |e| {
+                const cid = e.key_ptr.*;
+                if (protect_chat_id) |pid| {
+                    if (std.mem.eql(u8, cid, pid)) continue;
+                }
+                if (self.isDocPinned(cid)) continue;
+                if (e.value_ptr.last_access_seq < oldest_seq) {
+                    oldest_seq = e.value_ptr.last_access_seq;
+                    victim_key = cid;
+                }
+            }
+            const vkey = victim_key orelse break;
+            if (self.docs.fetchRemove(vkey)) |kv| {
+                var doc = kv.value;
+                defer {
+                    doc.deinit();
+                    self.gpa.free(kv.key);
+                }
+                if (doc.local_seq > 0 or self.store.loadSnapshot(kv.key) != null) {
+                    if (doc.exportSnapshot(self.gpa)) |snap| {
+                        defer self.gpa.free(snap);
+                        self.store.saveSnapshot(kv.key, snap, self.nowMs()) catch {};
+                    } else |_| {}
+                }
+                self.evicted_docs_total += 1;
+            } else {
+                break;
+            }
+        }
+    }
+
     pub fn getOrCreateDoc(self: *EngineHost, chat_id: []const u8) !*session_doc.SessionDoc {
+        self.doc_access_clock += 1;
+        if (self.docs.getPtr(chat_id)) |existing| {
+            existing.last_access_seq = self.doc_access_clock;
+            return existing;
+        }
         const gop = try self.docs.getOrPut(self.gpa, chat_id);
         if (!gop.found_existing) {
             errdefer _ = self.docs.remove(chat_id);
@@ -744,10 +836,12 @@ pub const EngineHost = struct {
             if (self.store.loadSnapshot(chat_id)) |snap_bytes| {
                 doc.importSnapshot(snap_bytes) catch {};
             }
+            doc.last_access_seq = self.doc_access_clock;
             gop.key_ptr.* = key_copy;
             gop.value_ptr.* = doc;
         }
-        return gop.value_ptr;
+        self.evictOverBudget(chat_id);
+        return self.docs.getPtr(chat_id).?;
     }
 
     fn nowMs(self: *const EngineHost) i64 {
@@ -3165,4 +3259,70 @@ test "Mechanical 1:1 source-of-truth verification against crates/rpc/src/lib.rs,
         defer gpa.free(f_out.unary_json);
         try testing.expectEqualStrings("{\"finished\":true}", f_out.unary_json);
     }
+}
+
+test "Warm-Doc LRU eviction and memory bound 1:1 parity with crates/engine/src/doc_host.rs" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // 1. Verify constants against `crates/engine/src/doc_host.rs` and `crates/doc/src/constants.rs` directly from disk.
+    const doc_host_rs = try std.Io.Dir.cwd().readFileAlloc(io, "../../crates/engine/src/doc_host.rs", a, .limited(512 * 1024));
+    const doc_consts_rs = try std.Io.Dir.cwd().readFileAlloc(io, "../../crates/doc/src/constants.rs", a, .limited(64 * 1024));
+    try testing.expect(std.mem.indexOf(u8, doc_host_rs, "const WARM_DOC_CAP: usize = 12;") != null);
+    try testing.expect(std.mem.indexOf(u8, doc_consts_rs, "pub const DOC_LRU_BYTE_BUDGET: usize = 80 * 1024 * 1024;") != null);
+    try testing.expect(std.mem.indexOf(u8, doc_host_rs, "const DOC_RESIDENT_FLOOR_BYTES: usize = 512 * 1024;") != null);
+    try testing.expect(std.mem.indexOf(u8, doc_host_rs, "const RESIDENT_BYTES_PER_SNAPSHOT_BYTE: usize = 6;") != null);
+    try testing.expect(std.mem.indexOf(u8, doc_host_rs, "const ACTIVE_SYNC_CAP: usize = 28;") != null);
+    try testing.expectEqual(@as(usize, 12), EngineHost.warm_doc_cap);
+    try testing.expectEqual(@as(usize, 80 * 1024 * 1024), EngineHost.doc_lru_byte_budget);
+    try testing.expectEqual(@as(usize, 512 * 1024), EngineHost.doc_resident_floor_bytes);
+    try testing.expectEqual(@as(usize, 6), EngineHost.resident_bytes_per_snapshot_byte);
+    try testing.expectEqual(@as(usize, 28), EngineHost.active_sync_cap);
+
+    // 2. Open 50 chats with messages while pinning 2 of them (`chat-0` and `chat-1`).
+    var host = try EngineHost.init(gpa, "dev-lru", "LruParityHost");
+    defer host.deinit();
+
+    for (0..50) |idx| {
+        const cid = try std.fmt.allocPrint(a, "chat-{d}", .{idx});
+        const msg_id = try std.fmt.allocPrint(a, "msg-{d}", .{idx});
+        const part_id = try std.fmt.allocPrint(a, "part-{d}", .{idx});
+        const body = try std.fmt.allocPrint(a, "persisted message for {s}", .{cid});
+        const doc = try host.getOrCreateDoc(cid);
+        try doc.appendUserMessage(msg_id, part_id, body, @intCast(1000 + idx));
+
+        if (idx == 0) {
+            try host.registerWatch(9001, .doc_messages, cid);
+        } else if (idx == 1) {
+            try host.registerWatch(9002, .queue, cid);
+        }
+    }
+
+    // Warm docs must be strictly capped at WARM_DOC_CAP = 12, with 38 evicted to DocsStore.
+    try testing.expectEqual(@as(u32, 12), host.docs.count());
+    try testing.expectEqual(@as(u64, 38), host.evicted_docs_total);
+    try testing.expect(host.docs.contains("chat-0"));
+    try testing.expect(host.docs.contains("chat-1"));
+    try testing.expect(!host.docs.contains("chat-2"));
+    try testing.expect(host.docs.contains("chat-49"));
+
+    // 3. Reopening an evicted chat (`chat-2`) reloads its full snapshot losslessly from DocsStore.
+    const reloaded = try host.getOrCreateDoc("chat-2");
+    try testing.expectEqual(@as(usize, 1), reloaded.messages.items.len);
+    try testing.expectEqualStrings("persisted message for chat-2", reloaded.messages.items[0].parts.items[0].text.items);
+    try testing.expectEqual(@as(u32, 12), host.docs.count());
+
+    // 4. Unpinning `chat-0` and `chat-1` allows them to be evicted when newer chats are accessed.
+    host.cancelWatch(9001);
+    host.cancelWatch(9002);
+    try testing.expect(!host.isDocPinned("chat-0"));
+    try testing.expect(!host.isDocPinned("chat-1"));
+    _ = try host.getOrCreateDoc("chat-3");
+    _ = try host.getOrCreateDoc("chat-4");
+    try testing.expectEqual(@as(u32, 12), host.docs.count());
+    try testing.expect(!host.docs.contains("chat-0"));
+    try testing.expect(!host.docs.contains("chat-1"));
 }

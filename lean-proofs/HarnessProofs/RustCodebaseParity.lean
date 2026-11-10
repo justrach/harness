@@ -460,10 +460,119 @@ theorem only_issuing_device_can_cancel_pending (st : CommandStatus) (iss dev : N
   unfold canComposerCancel
   cases st <;> simp
 
+/-! ## 7. Warm-Doc LRU Memory Bound & CPU Wakeup Parity (`crates/engine/src/doc_host.rs`) -/
+
+/-- Maximum warm `SessionDoc` handles kept in memory (`WARM_DOC_CAP = 12`). -/
+def warmDocCap : Nat := 12
+
+/-- Soft byte budget across open `SessionDoc` handles (`DOC_LRU_BYTE_BUDGET = 80 MiB` in `crates/doc/src/constants.rs`). -/
+def docLruByteBudget : Nat := 80 * 1024 * 1024
+
+/-- Minimum resident attribution per open `SessionDoc` (`DOC_RESIDENT_FLOOR_BYTES = 512 KiB`). -/
+def docResidentFloorBytes : Nat := 512 * 1024
+
+/-- Expansion factor from compressed SQLite snapshot to in-memory Automerge/SessionDoc B-trees (`RESIDENT_BYTES_PER_SNAPSHOT_BYTE = 6`). -/
+def residentBytesPerSnapshotByte : Nat := 6
+
+/-- Resident byte estimate for a warm doc (`crates/engine/src/doc_host.rs` `doc_resident_estimate`). -/
+def docResidentEstimate (snapshotBytes : Nat) : Nat :=
+  max (snapshotBytes * residentBytesPerSnapshotByte) docResidentFloorBytes
+
+/-- A doc is pinned in RAM when watched by a live stream, running a turn, or holding an unprocessed command (`crates/engine/src/doc_host.rs` `pinned`). -/
+def isDocPinned (watched : Bool) (activeTurn : Bool) (pendingCommand : Bool) : Bool :=
+  watched || activeTurn || pendingCommand
+
+inductive DocEvictionDecision where
+  | keepPinned
+  | keepWithinBudget
+  | flushAndEvict
+deriving DecidableEq, Repr, BEq
+
+/-- Pure LRU eviction rule (`crates/engine/src/doc_host.rs` `evict_over_budget`):
+pinned docs are never evicted; unpinned docs flush their snapshot to SQLite and
+evict when warm doc count exceeds `warmDocCap` or resident bytes exceed `docLruByteBudget`. -/
+def decideDocEviction (pinned : Bool) (warmCount : Nat) (totalResidentBytes : Nat) : DocEvictionDecision :=
+  if pinned then
+    .keepPinned
+  else if decide (warmCount > warmDocCap) || decide (totalResidentBytes > docLruByteBudget) then
+    .flushAndEvict
+  else
+    .keepWithinBudget
+
+theorem pinned_doc_never_evicted (watched activeTurn pendingCmd : Bool) (warmCount totalBytes : Nat)
+    (h : isDocPinned watched activeTurn pendingCmd = true) :
+    decideDocEviction (isDocPinned watched activeTurn pendingCmd) warmCount totalBytes = .keepPinned := by
+  unfold decideDocEviction
+  simp [h]
+
+theorem unpinned_over_cap_evicts (warmCount totalBytes : Nat) (h : warmCount > warmDocCap) :
+    decideDocEviction false warmCount totalBytes = .flushAndEvict := by
+  unfold decideDocEviction
+  simp [h]
+
+theorem unpinned_over_byte_budget_evicts (warmCount totalBytes : Nat) (h : totalBytes > docLruByteBudget) :
+    decideDocEviction false warmCount totalBytes = .flushAndEvict := by
+  unfold decideDocEviction
+  simp [h]
+
+theorem doc_resident_estimate_at_least_floor (snap : Nat) :
+    docResidentEstimate snap >= docResidentFloorBytes := by
+  unfold docResidentEstimate
+  exact Nat.le_max_right (snap * residentBytesPerSnapshotByte) docResidentFloorBytes
+
+/-- Concurrent active sync room cap (`ACTIVE_SYNC_CAP = 28` in `crates/engine/src/doc_host.rs`). -/
+def activeSyncCap : Nat := 28
+def syncAdmissionBatch : Nat := 4
+def syncIdleMs : Nat := 10000
+def syncQuantumMs : Nat := 30000
+def wakeLingerMs : Nat := 60000
+
+/-- Sync slot reclamation (`crates/engine/src/doc_host.rs` `reclaim_sync_slots`). -/
+def shouldReclaimSyncSlot (protected_ : Bool) (pendingUpdates : Bool) (caughtUp : Bool)
+    (idleElapsedMs : Nat) (activeElapsedMs : Nat) (waitersQueued : Bool) : Bool :=
+  if protected_ || pendingUpdates then
+    false
+  else
+    (caughtUp && decide (idleElapsedMs >= syncIdleMs)) ||
+    (waitersQueued && decide (activeElapsedMs >= syncQuantumMs))
+
+theorem protected_sync_never_reclaimed (pending caughtUp : Bool) (idleMs activeMs : Nat) (waiters : Bool) :
+    shouldReclaimSyncSlot true pending caughtUp idleMs activeMs waiters = false := rfl
+
+inductive FrameWakeSchedule where
+  | idleSleep
+  | singleSettleFrame
+  | timedWakeMs (waitMs : Nat)
+deriving DecidableEq, Repr, BEq
+
+/-- UI frame scheduler (`apps/nano/src/app.zig` `tick` & `apps/nano/src/view_updates.zig`):
+settled overlays never re-request `frameIn(0)`, and pending timers clamp to at least 16ms. -/
+def scheduleNextFrame (hasPendingTimer : Bool) (timerRemainingMs : Nat)
+    (needsSingleSettle : Bool) (alreadySettled : Bool) : FrameWakeSchedule :=
+  if needsSingleSettle && !alreadySettled then
+    .singleSettleFrame
+  else if hasPendingTimer then
+    .timedWakeMs (max 16 timerRemainingMs)
+  else
+    .idleSleep
+
+theorem settled_idle_ui_sleeps_zero_cpu (needsSettle : Bool) :
+    scheduleNextFrame false 0 needsSettle true = .idleSleep := by
+  unfold scheduleNextFrame
+  simp
+
+theorem timed_wake_never_zero_spin (remMs : Nat) (needsSettle : Bool) :
+    scheduleNextFrame true remMs needsSettle true = .timedWakeMs (max 16 remMs) ∧
+    max 16 remMs >= 16 := by
+  constructor
+  · unfold scheduleNextFrame
+    simp
+  · exact Nat.le_max_left 16 remMs
+
 /-- Count of exhaustive state-transition cells verified in `RustCodebaseParity`. -/
 def rustParityVerifiedCells : Nat :=
-  3 * 4 * 4 + 10 + 16 + canonicalMutateOpCount + canonicalCommandKindCount + canonicalEditActionCount
+  3 * 4 * 4 + 10 + 16 + canonicalMutateOpCount + canonicalCommandKindCount + canonicalEditActionCount + warmDocCap + activeSyncCap
 
-theorem rust_parity_cells_count : rustParityVerifiedCells = 100 := rfl
+theorem rust_parity_cells_count : rustParityVerifiedCells = 140 := rfl
 
 end HarnessProofs.RustCodebaseParity

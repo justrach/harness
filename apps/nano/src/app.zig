@@ -715,10 +715,12 @@ pub const App = struct {
         if (@import("app_sandboxes.zig").tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (change_requests.tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (@import("app_subagents.zig").tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
-        if (a.w_queue.retry_at) |t| if (now >= t) {
-            a.w_queue = .{};
-            queue_mod.watch(a);
-        };
+        if (a.w_queue.retry_at) |t| {
+            if (now >= t) {
+                a.w_queue = .{};
+                queue_mod.watch(a);
+            } else next = if (next) |n| @min(n, t) else t;
+        }
         inline for (.{ "w_devices", "w_spaces", "w_chats", "w_sessions", "w_doc" }) |name| {
             const w = &@field(a, name);
             if (w.retry_at) |t| {
@@ -741,7 +743,7 @@ pub const App = struct {
                 a.settings.flushOpenTabsAndLayout();
             } else next = if (next) |n| @min(n, a.tabs_save_at) else a.tabs_save_at;
         }
-        return if (next) |n| @floatCast(n - now) else null;
+        return if (next) |n| @max(@as(f32, 0.016), @as(f32, @floatCast(n - now))) else null;
     }
 
     /// A stream ended or failed: try again soon, while connected.

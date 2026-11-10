@@ -156,10 +156,41 @@ pub const SessionDoc = struct {
     chat_id: []u8,
     device_id: []u8,
     local_seq: u64 = 0,
+    last_access_seq: u64 = 0,
     vv: std.StringHashMapUnmanaged(u64) = .empty,
     messages: std.ArrayList(MessageEntry) = .empty,
     commands: std.ArrayList(CommandEntry) = .empty,
     queue: std.ArrayList(QueuedItem) = .empty,
+
+    pub fn hasActiveWork(self: *const SessionDoc) bool {
+        for (self.messages.items) |m| {
+            if (m.status) |st| {
+                if (std.mem.eql(u8, st, "streaming")) return true;
+            }
+        }
+        for (self.commands.items) |c| {
+            if (std.mem.eql(u8, c.status, "pending")) return true;
+        }
+        return false;
+    }
+
+    pub fn approxPayloadBytes(self: *const SessionDoc) usize {
+        var total: usize = self.chat_id.len + self.device_id.len;
+        for (self.messages.items) |m| {
+            const st_len = if (m.status) |st| st.len else 0;
+            total += m.id.len + m.role.len + m.device_id.len + st_len + 64;
+            for (m.parts.items) |p| {
+                total += p.id.len + p.kind.len + p.text.items.len + 32;
+            }
+        }
+        for (self.commands.items) |c| {
+            total += c.id.len + c.kind.len + c.payload_json.len + c.status.len + 48;
+        }
+        for (self.queue.items) |q| {
+            total += q.id.len + q.text.len + q.issued_by.len + 48;
+        }
+        return total;
+    }
 
     pub fn init(gpa: Allocator, chat_id: []const u8, device_id: []const u8) !SessionDoc {
         const cid = try gpa.dupe(u8, chat_id);

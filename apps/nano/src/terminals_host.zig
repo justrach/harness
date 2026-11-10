@@ -89,6 +89,7 @@ pub const TerminalManager = struct {
     ) !*TerminalSession {
         const gop = try self.sessions.getOrPut(self.gpa, terminal_id);
         if (!gop.found_existing) {
+            errdefer _ = self.sessions.remove(terminal_id);
             const key = try self.gpa.dupe(u8, terminal_id);
             errdefer self.gpa.free(key);
             const id_copy = try self.gpa.dupe(u8, terminal_id);
