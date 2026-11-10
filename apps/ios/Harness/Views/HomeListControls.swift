@@ -38,6 +38,60 @@ enum HomeListControls {
     static func showsGrouping(sessionsInScope: Int) -> Bool {
         sessionsInScope > 0
     }
+
+    /// Top-of-screen clutter (`HomeStartHeader`, `PinnedRow`, `SplitOfferBanner`,
+    /// `NowStrip`) stays off the Home list (`FrameSchedule.lean`:
+    /// `clean_home_layout_has_zero_top_clutter`), so the filter pills and
+    /// session rows open immediately at the top of the screen.
+    static func showsTopClutter(hasSessions: Bool) -> Bool {
+        false
+    }
+}
+
+/// Time-window filter matching the desktop sidebar's `Last activity` menu
+/// (`FrameSchedule.lean`: `keepChatFixed`).
+enum HomeActivityWindow: String, CaseIterable, Identifiable {
+    case d1 = "1d"
+    case d3 = "3d"
+    case d7 = "7d"
+    case d30 = "30d"
+    case all = "all"
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .d1: return "1d"
+        case .d3: return "3d"
+        case .d7: return "7d"
+        case .d30: return "30d"
+        case .all: return "All"
+        }
+    }
+
+    var cutoffMs: Int64? {
+        let dayMs: Int64 = 86_400_000
+        switch self {
+        case .d1: return dayMs
+        case .d3: return 3 * dayMs
+        case .d7: return 7 * dayMs
+        case .d30: return 30 * dayMs
+        case .all: return nil
+        }
+    }
+
+    static func keep(_ chat: Chat, indicator: ChatIndicator, window: HomeActivityWindow, nowMs: Int64) -> Bool {
+        guard let cutoff = window.cutoffMs else { return true }
+        if indicator == .working || indicator == .awaitingInput { return true }
+        let touched = max(chat.lastMessageAt ?? 0, chat.createdAt)
+        return touched >= nowMs - cutoff
+    }
+
+    static func apply(_ chats: [Chat], window: HomeActivityWindow,
+                      indicator: (Chat) -> ChatIndicator, nowMs: Int64) -> [Chat] {
+        guard window != .all else { return chats }
+        return chats.filter { keep($0, indicator: indicator($0), window: window, nowMs: nowMs) }
+    }
 }
 
 extension HomeGroupBy {

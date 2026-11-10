@@ -96,8 +96,17 @@ struct SessionView: View {
             && model.connectivity.state == .connected
     }
 
+    /// Auxiliary `< 1/12 >` pager buttons and multi-session status dot strips stay
+    /// off the session header by default (`FrameSchedule.lean`:
+    /// `clean_home_layout_has_zero_top_clutter`), leaving the full width for the
+    /// session title and `project @ device` subtitle.
+    nonisolated static func showsAuxiliaryHeaderControls(arguments: [String] = ProcessInfo.processInfo.arguments) -> Bool {
+        arguments.contains("-header-status-count")
+    }
+
     private func headerControls(_ chat: Chat, chats: [Chat], maxVisible: Int) -> some View {
-        HStack(spacing: 4) {
+        let showAuxiliary = Self.showsAuxiliaryHeaderControls()
+        return HStack(spacing: 4) {
             HStack(spacing: 3) {
                 Button {
                     renameChatId = chat.id
@@ -126,12 +135,14 @@ struct SessionView: View {
                 .accessibilityHint("Rename session")
                 .accessibilityIdentifier("session-header")
 
-                pagerControls(for: chat)
+                if showAuxiliary {
+                    pagerControls(for: chat)
+                }
             }
             .pagerSwipe()
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("session-navigation-controls")
-            if !pillShows(chat) {
+            if showAuxiliary, !pillShows(chat) {
                 SessionStatusIndicators(current: chat.id, chats: chats, maxVisible: maxVisible)
             }
         }

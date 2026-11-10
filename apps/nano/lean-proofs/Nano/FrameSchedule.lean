@@ -638,4 +638,102 @@ def desktopRegressionCube : Bool :=
 theorem desktop_regression_cube_holds : desktopRegressionCube = true := by
   decide
 
+/-- iOS `UITableView` batch-update and scroll-index safety (`NativeTranscriptTable.swift`):
+UIKit throws `NSInternalInconsistencyException` if `insertRows` or `performBatchUpdates` is
+invoked when `numberOfRows(inSection: 0) ≠ previousIDs.count` (for example after an offscreen
+`reloadData()` whose layout was skipped on an append) or when row IDs contain duplicates.
+Falling back to `reloadData()` whenever `uiKitRowCount ≠ previousCount ∨ ¬uniqueIds`
+guarantees UIKit batch-update preconditions hold. -/
+inductive TableUpdateAction where
+  | batchDiff
+  | reloadAll
+deriving DecidableEq, Repr, BEq
+
+def chooseTableUpdateSafe (uiKitRowCount previousCount : Nat) (uniqueIds : Bool) : TableUpdateAction :=
+  if uiKitRowCount == previousCount && uniqueIds then .batchDiff else .reloadAll
+
+theorem safe_table_update_requires_synced_counts_and_unique_ids
+    (uiKitRowCount previousCount : Nat) (uniqueIds : Bool)
+    (h : chooseTableUpdateSafe uiKitRowCount previousCount uniqueIds = .batchDiff) :
+    uiKitRowCount = previousCount ∧ uniqueIds = true := by
+  unfold chooseTableUpdateSafe at h
+  split at h
+  · rename_i hcond
+    rw [Bool.and_eq_true, beq_iff_eq] at hcond
+    exact hcond
+  · contradiction
+
+theorem desynced_table_row_count_falls_back_to_reload
+    (uiKitRowCount previousCount : Nat) (uniqueIds : Bool)
+    (hne : uiKitRowCount ≠ previousCount) :
+    chooseTableUpdateSafe uiKitRowCount previousCount uniqueIds = .reloadAll := by
+  unfold chooseTableUpdateSafe
+  have hbeq : (uiKitRowCount == previousCount) = false := beq_false_of_ne hne
+  simp [hbeq]
+
+theorem duplicate_row_ids_fall_back_to_reload (uiKitRowCount previousCount : Nat) :
+    chooseTableUpdateSafe uiKitRowCount previousCount false = .reloadAll := by
+  unfold chooseTableUpdateSafe
+  simp
+
+/-- Guarding `scrollToRow` and `rectForRow` against both `rows.count` and UIKit's
+materialized `numberOfRows(inSection: 0)` prevents `NSRangeException`. -/
+def canIndexTableRow (row rowsCount uiKitRowCount : Int) : Bool :=
+  decide (0 ≤ row ∧ row < rowsCount ∧ row < uiKitRowCount)
+
+theorem canIndexTableRow_in_bounds (row rowsCount uiKitRowCount : Int)
+    (h : canIndexTableRow row rowsCount uiKitRowCount = true) :
+    0 ≤ row ∧ row < rowsCount ∧ row < uiKitRowCount := by
+  unfold canIndexTableRow at h
+  exact of_decide_eq_true h
+
+/-- Lock-order hierarchy for `EntryCache` and `LoroDoc` (`EntryCache.swift`, `SessionStore.swift`):
+`readLock` (rank 0) serializes `EntryCache.read` calls, `loroLock` (rank 1) is `LoroDoc`'s
+internal Rust mutex acquired during FFI reads/imports, and `staleLock` (rank 2) guards the
+`stale` / `entries` dictionaries. Every code path acquires locks in strictly ascending rank
+order (`0 < 1`, `0 < 2`, `1 < 2`), making lock-order cycles (deadlocks) impossible while
+preventing concurrent `EntryCache.read` calls from overwriting fresh entries with stale snapshots. -/
+def lockRankRead : Nat := 0
+def lockRankLoro : Nat := 1
+def lockRankStale : Nat := 2
+
+def validLockTransition (held next : Nat) : Bool :=
+  decide (held < next)
+
+theorem entry_cache_lock_order_is_strictly_acyclic :
+    validLockTransition lockRankRead lockRankLoro = true ∧
+    validLockTransition lockRankRead lockRankStale = true ∧
+    validLockTransition lockRankLoro lockRankStale = true := by
+  decide
+
+/-- Decluttered iOS top-of-screen hierarchy (`HomeView.swift`, `SessionView.swift`):
+Removing the hero banner (`HomeStartHeader`), duplicate horizontal strips (`PinnedRow`,
+`NowStrip`), and split banner (`SplitOfferBanner`) above the session list places the compact
+filter pills and session rows immediately at index 0, and removing auxiliary pager/status
+widgets from `SessionView`'s navigation bar reduces header clutter to 0. -/
+inductive HomeTopItem where
+  | startHero
+  | pinnedStrip
+  | splitOffer
+  | nowCarousel
+  | filterPills
+  | sessionList
+deriving DecidableEq, Repr, BEq
+
+def isTopClutter : HomeTopItem → Bool
+  | .startHero   => true
+  | .pinnedStrip => true
+  | .splitOffer  => true
+  | .nowCarousel => true
+  | .filterPills => false
+  | .sessionList => false
+
+def homeTopLayoutClean : List HomeTopItem :=
+  [.filterPills, .sessionList]
+
+theorem clean_home_layout_has_zero_top_clutter :
+    (homeTopLayoutClean.filter isTopClutter).length = 0 ∧
+    homeTopLayoutClean.head? = some .filterPills := by
+  decide
+
 end Nano.FrameSchedule

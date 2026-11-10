@@ -39,6 +39,7 @@ struct HomeView: View {
     /// Status by default; `-homeGroupBy none|project|device` picks another at launch.
     @State private var groupByRaw = UserDefaults.standard.string(forKey: "homeGroupBy")
         .flatMap(HomeGroupBy.init(rawValue:))?.rawValue ?? HomeGroupBy.status.rawValue
+    @State private var activityWindow: HomeActivityWindow = .all
     @AppStorage("homeCollapsedGroups") private var collapsedGroupsRaw = ""
     // Not persisted: a filter left on across launches reads as lost sessions.
     @State private var searchText = ""
@@ -418,7 +419,7 @@ struct HomeView: View {
     /// The session switcher's jump: from inside a session, swap that session
     /// out instead of stacking another one behind it.
     private func switchTo(_ chatId: String) {
-        if !splitLayout, case .chat = path.last {
+        if !splitLayout, !path.isEmpty, case .chat = path.last {
             path[path.count - 1] = .chat(chatId)
         } else {
             open(.chat(chatId))
@@ -693,11 +694,19 @@ struct HomeView: View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 8) {
                 projectMenu
-                if showsGrouping { groupPill }
+                if showsGrouping {
+                    groupPill
+                    activityPill
+                }
             }
             VStack(alignment: .leading, spacing: 6) {
                 projectMenu
-                if showsGrouping { groupPill }
+                if showsGrouping {
+                    HStack(spacing: 8) {
+                        groupPill
+                        activityPill
+                    }
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -765,6 +774,28 @@ struct HomeView: View {
         .accessibilityIdentifier("home-group-by")
     }
 
+    private var activityPill: some View {
+        Menu {
+            Picker(selection: $activityWindow) {
+                ForEach(HomeActivityWindow.allCases) { option in
+                    Text(option.label).tag(option)
+                }
+            } label: {
+                Text("Last activity")
+            }
+            .pickerStyle(.inline)
+        } label: {
+            let title = activityWindow == .all ? "Last activity" : activityWindow.label
+            HomeControlPill(symbol: "clock.arrow.circlepath", title: title, active: activityWindow != .all)
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .accessibilityLabel("Last activity")
+        .accessibilityValue(activityWindow.label)
+        .accessibilityHint("Filters sessions by recent activity")
+        .accessibilityIdentifier("home-activity-filter")
+    }
+
     private func deviceTag(_ space: Space) -> String {
         let name = model.deviceName(space.deviceId)
         // "offline" only on positive evidence; a host that is merely unconfirmed is not called gone.
@@ -811,29 +842,11 @@ struct HomeView: View {
     @ViewBuilder private var sessionsSection: some View {
         let scoped = selectedSpace.map { model.chats(in: $0.id) }
             ?? (projectlessSelected ? HomeListControls.projectless(model.overviewChats) : model.overviewChats)
-        let chats = HomeFilter.apply(scoped, query: searchText, names: model.homeFilterNames)
+        let activityFiltered = HomeActivityWindow.apply(scoped, window: activityWindow,
+                                                        indicator: { model.indicator(for: $0) },
+                                                        nowMs: nowMs())
+        let chats = HomeFilter.apply(activityFiltered, query: searchText, names: model.homeFilterNames)
         let grouping = HomeGroupBy(rawValue: groupByRaw) ?? .none
-        // The large title, then the pinned people row, then the chips. Not in
-        // the phone split: a narrow pane keeps its rows for sessions.
-        if phoneArrangement == nil {
-            Section {
-                HomeStartHeader(hasProject: startSpaceId != nil,
-                                compose: { startNewSession(prompt: nil) },
-                                start: { startNewSession(prompt: $0.prompt) })
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
-                    .listRowInsets(EdgeInsets(top: 4, leading: Theme.gutter, bottom: 10, trailing: Theme.gutter))
-                let pinnedChats = scoped.filter { model.isPinned(chatId: $0.id) }
-                // Grouped by status, pins already lead the list: no second copy.
-                if searchText.isEmpty, !pinnedChats.isEmpty, grouping != .status {
-                    PinnedRow(chats: pinnedChats) { open(.chat($0)) }
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
-                        .listRowInsets(EdgeInsets(top: 2, leading: 0, bottom: 8, trailing: 0))
-                }
-            }
-            .listSectionSeparator(.hidden)
-        }
         if HomeListControls.showsRow(hasSessions: !model.overviewChats.isEmpty,
                                      hasProjects: !model.spaces.isEmpty,
                                      projectSelected: selectedSpace != nil || projectlessSelected) {
@@ -844,34 +857,6 @@ struct HomeView: View {
                     .listRowInsets(EdgeInsets(top: 0, leading: Theme.gutter, bottom: 4, trailing: Theme.gutter))
             }
             .listSectionSeparator(.hidden)
-        }
-        if showSplitOffer {
-            Section {
-                SplitOfferBanner(tryIt: { answerSplitOffer(tryIt: true) },
-                                 notNow: { answerSplitOffer(tryIt: false) })
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
-                    .listRowInsets(EdgeInsets(top: 6, leading: Theme.gutter, bottom: 6, trailing: Theme.gutter))
-            }
-            .listSectionSeparator(.hidden)
-        }
-        if !scoped.isEmpty {
-            // What's running or waiting, above the history. Hidden while
-            // searching so it never competes with a query.
-            let now = NowStrip.active(in: scoped, model: model)
-            // Not in the phone split: the list beside the open session already shows what is running or
-            // waiting, and the cards would take most of a narrow pane.
-            // Grouped by status, "Needs you" already lists what waits on you:
-            // the strip would repeat it (less by default, #417).
-            if searchText.isEmpty, !now.isEmpty, phoneArrangement == nil, grouping != .status {
-                Section {
-                    NowStrip(chats: now) { open(.chat($0)) }
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
-                        .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 10, trailing: 0))
-                }
-                .listSectionSeparator(.hidden)
-            }
         }
         if chats.isEmpty {
             // A search can still hit the archived shelf below.
