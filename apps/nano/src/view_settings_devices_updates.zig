@@ -140,8 +140,13 @@ pub const State = struct {
         return s.device.items.len > 0 and std.mem.eql(u8, s.device.items, id);
     }
 
-    fn clearStatus(s: *State) void {
-        if (s.status_arena) |*x| x.deinit();
+    fn clearStatus(s: *State, a: ?*App) void {
+        if (s.status_arena) |x| {
+            if (a) |app| app.retireArena(x) else {
+                var ar = x;
+                ar.deinit();
+            }
+        }
         s.status_arena = null;
         s.status = null;
     }
@@ -152,7 +157,7 @@ pub const State = struct {
     }
 
     pub fn deinit(s: *State, gpa: Allocator) void {
-        s.clearStatus();
+        s.clearStatus(null);
         s.device.deinit(gpa);
         s.err.deinit(gpa);
     }
@@ -169,7 +174,7 @@ fn stopWatch(a: *App) void {
     s.watch = null;
     s.action = null;
     s.notice = null;
-    s.clearStatus();
+    s.clearStatus(a);
     s.err.clearRetainingCapacity();
 }
 
@@ -202,7 +207,7 @@ fn onStatus(a: *App, id: u64, r: rpc.Reply) void {
                 arena.deinit();
                 s.setErr(a.gpa, "Invalid update status.");
             } else {
-                s.clearStatus();
+                s.clearStatus(a);
                 s.status_arena = arena;
                 s.status = parsed;
                 s.err.clearRetainingCapacity();
@@ -211,13 +216,13 @@ fn onStatus(a: *App, id: u64, r: rpc.Reply) void {
         .err => |e| {
             s.watch = null;
             s.notice = null;
-            s.clearStatus();
+            s.clearStatus(a);
             s.setErr(a.gpa, e);
         },
         .done => {
             s.watch = null;
             s.notice = null;
-            s.clearStatus();
+            s.clearStatus(a);
             s.setErr(a.gpa, "Connection closed. The host may be restarting; refresh to confirm its version.");
         },
         .ok => {},

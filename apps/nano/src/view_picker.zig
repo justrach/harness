@@ -21,6 +21,8 @@ const detail_width: f32 = 276;
 /// 4c9766def), measured as drawn, from this first guess.
 const list_height: f32 = 480;
 const stage_height: f32 = 293;
+pub const compact_height: f32 = 104;
+pub const compact_single_height: f32 = 52;
 
 /// GPUI's menu_geometry and measure_trigger: new-chat menus prefer down
 /// when 180 points fit; established chats prefer up, flipping near the top.
@@ -49,6 +51,8 @@ pub fn opened(a: *App) void {
     p.focus = true;
     p.opened_at = null;
     p.clearStage(a.gpa);
+    p.can_return_compact = false;
+    p.card_height = null;
     p.detail = null;
     p.hover_target = null;
     p.detail_rect = null;
@@ -69,6 +73,59 @@ pub fn opened(a: *App) void {
         p.active = i;
         break;
     };
+}
+
+/// Opens the picker directly onto the Zeron-style compact thinking tier
+/// panel (`crates/ui/src/pickers/compact.rs`): clicking the model row in the
+/// header expands upwards into the full searchable model list.
+pub fn openedCompact(a: *App) void {
+    opened(a);
+    stageCurrentCompact(a);
+    a.view.model_picker.card_height = null;
+}
+
+pub fn stageCurrentCompact(a: *App) void {
+    const p = &a.view.model_picker;
+    const t = a.target();
+    const model_id = t.model orelse if (a.models.items.len > 0) a.models.items[0].id else return;
+    var resolved: workspace.Model = .{ .id = model_id, .label = a.modelLabel(t.model) };
+    for (models.modelsFor(a, t.harness)) |m| if (std.mem.eql(u8, m.id, model_id)) {
+        resolved = m;
+        break;
+    };
+    const harness = a.gpa.dupe(u8, t.harness) catch return;
+    const id = a.gpa.dupe(u8, resolved.id) catch {
+        a.gpa.free(harness);
+        return;
+    };
+    const levels = levelsOf(a, t.harness, resolved);
+    const want = t.reasoning orelse resolved.reasoning_default;
+    var level: ?usize = null;
+    if (levels.len > 0) {
+        level = if (resolved.reasoning_default) |d| index(levels, d) else null;
+        if (want) |w| if (index(levels, w)) |i| {
+            level = i;
+        };
+        if (level == null) level = levels.len - 1;
+    }
+    p.clearStage(a.gpa);
+    p.stage = .{ .harness = harness, .model = id, .level = level, .compact = true };
+    p.focus = false;
+    p.detail = null;
+    p.hover_target = null;
+    p.height = if (levels.len > 1) compact_height else compact_single_height;
+}
+
+fn applyLiveStage(a: *App) void {
+    const p = &a.view.model_picker;
+    const st = p.stage orelse return;
+    if (a.selected == null and !std.mem.eql(u8, st.harness, a.target().harness)) {
+        a.setHarness(st.harness);
+    }
+    const m: workspace.Model = staged(a) orelse .{ .id = st.model, .label = st.model };
+    const levels = levelsOf(a, st.harness, m);
+    const level: ?[]const u8 = if (st.level) |i| (if (i < levels.len) levels[i] else null) else null;
+    a.applyLiveModelAndReasoning(st.model, level);
 }
 
 /// Apply picks before building, so catalog replacement cannot invalidate
@@ -151,7 +208,9 @@ fn stage(c: *ui.Context, a: *App, r: models.Row) void {
         };
         if (level == null) level = levels.len - 1;
     }
-    p.stage = .{ .harness = harness, .model = id, .level = level };
+    const return_compact = p.can_return_compact;
+    p.can_return_compact = false;
+    p.stage = .{ .harness = harness, .model = id, .level = level, .compact = return_compact };
     p.slider_seeded = false;
     p.drag_fraction = null;
     p.effort_anim = null;
@@ -160,7 +219,14 @@ fn stage(c: *ui.Context, a: *App, r: models.Row) void {
     p.shimmer_last = null;
     p.detail = null;
     p.hover_target = null;
-    p.height = if (levels.len > 1) stage_height else 245;
+    p.height = if (return_compact)
+        (if (levels.len > 1) compact_height else compact_single_height)
+    else
+        (if (levels.len > 1) stage_height else 245);
+    if (return_compact) {
+        p.focus = false;
+        applyLiveStage(a);
+    }
     c.changed = true;
 }
 
@@ -213,10 +279,24 @@ pub fn keys(c: *ui.Context, a: *App) void {
     const p = &a.view.model_picker;
     const S = ui.Shortcut;
     if (p.stage) |st| {
-        // The page: Escape goes back, Return uses the model, the arrows,
-        // Home and End move the slider (`preview_key`).
-        if (c.shortcut(.{ .key = S.escape })) return back(c, a);
-        if (c.shortcut(.{ .key = S.enter })) return commit(c, a);
+        // The page: Escape goes back (or closes the compact panel), Return
+        // uses the model (or opens the model list from the compact panel),
+        // the arrows, Home and End move the slider (`preview_key`).
+        if (c.shortcut(.{ .key = S.escape })) {
+            if (st.compact) {
+                a.picker = .none;
+                a.view.focus_composer = true;
+                return;
+            }
+            return back(c, a);
+        }
+        if (c.shortcut(.{ .key = S.enter })) {
+            if (st.compact) {
+                p.can_return_compact = true;
+                return back(c, a);
+            }
+            return commit(c, a);
+        }
         const m = staged(a) orelse return;
         const levels = levelsOf(a, st.harness, m);
         if (levels.len == 0) return;
@@ -233,15 +313,20 @@ pub fn keys(c: *ui.Context, a: *App) void {
             null;
         if (next) |n| {
             if (p.stage) |*s| s.level = n;
+            if (st.compact) applyLiveStage(a);
             c.changed = true;
         }
         return;
     }
     if (c.shortcut(.{ .key = S.escape })) {
-        // A detail card first, then the picker.
+        // A detail card first, then back to compact panel if expanded from it, else close.
         if (p.detail != null) {
             p.detail = null;
             p.hover_target = null;
+            c.changed = true;
+        } else if (p.can_return_compact) {
+            p.can_return_compact = false;
+            stageCurrentCompact(a);
             c.changed = true;
         } else {
             a.picker = .none;
@@ -313,15 +398,28 @@ pub fn popover(c: *ui.Context, a: *App, k: theme.Colors) void {
             p.closing_since = null;
             p.anchor = null;
             p.clearStage(a.gpa);
+            p.can_return_compact = false;
+            p.card_height = null;
             p.detail = null;
             return;
         }
     }
     const anchor = p.anchor orelse return;
-    const w = @min(menu_width, c.size.w - 16);
-    const geometry = placement(anchor, c.size, a.selected == null, p.height);
+    const is_compact = p.stage != null and p.stage.?.compact;
+    const card_w: f32 = if (is_compact) 256 else menu_width;
+    const w = @min(card_w, c.size.w - 16);
+    const animate_height = is_compact or p.can_return_compact;
+    const wanted_h = if (animate_height) blk: {
+        const height_sample = models.ScalarTransition.sample(&p.card_height, p.height, c.time, c.reduced_motion);
+        if (height_sample.moving) c.frameIn(1.0 / 120.0);
+        break :blk height_sample.value;
+    } else blk: {
+        p.card_height = null;
+        break :blk p.height;
+    };
+    const geometry = placement(anchor, c.size, a.selected == null, wanted_h);
     const h = geometry.h;
-    const x = geometry.x;
+    const x = std.math.clamp(anchor.x, 8, @max(8, c.size.w - w - 8));
     const y = geometry.y;
     if (open) {
         ui.key(c, "model-picker-backdrop");
@@ -351,7 +449,7 @@ pub fn popover(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
     ui.key(c, "model-picker-card");
     const panel = @import("view_sidebar_menus.zig").held(kit.shadowLg(ui.div(c).fixed().offset(x, y).motion(motion).w(w).h(h).layer(5).column().p(1)
-        .bg(k.composer).border(k.border).borderW(1).rounded(12).clip()));
+        .bg(k.composer).border(k.border).borderW(1).rounded(if (is_compact) 14 else 12).clip()));
     defer panel.end();
     if (p.stage != null) return page(c, a, k, w - 2, open);
     tabs(c, a, k, w - 2);
@@ -621,10 +719,12 @@ fn detail(c: *ui.Context, a: *App, k: theme.Colors, r: models.Row, row: ui.Rect,
 
 /// The model's page (`preview_reasoning`): back to the models, the model
 /// and its route, its reasoning on a slider in the maker's colour, and
-/// "Use model".
+/// "Use model". When `st.compact` is true, renders the Zeron-style compact
+/// thinking tier card (`crates/ui/src/pickers/compact.rs`).
 fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) void {
     const p = &a.view.model_picker;
     const st = p.stage orelse return;
+    if (st.compact) return compactPage(c, a, k, w, open);
     const harness_id = c.print("{s}", .{st.harness});
     const model_id = c.print("{s}", .{st.model});
     const fallback_level = st.level orelse 0;
@@ -725,20 +825,105 @@ fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) void {
     ui.text(c, "Use model", .{ .size = 13, .line_height = 13 * 1.618, .weight = .medium, .color = k.on_solid });
 }
 
-/// The reasoning slider (`crates/ui/src/pickers/compact.rs`): a 26-point
-/// circular capsule rail, filled to the level in the model's colour with a
-/// flowing light-wave shimmer and breathing halo on deeper effort stops,
-/// stop dots that light up as the animated fill front reaches them, and a
-/// circular thumb that tracks the pointer continuously while dragging and
-/// glides from the exact release pointer position to the snapped stop over
-/// 200ms (`RESIZE` curve).
+/// Zeron-style compact thinking tier panel (`crates/ui/src/pickers/compact.rs`):
+/// effort title (`High`) on top, clickable model subtitle (`GPT-6.1-Sol ›`)
+/// beneath that expands upwards into the searchable model list, fast-tier
+/// bolt toggle on the right, and a live 120fps capsule effort slider below.
+fn compactPage(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) void {
+    const p = &a.view.model_picker;
+    const st = p.stage orelse return;
+    const harness_id = c.print("{s}", .{st.harness});
+    const model_id = c.print("{s}", .{st.model});
+    const fallback_level = st.level orelse 0;
+    const m: workspace.Model = staged(a) orelse .{ .id = model_id, .label = a.modelLabel(model_id) };
+    const levels = levelsOf(a, harness_id, m);
+    const is_binary = models.binary(levels);
+    const wanted_h: f32 = if (levels.len > 1) compact_height else compact_single_height;
+    if (@abs(p.height - wanted_h) > 0.5) {
+        p.height = wanted_h;
+        c.changed = true;
+    }
+    const raw_accent: ui.Color = if (models.brandHex(m, harness_id, k.dark)) |hx| ui.Color.hex(hx) else k.accent;
+    const accent: ui.Color = if (!k.dark and raw_accent.b > 0.85 and raw_accent.r > 0.3)
+        ui.Color.hex(0x2563eb)
+    else
+        raw_accent;
+    ui.key(c, "model-compact-page");
+    const body = ui.div(c).column().wFull().grow().h(0).p(3).justifyBetween();
+    defer body.end();
+    const header_h: f32 = if (levels.len > 1) 48 else 44;
+    {
+        const header = ui.div(c).row().wFull().h(header_h).gap(4).itemsCenter();
+        defer header.end();
+        ui.key(c, "compact-select-model");
+        const select_btn = ui.div(c).column().grow().w(0).hFull().px(8).justifyCenter().rounded(8).hover(k.hover);
+        const hot = select_btn.hovered();
+        const clicked_model = select_btn.clicked();
+        {
+            defer select_btn.end();
+            if (levels.len > 0) {
+                const cur_level = if (p.stage) |s| s.level else st.level;
+                const label = if (cur_level) |i| (if (i < levels.len) models.levelLabel(levels[i], is_binary) else "Default") else "Default";
+                const top_line = ui.div(c).row().wFull().itemsCenter().clip();
+                defer top_line.end();
+                kit.rollText(c, "model-picker-effort-badge", label, .{ .size = 14, .line_height = 18, .weight = .semibold, .color = k.text });
+            }
+            const bottom_line = ui.div(c).row().wFull().gap(3).itemsCenter();
+            defer bottom_line.end();
+            const model_color = if (levels.len == 0 or hot) k.text else k.muted;
+            const model_size: f32 = if (levels.len == 0) 13 else 12;
+            const model_lh: f32 = if (levels.len == 0) 17 else 15;
+            const model_weight: ui.Weight = if (levels.len == 0) .semibold else .medium;
+            kit.ellipsisText(c, m.label, .{ .size = model_size, .line_height = model_lh, .weight = model_weight, .color = model_color }, @max(40, w - 76));
+            icons.icon(c, .@"alt-arrow-right", 10, if (hot) k.text else k.muted.alpha(0.7), 10);
+        }
+        if (clicked_model and open) {
+            p.can_return_compact = true;
+            back(c, a);
+        }
+        ui.key(c, "compact-fast");
+        var fast_btn = ui.div(c).row().size(32, header_h).center().rounded(8).hover(k.hover);
+        if (st.fast) fast_btn = fast_btn.bg(accent.alpha(if (k.dark) 0.16 else 0.10));
+        const fast_hot = fast_btn.hovered();
+        const fast_clicked = fast_btn.clicked();
+        {
+            defer fast_btn.end();
+            const bolt_color = if (st.fast) accent else if (fast_hot) k.text else k.muted;
+            icons.icon(c, .@"fast-tier", 15, bolt_color, 15);
+        }
+        if (fast_clicked and open) {
+            if (p.stage) |*s| s.fast = !s.fast;
+            c.changed = true;
+        }
+    }
+    if (levels.len > 1) {
+        const slider_row = ui.div(c).row().wFull().px(6).pt(2).pb(4);
+        defer slider_row.end();
+        slider(c, a, k, accent, levels.len, @max(40, w - 6 - 12 - 44), open, fallback_level);
+    }
+}
+
+/// The reasoning slider (`crates/ui/src/pickers/compact.rs`): a circular
+/// capsule rail, filled to the level in the model's colour with a flowing
+/// light-wave shimmer and breathing halo on deeper effort stops, stop dots
+/// that light up as the animated fill front reaches them, and a thumb that
+/// tracks the pointer continuously while dragging and glides from the exact
+/// release pointer position to the snapped stop over 200ms (`RESIZE` curve).
 fn slider(c: *ui.Context, a: *App, k: theme.Colors, accent: ui.Color, n: usize, tw: f32, open: bool, fallback_level: usize) void {
     const p = &a.view.model_picker;
+    const is_compact = p.stage != null and p.stage.?.compact;
+    const overhang: f32 = if (is_compact) 22 else 14;
+    const box_h: f32 = if (is_compact) 36 else 34;
+    const rail_h: f32 = if (is_compact) 28 else 26;
+    const rail_r: f32 = rail_h * 0.5;
+    const thumb_w: f32 = if (is_compact) 44 else 28;
+    const thumb_h: f32 = if (is_compact) 32 else 28;
+    const thumb_r: f32 = thumb_h * 0.5;
     const last: f32 = @floatFromInt(n - 1);
-    const pad = ui.div(c).row().wFull().px(14);
+    const pad = ui.div(c).row().wFull().px(overhang);
     defer pad.end();
     ui.key(c, "model-slider-track");
-    const track = ui.div(c).w(tw).h(34);
+    const track = ui.div(c).w(tw).h(box_h);
     defer track.end();
     const track_id = c.node(track.index).id;
     if (c.rects.get(track_id)) |r| p.track = r;
@@ -752,6 +937,7 @@ fn slider(c: *ui.Context, a: *App, k: theme.Colors, accent: ui.Color, n: usize, 
             if (next != level) {
                 level = next;
                 if (p.stage) |*s| s.level = next;
+                if (is_compact) applyLiveStage(a);
                 c.changed = true;
             }
         }
@@ -791,15 +977,15 @@ fn slider(c: *ui.Context, a: *App, k: theme.Colors, accent: ui.Color, n: usize, 
     }
 
     // Track rail.
-    ui.div(c).absolute().offset(-14, 4).size(tw + 28, 26).rounded(13).circular().bg(k.ink(if (k.dark) 0.08 else 0.055)).border(k.border).borderW(1).end();
+    ui.div(c).absolute().offset(-overhang, 4).size(tw + overhang * 2, rail_h).rounded(rail_r).circular().bg(k.ink(if (k.dark) 0.08 else 0.055)).border(k.border).borderW(1).end();
 
     // Accent fill + flowing light-wave shimmer (`effort_fill`).
-    const fill_w = fraction * tw + 28;
+    const fill_w = fraction * tw + overhang * 2;
     const fill_bg = ui.motion.effects.mix(accent, ui.Color.hex(0xffffff), intensity * (0.08 + 0.12 * breath));
     {
-        const fill_box = ui.div(c).absolute().offset(-14, 4).size(fill_w, 26).rounded(13).circular().bg(fill_bg).clip();
+        const fill_box = ui.div(c).absolute().offset(-overhang, 4).size(fill_w, rail_h).rounded(rail_r).circular().bg(fill_bg).clip();
         defer fill_box.end();
-        if (intensity > 0.001 and fill_w > 26) {
+        if (intensity > 0.001 and fill_w > rail_h) {
             const lifted = ui.motion.effects.mix(accent, ui.Color.hex(0xffffff), 0.45);
             const shifted = ui.Color{
                 .r = @min(1.0, accent.r * 0.85 + 0.15),
@@ -807,7 +993,7 @@ fn slider(c: *ui.Context, a: *App, k: theme.Colors, accent: ui.Color, n: usize, 
                 .b = @min(1.0, accent.b * 0.95 + 0.18),
                 .a = 1.0,
             };
-            const center_x = fraction * tw + 14.0;
+            const center_x = fraction * tw + overhang;
             const step_w: f32 = 6.0;
             var x: f32 = 0.0;
             while (x < fill_w) : (x += step_w) {
@@ -821,32 +1007,32 @@ fn slider(c: *ui.Context, a: *App, k: theme.Colors, accent: ui.Color, n: usize, 
                 const lead = std.math.clamp(xm / 28.0, 0.0, 1.0);
                 const alpha = std.math.clamp(intensity * ((0.08 + 0.34 * glow) * lead + 0.22 * charge), 0.0, 1.0);
                 const sc = ui.motion.effects.mix(shifted, lifted, slow).alpha(alpha);
-                ui.div(c).absolute().offset(x, 0).size(sw, 26).bg(sc).end();
+                ui.div(c).absolute().offset(x, 0).size(sw, rail_h).bg(sc).end();
             }
         }
     }
 
     // Stops: filled stops follow the animated front, never jumping ahead of the thumb.
+    const dot_y = (box_h - 4.0) * 0.5;
     for (0..n) |i| {
         const f = @as(f32, @floatFromInt(i)) / last;
         const dot = if (f <= fraction) ui.Color.hex(0xffffff).alpha(0.45) else k.muted.alpha(0.32);
-        ui.div(c).absolute().offset(f * tw - 2.0, 15.0).size(4, 4).roundedFull().circular().bg(dot).end();
+        ui.div(c).absolute().offset(f * tw - 2.0, dot_y).size(4, 4).roundedFull().circular().bg(dot).end();
     }
 
-    // Thumb: breathing accent halo on deeper effort + press elevation shadow + crisp circular handle.
-    const th: f32 = 28;
-    const tx = fraction * tw - th / 2;
-    const ty = (34 - th) / 2;
+    // Thumb: breathing accent halo on deeper effort + press elevation shadow + crisp handle.
+    const tx = fraction * tw - thumb_w * 0.5;
+    const ty = (box_h - thumb_h) * 0.5;
     const live = intensity * (0.55 + 0.45 * breath);
     if (intensity > 0.001) {
-        ui.div(c).absolute().offset(tx, ty).size(th, th).roundedFull().circular()
+        ui.div(c).absolute().offset(tx, ty).size(thumb_w, thumb_h).rounded(thumb_r).circular()
             .shadow(.{ .color = accent.alpha(0.35 * live), .y = 1, .blur = 10 }).end();
     }
     if (press > 0.001) {
-        ui.div(c).absolute().offset(tx, ty).size(th, th).roundedFull().circular()
+        ui.div(c).absolute().offset(tx, ty).size(thumb_w, thumb_h).rounded(thumb_r).circular()
             .shadow(.{ .color = ui.Color.black.alpha(0.12 * press), .y = 2.0 * press, .blur = 8 }).end();
     }
-    ui.div(c).absolute().offset(tx, ty).size(th, th).roundedFull().circular()
+    ui.div(c).absolute().offset(tx, ty).size(thumb_w, thumb_h).rounded(thumb_r).circular()
         .bg(ui.Color.hex(0xfffefa)).border(k.border).borderW(1).shadowSm().end();
 }
 
@@ -857,8 +1043,9 @@ fn tabs(c: *ui.Context, a: *App, k: theme.Colors, width: f32) void {
     const viewport = ui.div(c).row().wFull().h(39).clip().wheel();
     defer viewport.end();
     const current = a.target().harness;
-    var total: f32 = 8 + tabWidth(c, "Starred", 15) + 2;
-    var selected_x: f32 = 4;
+    const back_w: f32 = if (p.can_return_compact) 34 else 0;
+    var total: f32 = 8 + back_w + tabWidth(c, "Starred", 15) + 2;
+    var selected_x: f32 = 4 + back_w;
     var selected_w = tabWidth(c, "Starred", 15);
     for (a.harnesses.items) |h| {
         if (!offered(a, h.id, h.offered)) continue;
@@ -884,6 +1071,21 @@ fn tabs(c: *ui.Context, a: *App, k: theme.Colors, width: f32) void {
     p.tab_offset = std.math.clamp(p.tab_offset, 0, @max(0, total - width));
     const track = ui.div(c).row().absolute().offset(-p.tab_offset, 0).h(39).px(4).gap(2).itemsCenter();
     defer track.end();
+    if (p.can_return_compact) {
+        ui.key(c, "compact-model-back");
+        const b = ui.div(c).row().size(32, 32).center().rounded(8).hover(k.hover);
+        const hit_back = b.clicked();
+        const hot_back = b.hovered();
+        {
+            defer b.end();
+            icons.icon(c, .@"alt-arrow-left", 15, if (hot_back) k.text else k.muted, 15);
+        }
+        if (hit_back and a.picker != .none) {
+            p.can_return_compact = false;
+            stageCurrentCompact(a);
+            c.changed = true;
+        }
+    }
     if (tab(c, k, .@"star-bold", null, "Starred", p.starred) and a.picker != .none) {
         p.starred = true;
         reset(c, a);

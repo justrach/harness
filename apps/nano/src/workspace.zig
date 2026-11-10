@@ -102,13 +102,30 @@ pub fn List(comptime T: type, comptime parse: fn (Allocator, json.ObjectMap) ?T)
     return struct {
         const Self = @This();
         arena: std.heap.ArenaAllocator,
+        retired: std.ArrayList(std.heap.ArenaAllocator) = .empty,
         items: []T = &.{},
 
         pub fn init(gpa: Allocator) Self {
             return .{ .arena = .init(gpa) };
         }
 
+        pub fn retireArena(l: *Self, arena: std.heap.ArenaAllocator) void {
+            var ar = arena;
+            if (ar.queryCapacity() == 0) {
+                ar.deinit();
+                return;
+            }
+            l.retired.append(l.arena.child_allocator, ar) catch ar.deinit();
+        }
+
+        pub fn reap(l: *Self) void {
+            for (l.retired.items) |*ar| ar.deinit();
+            l.retired.clearRetainingCapacity();
+        }
+
         pub fn deinit(l: *Self) void {
+            l.reap();
+            l.retired.deinit(l.arena.child_allocator);
             l.arena.deinit();
         }
 
@@ -122,7 +139,7 @@ pub fn List(comptime T: type, comptime parse: fn (Allocator, json.ObjectMap) ?T)
             const a = next.allocator();
             var out: std.ArrayList(T) = try .initCapacity(a, arr.len);
             for (arr) |v| if (v == .object) if (parse(a, v.object)) |t| out.appendAssumeCapacity(t);
-            l.arena.deinit();
+            l.retireArena(l.arena);
             l.arena = next;
             l.items = out.items;
         }

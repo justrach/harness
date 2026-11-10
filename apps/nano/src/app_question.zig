@@ -125,18 +125,19 @@ pub fn dismiss(a: *App) void {
 }
 
 fn markAnswered(a: *App, request_id: []const u8) void {
-    if (a.answered) |old| a.gpa.free(old);
+    if (a.answered) |old| a.retireSlice(old);
     a.answered = a.gpa.dupe(u8, request_id) catch null;
 }
 
 fn freeRetired(a: *App) void {
-    if (a.retired_wizard) |*w| w.deinit();
+    if (a.retired_wizard) |*w| w.retire(a);
     a.retired_wizard = null;
 }
 
 pub fn deinit(a: *App) void {
     if (a.wizard) |*w| w.deinit();
-    freeRetired(a);
+    if (a.retired_wizard) |*w| w.deinit();
+    a.retired_wizard = null;
     if (a.answered) |s| a.gpa.free(s);
     a.draft_stash.deinit(a.gpa);
 }

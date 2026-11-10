@@ -128,7 +128,7 @@ fn setHarness(a: *App, harness: []const u8) void {
 }
 
 fn setNew(a: *App, field: *?[]u8, value: ?[]const u8) void {
-    if (field.*) |old| a.gpa.free(old);
+    if (field.*) |old| a.retireSlice(old);
     field.* = if (value) |v| a.gpa.dupe(u8, v) catch null else null;
 }
 

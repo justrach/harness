@@ -38,6 +38,7 @@ pub fn close(a: *App) void {
     a.view.settings_open = false;
     a.view.settings_search_focus = false;
     a.view.settings_search.clear();
+    a.view.focus_composer = true;
     a.redraw();
 }
 
@@ -123,17 +124,17 @@ pub fn nav(c: *ui.Context, a: *App, k: theme.Colors) void {
                 ui.text(c, "No matching settings", st(c, 12, .{ .color = k.muted }));
             }
             for (found, 0..) |s, i| if (navRow(c, k, s, i == 0)) show(a, s);
-            return;
-        }
-        var group: []const u8 = "";
-        for (Section.all) |s| {
-            if (!std.mem.eql(u8, group, s.group())) {
-                group = s.group();
-                const h = ui.div(c).row().px(8).pt(12).pb(4);
-                defer h.end();
-                ui.text(c, group, st(c, 11, .{ .weight = .medium, .color = k.muted.alpha(0.6) }));
+        } else {
+            var group: []const u8 = "";
+            for (Section.all) |s| {
+                if (!std.mem.eql(u8, group, s.group())) {
+                    group = s.group();
+                    const h = ui.div(c).row().px(8).pt(12).pb(4);
+                    defer h.end();
+                    ui.text(c, group, st(c, 11, .{ .weight = .medium, .color = k.muted.alpha(0.6) }));
+                }
+                if (navRow(c, k, s, s == a.settings.section)) show(a, s);
             }
-            if (navRow(c, k, s, s == a.settings.section)) show(a, s);
         }
     }
     // A running cloud sandbox stays in view on every settings page too.

@@ -346,6 +346,7 @@ pub const App = struct {
     /// already, and lays it out after. Freed at the next frame's start
     /// (`reap`).
     retired: std.ArrayList(Transcript) = .empty,
+    retired_arenas: std.ArrayList(std.heap.ArenaAllocator) = .empty,
     retired_ids: std.ArrayList([]u8) = .empty,
     /// The process's environment (main's), for what's started from here.
     env: ?*const std.process.Environ.Map = null,
@@ -495,6 +496,7 @@ pub const App = struct {
         @import("app_surface.zig").deinit(a);
         // An engine started from here stays up: others may be on it now.
         a.engine.deinit();
+        a.reap();
         a.attachments.deinit(a.gpa);
         @import("app_send_feedback.zig").deinit(a);
         var blobs = a.tool_blobs.valueIterator();
@@ -537,9 +539,12 @@ pub const App = struct {
         a.panels.deinit();
         a.actions.deinit();
         a.transcript.deinit();
-        a.reap();
+        for (a.retired.items) |*t| t.deinit();
+        for (a.retired_arenas.items) |*ar| ar.deinit();
+        for (a.retired_ids.items) |s| a.gpa.free(s);
         a.dictation.deinit(a.gpa);
         a.retired.deinit(a.gpa);
+        a.retired_arenas.deinit(a.gpa);
         a.retired_ids.deinit(a.gpa);
         if (a.selected) |s| a.gpa.free(s);
         if (a.space) |s| a.gpa.free(s);
@@ -564,9 +569,11 @@ pub const App = struct {
     pub const target = agent.target;
     pub const levelsOf = agent.levelsOf;
     pub const togglePicker = agent.togglePicker;
+    pub const togglePickerCompact = agent.togglePickerCompact;
     pub const pickModel = agent.pickModel;
     pub const pickReasoning = agent.pickReasoning;
     pub const pickModelAndReasoning = agent.pickModelAndReasoning;
+    pub const applyLiveModelAndReasoning = agent.applyLiveModelAndReasoning;
     pub const ensureModels = agent.ensureModels;
     pub const newChatSpace = agent.newChatSpace;
     pub const setArchived = agent.setArchived;
@@ -763,6 +770,10 @@ pub const App = struct {
     /// The sidebar's project filter, kept in the settings as the GPUI app
     /// keeps it; with no session open, the new one goes there too.
     pub fn setSpaceFilter(a: *App, id: ?[]const u8) void {
+        if (a.view.filter) |old| {
+            a.retireSlice(old);
+            a.view.filter = null;
+        }
         a.view.setFilter(a.gpa, id);
         a.settings.setSpaceFilter(id);
         if (id) |s| if (a.selected == null) a.select(null, s);
@@ -784,7 +795,7 @@ pub const App = struct {
 
     fn storeDraftDevice(a: *App, id: ?[]const u8) bool {
         const copy = if (id) |dev| a.gpa.dupe(u8, dev) catch return false else null;
-        if (a.new_device) |old| a.gpa.free(old);
+        if (a.new_device) |old| a.retireSlice(old);
         a.new_device = copy;
         return true;
     }
@@ -799,7 +810,7 @@ pub const App = struct {
         const keep_folder = if (space) |sp| (if (sp.device_id) |host| (if (effective) |dev| std.mem.eql(u8, host, dev) else false) else false) else false;
         if (!a.storeDraftDevice(id)) return;
         if (!keep_folder) {
-            if (a.space) |old| a.gpa.free(old);
+            if (a.space) |old| a.retireSlice(old);
             a.space = null;
             a.new_no_project = true;
         }
@@ -1349,8 +1360,8 @@ pub const App = struct {
                 continue;
             }
             if (p.watch) |w| a.engine.cancel(w);
-            p.transcript.deinit();
-            a.gpa.free(p.id);
+            a.retired.append(a.gpa, p.transcript) catch p.transcript.deinit();
+            a.retireSlice(p.id);
             _ = a.peers.swapRemove(i);
         }
         for (wanted) |w| if (w) |id| if (a.peer(id) == null) {
@@ -1446,7 +1457,7 @@ pub const App = struct {
         a.redraw();
     }
 
-    fn onEngineInfo(a: *App, _: u64, r: rpc.Reply) void {
+    pub fn onEngineInfo(a: *App, _: u64, r: rpc.Reply) void {
         const v = switch (r) {
             .ok => |v| v,
             else => return,
@@ -1457,14 +1468,31 @@ pub const App = struct {
             a.caps = queue_mod.readCaps(caps.array.items);
         };
         if (v.object.get("version")) |ver_val| if (ver_val == .string) {
-            var notice_buf: [280]u8 = undefined;
-            if (@import("view_updates.zig").olderEngineNotice(&notice_buf, @import("build_info").version, ver_val.string)) |msg| {
-                a.setSidebarNotice(msg, null);
+            const updates = @import("view_updates.zig");
+            const live_session = !a.offscreen and a.engine.scene == null and
+                (if (a.env) |env| env.get("HARNESS_NANO_NO_ENGINE_START") == null else false);
+            switch (updates.decideEngineVersionAction(
+                @import("build_info").version,
+                ver_val.string,
+                live_session,
+                a.engine_start.replaced_once,
+            )) {
+                .up_to_date => a.view.sidebar_notice_len = 0,
+                .replace_old_session => {
+                    @import("engine_start.zig").replaceOlderEngine(a);
+                    return;
+                },
+                .notify_only => {
+                    var notice_buf: [280]u8 = undefined;
+                    if (updates.olderEngineNotice(&notice_buf, @import("build_info").version, ver_val.string)) |msg| {
+                        a.setSidebarNotice(msg, null);
+                    }
+                },
             }
         };
         const id = v.object.get("deviceId") orelse return;
         if (id != .string) return;
-        if (a.device_id) |d| a.gpa.free(d);
+        if (a.device_id) |d| a.retireSlice(d);
         a.device_id = a.gpa.dupe(u8, id.string) catch null;
         // Watches opened before routed through `targetDeviceId`.
         change_requests.restart(a);
@@ -1528,12 +1556,12 @@ pub const App = struct {
         a.notice_len = 0;
         queue_mod.stop(a);
         const same = if (a.selected) |s| (if (chat_id) |c| std.mem.eql(u8, s, c) else false) else chat_id == null;
-        if (!same) if (a.selected) |s| a.retired_ids.append(a.gpa, s) catch a.gpa.free(s);
+        if (!same) if (a.selected) |s| a.retireSlice(s);
         if (!same) a.selected = if (chat_id) |c| a.gpa.dupe(u8, c) catch null else null;
         // A leftover offset from the previous chat parks this one in padding.
         if (!same) a.view.stick_end = true;
         if (space_id) |s| {
-            if (a.space) |old| a.gpa.free(old);
+            if (a.space) |old| a.retireSlice(old);
             a.space = a.gpa.dupe(u8, s) catch null;
             a.new_no_project = false;
             if (a.findSpace(s)) |space| _ = a.storeDraftDevice(space.device_id);
@@ -1552,6 +1580,20 @@ pub const App = struct {
         a.redraw();
     }
 
+    pub fn retireArena(a: *App, arena: std.heap.ArenaAllocator) void {
+        var ar = arena;
+        if (ar.queryCapacity() == 0) {
+            ar.deinit();
+            return;
+        }
+        a.retired_arenas.append(a.gpa, ar) catch ar.deinit();
+    }
+
+    pub fn retireSlice(a: *App, slice: []u8) void {
+        if (slice.len == 0) return;
+        a.retired_ids.append(a.gpa, slice) catch a.gpa.free(slice);
+    }
+
     /// Opened, a chat is seen (`mark_chat_seen`): here at once, its
     /// Done giving way to its time, then on the host; only when unseen.
     /// At a frame's start, before anything is drawn: what `select` let go
@@ -1559,8 +1601,18 @@ pub const App = struct {
     pub fn reap(a: *App) void {
         @import("app_attachments.zig").reap(a);
         @import("app_send_feedback.zig").reap(a);
+        a.spaces.reap();
+        a.chats.reap();
+        a.sessions.reap();
+        a.devices.reap();
+        a.queue.reap();
+        a.harnesses.reap();
+        a.models.reap();
+        a.view.model_picker.reap(a.gpa);
         for (a.retired.items) |*t| t.deinit();
         a.retired.clearRetainingCapacity();
+        for (a.retired_arenas.items) |*ar| ar.deinit();
+        a.retired_arenas.clearRetainingCapacity();
         for (a.retired_ids.items) |s| a.gpa.free(s);
         a.retired_ids.clearRetainingCapacity();
     }

@@ -21,8 +21,8 @@ fn live(a: *const App) []const u8 {
 /// written in. A question or a queued edit in progress stays with it.
 pub fn leave(a: *App) void {
     put(a, a.selected orelse canvas_key, live(a));
-    a.prompt_nav.reset(a.gpa);
-    if (a.wizard) |*w| w.deinit();
+    a.prompt_nav.retire(a);
+    if (a.wizard) |*w| w.retire(a);
     a.wizard = null;
     a.draft_stash.clearRetainingCapacity();
 }
@@ -84,11 +84,11 @@ pub fn canvas(a: *App) !Draft {
 pub fn adopt(a: *App, d: Draft) void {
     if (a.selected == null) a.composer.set(d.text) else put(a, canvas_key, d.text);
     a.gpa.free(d.text);
-    a.gpa.free(a.new_harness);
+    a.retireSlice(a.new_harness);
     a.new_harness = d.harness;
     a.new_no_project = d.no_project;
     inline for (.{ .{ "new_model", "model" }, .{ "new_reasoning", "reasoning" }, .{ "space", "space" }, .{ "new_device", "device" } }) |f| {
-        if (@field(a, f[0])) |old| a.gpa.free(old);
+        if (@field(a, f[0])) |old| a.retireSlice(old);
         @field(a, f[0]) = @field(d, f[1]);
     }
     a.ensureModels(a.target().harness);

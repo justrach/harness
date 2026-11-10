@@ -165,10 +165,10 @@ pub fn chatChanged(a: *App) void {
     if (p.w_git) |id| a.engine.cancel(id);
     p.w_diffs = null;
     p.w_git = null;
-    if (p.diff) |*d| d.arena.deinit();
+    if (p.diff) |d| a.retireArena(d.arena);
     p.diff = null;
     p.diff_loading = false;
-    if (p.diff_error) |e| p.gpa.free(e);
+    if (p.diff_error) |e| a.retireSlice(e);
     p.diff_error = null;
     p.listings.clearRetainingCapacity();
     p.pending_lists.clearRetainingCapacity();
@@ -176,9 +176,10 @@ pub fn chatChanged(a: *App) void {
     p.git.clearRetainingCapacity();
     p.folded.clearRetainingCapacity();
     p.selected = null;
-    _ = p.arena.reset(.retain_capacity);
+    a.retireArena(p.arena);
+    p.arena = .init(p.gpa);
     p.file = .{};
-    if (p.chat) |c| p.gpa.free(c);
+    if (p.chat) |c| a.retireSlice(c);
     p.chat = if (a.selected) |s| p.gpa.dupe(u8, s) catch null else null;
     if (a.selected == null) return;
     @import("app_actions.zig").refresh(a);
@@ -325,7 +326,7 @@ pub fn fetchDiff(a: *App) void {
 fn onDiff(a: *App, _: u64, r: rpc.Reply) void {
     const p = &a.panels;
     p.diff_loading = false;
-    if (p.diff_error) |e| p.gpa.free(e);
+    if (p.diff_error) |e| a.retireSlice(e);
     p.diff_error = null;
     switch (r) {
         .ok => |v| {
@@ -340,7 +341,7 @@ fn onDiff(a: *App, _: u64, r: rpc.Reply) void {
             next.truncated = if (o.get("truncated")) |t| t == .bool and t.bool else false;
             next.checkout_id = ar.dupe(u8, strOf(o, "checkoutId") orelse "") catch "";
             next.checksum = ar.dupe(u8, strOf(o, "checksum") orelse "") catch "";
-            if (p.diff) |*old| old.arena.deinit();
+            if (p.diff) |old| a.retireArena(old.arena);
             p.diff = next;
         },
         .err => |e| p.diff_error = p.gpa.dupe(u8, friendlyDiffError(e)) catch null,

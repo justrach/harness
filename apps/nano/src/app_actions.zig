@@ -109,7 +109,7 @@ pub fn refresh(a: *App) void {
     const x = &a.actions;
     const sid = spaceOf(a) orelse return;
     if (x.space) |s| if (std.mem.eql(u8, s, sid) and x.status != .idle) return;
-    if (x.space) |s| x.gpa.free(s);
+    if (x.space) |s| a.retireSlice(s);
     x.space = x.gpa.dupe(u8, sid) catch null;
     x.status = .loading;
     a.request(requests.listActions(sid, host(a)), .of(App, a, onSnapshot));
@@ -119,7 +119,8 @@ fn onSnapshot(a: *App, _: u64, r: rpc.Reply) void {
     const x = &a.actions;
     switch (r) {
         .ok => |v| {
-            _ = x.arena.reset(.retain_capacity);
+            a.retireArena(x.arena);
+            x.arena = .init(x.gpa);
             const ar = x.arena.allocator();
             var out: std.ArrayList(Action) = .empty;
             const list = if (v == .object) v.object.get("actions") else null;

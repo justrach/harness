@@ -81,7 +81,7 @@ pub fn ensureModels(a: *App, harness: []const u8) void {
     const cat = picker.ensureCatalog(a, harness, false) orelse return;
     if (std.mem.eql(u8, a.models_for, harness)) return;
     const copy = a.gpa.dupe(u8, harness) catch return;
-    a.gpa.free(a.models_for);
+    a.retireSlice(a.models_for);
     a.models_for = copy;
     picker.copyModels(&a.models, cat.models.items) catch {};
 }
@@ -92,10 +92,16 @@ pub fn togglePicker(a: *App) void {
     a.redraw();
 }
 
+pub fn togglePickerCompact(a: *App) void {
+    a.picker = if (a.picker == .none) .model else .none;
+    if (a.picker != .none) @import("view_picker.zig").openedCompact(a);
+    a.redraw();
+}
+
 /// The agent a new chat starts with.
 pub fn setHarness(a: *App, id: []const u8) void {
     const copy = a.gpa.dupe(u8, id) catch return;
-    a.gpa.free(a.new_harness);
+    a.retireSlice(a.new_harness);
     a.new_harness = copy;
     setNew(a, &a.new_model, null);
     setNew(a, &a.new_reasoning, null);
@@ -116,7 +122,7 @@ pub fn setModel(a: *App, id: ?[]const u8) void {
 }
 
 fn setNew(a: *App, field: *?[]u8, value: ?[]const u8) void {
-    if (field.*) |old| a.gpa.free(old);
+    if (field.*) |old| a.retireSlice(old);
     field.* = if (value) |v| a.gpa.dupe(u8, v) catch null else null;
 }
 
@@ -155,6 +161,20 @@ pub fn pickModelAndReasoning(a: *App, id: []const u8, level: []const u8) void {
     storeChatConfig(a, id, level);
 }
 
+/// Applies model and reasoning changes live from the compact thinking tier
+/// panel without closing the popover (`compact.rs` `pick_compact_effort`).
+pub fn applyLiveModelAndReasoning(a: *App, id: []const u8, level: ?[]const u8) void {
+    if (a.selected == null) {
+        setNew(a, &a.new_model, id);
+        setNew(a, &a.new_reasoning, level);
+        composer_defaults.rememberModel(a);
+        if (level != null) composer_defaults.rememberReasoning(a);
+        a.ensureModels(a.target().harness);
+        return a.redraw();
+    }
+    storeChatConfigLive(a, id, level, false);
+}
+
 /// Replaces the open chat's config: its agent stays, the model or the
 /// level changes (a new model takes its own default level).
 fn setChatConfig(a: *App, model: ?[]const u8, reasoning: ?[]const u8, new_model: bool) void {
@@ -167,6 +187,10 @@ fn setChatConfig(a: *App, model: ?[]const u8, reasoning: ?[]const u8, new_model:
 /// One request carries both values, and the local row changes now instead
 /// of waiting for the next WatchChats item.
 fn storeChatConfig(a: *App, model: ?[]const u8, reasoning: ?[]const u8) void {
+    storeChatConfigLive(a, model, reasoning, true);
+}
+
+fn storeChatConfigLive(a: *App, model: ?[]const u8, reasoning: ?[]const u8, focus_composer: bool) void {
     const id = a.selected orelse return;
     const ch = a.findChat(id) orelse return;
     const sent = a.send_(requests.setChatConfig(id, .{
@@ -178,7 +202,7 @@ fn storeChatConfig(a: *App, model: ?[]const u8, reasoning: ?[]const u8) void {
     }), .of(App, a, App.onNotice));
     if (sent == null) return a.setNotice("The config change couldn't be sent. Reconnect and try again.");
     _ = @import("workspace.zig").setChatConfig(&a.chats, id, model, reasoning);
-    a.view.focus_composer = true;
+    if (focus_composer) a.view.focus_composer = true;
     a.redraw();
 }
 

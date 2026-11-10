@@ -379,7 +379,7 @@ pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) void {
     // pointer and must not clear the wash until the pointer actually moves.
     const b = kit.listenerHover(&a.view.hovers, if (a.picker != .none) base.bg(k.hover) else base, k.hover).div;
     defer b.end();
-    if (b.clicked()) a.togglePicker();
+    if (b.clicked()) a.togglePickerCompact();
     if (c.rects.get(c.node(b.index).id)) |r| a.view.chip_anchor = r;
     // Before the engine lists them: the glyph spinner for an agent not yet
     // known (an open chat's is: its own), a pulsing bar for its model
@@ -409,8 +409,12 @@ pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) void {
         return;
     }
     // `hover_blend`: the label brightens under the pointer, rolling Scritto-style when changed.
-    kit.rollText(c, "composer-model-label", label_text, .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight, .color = if (b.hovered()) k.text else k.text.alpha(0.9) });
-    if (suffix_text) |sfx| kit.rollText(c, "composer-effort-suffix", sfx, .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight, .color = k.muted.alpha(0.7) });
+    // Re-read after `togglePickerCompact` in case opening the picker synced `a.models`.
+    const live_t = a.target();
+    const live_label = if (!unresolved and !label_loading) a.modelLabel(live_t.model) else label_text;
+    const live_suffix: ?[]const u8 = if (!unresolved and !label_loading) (if (live_t.reasoning) |level| rules.reasoningLabel(level) else null) else suffix_text;
+    kit.rollText(c, "composer-model-label", live_label, .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight, .color = if (b.hovered()) k.text else k.text.alpha(0.9) });
+    if (live_suffix) |sfx| kit.rollText(c, "composer-effort-suffix", sfx, .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight, .color = k.muted.alpha(0.7) });
 }
 
 /// Follow-up mode switch in the composer footer: shows whether a message

@@ -25,6 +25,8 @@ pub const Stage = struct {
     /// Index into the model's levels; null for the model's default.
     level: ?usize = null,
     error_text: ?[]const u8 = null,
+    compact: bool = false,
+    fast: bool = false,
 };
 
 pub const Catalog = struct {
@@ -138,11 +140,17 @@ pub const State = struct {
     shimmer_last: ?f64 = null,
     /// Animated width of the composer's model + effort trigger chip (`model_chip_width`).
     chip_width: ?ScalarTransition = null,
+    /// Animated height of the model picker card when expanding from compact panel to list.
+    card_height: ?ScalarTransition = null,
+    /// True when the full model list was opened from the compact thinking tier panel.
+    can_return_compact: bool = false,
+    /// Retired stage strings freed at the start of the next frame (`reap`).
+    retired_strings: std.ArrayList([]u8) = .empty,
 
     pub fn clearStage(s: *State, gpa: Allocator) void {
         if (s.stage) |st| {
-            gpa.free(st.harness);
-            gpa.free(st.model);
+            s.retired_strings.append(gpa, st.harness) catch gpa.free(st.harness);
+            s.retired_strings.append(gpa, st.model) catch gpa.free(st.model);
         }
         s.stage = null;
         s.dragging = false;
@@ -152,6 +160,13 @@ pub const State = struct {
         s.press_anim = null;
         s.energy_anim = null;
         s.shimmer_last = null;
+    }
+
+    pub fn reap(s: *State, gpa: Allocator) void {
+        for (s.retired_strings.items) |str| gpa.free(str);
+        s.retired_strings.clearRetainingCapacity();
+        var it = s.catalogs.valueIterator();
+        while (it.next()) |item| item.*.models.reap();
     }
 
     pub fn deinit(s: *State, gpa: Allocator) void {
@@ -170,6 +185,8 @@ pub const State = struct {
         }
         s.catalogs.deinit(gpa);
         s.clearStage(gpa);
+        for (s.retired_strings.items) |str| gpa.free(str);
+        s.retired_strings.deinit(gpa);
         if (s.pending) |p| {
             if (p.harness) |v| gpa.free(v);
             if (p.model) |v| gpa.free(v);
@@ -219,7 +236,7 @@ pub fn copyModels(to: *workspace.Models, models: []const workspace.Model) !void 
         for (m.levels, levels) |v, *l| l.* = try gpa.dupe(u8, v);
         n.levels = levels;
     }
-    to.arena.deinit();
+    to.retireArena(to.arena);
     to.arena = next;
     to.items = out;
 }

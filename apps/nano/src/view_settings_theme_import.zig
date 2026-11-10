@@ -57,11 +57,12 @@ pub fn close(a: *App) void {
 }
 
 /// Escape closes the dialog, or the review.
-pub fn escape(c: *ui.Context, a: *App) void {
-    if (a.view.theme_import == null and !a.view.theme_review_open) return;
-    if (!c.shortcut(.{ .key = ui.Shortcut.escape })) return;
+pub fn escape(c: *ui.Context, a: *App) bool {
+    if (a.view.theme_import == null and !a.view.theme_review_open) return false;
+    if (!c.shortcut(.{ .key = ui.Shortcut.escape })) return false;
     close(a);
     a.view.theme_review_open = false;
+    return true;
 }
 
 pub fn anyOpen(a: *const App) bool {

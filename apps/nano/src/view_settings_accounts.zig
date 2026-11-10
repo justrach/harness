@@ -390,11 +390,12 @@ fn onSignOutGraff(a: *App, _: u64, r: rpc.Reply) void {
 }
 
 /// Escape closes the sign-in dialog (cancelling it), else the device list.
-pub fn escape(c: *ui.Context, a: *App) void {
+pub fn escape(c: *ui.Context, a: *App) bool {
     const p = &a.view.accounts;
-    if (!login.open(a) and !p.menu) return;
-    if (!c.shortcut(.{ .key = ui.Shortcut.escape })) return;
+    if (!login.open(a) and !p.menu) return false;
+    if (!c.shortcut(.{ .key = ui.Shortcut.escape })) return false;
     if (login.open(a)) login.cancel(a) else p.menu = false;
+    return true;
 }
 
 // Rendering.

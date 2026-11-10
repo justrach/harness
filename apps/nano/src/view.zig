@@ -408,7 +408,10 @@ fn panes(c: *ui.Context, a: *App, k: theme.Colors, s: *tabs.Split) void {
         const neighbor_w = @max(0, (if (across) size else a.view.chrome.chat_width) - a.view.seam_inset);
         if (neighbor(c, a, k, ix, chat, neighbor_w)) return;
     }
-    if (focus) |ix| strip.focus(a, .{ .chat = ix });
+    if (focus) |ix| {
+        strip.queue(a, .{ .focus = .{ .chat = ix } });
+        c.changed = true;
+    }
 }
 
 /// One pane's width on the split insertion curve: old panes dissolve their
@@ -513,12 +516,41 @@ fn keys(c: *ui.Context, a: *App) void {
     // arrows and Return.
     const header_menus = @import("view_sidebar_menus.zig");
     // Settings › Accounts' sign-in dialog or device list, Archived's Delete
-    // all or Devices' Rename takes Escape first.
-    if (a.view.settings_open) {
-        @import("view_settings_accounts.zig").escape(c, a);
-        _ = @import("view_settings_archived.zig").escape(c, a);
-        _ = @import("view_settings_devices.zig").escape(c, a);
-        @import("view_settings_theme_import.zig").escape(c, a);
+    // all or Devices' Rename takes Escape first; otherwise Escape exits
+    // Settings back to the workspace (`#settings-back [esc]`).
+    if (a.view.settings_open and !palette_had_keys and !a.view.palette.open) {
+        if (@import("view_settings_accounts.zig").escape(c, a) or
+            @import("view_settings_archived.zig").escape(c, a) or
+            @import("view_settings_devices.zig").escape(c, a) or
+            @import("view_settings_theme_import.zig").escape(c, a))
+        {
+            return;
+        }
+        if (a.view.theme_menu != null and c.shortcut(.{ .key = S.escape })) {
+            a.view.theme_menu = null;
+            a.redraw();
+            return;
+        }
+        if (a.view.agents.device_menu and c.shortcut(.{ .key = S.escape })) {
+            a.view.agents.device_menu = false;
+            a.redraw();
+            return;
+        }
+        if (a.view.github_ci.size_menu != null and c.shortcut(.{ .key = S.escape })) {
+            if (a.view.github_ci.size_menu) |m| a.gpa.free(m);
+            a.view.github_ci.size_menu = null;
+            a.view.github_ci.size_anchor = null;
+            a.redraw();
+            return;
+        }
+        if (!chat_menu.anyOpen(a) and !header_menus.anyOpen(a) and a.view.strip.menu == null and
+            (c.shortcut(.{ .key = S.escape }) or c.input.key == .escape))
+        {
+            c.input.key = null;
+            c.focus = 0;
+            settings_view.close(a);
+            return;
+        }
     }
     if (strip.navigationKeys(c, a)) return;
     if (a.view.strip.menu != null) {

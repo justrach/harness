@@ -34,6 +34,7 @@ pub const Engine = struct {
     live: std.atomic.Value(?*ws.Client) = .init(null),
     thread: ?std.Thread = null,
     stopping: std.atomic.Value(bool) = .init(false),
+    reconnect_fast: std.atomic.Value(bool) = .init(false),
     /// A headless scene's made-up replies, by method (snap.zig; the GPUI
     /// renderer's `replies`): calls are answered from them, a frame later.
     scene: ?std.json.Parsed(std.json.Value) = null,
@@ -151,6 +152,13 @@ pub const Engine = struct {
         if (e.state == .connected) if (e.client) |c| c.sendText(frame) catch {};
     }
 
+    /// Wakes the reader thread to reconnect immediately after replacing an
+    /// older engine process.
+    pub fn disconnectForRestart(e: *Engine) void {
+        e.reconnect_fast.store(true, .release);
+        if (e.live.load(.acquire)) |c| c.shutdown();
+    }
+
     fn run(e: *Engine) void {
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(e.gpa);
@@ -175,8 +183,8 @@ pub const Engine = struct {
     }
 
     fn pause(e: *Engine) void {
-        // Two seconds, as the GPUI app waits before it resubscribes.
-        var left: usize = 20;
+        // Two seconds normally, or 200ms after replacing an older engine.
+        var left: usize = if (e.reconnect_fast.swap(false, .acq_rel)) 2 else 20;
         while (left > 0 and !e.stopping.load(.acquire)) : (left -= 1)
             std.Io.sleep(e.io, .fromMilliseconds(100), .awake) catch return;
     }

@@ -75,9 +75,9 @@ pub fn ensureRefs(a: *App, space: @import("workspace.zig").Space) void {
     const v = &a.view;
     if (v.ref_space) |prev| {
         if (!std.mem.eql(u8, prev, space.id)) {
-            a.gpa.free(prev);
+            a.retireSlice(prev);
             v.ref_space = null;
-            for (v.refs.items) |r| a.gpa.free(r);
+            for (v.refs.items) |r| a.retireSlice(r);
             v.refs.clearRetainingCapacity();
         }
     }

@@ -40,6 +40,10 @@ pub const State = struct {
     /// Starts in a row that ended before an engine answered.
     failed: u8 = 0,
     ticking: bool = false,
+    /// Single-shot guard (`decideEngineVersionAction` in `view_updates.zig`):
+    /// true once this app session has killed an older background engine so it
+    /// never loops if the fallback binary on disk is also older.
+    replaced_once: bool = false,
     /// What the composer says while it waits.
     message: [256]u8 = undefined,
     message_len: usize = 0,
@@ -119,7 +123,7 @@ fn executable(gpa: Allocator, path: []const u8) bool {
 pub fn disconnected(a: *App) void {
     if (!enabled(a)) return;
     tick(a);
-    if (a.engine_start.ticking) return;
+    if (builtin.is_test or a.engine_start.ticking) return;
     a.engine_start.ticking = true;
     nanoui.App.after(tick_ms, a, onTick);
 }
@@ -130,6 +134,99 @@ pub fn connected(a: *App) void {
     if (s.pid != null) s.answered = true;
     s.failed = 0;
     setStatus(a, .idle);
+}
+
+fn resolveDataDir(a: *const App) ?[]const u8 {
+    if (a.settings.dataDir()) |dir| return dir;
+    if (a.env) |env| if (env.get("HARNESS_DATA_DIR")) |dir| if (dir.len > 0) return dir;
+    return null;
+}
+
+/// Pure parser for `{data_dir}/engine.lock` (`crates/engine/src/instance_lock.rs`),
+/// rejecting non-numeric contents, init/system PIDs (`<= 1`), and `self_pid`.
+pub fn parseLockPid(raw: []const u8, self_pid: i64) ?i64 {
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    const pid = std.fmt.parseInt(i64, trimmed, 10) catch return null;
+    if (pid <= 1 or pid == self_pid) return null;
+    return pid;
+}
+
+/// Kills the background `harness headless` process recorded in
+/// `{data_dir}/engine.lock` (or `engine.lock.pid` on Windows) so a newly
+/// updated app can immediately start its bundled engine in place.
+pub fn killLockedEngine(a: *App) bool {
+    if (a.offscreen or a.engine.scene != null) return false;
+    const dir = resolveDataDir(a) orelse return false;
+    const lock_file = if (comptime builtin.os.tag == .windows) "engine.lock.pid" else "engine.lock";
+    const lock_path = std.fs.path.join(a.gpa, &.{ dir, lock_file }) catch return false;
+    defer a.gpa.free(lock_path);
+    const raw = std.Io.Dir.cwd().readFileAlloc(a.io, lock_path, a.gpa, .limited(64)) catch return false;
+    defer a.gpa.free(raw);
+
+    if (comptime builtin.os.tag == .windows) {
+        const w = struct {
+            extern "kernel32" fn GetCurrentProcessId() callconv(.winapi) u32;
+            extern "kernel32" fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) callconv(.winapi) ?*anyopaque;
+            extern "kernel32" fn TerminateProcess(hProcess: *anyopaque, uExitCode: u32) callconv(.winapi) i32;
+            extern "kernel32" fn WaitForSingleObject(hHandle: *anyopaque, dwMilliseconds: u32) callconv(.winapi) u32;
+            extern "kernel32" fn CloseHandle(hObject: *anyopaque) callconv(.winapi) i32;
+        };
+        const self_pid: i64 = @intCast(w.GetCurrentProcessId());
+        const pid_i64 = parseLockPid(raw, self_pid) orelse return false;
+        const pid: u32 = @intCast(pid_i64);
+        // PROCESS_TERMINATE (0x0001) | SYNCHRONIZE (0x00100000)
+        const handle = w.OpenProcess(0x00100001, 0, pid) orelse return false;
+        defer _ = w.CloseHandle(handle);
+        _ = w.TerminateProcess(handle, 0);
+        _ = w.WaitForSingleObject(handle, 400);
+        return true;
+    } else {
+        const self_pid: i64 = @intCast(std.c.getpid());
+        const pid_i64 = parseLockPid(raw, self_pid) orelse return false;
+        const pid: std.c.pid_t = @intCast(pid_i64);
+        if (std.c.kill(pid, std.c.SIG.TERM) != 0) return false;
+        var step: usize = 0;
+        while (step < 15) : (step += 1) {
+            if (std.c.kill(pid, @fromBackingInt(@intCast(0))) != 0) return true;
+            std.Io.sleep(a.io, .fromMilliseconds(20), .awake) catch break;
+        }
+        _ = std.c.kill(pid, std.c.SIG.KILL);
+        std.Io.sleep(a.io, .fromMilliseconds(60), .awake) catch {};
+        return true;
+    }
+}
+
+/// Stops the running background engine before restarting into an app update.
+pub fn stopForUpdate(a: *App) void {
+    if (builtin.is_test or a.offscreen or a.engine.scene != null) return;
+    _ = a.engine.call("StopEngine", .{}, .of(App, a, App.onNotice));
+    _ = killLockedEngine(a);
+}
+
+/// Kills an older background `harness headless` process discovered on
+/// `EngineInfo` and immediately boots the current app's engine in its place.
+pub fn replaceOlderEngine(a: *App) void {
+    const s = &a.engine_start;
+    s.replaced_once = true;
+    a.view.sidebar_notice_len = 0;
+    _ = a.engine.call("StopEngine", .{}, .of(App, a, App.onNotice));
+    const killed = killLockedEngine(a);
+    s.pid = null;
+    s.answered = false;
+    s.failed = 0;
+    s.last_start = std.math.minInt(i64) / 2;
+    if (killed) {
+        a.engine.disconnectForRestart();
+        a.engine.state = .disconnected;
+        if (a.engine.events.state) |f| {
+            f(a.engine.events.ctx, .disconnected);
+        } else {
+            disconnected(a);
+        }
+    } else {
+        a.engine.reconnect_fast.store(true, .release);
+    }
 }
 
 fn enabled(a: *const App) bool {
@@ -294,6 +391,17 @@ test "harness is looked for in the override, the app, ~/Applications, then PATH"
     for (want, got) |w, g| try testing.expectEqualStrings(w, g);
 }
 
+test "parseLockPid extracts valid engine lock pid and rejects invalid or self pids" {
+    try testing.expectEqual(@as(?i64, 68856), parseLockPid("68856\n", 71378));
+    try testing.expectEqual(@as(?i64, 4242), parseLockPid("  4242 ", 71378));
+    try testing.expectEqual(@as(?i64, null), parseLockPid("71378\n", 71378));
+    try testing.expectEqual(@as(?i64, null), parseLockPid("1\n", 71378));
+    try testing.expectEqual(@as(?i64, null), parseLockPid("0\n", 71378));
+    try testing.expectEqual(@as(?i64, null), parseLockPid("-5\n", 71378));
+    try testing.expectEqual(@as(?i64, null), parseLockPid("", 71378));
+    try testing.expectEqual(@as(?i64, null), parseLockPid("unknown", 71378));
+}
+
 extern "c" fn getpgid(pid: std.c.pid_t) std.c.pid_t;
 
 /// Polls for `path` (up to 5 s) and returns its contents, trimmed.
@@ -387,4 +495,116 @@ test "a start that never answers counts as failed, and three in a row give up" {
     try testing.expect(a.engine_start.pid == null);
     try testing.expectEqual(Status.failed, a.engine_start.status);
     try testing.expect(std.mem.startsWith(u8, waiting(&a), "The engine didn't start"));
+}
+
+test "replaces an older background engine session with the updated engine instead of showing a warning banner" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    var dir_buf: [128]u8 = undefined;
+    const data_dir = try std.fmt.bufPrint(&dir_buf, "/tmp/nano-engine-replace-{d}", .{std.c.getpid()});
+    std.Io.Dir.cwd().createDirPath(testing.io, data_dir) catch {};
+
+    var lock_buf: [160]u8 = undefined;
+    const lock_path = try std.fmt.bufPrint(&lock_buf, "{s}/engine.lock", .{data_dir});
+    var old_script_buf: [160]u8 = undefined;
+    const old_script = try std.fmt.bufPrint(&old_script_buf, "{s}/old-engine.sh", .{data_dir});
+    var old_term_buf: [160]u8 = undefined;
+    const old_term = try std.fmt.bufPrint(&old_term_buf, "{s}/old-engine.sh.term", .{data_dir});
+    var new_script_buf: [160]u8 = undefined;
+    const new_script = try std.fmt.bufPrint(&new_script_buf, "{s}/new-engine.sh", .{data_dir});
+    var new_args_buf: [160]u8 = undefined;
+    const new_args = try std.fmt.bufPrint(&new_args_buf, "{s}/new-engine.sh.args", .{data_dir});
+
+    try std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = old_script, .data =
+        \\#!/bin/sh
+        \\printf "%s\n" "$$" > "$HARNESS_DATA_DIR/engine.lock"
+        \\trap 'echo old-stopped > "$0.term"; exit 0' TERM
+        \\while :; do sleep 0.05; done
+        \\
+    });
+    try std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = new_script, .data =
+        \\#!/bin/sh
+        \\echo "new-started $1 $HARNESS_IPC_PORT" > "$0.args"
+        \\trap 'exit 0' TERM
+        \\while :; do sleep 0.05; done
+        \\
+    });
+    defer {
+        for ([_][]const u8{ lock_path, old_script, old_term, new_script, new_args }) |p| {
+            std.Io.Dir.cwd().deleteFile(testing.io, p) catch {};
+        }
+        std.Io.Dir.cwd().deleteDir(testing.io, data_dir) catch {};
+    }
+
+    for ([_][]const u8{ old_script, new_script }) |p| {
+        const z = try testing.allocator.dupeSentinel(u8, p, 0);
+        defer testing.allocator.free(z);
+        try testing.expectEqual(@as(c_int, 0), std.c.chmod(z, 0o755));
+    }
+
+    var env = Map.init(testing.allocator);
+    defer env.deinit();
+    try env.put("HARNESS_DATA_DIR", data_dir);
+    try env.put("HARNESS_NANO_ENGINE_BIN", new_script);
+    try env.put("PATH", "/usr/bin:/bin");
+    try env.put("HARNESS_IPC_PORT", "27992");
+
+    const old_child = try std.process.spawn(testing.io, .{
+        .argv = &.{old_script},
+        .environ_map = &env,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+        .pgid = 0,
+    });
+    const old_pid = old_child.id orelse return error.NoPid;
+    defer {
+        _ = std.c.kill(old_pid, .KILL);
+        _ = std.c.waitpid(old_pid, null, 0);
+    }
+
+    const locked_pid_str = try waitForFile(lock_path);
+    defer testing.allocator.free(locked_pid_str);
+    try testing.expectEqual(@as(?i64, old_pid), parseLockPid(locked_pid_str, std.c.getpid()));
+
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    a.env = &env;
+    a.engine.state = .connected;
+
+    var old_info = try std.json.parseFromSlice(
+        std.json.Value,
+        testing.allocator,
+        "{\"version\":\"0.0.1\",\"deviceId\":\"dev-old\"}",
+        .{},
+    );
+    defer old_info.deinit();
+    a.onEngineInfo(1, .{ .ok = old_info.value });
+
+    try testing.expectEqual(@as(usize, 0), a.view.sidebar_notice_len);
+    try testing.expect(a.engine_start.replaced_once);
+    const term_out = try waitForFile(old_term);
+    defer testing.allocator.free(term_out);
+    try testing.expectEqualStrings("old-stopped\n", term_out);
+    _ = std.c.waitpid(old_pid, null, 0);
+
+    const new_pid = a.engine_start.pid orelse return error.NewEngineNotStarted;
+    defer {
+        _ = std.c.kill(new_pid, .KILL);
+        _ = std.c.waitpid(new_pid, null, 0);
+    }
+    try testing.expect(new_pid != old_pid);
+    const started_args = try waitForFile(new_args);
+    defer testing.allocator.free(started_args);
+    try testing.expectEqualStrings("new-started headless 27992\n", started_args);
+
+    const cur_json = try std.fmt.allocPrint(
+        testing.allocator,
+        "{{\"version\":\"{s}\",\"deviceId\":\"dev-new\"}}",
+        .{@import("build_info").version},
+    );
+    defer testing.allocator.free(cur_json);
+    var new_info = try std.json.parseFromSlice(std.json.Value, testing.allocator, cur_json, .{});
+    defer new_info.deinit();
+    a.onEngineInfo(2, .{ .ok = new_info.value });
+    try testing.expectEqual(@as(usize, 0), a.view.sidebar_notice_len);
 }

@@ -134,12 +134,41 @@ pub const State = struct {
     }
 };
 
+pub const EngineVersionAction = enum {
+    up_to_date,
+    replace_old_session,
+    notify_only,
+};
+
+/// True when the connected engine is older than `app_ver`.
+pub fn isOlderEngine(app_ver: []const u8, engine_ver: ?[]const u8) bool {
+    const app_parts = parseStrictDotted(app_ver) orelse return false;
+    if (engine_ver) |ev| {
+        const eng_parts = parseStrictDotted(ev) orelse return false;
+        return compareParts(eng_parts, app_parts) == .lt;
+    }
+    return true;
+}
+
+/// Pure decision rule proved in `Nano/FrameSchedule.lean`
+/// (`decideEngineVersionAction`): when a live desktop session connects to an
+/// older background `harness headless` process after an update, kill and
+/// replace the old engine session once instead of showing a warning banner.
+pub fn decideEngineVersionAction(
+    app_ver: []const u8,
+    engine_ver: ?[]const u8,
+    live_session: bool,
+    already_replaced: bool,
+) EngineVersionAction {
+    if (!isOlderEngine(app_ver, engine_ver)) return .up_to_date;
+    if (live_session and !already_replaced) return .replace_old_session;
+    return .notify_only;
+}
+
 /// Pure version comparison (`older_engine_notice` in `crates/ui/src/state.rs`).
 pub fn olderEngineNotice(buf: []u8, app_ver: []const u8, engine_ver: ?[]const u8) ?[]const u8 {
-    const app_parts = parseStrictDotted(app_ver) orelse return null;
+    if (!isOlderEngine(app_ver, engine_ver)) return null;
     if (engine_ver) |ev| {
-        const eng_parts = parseStrictDotted(ev) orelse return null;
-        if (compareParts(eng_parts, app_parts) != .lt) return null;
         return std.fmt.bufPrint(
             buf,
             "Harness {s} is connected to an engine that is still running {s}, so some changes won't apply yet. To update it, run `harness daemon stop`, then quit and reopen Harness. Chats that are running will stop.",
@@ -514,6 +543,7 @@ fn appUpdateDelivered(ctx: ?*anyopaque) callconv(.c) void {
 
 pub fn restartIntoUpdate(a: *App) void {
     if (builtin.is_test or a.offscreen) return;
+    @import("engine_start.zig").stopForUpdate(a);
     if (builtin.os.tag == .macos) {
         const pid = std.c.getpid();
         var cmd_buf: [256]u8 = undefined;
@@ -891,6 +921,22 @@ test "olderEngineNotice reports only older engines" {
     try std.testing.expect(olderEngineNotice(&buf, "0.2.170", "0.2.171") == null);
     try std.testing.expect(olderEngineNotice(&buf, "0.2.170", "0.3.0") == null);
     try std.testing.expect(olderEngineNotice(&buf, "0.2.170", "custom") == null);
+    try std.testing.expectEqual(
+        EngineVersionAction.replace_old_session,
+        decideEngineVersionAction("0.2.179", "0.2.178", true, false),
+    );
+    try std.testing.expectEqual(
+        EngineVersionAction.notify_only,
+        decideEngineVersionAction("0.2.179", "0.2.178", true, true),
+    );
+    try std.testing.expectEqual(
+        EngineVersionAction.notify_only,
+        decideEngineVersionAction("0.2.179", "0.2.178", false, false),
+    );
+    try std.testing.expectEqual(
+        EngineVersionAction.up_to_date,
+        decideEngineVersionAction("0.2.179", "0.2.179", true, false),
+    );
 }
 
 test "whatsNew extracts bullets in range from graff --version" {

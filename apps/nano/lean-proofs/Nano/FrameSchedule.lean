@@ -270,4 +270,126 @@ theorem frosted_sidebar_never_paints_opaque_card :
     sidebarActiveOpaqueCard true = false := by
   rfl
 
+/-- Engine version mismatch resolution (`decideEngineVersionAction` in `view_updates.zig`):
+when `harness-nano` connects to an older background `harness headless` process after an
+app update (`isOlder = true`, `liveSession = true`, `alreadyReplaced = false`), it kills
+the old engine session and starts the updated bundled engine (`replaceOldSession`)
+instead of showing a manual `harness daemon stop` warning. A single-shot guard
+(`alreadyReplaced = true`) guarantees termination if the candidate binary on disk is still old. -/
+inductive EngineVersionAction where
+  | upToDate
+  | replaceOldSession
+  | notifyOnly
+deriving DecidableEq, Repr, BEq
+
+def decideEngineVersionAction (isOlder : Bool) (liveSession : Bool) (alreadyReplaced : Bool) : EngineVersionAction :=
+  if !isOlder then .upToDate
+  else if liveSession && !alreadyReplaced then .replaceOldSession
+  else .notifyOnly
+
+theorem older_live_engine_replaces_first_time :
+    decideEngineVersionAction true true false = .replaceOldSession := by
+  rfl
+
+theorem older_engine_replace_terminates (isOlder liveSession : Bool) :
+    decideEngineVersionAction isOlder liveSession true ≠ .replaceOldSession := by
+  cases isOlder <;> cases liveSession <;> decide
+
+theorem current_or_newer_engine_noops (liveSession alreadyReplaced : Bool) :
+    decideEngineVersionAction false liveSession alreadyReplaced = .upToDate := by
+  rfl
+
+/-- UI frame execution phases (`nanoui.ui.frame.run` and `view.zig`):
+1. `preTreeReap`: runs `a.reap()` and `settleFrame()` before any UI nodes exist in `c.nodes`.
+2. `buildingTree`: builds `c.nodes`, where `.text` nodes borrow unowned `[]const u8` slices.
+3. `measuringAndPainting`: runs `ui.layout.measure` (`TextSystem.key` / `Wyhash.update`) and
+   `paint` over all `.text` slices borrowed during `buildingTree`. -/
+inductive FramePhase where
+  | preTreeReap
+  | buildingTree
+  | measuringAndPainting
+deriving DecidableEq, Repr, BEq
+
+/-- Lifecycle state of an arena or string slice that may be borrowed by `.text` nodes. -/
+inductive AllocState where
+  | live
+  | retired
+  | freed
+deriving DecidableEq, Repr, BEq
+
+/-- Memory is readable by `ui.layout.measure` (`Wyhash.update`) and `paint` iff it has
+not been unmapped/freed (`live` or `retired`). -/
+def isReadable (st : AllocState) : Bool :=
+  match st with
+  | .live    => true
+  | .retired => true
+  | .freed   => false
+
+/-- Buggy immediate replacement: freeing an arena or slice mid-frame unmaps its pages
+while `.text` nodes in `c.nodes` still hold slices into it. -/
+def replaceImmediate (_ : AllocState) : AllocState :=
+  .freed
+
+/-- Safe deferred replacement (`retireArena`, `retireSlice`, `List.replace`, `copyModels`):
+transitions a live allocation to `.retired` so it remains mapped until the next frame's
+`preTreeReap` phase. -/
+def replaceDeferred (st : AllocState) : AllocState :=
+  match st with
+  | .live    => .retired
+  | .retired => .retired
+  | .freed   => .freed
+
+/-- `a.reap()` at `preTreeReap` (when `c.nodes` is empty) reclaims retired allocations. -/
+def reapAtPreTree (st : AllocState) : AllocState :=
+  match st with
+  | .live    => .live
+  | .retired => .freed
+  | .freed   => .freed
+
+/-- N consecutive mid-frame replacements during `buildingTree`. -/
+def replaceDeferredN : Nat → AllocState → AllocState
+  | 0,     st => st
+  | n + 1, st => replaceDeferred (replaceDeferredN n st)
+
+theorem immediate_replace_causes_use_after_free :
+    isReadable (replaceImmediate .live) = false := by
+  rfl
+
+theorem deferred_replace_preserves_readability (st : AllocState)
+    (h : isReadable st = true) :
+    isReadable (replaceDeferred st) = true := by
+  cases st <;> simp_all [isReadable, replaceDeferred]
+
+theorem deferred_replace_n_preserves_readability (n : Nat) (st : AllocState)
+    (h : isReadable st = true) :
+    isReadable (replaceDeferredN n st) = true := by
+  induction n with
+  | zero => exact h
+  | succ k ih =>
+    simp only [replaceDeferredN]
+    exact deferred_replace_preserves_readability (replaceDeferredN k st) ih
+
+theorem live_borrowed_slice_survives_measure_and_paint (n : Nat) :
+    isReadable (replaceDeferredN n .live) = true := by
+  exact deferred_replace_n_preserves_readability n .live rfl
+
+theorem reap_frees_retired_at_next_frame_start :
+    reapAtPreTree (replaceDeferred .live) = .freed := by
+  rfl
+
+/-- Split-pane click action (`view.zig`): clicking an unfocused split pane during
+`buildingTree` (`inPreTree = false`) queues the focus transition for the next frame's
+`preTreeReap` phase rather than mutating the active pane mid-tree. -/
+inductive PaneClickAction where
+  | focusImmediate
+  | queueForNextPreTree
+deriving DecidableEq, Repr, BEq
+
+def decidePaneClickAction (inPreTree : Bool) : PaneClickAction :=
+  if inPreTree then .focusImmediate else .queueForNextPreTree
+
+theorem mid_frame_pane_click_defers_focus :
+    decidePaneClickAction false = .queueForNextPreTree := by
+  rfl
+
 end Nano.FrameSchedule

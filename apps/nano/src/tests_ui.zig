@@ -2258,3 +2258,132 @@ test "Cmd+=, Cmd+-, and Cmd+0 step and reset interface zoom at 120Hz" {
     try testing.expectEqual(@as(f32, 16), h.a.settings.uiFontSize());
     try testing.expectApproxEqAbs(@as(f32, 1.0), h.t.ctx.access.zoom, 0.001);
 }
+
+test "clicking the composer model chip opens the Zeron-style compact thinking tier panel and clicking the model subtitle expands upwards into the model list" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+
+    h.a.gpa.free(h.a.new_harness);
+    h.a.new_harness = try h.a.gpa.dupe(u8, "codex");
+    h.a.gpa.free(h.a.models_for);
+    h.a.models_for = try h.a.gpa.dupe(u8, "codex");
+    var models_parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"chatgpt-new/gpt-6.1-sol","label":"GPT-6.1-Sol","context":1048576,"maker":"openai","billing":"plan","reasoningLevels":["low","medium","high"],"defaultReasoningLevel":"high"},
+        \\ {"id":"chatgpt-new/gpt-5.6-sol","label":"GPT-5.6-Sol","context":200000,"maker":"openai","billing":"plan","reasoningLevels":["low","medium","high","xhigh"],"defaultReasoningLevel":"high"}]
+    , .{});
+    defer models_parsed.deinit();
+    try h.a.models.replace(models_parsed.value);
+    h.a.setModel("chatgpt-new/gpt-6.1-sol");
+    h.a.select(null, null);
+    h.t.settle(1);
+
+    // Open the compact thinking tier panel directly from the composer chip action.
+    h.a.togglePickerCompact();
+    h.t.settle(1);
+    try testing.expect(h.a.view.model_picker.stage != null);
+    try testing.expect(h.a.view.model_picker.stage.?.compact);
+    try testing.expectEqual(@as(?usize, 2), h.a.view.model_picker.stage.?.level);
+    try testing.expect(h.t.hasText("High"));
+    try testing.expect(h.t.hasText("GPT-6.1-Sol"));
+
+    // Drag/click the capsule slider to the first stop (`low`) and verify live update.
+    const track = h.a.view.model_picker.track orelse return error.MissingSliderTrack;
+    h.t.moveTo(track.x + 2, track.y + track.h / 2);
+    h.t.ctx.input.click_count = 1;
+    h.t.ctx.pointerDown();
+    h.t.frame();
+    h.t.ctx.pointerUp();
+    h.t.frame();
+    h.t.settle(1);
+    try testing.expectEqual(@as(?usize, 0), h.a.view.model_picker.stage.?.level);
+    try testing.expectEqualStrings("low", h.a.new_reasoning.?);
+
+    // Click the model subtitle (`GPT-6.1-Sol`) in the compact header (distinct from the composer chip)
+    // to expand upwards into the model list.
+    const chip = h.a.view.chip_anchor orelse return error.MissingChip;
+    var model_btn: ?ui.Rect = null;
+    for (h.t.ctx.nodes.items) |n| switch (n.content) {
+        .text => |t| if (std.mem.eql(u8, t.str, "GPT-6.1-Sol") and (n.rect.y + n.rect.h < chip.y or n.rect.y > chip.y + chip.h)) {
+            model_btn = n.rect;
+        },
+        else => {},
+    };
+    const btn_rect = model_btn orelse return error.MissingCompactModelButton;
+    h.t.click(btn_rect.x + 12, btn_rect.y + 4);
+    h.t.settle(1);
+    try testing.expect(h.a.view.model_picker.stage == null);
+    try testing.expect(h.a.view.model_picker.can_return_compact);
+    try testing.expect(h.t.hasText("GPT-5.6-Sol"));
+
+    // Pick `GPT-5.6-Sol` from the expanded list and verify it returns to the compact panel with the new model live.
+    try h.t.clickText("GPT-5.6-Sol");
+    h.t.settle(1);
+    try testing.expect(h.a.view.model_picker.stage != null);
+    try testing.expect(h.a.view.model_picker.stage.?.compact);
+    try testing.expectEqualStrings("chatgpt-new/gpt-5.6-sol", h.a.new_model.?);
+}
+
+test "Settings Back button and Escape key close Settings and return to the workspace even when search has focus" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+
+    @import("view_settings.zig").open(&h.a);
+    h.t.settle(1);
+    try testing.expect(h.a.view.settings_open);
+
+    // Pressing Escape while `settings-search-field` is focused closes Settings immediately.
+    try testing.expect(h.t.shortcut(.{ .key = @import("nanoui").ui.Shortcut.escape }));
+    h.t.settle(1);
+    try testing.expect(!h.a.view.settings_open);
+
+    // Re-open Settings and click the sidebar `← Back` button.
+    @import("view_settings.zig").open(&h.a);
+    h.t.settle(1);
+    try testing.expect(h.a.view.settings_open);
+    try h.t.clickText("Back");
+    h.t.settle(1);
+    try testing.expect(!h.a.view.settings_open);
+}
+
+test "older engine version triggers automatic daemon replacement and mid-frame catalog replacement retires arenas until next frame" {
+    const updates = @import("view_updates.zig");
+    try testing.expectEqual(updates.EngineVersionAction.replace_old_session, updates.decideEngineVersionAction("0.2.180", "0.2.178", true, false));
+    try testing.expectEqual(updates.EngineVersionAction.up_to_date, updates.decideEngineVersionAction("0.2.180", "0.2.180", true, false));
+    try testing.expectEqual(updates.EngineVersionAction.up_to_date, updates.decideEngineVersionAction("0.2.180", "0.2.181", true, false));
+
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var p1 = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"m1","label":"Model One"}]
+    , .{});
+    defer p1.deinit();
+    var p2 = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"m2","label":"Model Two"}]
+    , .{});
+    defer p2.deinit();
+    try h.a.models.replace(p1.value);
+    try h.a.models.replace(p2.value);
+    try testing.expect(h.a.models.retired.items.len >= 1);
+    h.t.frame();
+    try testing.expectEqual(@as(usize, 0), h.a.models.retired.items.len);
+
+    // Clicking the composer model chip when `models_for` is unsynced and the
+    // engine is connected triggers `ensureModels` -> `copyModels` mid-frame
+    // between `modelChip`'s pre-click width measurement and post-click `rollText`.
+    h.a.engine.state = .connected;
+    const cat = @import("model_picker.zig").ensureCatalog(&h.a, h.a.target().harness, false).?;
+    try cat.models.replace(p1.value);
+    cat.loaded = true;
+    h.a.retireSlice(h.a.models_for);
+    h.a.models_for = &.{};
+    h.t.frame();
+    const chip = h.a.view.chip_anchor.?;
+    h.t.click(chip.x + chip.w * 0.5, chip.y + chip.h * 0.5);
+    try testing.expect(h.a.picker == .model);
+    try testing.expectEqualStrings("Model One", h.a.modelLabel(h.a.target().model));
+    h.t.frame();
+    try testing.expectEqual(@as(usize, 0), h.a.models.retired.items.len);
+}
