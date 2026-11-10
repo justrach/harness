@@ -21,6 +21,8 @@ const terminals_host = @import("terminals_host.zig");
 const registry_sync = @import("registry_sync.zig");
 const chat2_client = @import("chat2_client.zig");
 const auth_host = @import("auth_host.zig");
+const agent_accounts_host = @import("agent_accounts_host.zig");
+const relay_callback = @import("relay_callback.zig");
 const run_journal = @import("run_journal.zig");
 const ws_server = @import("ws_server.zig");
 const ws = @import("ws.zig");
@@ -515,18 +517,37 @@ pub const PushedStreamItem = struct {
     }
 };
 
+pub const DeviceRecord = struct {
+    id: []u8,
+    name: []u8,
+    platform: []u8,
+    version: ?[]u8 = null,
+    last_seen_at_ms: i64 = 0,
+    created_at_ms: i64 = 0,
+
+    pub fn deinit(self: *DeviceRecord, gpa: Allocator) void {
+        gpa.free(self.id);
+        gpa.free(self.name);
+        gpa.free(self.platform);
+        if (self.version) |v| gpa.free(v);
+    }
+};
+
 pub const SpaceRecord = struct {
     id: []u8,
     device_id: []u8,
     path: []u8,
     name: []u8,
     git_detected: bool,
+    checkout_id: ?[]u8 = null,
+    created_at_ms: i64 = 0,
 
     pub fn deinit(self: *SpaceRecord, gpa: Allocator) void {
         gpa.free(self.id);
         gpa.free(self.device_id);
         gpa.free(self.path);
         gpa.free(self.name);
+        if (self.checkout_id) |c| gpa.free(c);
     }
 };
 
@@ -540,7 +561,18 @@ pub const ChatRecord = struct {
     reasoning: ?[]u8 = null,
     branch: ?[]u8 = null,
     cwd: ?[]u8 = null,
+    parent_chat_id: ?[]u8 = null,
+    preview: ?[]u8 = null,
+    harness_session_id: ?[]u8 = null,
+    source_context_json: ?[]u8 = null,
     activity_status: ?[]u8 = null,
+    activity_started_at_ms: i64 = 0,
+    activity_updated_at_ms: i64 = 0,
+    created_at_ms: i64 = 0,
+    last_message_at_ms: i64 = 0,
+    last_prompt_at_ms: i64 = 0,
+    last_seen_at_ms: i64 = 0,
+    chat_mode: bool = false,
     pinned: bool = false,
     archived: bool = false,
 
@@ -554,6 +586,10 @@ pub const ChatRecord = struct {
         if (self.reasoning) |r| gpa.free(r);
         if (self.branch) |b| gpa.free(b);
         if (self.cwd) |c| gpa.free(c);
+        if (self.parent_chat_id) |p| gpa.free(p);
+        if (self.preview) |pr| gpa.free(pr);
+        if (self.harness_session_id) |hs| gpa.free(hs);
+        if (self.source_context_json) |sc| gpa.free(sc);
         if (self.activity_status) |a| gpa.free(a);
     }
 };
@@ -596,10 +632,13 @@ pub const EngineHost = struct {
     registry: registry_sync.RegistryDoc,
     terminals: terminals_host.TerminalManager,
     auth: auth_host.AuthManager,
+    agent_accounts: agent_accounts_host.AgentAccountsHost,
     journal: run_journal.RunJournal,
     docs: std.StringHashMapUnmanaged(session_doc.SessionDoc) = .empty,
+    remote_tails: std.StringHashMapUnmanaged([]u8) = .empty,
     doc_access_clock: u64 = 0,
     evicted_docs_total: u64 = 0,
+    devices: std.ArrayList(DeviceRecord) = .empty,
     spaces: std.ArrayList(SpaceRecord) = .empty,
     chats: std.ArrayList(ChatRecord) = .empty,
     actions: std.ArrayList(ProjectActionRecord) = .empty,
@@ -625,6 +664,15 @@ pub const EngineHost = struct {
     queue_seq: u64 = 0,
     lease_seq: u64 = 0,
     sync_probes: u64 = 0,
+    registry_seq: u64 = 0,
+    registry_org_id: ?[]u8 = null,
+    bg_sync_enabled: bool = false,
+    sync_wake_seq: std.atomic.Value(u64) = .init(0),
+    bg_workers_active: std.atomic.Value(u32) = .init(0),
+    oauth_capture: ?*relay_callback.Capture = null,
+    oauth_callbacks_active: std.atomic.Value(u32) = .init(0),
+    device_poll_gen: std.atomic.Value(u64) = .init(0),
+    device_poll_threads: std.ArrayList(std.Thread) = .empty,
     stop_requested: bool = false,
 
     pub fn init(gpa: Allocator, device_id: []const u8, device_name: []const u8) !EngineHost {
@@ -642,6 +690,8 @@ pub const EngineHost = struct {
         errdefer reg.deinit();
         var auth = try auth_host.AuthManager.init(gpa);
         errdefer auth.deinit();
+        var agent_accs = try agent_accounts_host.AgentAccountsHost.init(gpa);
+        errdefer agent_accs.deinit();
         return .{
             .gpa = gpa,
             .device_id = did,
@@ -653,6 +703,7 @@ pub const EngineHost = struct {
             .registry = reg,
             .terminals = terminals_host.TerminalManager.init(gpa),
             .auth = auth,
+            .agent_accounts = agent_accs,
             .journal = run_journal.RunJournal.init(gpa),
         };
     }
@@ -664,16 +715,40 @@ pub const EngineHost = struct {
     }
 
     pub fn deinit(self: *EngineHost) void {
+        self.stop_requested = true;
+        _ = self.device_poll_gen.fetchAdd(1, .acq_rel);
+        if (self.oauth_capture) |cap| {
+            self.oauth_capture = null;
+            cap.cancelled.store(true, .release);
+            if (self.io) |io| {
+                var spins: usize = 0;
+                while (cap.refs.load(.acquire) > 1 and spins < 50) : (spins += 1) {
+                    std.Io.sleep(io, .fromMilliseconds(10), .awake) catch break;
+                }
+            }
+            cap.release();
+        }
+        if (self.io) |io| {
+            var spins: usize = 0;
+            while ((self.oauth_callbacks_active.load(.acquire) > 0 or self.bg_workers_active.load(.acquire) > 0) and spins < 400) : (spins += 1) {
+                std.Io.sleep(io, .fromMilliseconds(10), .awake) catch break;
+            }
+        }
+        for (self.device_poll_threads.items) |th| th.join();
+        self.device_poll_threads.deinit(self.gpa);
+
         self.gpa.free(self.device_id);
         self.gpa.free(self.device_name);
         self.gpa.free(self.autonomy_level);
         self.gpa.free(self.sidebar_sort_by);
         self.gpa.free(self.sidebar_group_by);
         if (self.data_dir) |d| self.gpa.free(d);
+        if (self.registry_org_id) |ro| self.gpa.free(ro);
         self.store.deinit();
         self.registry.deinit();
         self.terminals.deinit();
         self.auth.deinit();
+        self.agent_accounts.deinit();
         self.journal.deinit();
         var doc_it = self.docs.iterator();
         while (doc_it.next()) |e| {
@@ -681,6 +756,10 @@ pub const EngineHost = struct {
             e.value_ptr.deinit();
         }
         self.docs.deinit(self.gpa);
+        self.clearRemoteTails();
+        self.remote_tails.deinit(self.gpa);
+        for (self.devices.items) |*d| d.deinit(self.gpa);
+        self.devices.deinit(self.gpa);
         for (self.spaces.items) |*s| s.deinit(self.gpa);
         self.spaces.deinit(self.gpa);
         for (self.chats.items) |*c| c.deinit(self.gpa);
@@ -708,6 +787,126 @@ pub const EngineHost = struct {
         for (self.committed_upload_order.items) |k| self.gpa.free(k);
         self.committed_upload_order.deinit(self.gpa);
     }
+
+    fn onOAuthCallbackLanded(ctx: ?*anyopaque, cap: *relay_callback.Capture) void {
+        const host: *EngineHost = @ptrCast(@alignCast(ctx orelse {
+            cap.release();
+            return;
+        }));
+        _ = host.oauth_callbacks_active.fetchAdd(1, .acq_rel);
+        defer _ = host.oauth_callbacks_active.fetchSub(1, .acq_rel);
+        defer cap.release();
+
+        const io = host.io orelse return;
+        const code = (auth_host.extractQueryParamAlloc(host.gpa, cap.address, "code") catch null) orelse return;
+        defer host.gpa.free(code);
+        const state = (auth_host.extractQueryParamAlloc(host.gpa, cap.address, "state") catch null) orelse return;
+        defer host.gpa.free(state);
+        if (code.len == 0 or state.len == 0) return;
+
+        const state_dot_code = std.fmt.allocPrint(host.gpa, "{s}.{s}", .{ state, code }) catch return;
+        defer host.gpa.free(state_dot_code);
+
+        host.mutex.lockUncancelable(io);
+        defer host.mutex.unlock(io);
+
+        if (host.oauth_capture == cap) {
+            host.oauth_capture = null;
+            cap.release();
+        }
+        if (host.stop_requested or cap.isCancelled()) return;
+
+        host.auth.completeSignIn(io, state_dot_code) catch |err| {
+            std.log.warn("harness-engine: OAuth callback exchange failed: {t}", .{err});
+            return;
+        };
+        host.auth.autoSelectFirstOrgIfNeeded(io);
+        if (host.auth.signed_in or host.auth.phase == .needs_organization) {
+            host.workspace_scope = "synced";
+        }
+        if (host.auth.authStatusJson(host.gpa)) |st_json| {
+            defer host.gpa.free(st_json);
+            host.broadcastWatch(.auth_status, null, st_json) catch {};
+        } else |_| {}
+        if (host.auth.signed_in) {
+            _ = host.syncFromEdgeRegistry(io);
+        }
+    }
+
+    pub fn clearRemoteTails(self: *EngineHost) void {
+        var rt_it = self.remote_tails.iterator();
+        while (rt_it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            self.gpa.free(e.value_ptr.*);
+        }
+        self.remote_tails.clearRetainingCapacity();
+    }
+
+    const DevicePollCtx = struct {
+        host: *EngineHost,
+        io: std.Io,
+        gateway: []u8,
+        device_code: []u8,
+        expires_in_s: u64,
+        interval_s: u64,
+        gen: u64,
+
+        fn run(ctx: *@This()) void {
+            const host = ctx.host;
+            const io = ctx.io;
+            const gpa = host.gpa;
+            defer {
+                gpa.free(ctx.gateway);
+                gpa.free(ctx.device_code);
+                gpa.destroy(ctx);
+            }
+
+            const start_ms = std.Io.Clock.awake.now(io).toMilliseconds();
+            const deadline_ms = start_ms + @as(i64, @intCast(@max(@as(u64, 1), ctx.expires_in_s))) * std.time.ms_per_s;
+            var interval_s = ctx.interval_s;
+
+            while (std.Io.Clock.awake.now(io).toMilliseconds() < deadline_ms) {
+                var slept_ms: u64 = 0;
+                const target_ms = interval_s * 1000;
+                while (slept_ms < target_ms) : (slept_ms += 100) {
+                    if (host.device_poll_gen.load(.acquire) != ctx.gen) return;
+                    std.Io.sleep(io, .fromMilliseconds(100), .awake) catch return;
+                }
+                if (host.device_poll_gen.load(.acquire) != ctx.gen) return;
+
+                var step = auth_host.AuthManager.pollCodegraffDeviceStep(gpa, io, ctx.gateway, ctx.device_code, interval_s);
+                switch (step) {
+                    .pending => |next_iv| interval_s = next_iv,
+                    .transient => {},
+                    .approved => |*ap| {
+                        defer ap.deinit(gpa);
+                        host.mutex.lockUncancelable(io);
+                        defer host.mutex.unlock(io);
+                        if (host.device_poll_gen.load(.acquire) != ctx.gen or host.stop_requested) return;
+                        host.auth.adoptCodegraffKey(io, ap.api_key, ap.email) catch {};
+                        return;
+                    },
+                    .failed => |msg| {
+                        host.mutex.lockUncancelable(io);
+                        defer host.mutex.unlock(io);
+                        if (host.device_poll_gen.load(.acquire) != ctx.gen or host.stop_requested) return;
+                        host.auth.codegraff_pending = false;
+                        if (host.auth.codegraff_error) |old| gpa.free(old);
+                        host.auth.codegraff_error = gpa.dupe(u8, msg) catch null;
+                        return;
+                    },
+                }
+            }
+
+            host.mutex.lockUncancelable(io);
+            defer host.mutex.unlock(io);
+            if (host.device_poll_gen.load(.acquire) == ctx.gen and !host.stop_requested) {
+                host.auth.codegraff_pending = false;
+                if (host.auth.codegraff_error) |old| gpa.free(old);
+                host.auth.codegraff_error = gpa.dupe(u8, "The sign-in link expired. Try again.") catch null;
+            }
+        }
+    };
 
     pub fn registerWatch(self: *EngineHost, sub_id: u64, kind: WatchKind, target_id: ?[]const u8) !void {
         const new_target = if (target_id) |t| try self.gpa.dupe(u8, t) else null;
@@ -1010,6 +1209,34 @@ pub const EngineHost = struct {
             },
             .SignIn => {
                 if (self.auth.codegraff_client_id != null) {
+                    if (self.oauth_capture) |old_cap| {
+                        self.oauth_capture = null;
+                        old_cap.cancel();
+                    }
+                    if (self.io) |io| {
+                        const cap_opt = relay_callback.start(
+                            self.gpa,
+                            io,
+                            self.auth.callback_port,
+                            "/callback",
+                            .{ .ctx = self, .func = onOAuthCallbackLanded },
+                        );
+                        if (cap_opt) |cap| {
+                            self.oauth_capture = cap;
+                            const redirect_uri = try std.fmt.allocPrint(self.gpa, "http://127.0.0.1:{d}/callback", .{cap.port});
+                            defer self.gpa.free(redirect_uri);
+                            const url = try self.auth.startBrowserSignIn(io, redirect_uri);
+                            defer self.gpa.free(url);
+                            self.workspace_scope = "synced";
+                            return .{ .unary_json = try std.fmt.allocPrint(
+                                self.gpa,
+                                "{{\"url\":{f},\"ok\":true,\"workspaceScope\":\"synced\"}}",
+                                .{json.fmt(url, .{})},
+                            ) };
+                        } else {
+                            return .{ .err = .{ .exec_error = "sign-in callback port 27643 is already in use by another sign-in" } };
+                        }
+                    }
                     const url = try self.auth.startHeadlessSignIn("state-zig-1");
                     defer self.gpa.free(url);
                     return .{ .unary_json = try std.fmt.allocPrint(
@@ -1054,13 +1281,68 @@ pub const EngineHost = struct {
                 const st_json = try self.auth.authStatusJson(self.gpa);
                 defer self.gpa.free(st_json);
                 try self.broadcastWatch(.auth_status, null, st_json);
+                if (self.io) |io| {
+                    if (self.auth.codegraff_client_id != null and self.auth.signed_in) {
+                        _ = self.syncFromEdgeRegistry(io);
+                    }
+                }
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"ok\":true,\"workspaceScope\":\"synced\"}") };
             },
             .CodegraffSignIn => {
+                if (self.auth.codegraff_client_id != null and self.io != null) {
+                    const io = self.io.?;
+                    var start_info = self.auth.startCodegraffDeviceFlow(io) catch {
+                        return .{ .err = .{ .exec_error = "couldn't reach Codegraff to start device sign-in" } };
+                    };
+                    defer start_info.deinit(self.gpa);
+
+                    const poll_gen = self.device_poll_gen.fetchAdd(1, .acq_rel) + 1;
+                    const gw_copy = try self.gpa.dupe(u8, self.auth.codegraff_gateway);
+                    errdefer self.gpa.free(gw_copy);
+                    const dc_copy = try self.gpa.dupe(u8, start_info.device_code);
+                    errdefer self.gpa.free(dc_copy);
+                    const ctx = try self.gpa.create(DevicePollCtx);
+                    ctx.* = .{
+                        .host = self,
+                        .io = io,
+                        .gateway = gw_copy,
+                        .device_code = dc_copy,
+                        .expires_in_s = start_info.expires_in_s,
+                        .interval_s = start_info.interval_s,
+                        .gen = poll_gen,
+                    };
+                    if (std.Thread.spawn(.{}, DevicePollCtx.run, .{ctx})) |th| {
+                        self.device_poll_threads.append(self.gpa, th) catch th.detach();
+                    } else |_| {
+                        self.gpa.free(gw_copy);
+                        self.gpa.free(dc_copy);
+                        self.gpa.destroy(ctx);
+                    }
+                    return .{ .unary_json = try std.fmt.allocPrint(
+                        self.gpa,
+                        "{{\"url\":{f},\"ok\":true}}",
+                        .{json.fmt(start_info.verification_url, .{})},
+                    ) };
+                }
                 self.workspace_scope = "synced";
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"url\":\"\",\"ok\":true,\"signedIn\":true}") };
             },
             .CodegraffAuthStatus => {
+                if (self.auth.codegraff_client_id != null) {
+                    const who_email: ?[]const u8 = self.auth.codegraff_email orelse
+                        (if (self.auth.email.len > 0) self.auth.email else null);
+                    return .{ .unary_json = try std.fmt.allocPrint(
+                        self.gpa,
+                        "{{\"configured\":true,\"signedIn\":{},\"pending\":{},\"email\":{f},\"name\":{f},\"error\":{f}}}",
+                        .{
+                            self.auth.codegraff_connected,
+                            self.auth.codegraff_pending,
+                            json.fmt(who_email, .{}),
+                            json.fmt(self.auth.user_name, .{}),
+                            json.fmt(self.auth.codegraff_error, .{}),
+                        },
+                    ) };
+                }
                 return .{ .unary_json = try std.fmt.allocPrint(
                     self.gpa,
                     "{{\"signedIn\":{},\"pending\":false,\"email\":{f},\"name\":{f}}}",
@@ -1081,10 +1363,32 @@ pub const EngineHost = struct {
                 self.workspace_scope = "synced";
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"signedIn\":true}") };
             },
-            .SignOut, .CodegraffSignOut => {
+            .SignOut => {
+                if (self.oauth_capture) |old_cap| {
+                    self.oauth_capture = null;
+                    old_cap.cancel();
+                }
                 self.auth.signOutWithIo(self.io);
+                self.registry_seq = 0;
+                if (self.registry_org_id) |ro| {
+                    self.gpa.free(ro);
+                    self.registry_org_id = null;
+                }
+                self.clearRemoteTails();
+                self.clearDiskSyncCaches();
                 self.workspace_scope = "local";
                 try self.broadcastWatch(.auth_status, null, "{\"state\":\"signedOut\"}");
+                return .{ .unary_json = try self.gpa.dupe(u8, "{\"signedIn\":false,\"ok\":true}") };
+            },
+            .CodegraffSignOut => {
+                _ = self.device_poll_gen.fetchAdd(1, .acq_rel);
+                if (self.auth.codegraff_client_id != null) {
+                    self.auth.codegraffSignOut(self.io);
+                } else {
+                    self.auth.signOutWithIo(self.io);
+                    self.workspace_scope = "local";
+                    try self.broadcastWatch(.auth_status, null, "{\"state\":\"signedOut\"}");
+                }
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"signedIn\":false,\"ok\":true}") };
             },
             .UploadChunk => {
@@ -1240,6 +1544,13 @@ pub const EngineHost = struct {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"command\":null}") };
             },
             .ListAgentAccounts => {
+                if (self.auth.codegraff_client_id != null) {
+                    const force_usage: bool = if (requireObj(params)) |obj|
+                        (if (obj.get("forceUsage")) |fv| (if (fv == .bool) fv.bool else true) else true)
+                    else
+                        true;
+                    return .{ .unary_json = try self.agent_accounts.listAgentAccountsJson(self.io, self.nowMs(), force_usage) };
+                }
                 return .{ .unary_json = try self.gpa.dupe(
                     u8,
                     "{\"accounts\":[" ++
@@ -1250,15 +1561,24 @@ pub const EngineHost = struct {
                 ) };
             },
             .CodegraffUsage => {
+                if (self.auth.codegraff_client_id != null) {
+                    return .{ .unary_json = try self.auth.fetchCodegraffUsageJson(self.io) };
+                }
                 return .{ .unary_json = try self.gpa.dupe(
                     u8,
                     "{\"email\":\"local@codegraff.com\",\"tier\":\"Max\",\"credits_micro_usd\":50000000,\"spend_30d_micro_usd\":1250000,\"requests_30d\":48,\"key_spend_monthly_micro_usd\":0,\"key_budget_resets_at\":\"\"}",
                 ) };
             },
             .CodegraffJobs => {
+                if (self.auth.codegraff_client_id != null) {
+                    return .{ .unary_json = try self.auth.fetchCodegraffJobsJson(self.io) };
+                }
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"jobs\":[]}") };
             },
             .ListGraffLogins => {
+                if (self.auth.codegraff_client_id != null) {
+                    return .{ .unary_json = try self.agent_accounts.listGraffLoginsJson(self.io) };
+                }
                 return .{ .unary_json = try self.gpa.dupe(
                     u8,
                     "[" ++
@@ -1434,6 +1754,11 @@ pub const EngineHost = struct {
                 const st_json = try self.auth.authStatusJson(self.gpa);
                 defer self.gpa.free(st_json);
                 try self.broadcastWatch(.auth_status, null, st_json);
+                if (self.io) |io| {
+                    if (self.auth.codegraff_client_id != null and self.auth.signed_in) {
+                        _ = self.syncFromEdgeRegistry(io);
+                    }
+                }
                 return .{ .unary_json = try std.fmt.allocPrint(
                     self.gpa,
                     "{{\"id\":{f},\"organizationId\":{f},\"ok\":true}}",
@@ -1525,6 +1850,15 @@ pub const EngineHost = struct {
                         self.auth.last_unanswered = false;
                     };
                 }
+                if (self.io) |io| {
+                    if (self.auth.codegraff_client_id != null and self.auth.signed_in) {
+                        if (self.bg_sync_enabled) {
+                            _ = self.sync_wake_seq.fetchAdd(1, .acq_rel);
+                        } else {
+                            _ = self.syncFromEdgeRegistry(io);
+                        }
+                    }
+                }
                 return .{ .unary_json = try std.fmt.allocPrint(
                     self.gpa,
                     "{{\"probed\":true,\"probes\":{d}}}",
@@ -1548,11 +1882,7 @@ pub const EngineHost = struct {
             },
             .WatchDevices => {
                 if (call_id != 0) try self.registerWatch(call_id, .devices, null);
-                return self.oneStreamItem(false, try std.fmt.allocPrint(
-                    self.gpa,
-                    "[{{\"id\":{f},\"name\":{f},\"platform\":\"macos\",\"online\":true,\"isSelf\":true,\"version\":{f},\"lastSeenAt\":\"2026-11-10T08:05:00Z\",\"createdAt\":\"2026-11-01T00:00:00Z\"}}]",
-                    .{ json.fmt(self.device_id, .{}), json.fmt(self.device_name, .{}), json.fmt(build_info.version, .{}) },
-                ));
+                return self.oneStreamItem(false, try self.devicesJson());
             },
             .FocusChat => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
@@ -1567,6 +1897,36 @@ pub const EngineHost = struct {
                 const chat_id = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
                 if (call_id != 0) try self.registerWatch(call_id, .doc_messages, chat_id);
                 const doc = try self.getOrCreateDoc(chat_id);
+                if (doc.messages.items.len == 0 and self.store.loadSnapshot(chat_id) == null) {
+                    if (self.lookupCachedTailJson(chat_id)) |tail_msgs_json| {
+                        return self.oneStreamItem(
+                            false,
+                            try std.fmt.allocPrint(
+                                self.gpa,
+                                "{{\"historyPending\":false,\"reset\":{s}}}",
+                                .{tail_msgs_json},
+                            ),
+                        );
+                    }
+                    if (self.bg_sync_enabled and call_id != 0 and self.live_ws_writer != null and self.auth.signed_in and self.auth.edge_url != null) {
+                        if (self.spawnAsyncTailFetch(chat_id)) {
+                            return self.oneStreamItem(
+                                false,
+                                try self.gpa.dupe(u8, "{\"historyPending\":true,\"reset\":[]}"),
+                            );
+                        }
+                    }
+                    if (self.fetchEdgeChatTailMessagesJson(chat_id)) |tail_msgs_json| {
+                        return self.oneStreamItem(
+                            false,
+                            try std.fmt.allocPrint(
+                                self.gpa,
+                                "{{\"historyPending\":false,\"reset\":{s}}}",
+                                .{tail_msgs_json},
+                            ),
+                        );
+                    }
+                }
                 return self.oneStreamItem(false, try doc.toResetFrameJson(self.gpa));
             },
             .WatchToolProgress => {
@@ -1623,6 +1983,13 @@ pub const EngineHost = struct {
                         const req_model: ?[]const u8 = requireStr(req_val.object, "model");
 
                         if (try self.store.markCommandProcessed(msg_id, now)) {
+                            for (self.chats.items) |*c| {
+                                if (std.mem.eql(u8, c.id, chat_id)) {
+                                    c.last_prompt_at_ms = now;
+                                    c.last_message_at_ms = now;
+                                    break;
+                                }
+                            }
                             try doc.enqueueCommand(msg_id, "run", prompt, "completed", now);
                             try doc.appendUserMessage(msg_id, "part-u", prompt, now);
                             self.turn_counter += 1;
@@ -2241,6 +2608,7 @@ pub const EngineHost = struct {
                         .title = t_c,
                         .model = m_c,
                         .reasoning = r_c,
+                        .created_at_ms = self.nowMs(),
                     });
                 }
                 _ = try self.getOrCreateDoc(chat_id);
@@ -2417,6 +2785,10 @@ pub const EngineHost = struct {
                     var doc = kv.value;
                     doc.deinit();
                 }
+                if (self.remote_tails.fetchRemove(chat_id)) |rt_kv| {
+                    self.gpa.free(rt_kv.key);
+                    self.gpa.free(rt_kv.value);
+                }
                 self.store.deleteDoc(chat_id);
                 self.removeTargetWatches(chat_id);
                 if (self.focused_chat_id) |fid| {
@@ -2434,7 +2806,14 @@ pub const EngineHost = struct {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"deleted\":true}") };
             },
             .markChatSeen => {
-                _ = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
+                const chat_id = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
+                const seen_at: i64 = if (obj.get("at")) |av| (if (av == .integer) av.integer else self.nowMs()) else self.nowMs();
+                for (self.chats.items) |*c| {
+                    if (std.mem.eql(u8, c.id, chat_id)) {
+                        c.last_seen_at_ms = seen_at;
+                        break;
+                    }
+                }
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"seen\":true}") };
             },
             .setChatArchived => {
@@ -2455,17 +2834,87 @@ pub const EngineHost = struct {
         }
     }
 
+    pub fn devicesJson(self: *const EngineHost) ![]u8 {
+        var aw: std.Io.Writer.Allocating = .init(self.gpa);
+        errdefer aw.deinit();
+        const w = &aw.writer;
+        const now = self.nowMs();
+        var now_buf: [32]u8 = undefined;
+        const now_rfc = auth_host.formatRfc3339Ms(&now_buf, now);
+
+        try w.writeByte('[');
+        var count: usize = 0;
+        var emitted_self = false;
+
+        for (self.devices.items) |d| {
+            const is_self = std.mem.eql(u8, d.id, self.device_id);
+            if (is_self) emitted_self = true;
+            const online = is_self or (d.last_seen_at_ms > 0 and now - d.last_seen_at_ms <= 120_000);
+            var seen_buf: [32]u8 = undefined;
+            var created_buf: [32]u8 = undefined;
+            const seen_rfc = if (is_self)
+                now_rfc
+            else if (d.last_seen_at_ms > 0)
+                auth_host.formatRfc3339Ms(&seen_buf, d.last_seen_at_ms)
+            else
+                now_rfc;
+            const created_rfc = if (d.created_at_ms > 0)
+                auth_host.formatRfc3339Ms(&created_buf, d.created_at_ms)
+            else
+                seen_rfc;
+            const ver = d.version orelse build_info.version;
+            if (count > 0) try w.writeByte(',');
+            count += 1;
+            try w.print(
+                "{{\"id\":{f},\"name\":{f},\"platform\":{f},\"online\":{},\"isSelf\":{},\"version\":{f},\"lastSeenAt\":{f},\"createdAt\":{f}}}",
+                .{
+                    json.fmt(d.id, .{}),
+                    json.fmt(d.name, .{}),
+                    json.fmt(if (d.platform.len > 0) d.platform else "macos", .{}),
+                    online,
+                    is_self,
+                    json.fmt(ver, .{}),
+                    json.fmt(seen_rfc, .{}),
+                    json.fmt(created_rfc, .{}),
+                },
+            );
+        }
+
+        if (!emitted_self) {
+            if (count > 0) try w.writeByte(',');
+            try w.print(
+                "{{\"id\":{f},\"name\":{f},\"platform\":\"macos\",\"online\":true,\"isSelf\":true,\"version\":{f},\"lastSeenAt\":{f},\"createdAt\":{f}}}",
+                .{
+                    json.fmt(self.device_id, .{}),
+                    json.fmt(self.device_name, .{}),
+                    json.fmt(build_info.version, .{}),
+                    json.fmt(now_rfc, .{}),
+                    json.fmt(now_rfc, .{}),
+                },
+            );
+        }
+        try w.writeByte(']');
+        return aw.toOwnedSlice();
+    }
+
     pub fn spacesJson(self: *const EngineHost) ![]u8 {
         var aw: std.Io.Writer.Allocating = .init(self.gpa);
         errdefer aw.deinit();
         const w = &aw.writer;
+        const now = self.nowMs();
         try w.writeByte('[');
         for (self.spaces.items, 0..) |s, idx| {
             if (idx > 0) try w.writeByte(',');
+            var cbuf: [32]u8 = undefined;
+            const created_rfc = auth_host.formatRfc3339Ms(&cbuf, if (s.created_at_ms > 0) s.created_at_ms else now);
             try w.print(
-                "{{\"id\":{f},\"deviceId\":{f},\"path\":{f},\"name\":{f},\"gitDetected\":{}}}",
-                .{ json.fmt(s.id, .{}), json.fmt(s.device_id, .{}), json.fmt(s.path, .{}), json.fmt(s.name, .{}), s.git_detected },
+                "{{\"id\":{f},\"deviceId\":{f},\"path\":{f},\"name\":{f},\"gitDetected\":{},\"createdAt\":{f}",
+                .{ json.fmt(s.id, .{}), json.fmt(s.device_id, .{}), json.fmt(s.path, .{}), json.fmt(s.name, .{}), s.git_detected, json.fmt(created_rfc, .{}) },
             );
+            if (s.checkout_id) |cid| {
+                try w.print(",\"checkoutId\":{f}", .{json.fmt(cid, .{})});
+            }
+            try w.writeByte('}');
         }
         try w.writeByte(']');
         return aw.toOwnedSlice();
@@ -2475,23 +2924,65 @@ pub const EngineHost = struct {
         var aw: std.Io.Writer.Allocating = .init(self.gpa);
         errdefer aw.deinit();
         const w = &aw.writer;
+        const now = self.nowMs();
         try w.writeByte('[');
         for (self.chats.items, 0..) |c, idx| {
             if (idx > 0) try w.writeByte(',');
-            const title = c.title orelse "New Chat";
             const model = c.model orelse defaultModelForHarness(c.harness);
             const reasoning = c.reasoning orelse "high";
-            const cwd = c.cwd orelse self.chatWorkspacePath(c.id);
-            const branch = c.branch orelse "experimental-zig-branch";
-            if (c.space_id) |sid| {
+            const ws_path = self.chatWorkspacePath(c.id);
+            const resolved_cwd: ?[]const u8 = c.cwd orelse (if (!std.mem.eql(u8, ws_path, ".")) ws_path else null);
+
+            var created_buf: [32]u8 = undefined;
+            const created_rfc = auth_host.formatRfc3339Ms(
+                &created_buf,
+                if (c.created_at_ms > 0) c.created_at_ms else now,
+            );
+
+            try w.print(
+                "{{\"id\":{f},\"deviceId\":{f},\"harness\":{f},\"archived\":{},\"createdAt\":{f}",
+                .{
+                    json.fmt(c.id, .{}),
+                    json.fmt(c.device_id, .{}),
+                    json.fmt(c.harness, .{}),
+                    c.archived,
+                    json.fmt(created_rfc, .{}),
+                },
+            );
+            if (c.title) |t| try w.print(",\"title\":{f}", .{json.fmt(t, .{})});
+            if (c.space_id) |sid| try w.print(",\"spaceId\":{f}", .{json.fmt(sid, .{})});
+            if (c.parent_chat_id) |pid| try w.print(",\"parentChatId\":{f}", .{json.fmt(pid, .{})});
+            if (resolved_cwd) |cw| try w.print(",\"cwd\":{f}", .{json.fmt(cw, .{})});
+            if (c.branch) |br| try w.print(",\"branch\":{f}", .{json.fmt(br, .{})});
+            if (c.preview) |pr| try w.print(",\"lastMessagePreview\":{f}", .{json.fmt(pr, .{})});
+            if (c.harness_session_id) |hs| try w.print(",\"harnessSessionId\":{f}", .{json.fmt(hs, .{})});
+            if (c.last_message_at_ms > 0) {
+                var mbuf: [32]u8 = undefined;
+                const mrfc = auth_host.formatRfc3339Ms(&mbuf, c.last_message_at_ms);
+                try w.print(",\"lastMessageAt\":{f}", .{json.fmt(mrfc, .{})});
+            }
+            if (c.last_prompt_at_ms > 0) {
+                var pbuf: [32]u8 = undefined;
+                const prfc = auth_host.formatRfc3339Ms(&pbuf, c.last_prompt_at_ms);
+                try w.print(",\"lastPromptAt\":{f}", .{json.fmt(prfc, .{})});
+            }
+            if (c.last_seen_at_ms > 0) {
+                var sbuf: [32]u8 = undefined;
+                const srfc = auth_host.formatRfc3339Ms(&sbuf, c.last_seen_at_ms);
+                try w.print(",\"lastSeenAt\":{f}", .{json.fmt(srfc, .{})});
+            }
+            if (c.source_context_json) |sc| {
+                try w.print(",\"sourceContext\":{s}", .{sc});
+            }
+            if (c.chat_mode) {
                 try w.print(
-                    "{{\"id\":{f},\"title\":{f},\"spaceId\":{f},\"deviceId\":{f},\"harness\":{f},\"archived\":{},\"createdAt\":\"2026-11-10T08:00:00Z\",\"lastMessageAt\":\"2026-11-10T08:05:00Z\",\"cwd\":{f},\"branch\":{f},\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f}}}}}",
-                    .{ json.fmt(c.id, .{}), json.fmt(title, .{}), json.fmt(sid, .{}), json.fmt(c.device_id, .{}), json.fmt(c.harness, .{}), c.archived, json.fmt(cwd, .{}), json.fmt(branch, .{}), json.fmt(c.harness, .{}), json.fmt(model, .{}), json.fmt(reasoning, .{}) },
+                    ",\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f},\"chatMode\":true}}}}",
+                    .{ json.fmt(c.harness, .{}), json.fmt(model, .{}), json.fmt(reasoning, .{}) },
                 );
             } else {
                 try w.print(
-                    "{{\"id\":{f},\"title\":{f},\"deviceId\":{f},\"harness\":{f},\"archived\":{},\"createdAt\":\"2026-11-10T08:00:00Z\",\"lastMessageAt\":\"2026-11-10T08:05:00Z\",\"cwd\":{f},\"branch\":{f},\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f}}}}}",
-                    .{ json.fmt(c.id, .{}), json.fmt(title, .{}), json.fmt(c.device_id, .{}), json.fmt(c.harness, .{}), c.archived, json.fmt(cwd, .{}), json.fmt(branch, .{}), json.fmt(c.harness, .{}), json.fmt(model, .{}), json.fmt(reasoning, .{}) },
+                    ",\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f}}}}}",
+                    .{ json.fmt(c.harness, .{}), json.fmt(model, .{}), json.fmt(reasoning, .{}) },
                 );
             }
         }
@@ -2503,17 +2994,424 @@ pub const EngineHost = struct {
         var aw: std.Io.Writer.Allocating = .init(self.gpa);
         errdefer aw.deinit();
         const w = &aw.writer;
+        const now = self.nowMs();
         try w.writeByte('[');
         for (self.chats.items, 0..) |c, idx| {
             if (idx > 0) try w.writeByte(',');
             const status = c.activity_status orelse "idle";
-            try w.print(
-                "{{\"chatId\":{f},\"status\":{f},\"updatedAt\":\"2026-11-10T08:05:00Z\"}}",
-                .{ json.fmt(c.id, .{}), json.fmt(status, .{}) },
-            );
+            const updated_ms = if (c.activity_updated_at_ms > 0)
+                c.activity_updated_at_ms
+            else if (c.last_message_at_ms > 0)
+                c.last_message_at_ms
+            else if (c.created_at_ms > 0)
+                c.created_at_ms
+            else
+                now;
+            var ubuf: [32]u8 = undefined;
+            const updated_rfc = auth_host.formatRfc3339Ms(&ubuf, updated_ms);
+            if (c.activity_started_at_ms > 0) {
+                var st_buf: [32]u8 = undefined;
+                const started_rfc = auth_host.formatRfc3339Ms(&st_buf, c.activity_started_at_ms);
+                try w.print(
+                    "{{\"chatId\":{f},\"status\":{f},\"startedAt\":{f},\"updatedAt\":{f}}}",
+                    .{ json.fmt(c.id, .{}), json.fmt(status, .{}), json.fmt(started_rfc, .{}), json.fmt(updated_rfc, .{}) },
+                );
+            } else {
+                try w.print(
+                    "{{\"chatId\":{f},\"status\":{f},\"updatedAt\":{f}}}",
+                    .{ json.fmt(c.id, .{}), json.fmt(status, .{}), json.fmt(updated_rfc, .{}) },
+                );
+            }
         }
         try w.writeByte(']');
         return aw.toOwnedSlice();
+    }
+
+    /// Pull the signed-in organization's cloud Workspace Registry (`GET {edge_url}/registry/{orgId}/rows?since=0`),
+    /// hydrating synced `devices`, `spaces`, `chats`, and `sessions` 1:1 with `crates/doc/src/registry.rs`,
+    /// and broadcasting updated `Watch*` frames to connected UI clients.
+    pub fn syncFromEdgeRegistry(self: *EngineHost, io: std.Io) bool {
+        if (!self.auth.signed_in) return false;
+        const edge_raw = self.auth.edge_url orelse return false;
+        const org_id = self.auth.org_id orelse return false;
+        const tok0 = self.auth.ensureAccessToken(io, false) orelse return false;
+
+        const base = std.mem.trimEnd(u8, edge_raw, "/");
+        const enc_org = auth_host.urlEncodeAlloc(self.gpa, org_id) catch return false;
+        defer self.gpa.free(enc_org);
+        const url = std.fmt.allocPrint(self.gpa, "{s}/registry/{s}/rows?since=0", .{ base, enc_org }) catch return false;
+        defer self.gpa.free(url);
+
+        var resp = auth_host.AuthManager.edgeRequest(self.gpa, io, "GET", url, tok0, null) catch return false;
+        if (resp.status == 401) {
+            resp.deinit(self.gpa);
+            const tok1 = self.auth.ensureAccessToken(io, true) orelse return false;
+            resp = auth_host.AuthManager.edgeRequest(self.gpa, io, "GET", url, tok1, null) catch return false;
+        }
+        defer resp.deinit(self.gpa);
+        if (resp.status != 200) return false;
+
+        var parsed = json.parseFromSlice(json.Value, self.gpa, resp.body, .{}) catch return false;
+        defer parsed.deinit();
+        if (parsed.value != .object) return false;
+        const rows_val = parsed.value.object.get("rows") orelse return false;
+        if (rows_val != .array) return false;
+
+        // Pass 1: devices, spaces, chats
+        for (rows_val.array.items) |row_val| {
+            if (row_val != .object) continue;
+            const ro = row_val.object;
+            if (ro.get("deleted")) |dv| if (dv == .bool and dv.bool) continue;
+            const kind = regOptStr(ro, "kind") orelse continue;
+            const row_id = regOptStr(ro, "id") orelse continue;
+            const fv = ro.get("fields") orelse continue;
+            if (fv != .object) continue;
+            const f = fv.object;
+
+            if (std.mem.eql(u8, kind, "devices")) {
+                self.upsertSyncedDevice(row_id, f) catch continue;
+            } else if (std.mem.eql(u8, kind, "spaces")) {
+                self.upsertSyncedSpace(row_id, f) catch continue;
+            } else if (std.mem.eql(u8, kind, "chats")) {
+                self.upsertSyncedChat(row_id, f) catch continue;
+            }
+        }
+
+        // Pass 2: sessions (attached to synced chats)
+        for (rows_val.array.items) |row_val| {
+            if (row_val != .object) continue;
+            const ro = row_val.object;
+            if (ro.get("deleted")) |dv| if (dv == .bool and dv.bool) continue;
+            const kind = regOptStr(ro, "kind") orelse continue;
+            if (!std.mem.eql(u8, kind, "sessions")) continue;
+            const row_id = regOptStr(ro, "id") orelse continue;
+            const fv = ro.get("fields") orelse continue;
+            if (fv != .object) continue;
+            const f = fv.object;
+
+            const cid = regOptStr(f, "chatId") orelse row_id;
+            const status = regOptStr(f, "status") orelse "idle";
+            const started_ms = regOptEpochMs(f, "startedAt");
+            const updated_ms = regOptEpochMs(f, "updatedAt");
+            for (self.chats.items) |*c| {
+                if (std.mem.eql(u8, c.id, cid)) {
+                    if (self.gpa.dupe(u8, status)) |scopy| {
+                        if (c.activity_status) |old| self.gpa.free(old);
+                        c.activity_status = scopy;
+                    } else |_| {}
+                    if (started_ms > 0) c.activity_started_at_ms = started_ms;
+                    if (updated_ms > 0) c.activity_updated_at_ms = updated_ms;
+                    break;
+                }
+            }
+        }
+
+        // Drop the local fallback placeholder `"space-zig-default"` if real cloud spaces arrived
+        // and no chat references `"space-zig-default"`.
+        if (self.spaces.items.len > 1) {
+            var default_used = false;
+            for (self.chats.items) |c| {
+                if (c.space_id) |sid| {
+                    if (std.mem.eql(u8, sid, "space-zig-default")) {
+                        default_used = true;
+                        break;
+                    }
+                }
+            }
+            if (!default_used) {
+                var idx: usize = 0;
+                while (idx < self.spaces.items.len) {
+                    if (std.mem.eql(u8, self.spaces.items[idx].id, "space-zig-default")) {
+                        self.spaces.items[idx].deinit(self.gpa);
+                        _ = self.spaces.orderedRemove(idx);
+                        break;
+                    }
+                    idx += 1;
+                }
+            }
+        }
+
+        if (self.devicesJson()) |dj| {
+            defer self.gpa.free(dj);
+            self.broadcastWatch(.devices, null, dj) catch {};
+        } else |_| {}
+        if (self.spacesJson()) |spj| {
+            defer self.gpa.free(spj);
+            self.broadcastWatch(.spaces, null, spj) catch {};
+        } else |_| {}
+        if (self.chatsJson()) |chj| {
+            defer self.gpa.free(chj);
+            self.broadcastWatch(.chats, null, chj) catch {};
+        } else |_| {}
+        if (self.sessionsJson()) |sj| {
+            defer self.gpa.free(sj);
+            self.broadcastWatch(.sessions, null, sj) catch {};
+        } else |_| {}
+
+        return true;
+    }
+
+    fn upsertSyncedDevice(self: *EngineHost, row_id: []const u8, f: json.ObjectMap) !void {
+        const id = regOptStr(f, "id") orelse row_id;
+        const name = regOptStr(f, "name") orelse "Unknown device";
+        const platform = regOptStr(f, "platform") orelse "";
+        const version = regOptStr(f, "version");
+        const last_seen_ms = regOptEpochMs(f, "lastSeenAt");
+        const created_ms = regOptEpochMs(f, "createdAt");
+
+        for (self.devices.items) |*d| {
+            if (std.mem.eql(u8, d.id, id)) {
+                const n_c = try self.gpa.dupe(u8, name);
+                errdefer self.gpa.free(n_c);
+                const p_c = try self.gpa.dupe(u8, platform);
+                errdefer self.gpa.free(p_c);
+                const v_c = if (version) |v| try self.gpa.dupe(u8, v) else null;
+                self.gpa.free(d.name);
+                self.gpa.free(d.platform);
+                if (d.version) |old| self.gpa.free(old);
+                d.name = n_c;
+                d.platform = p_c;
+                d.version = v_c;
+                if (last_seen_ms > 0) d.last_seen_at_ms = last_seen_ms;
+                if (created_ms > 0) d.created_at_ms = created_ms;
+                return;
+            }
+        }
+
+        const id_c = try self.gpa.dupe(u8, id);
+        errdefer self.gpa.free(id_c);
+        const n_c = try self.gpa.dupe(u8, name);
+        errdefer self.gpa.free(n_c);
+        const p_c = try self.gpa.dupe(u8, platform);
+        errdefer self.gpa.free(p_c);
+        const v_c = if (version) |v| try self.gpa.dupe(u8, v) else null;
+        errdefer if (v_c) |v| self.gpa.free(v);
+        try self.devices.append(self.gpa, .{
+            .id = id_c,
+            .name = n_c,
+            .platform = p_c,
+            .version = v_c,
+            .last_seen_at_ms = last_seen_ms,
+            .created_at_ms = created_ms,
+        });
+    }
+
+    fn upsertSyncedSpace(self: *EngineHost, row_id: []const u8, f: json.ObjectMap) !void {
+        const id = regOptStr(f, "id") orelse row_id;
+        const path = regOptStr(f, "path") orelse return;
+        const dev_id = regOptStr(f, "deviceId") orelse self.device_id;
+        const name = regOptStr(f, "name") orelse std.fs.path.basename(path);
+        const git = regOptBool(f, "gitDetected", false);
+        const checkout_id = regOptStr(f, "checkoutId");
+        const created_ms = regOptEpochMs(f, "createdAt");
+
+        for (self.spaces.items) |*s| {
+            if (std.mem.eql(u8, s.id, id)) {
+                const d_c = try self.gpa.dupe(u8, dev_id);
+                errdefer self.gpa.free(d_c);
+                const p_c = try self.gpa.dupe(u8, path);
+                errdefer self.gpa.free(p_c);
+                const n_c = try self.gpa.dupe(u8, name);
+                errdefer self.gpa.free(n_c);
+                const co_c = if (checkout_id) |co| try self.gpa.dupe(u8, co) else null;
+                self.gpa.free(s.device_id);
+                self.gpa.free(s.path);
+                self.gpa.free(s.name);
+                if (s.checkout_id) |old| self.gpa.free(old);
+                s.device_id = d_c;
+                s.path = p_c;
+                s.name = n_c;
+                s.git_detected = git;
+                s.checkout_id = co_c;
+                if (created_ms > 0) s.created_at_ms = created_ms;
+                return;
+            }
+        }
+
+        const id_c = try self.gpa.dupe(u8, id);
+        errdefer self.gpa.free(id_c);
+        const d_c = try self.gpa.dupe(u8, dev_id);
+        errdefer self.gpa.free(d_c);
+        const p_c = try self.gpa.dupe(u8, path);
+        errdefer self.gpa.free(p_c);
+        const n_c = try self.gpa.dupe(u8, name);
+        errdefer self.gpa.free(n_c);
+        const co_c = if (checkout_id) |co| try self.gpa.dupe(u8, co) else null;
+        errdefer if (co_c) |co| self.gpa.free(co);
+        try self.spaces.append(self.gpa, .{
+            .id = id_c,
+            .device_id = d_c,
+            .path = p_c,
+            .name = n_c,
+            .git_detected = git,
+            .checkout_id = co_c,
+            .created_at_ms = created_ms,
+        });
+    }
+
+    fn upsertSyncedChat(self: *EngineHost, row_id: []const u8, f: json.ObjectMap) !void {
+        const id = regOptStr(f, "id") orelse row_id;
+        const dev_id = regOptStr(f, "deviceId") orelse self.device_id;
+        const space_id = regOptStr(f, "spaceId");
+        const title = regOptStr(f, "title");
+        const archived = regOptBool(f, "archived", false);
+        const parent_chat_id = regOptStr(f, "parentChatId");
+        const cwd = regOptStr(f, "cwd");
+        const branch = regOptStr(f, "branch");
+        const preview = regOptStr(f, "lastMessagePreview");
+        const harness_session_id = regOptStr(f, "harnessSessionId");
+        const created_ms = regOptEpochMs(f, "createdAt");
+        const last_msg_ms = regOptEpochMs(f, "lastMessageAt");
+        const last_prompt_ms = regOptEpochMs(f, "lastPromptAt");
+        const last_seen_ms = regOptEpochMs(f, "lastSeenAt");
+
+        const cfg_obj: ?json.ObjectMap = if (f.get("config")) |cv| (if (cv == .object) cv.object else null) else null;
+        const harness = (if (cfg_obj) |co| regOptStr(co, "harness") else null) orelse regOptStr(f, "harness") orelse "graff";
+        const model = if (cfg_obj) |co| regOptStr(co, "model") else null;
+        const reasoning = if (cfg_obj) |co| regOptStr(co, "reasoning") else null;
+        const chat_mode = if (cfg_obj) |co| regOptBool(co, "chatMode", false) else false;
+
+        var sc_json: ?[]u8 = null;
+        errdefer if (sc_json) |sc| self.gpa.free(sc);
+        if (f.get("sourceContext")) |scv| {
+            if (scv == .object) {
+                sc_json = try std.fmt.allocPrint(self.gpa, "{f}", .{json.fmt(scv, .{})});
+            }
+        }
+
+        var rec = ChatRecord{
+            .id = try self.gpa.dupe(u8, id),
+            .space_id = null,
+            .device_id = &.{},
+            .harness = &.{},
+        };
+        errdefer {
+            self.gpa.free(rec.id);
+            if (rec.space_id) |s| self.gpa.free(s);
+            if (rec.device_id.len > 0) self.gpa.free(rec.device_id);
+            if (rec.harness.len > 0) self.gpa.free(rec.harness);
+            if (rec.title) |t| self.gpa.free(t);
+            if (rec.model) |m| self.gpa.free(m);
+            if (rec.reasoning) |r| self.gpa.free(r);
+            if (rec.branch) |b| self.gpa.free(b);
+            if (rec.cwd) |cw| self.gpa.free(cw);
+            if (rec.parent_chat_id) |p| self.gpa.free(p);
+            if (rec.preview) |pr| self.gpa.free(pr);
+            if (rec.harness_session_id) |hs| self.gpa.free(hs);
+        }
+        rec.device_id = try self.gpa.dupe(u8, dev_id);
+        rec.harness = try self.gpa.dupe(u8, harness);
+        rec.space_id = if (space_id) |s| try self.gpa.dupe(u8, s) else null;
+        rec.title = if (title) |t| try self.gpa.dupe(u8, t) else null;
+        rec.model = if (model) |m| try self.gpa.dupe(u8, m) else null;
+        rec.reasoning = if (reasoning) |r| try self.gpa.dupe(u8, r) else null;
+        rec.branch = if (branch) |b| try self.gpa.dupe(u8, b) else null;
+        rec.cwd = if (cwd) |cw| try self.gpa.dupe(u8, cw) else null;
+        rec.parent_chat_id = if (parent_chat_id) |p| try self.gpa.dupe(u8, p) else null;
+        rec.preview = if (preview) |pr| try self.gpa.dupe(u8, pr) else null;
+        rec.harness_session_id = if (harness_session_id) |hs| try self.gpa.dupe(u8, hs) else null;
+        rec.source_context_json = sc_json;
+        sc_json = null;
+        rec.archived = archived;
+        rec.chat_mode = chat_mode;
+        rec.created_at_ms = created_ms;
+        rec.last_message_at_ms = last_msg_ms;
+        rec.last_prompt_at_ms = last_prompt_ms;
+        rec.last_seen_at_ms = last_seen_ms;
+
+        for (self.chats.items) |*existing| {
+            if (std.mem.eql(u8, existing.id, id)) {
+                rec.pinned = existing.pinned;
+                if (existing.activity_status) |st| {
+                    rec.activity_status = st;
+                    existing.activity_status = null;
+                }
+                rec.activity_started_at_ms = existing.activity_started_at_ms;
+                rec.activity_updated_at_ms = existing.activity_updated_at_ms;
+                existing.deinit(self.gpa);
+                existing.* = rec;
+                return;
+            }
+        }
+        try self.chats.append(self.gpa, rec);
+    }
+
+    /// Fetch `/chat2/{chatId}/tail` from the edge server and cache the `messages` JSON array
+    /// so opening any cloud-synced chat renders its full transcript immediately.
+    pub fn fetchEdgeChatTailMessagesJson(self: *EngineHost, chat_id: []const u8) ?[]const u8 {
+        if (self.remote_tails.get(chat_id)) |cached| return cached;
+        const io = self.io orelse return null;
+        if (!self.auth.signed_in) return null;
+        const edge_raw = self.auth.edge_url orelse return null;
+        const tok0 = self.auth.ensureAccessToken(io, false) orelse return null;
+
+        const base = std.mem.trimEnd(u8, edge_raw, "/");
+        const enc_cid = auth_host.urlEncodeAlloc(self.gpa, chat_id) catch return null;
+        defer self.gpa.free(enc_cid);
+        const url = std.fmt.allocPrint(self.gpa, "{s}/chat2/{s}/tail", .{ base, enc_cid }) catch return null;
+        defer self.gpa.free(url);
+
+        var resp = auth_host.AuthManager.edgeRequest(self.gpa, io, "GET", url, tok0, null) catch return null;
+        if (resp.status == 401) {
+            resp.deinit(self.gpa);
+            const tok1 = self.auth.ensureAccessToken(io, true) orelse return null;
+            resp = auth_host.AuthManager.edgeRequest(self.gpa, io, "GET", url, tok1, null) catch return null;
+        }
+        defer resp.deinit(self.gpa);
+        if (resp.status != 200) return null;
+
+        var parsed = json.parseFromSlice(json.Value, self.gpa, resp.body, .{}) catch return null;
+        defer parsed.deinit();
+        if (parsed.value != .object) return null;
+        const msgs_val = parsed.value.object.get("messages") orelse return null;
+        if (msgs_val != .array) return null;
+
+        const msgs_json = std.fmt.allocPrint(self.gpa, "{f}", .{json.fmt(msgs_val, .{})}) catch return null;
+        errdefer self.gpa.free(msgs_json);
+
+        // Keep remote_tails strictly bounded (cap at 64 cached transcripts).
+        if (self.remote_tails.count() >= 64) {
+            var it = self.remote_tails.iterator();
+            if (it.next()) |first| {
+                const evict_k = first.key_ptr.*;
+                if (self.remote_tails.fetchRemove(evict_k)) |old| {
+                    self.gpa.free(old.key);
+                    self.gpa.free(old.value);
+                }
+            }
+        }
+
+        const key_copy = self.gpa.dupe(u8, chat_id) catch {
+            self.gpa.free(msgs_json);
+            return null;
+        };
+        self.remote_tails.put(self.gpa, key_copy, msgs_json) catch {
+            self.gpa.free(key_copy);
+            self.gpa.free(msgs_json);
+            return null;
+        };
+        return self.remote_tails.get(chat_id);
+    }
+
+    fn regOptStr(o: json.ObjectMap, key: []const u8) ?[]const u8 {
+        const v = o.get(key) orelse return null;
+        if (v != .string) return null;
+        return if (v.string.len > 0) v.string else null;
+    }
+
+    fn regOptBool(o: json.ObjectMap, key: []const u8, default_val: bool) bool {
+        const v = o.get(key) orelse return default_val;
+        return if (v == .bool) v.bool else default_val;
+    }
+
+    fn regOptEpochMs(o: json.ObjectMap, key: []const u8) i64 {
+        const v = o.get(key) orelse return 0;
+        return switch (v) {
+            .integer => |i| i,
+            .float => |fl| @intFromFloat(fl),
+            .string => |s| std.fmt.parseInt(i64, s, 10) catch 0,
+            else => 0,
+        };
     }
 
     pub fn syncStatusJson(self: *EngineHost) ![]u8 {
@@ -3138,24 +4036,26 @@ test "Full Rust parity Login (SignInHeadless -> CompleteSignIn -> NeedsOrganizat
     defer edge_srv.deinit(io);
     const edge_port = edge_srv.socket.address.getPort();
 
+    var stop_edge = std.atomic.Value(bool).init(false);
     const EdgeCtx = struct {
         srv: *std.Io.net.Server,
         tio: std.Io,
+        stop: *std.atomic.Value(bool),
 
         fn run(ctx: @This()) void {
-            // Serve 3 sequential HTTP requests: /auth/exchange, /auth/orgs, /auth/refresh
-            for (0..3) |_| {
+            while (!ctx.stop.load(.acquire)) {
                 var stream = ctx.srv.accept(ctx.tio) catch return;
                 defer stream.close(ctx.tio);
+                if (ctx.stop.load(.acquire)) return;
                 var rbuf: [4096]u8 = undefined;
                 var wbuf: [4096]u8 = undefined;
                 var reader = stream.reader(ctx.tio, &rbuf);
                 var writer = stream.writer(ctx.tio, &wbuf);
 
-                const req_line = reader.interface.takeDelimiterInclusive('\n') catch return;
+                const req_line = reader.interface.takeDelimiterInclusive('\n') catch continue;
                 var content_len: usize = 0;
                 while (true) {
-                    const line = reader.interface.takeDelimiterInclusive('\n') catch return;
+                    const line = reader.interface.takeDelimiterInclusive('\n') catch break;
                     const trimmed = std.mem.trimEnd(u8, line, "\r\n");
                     if (trimmed.len == 0) break;
                     if (std.ascii.startsWithIgnoreCase(trimmed, "content-length:")) {
@@ -3168,7 +4068,7 @@ test "Full Rust parity Login (SignInHeadless -> CompleteSignIn -> NeedsOrganizat
                     var rem = content_len;
                     while (rem > 0) {
                         const chunk = @min(rem, body_discard.len);
-                        reader.interface.readSliceAll(body_discard[0..chunk]) catch return;
+                        reader.interface.readSliceAll(body_discard[0..chunk]) catch break;
                         rem -= chunk;
                     }
                 }
@@ -3180,20 +4080,28 @@ test "Full Rust parity Login (SignInHeadless -> CompleteSignIn -> NeedsOrganizat
                     "{\"user\":{\"id\":\"user_1\",\"email\":\"w@example.com\",\"firstName\":\"Wing\",\"lastName\":\"Test\"},\"accessToken\":\"e30.eyJzdWIiOiJ1c2VyXzEiLCJpYXQiOjEwMDAsImV4cCI6NDYwMH0.sig\",\"refreshToken\":\"refresh-1\"}"
                 else if (std.mem.indexOf(u8, req_line, "/auth/orgs") != null)
                     "{\"orgs\":[{\"id\":\"om_1\",\"organizationId\":\"org_1\",\"name\":\"Acme\"}]}"
+                else if (std.mem.indexOf(u8, req_line, "/registry/") != null)
+                    "{\"seq\":0,\"rows\":[]}"
                 else
                     "{\"accessToken\":\"e30.eyJzdWIiOiJ1c2VyXzEiLCJpYXQiOjEwMDAsImV4cCI6NDYwMCwib3JnX2lkIjoib3JnXzEifQ.sig\",\"refreshToken\":\"rotated-1\"}";
 
                 writer.interface.print(
                     "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {d}\r\nconnection: close\r\n\r\n{s}",
                     .{ body.len, body },
-                ) catch return;
-                writer.interface.flush() catch return;
+                ) catch continue;
+                writer.interface.flush() catch continue;
             }
         }
     };
 
-    const edge_thread = try std.Thread.spawn(.{}, EdgeCtx.run, .{EdgeCtx{ .srv = &edge_srv, .tio = io }});
-    defer edge_thread.join();
+    const edge_thread = try std.Thread.spawn(.{}, EdgeCtx.run, .{EdgeCtx{ .srv = &edge_srv, .tio = io, .stop = &stop_edge }});
+    defer {
+        stop_edge.store(true, .release);
+        if (std.Io.net.IpAddress.parse("127.0.0.1", edge_port)) |wake_addr| {
+            if (wake_addr.connect(io, .{ .mode = .stream })) |ws_wake| ws_wake.close(io) else |_| {}
+        } else |_| {}
+        edge_thread.join();
+    }
 
     var host = try EngineHost.init(gpa, "dev-sync-1", "SyncHost");
     defer host.deinit();
@@ -3668,4 +4576,213 @@ test "Mechanical 1:1 queue delivery gate, doc constants, and sync budget parity 
     var watch_sb = try host.handle("WatchSidebarPreferences", json.Value{ .object = .empty });
     defer watch_sb.stream_items_json.deinit(gpa);
     try testing.expectEqualStrings("{\"sortBy\":\"created\",\"groupBy\":\"status\"}", watch_sb.stream_items_json.items[0]);
+}
+
+test "Headed browser OAuth loopback callback (SignIn -> /callback -> autoSelectOrg -> graffKey) + CodegraffSignIn device flow" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Reserve a free loopback callback port for headed SignIn.
+    const any_addr = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+    const cb_port = blk: {
+        var probe = try any_addr.listen(io, .{ .reuse_address = true });
+        defer probe.deinit(io);
+        break :blk probe.socket.address.getPort();
+    };
+
+    // Mock Edge + Gateway HTTP server handling:
+    // 1. POST /auth/exchange (returns user + graffKey + org-less JWT)
+    // 2. GET  /auth/orgs     (returns personal org_personal_1)
+    // 3. POST /auth/refresh  (rotates refresh token + returns org-scoped JWT)
+    // 4. POST /v1/device/start
+    // 5. POST /v1/device/poll
+    var mock_srv = try any_addr.listen(io, .{ .reuse_address = true });
+    defer mock_srv.deinit(io);
+    const mock_port = mock_srv.socket.address.getPort();
+
+    var stop_mock = std.atomic.Value(bool).init(false);
+    const MockCtx = struct {
+        srv: *std.Io.net.Server,
+        tio: std.Io,
+        stop: *std.atomic.Value(bool),
+
+        fn run(ctx: @This()) void {
+            while (!ctx.stop.load(.acquire)) {
+                var stream = ctx.srv.accept(ctx.tio) catch return;
+                defer stream.close(ctx.tio);
+                if (ctx.stop.load(.acquire)) return;
+                var rbuf: [4096]u8 = undefined;
+                var wbuf: [4096]u8 = undefined;
+                var reader = stream.reader(ctx.tio, &rbuf);
+                var writer = stream.writer(ctx.tio, &wbuf);
+
+                const req_line = reader.interface.takeDelimiterInclusive('\n') catch continue;
+                var content_len: usize = 0;
+                while (true) {
+                    const line = reader.interface.takeDelimiterInclusive('\n') catch break;
+                    const trimmed = std.mem.trimEnd(u8, line, "\r\n");
+                    if (trimmed.len == 0) break;
+                    if (std.ascii.startsWithIgnoreCase(trimmed, "content-length:")) {
+                        const val = std.mem.trim(u8, trimmed["content-length:".len..], " \t");
+                        content_len = std.fmt.parseInt(usize, val, 10) catch 0;
+                    }
+                }
+                if (content_len > 0) {
+                    var discard_buf: [1024]u8 = undefined;
+                    var rem = content_len;
+                    while (rem > 0) {
+                        const chunk = @min(rem, discard_buf.len);
+                        reader.interface.readSliceAll(discard_buf[0..chunk]) catch break;
+                        rem -= chunk;
+                    }
+                }
+
+                const body: []const u8 = if (std.mem.indexOf(u8, req_line, "/auth/exchange") != null)
+                    "{\"user\":{\"id\":\"u_live\",\"email\":\"ada@example.com\",\"firstName\":\"Ada\",\"lastName\":\"Lovelace\"},\"accessToken\":\"e30.eyJzdWIiOiJ1X2xpdmUiLCJpYXQiOjEwMDAsImV4cCI6NDYwMH0.sig\",\"refreshToken\":\"rt-browser-1\",\"graffKey\":{\"apiKey\":\"cg_sk_synthetic_browser_1\",\"email\":\"ada@example.com\"}}"
+                else if (std.mem.indexOf(u8, req_line, "/auth/orgs") != null)
+                    "{\"orgs\":[{\"id\":\"om_p\",\"organizationId\":\"org_1\",\"name\":\"Ada Personal\",\"personal\":true}]}"
+                else if (std.mem.indexOf(u8, req_line, "/auth/refresh") != null)
+                    "{\"accessToken\":\"e30.eyJzdWIiOiJ1X2xpdmUiLCJpYXQiOjEwMDAsImV4cCI6NDYwMCwib3JnX2lkIjoib3JnXzEifQ.sig\",\"refreshToken\":\"rt-browser-2\"}"
+                else if (std.mem.indexOf(u8, req_line, "/registry/org_1/rows") != null)
+                    "{\"seq\":4,\"rows\":[" ++
+                        "{\"kind\":\"devices\",\"id\":\"dev-cloud-mac\",\"deleted\":false,\"fields\":{\"id\":\"dev-cloud-mac\",\"name\":\"Ada MacBook\",\"platform\":\"macos\",\"version\":\"0.2.212\",\"lastSeenAt\":1794334000000,\"createdAt\":1794000000000},\"clocks\":{}}," ++
+                        "{\"kind\":\"spaces\",\"id\":\"space-cloud-1\",\"deleted\":false,\"fields\":{\"id\":\"space-cloud-1\",\"deviceId\":\"dev-cloud-mac\",\"path\":\"/work/synth-repo\",\"name\":\"synth-repo\",\"gitDetected\":true,\"createdAt\":1794100000000},\"clocks\":{}}," ++
+                        "{\"kind\":\"chats\",\"id\":\"chat-cloud-1\",\"deleted\":false,\"fields\":{\"id\":\"chat-cloud-1\",\"deviceId\":\"dev-cloud-mac\",\"spaceId\":\"space-cloud-1\",\"title\":\"Cloud Synced Chat\",\"archived\":false,\"cwd\":\"/work/synth-repo\",\"branch\":\"main\",\"lastMessagePreview\":\"Hello from cloud sync!\",\"createdAt\":1794333000000,\"lastMessageAt\":1794334050000,\"config\":{\"harness\":\"graff\",\"model\":\"claude-agent/claude-opus-5-5\",\"reasoning\":\"high\"}},\"clocks\":{}}," ++
+                        "{\"kind\":\"sessions\",\"id\":\"chat-cloud-1\",\"deleted\":false,\"fields\":{\"chatId\":\"chat-cloud-1\",\"deviceId\":\"dev-cloud-mac\",\"status\":\"idle\",\"updatedAt\":1794334050000},\"clocks\":{}}" ++
+                        "]}"
+                else if (std.mem.indexOf(u8, req_line, "/chat2/chat-cloud-1/tail") != null)
+                    "{\"chatId\":\"chat-cloud-1\",\"schemaVersion\":1,\"messages\":[{\"id\":\"m-cloud-1\",\"role\":\"assistant\",\"status\":\"complete\",\"createdAt\":1794334050000,\"parts\":[{\"id\":\"p-1\",\"kind\":\"text\",\"content\":\"Hello from cloud sync!\"}]}],\"totalMessages\":1,\"updatedAt\":1794334050000}"
+                else if (std.mem.indexOf(u8, req_line, "/v1/device/start") != null)
+                    "{\"device_code\":\"dev_code_synth_1\",\"verification_uri\":\"https://codegraff.example/cli/auth\",\"verification_uri_complete\":\"https://codegraff.example/cli/auth?code=ABCD-1234\",\"expires_in\":120,\"interval\":1}"
+                else
+                    "{\"status\":\"ok\",\"api_key\":\"cg_sk_synthetic_device_2\",\"email\":\"grace@example.com\"}";
+
+                writer.interface.print(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {d}\r\nconnection: close\r\n\r\n{s}",
+                    .{ body.len, body },
+                ) catch continue;
+                writer.interface.flush() catch continue;
+            }
+        }
+    };
+
+    const mock_thread = try std.Thread.spawn(.{}, MockCtx.run, .{MockCtx{ .srv = &mock_srv, .tio = io, .stop = &stop_mock }});
+    defer {
+        stop_mock.store(true, .release);
+        if (std.Io.net.IpAddress.parse("127.0.0.1", mock_port)) |wake_addr| {
+            if (wake_addr.connect(io, .{ .mode = .stream })) |ws_wake| ws_wake.close(io) else |_| {}
+        } else |_| {}
+        mock_thread.join();
+    }
+
+    const sess_dir = "/tmp/harness-zig-loopback-auth-test";
+    std.Io.Dir.cwd().createDirPath(io, sess_dir) catch {};
+    std.Io.Dir.cwd().deleteFile(io, "/tmp/harness-zig-loopback-auth-test/session.json") catch {};
+    std.Io.Dir.cwd().deleteFile(io, "/tmp/harness-zig-loopback-auth-test/codegraff-key.json") catch {};
+
+    var host = try EngineHost.init(gpa, "dev-browser-1", "BrowserHost");
+    defer host.deinit();
+    host.io = io;
+
+    const mock_url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}", .{mock_port});
+    try host.auth.configureCodegraff(mock_url, "cg_client_synth", "https://codegraff.example", sess_dir);
+    try host.auth.setCodegraffGateway(mock_url);
+    host.auth.callback_port = cb_port;
+
+    const empty_p = json.Value{ .object = .empty };
+    var watch_auth = try host.handleWithId(42, "AuthStatus", empty_p);
+    defer watch_auth.stream_items_json.deinit(gpa);
+    try testing.expectEqualStrings("{\"state\":\"signedOut\"}", watch_auth.stream_items_json.items[0]);
+
+    // 1. Call headed SignIn -> binds loopback callback listener and returns browser authorize URL.
+    const sign_in_res = try host.handle("SignIn", empty_p);
+    defer gpa.free(sign_in_res.unary_json);
+    const sign_in_obj = (try json.parseFromSliceLeaky(json.Value, a, sign_in_res.unary_json, .{})).object;
+    const auth_url = sign_in_obj.get("url").?.string;
+    try testing.expect(std.mem.indexOf(u8, auth_url, "redirect_uri=http%3A%2F%2F127.0.0.1%3A") != null);
+    try testing.expect(std.mem.indexOf(u8, auth_url, "scope=openid%20email%20offline_access") != null);
+    const state_param = (try auth_host.extractQueryParamAlloc(gpa, auth_url, "state")).?;
+    defer gpa.free(state_param);
+
+    // 2. Simulate user's browser hitting `http://127.0.0.1:{cb_port}/callback?code=c_ok&state={state_param}`.
+    const cb_url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/callback?code=c_ok&state={s}", .{ cb_port, state_param });
+    var cb_reply = try auth_host.AuthManager.edgeRequest(gpa, io, "GET", cb_url, null, null);
+    defer cb_reply.deinit(gpa);
+    try testing.expectEqual(@as(u16, 200), cb_reply.status);
+    try testing.expect(std.mem.indexOf(u8, cb_reply.body, "Sign-in sent to Harness") != null);
+
+    // Wait briefly for `onOAuthCallbackLanded` worker to finish token exchange & org auto-selection.
+    var tries: usize = 0;
+    while (tries < 100) : (tries += 1) {
+        host.mutex.lockUncancelable(io);
+        const done = host.auth.signed_in;
+        host.mutex.unlock(io);
+        if (done) break;
+        std.Io.sleep(io, .fromMilliseconds(10), .awake) catch break;
+    }
+
+    {
+        host.mutex.lockUncancelable(io);
+        defer host.mutex.unlock(io);
+        try testing.expect(host.auth.signed_in);
+        try testing.expectEqual(auth_host.AuthPhase.signed_in, host.auth.phase);
+        try testing.expectEqualStrings("ada@example.com", host.auth.email);
+        try testing.expectEqualStrings("Ada Lovelace", host.auth.user_name.?);
+        try testing.expectEqualStrings("org_1", host.auth.org_id.?);
+        try testing.expect(host.auth.codegraff_connected);
+        try testing.expectEqualStrings("cg_sk_synthetic_browser_1", host.auth.codegraff_api_key.?);
+        try testing.expect(host.pushed_frames.items.len >= 1);
+        try testing.expectEqual(@as(usize, 1), host.spaces.items.len);
+        try testing.expectEqualStrings("space-cloud-1", host.spaces.items[0].id);
+        try testing.expectEqual(@as(usize, 1), host.chats.items.len);
+        try testing.expectEqualStrings("chat-cloud-1", host.chats.items[0].id);
+
+        const ch_json = try host.chatsJson();
+        defer gpa.free(ch_json);
+        try testing.expect(std.mem.indexOf(u8, ch_json, "\"lastMessagePreview\":\"Hello from cloud sync!\"") != null);
+        try testing.expect(std.mem.indexOf(u8, ch_json, "\"lastMessageAt\":\"2026-11-10T18:07:30.000Z\"") != null);
+
+        const watch_tail_params = try json.parseFromSliceLeaky(json.Value, a, "{\"chatId\":\"chat-cloud-1\",\"openingTail\":true}", .{});
+        var watch_tail = try host.handle("WatchDocMessages", watch_tail_params);
+        defer watch_tail.stream_items_json.deinit(gpa);
+        try testing.expect(std.mem.indexOf(u8, watch_tail.stream_items_json.items[0], "Hello from cloud sync!") != null);
+    }
+
+    // Verify persisted session & CodeGraff key restore cleanly in a fresh AuthManager!
+    {
+        var restored = try auth_host.AuthManager.init(gpa);
+        defer restored.deinit();
+        try restored.configureCodegraff(mock_url, "cg_client_synth", "https://codegraff.example", sess_dir);
+        try testing.expect(restored.loadPersistedSession(io));
+        try testing.expect(restored.signed_in);
+        try testing.expectEqualStrings("ada@example.com", restored.email);
+        try testing.expectEqualStrings("Ada Lovelace", restored.user_name.?);
+        try testing.expectEqualStrings("org_1", restored.org_id.?);
+        try testing.expect(restored.codegraff_connected);
+        try testing.expectEqualStrings("cg_sk_synthetic_browser_1", restored.codegraff_api_key.?);
+    }
+
+    // 3. Test CodegraffSignIn device flow (`POST /v1/device/start` -> background `/v1/device/poll`).
+    host.mutex.lockUncancelable(io);
+    const cg_out = try host.handle("CodegraffSignIn", empty_p);
+    host.mutex.unlock(io);
+    defer gpa.free(cg_out.unary_json);
+    try testing.expect(std.mem.indexOf(u8, cg_out.unary_json, "https://codegraff.example/cli/auth?code=ABCD-1234") != null);
+
+    var poll_tries: usize = 0;
+    while (poll_tries < 30) : (poll_tries += 1) {
+        host.mutex.lockUncancelable(io);
+        const updated = if (host.auth.codegraff_email) |em| std.mem.eql(u8, em, "grace@example.com") else false;
+        host.mutex.unlock(io);
+        if (updated) break;
+        std.Io.sleep(io, .fromMilliseconds(100), .awake) catch break;
+    }
+    host.mutex.lockUncancelable(io);
+    try testing.expectEqualStrings("grace@example.com", host.auth.codegraff_email.?);
+    try testing.expectEqualStrings("cg_sk_synthetic_device_2", host.auth.codegraff_api_key.?);
+    try testing.expect(!host.auth.codegraff_pending);
+    host.mutex.unlock(io);
 }

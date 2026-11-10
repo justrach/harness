@@ -136,8 +136,27 @@ test {
     _ = @import("registry_sync.zig");
     _ = @import("chat2_client.zig");
     _ = @import("auth_host.zig");
+    _ = @import("agent_accounts_host.zig");
     _ = @import("run_journal.zig");
     _ = @import("mcp_server.zig");
     _ = @import("engine_host.zig");
     _ = @import("multi_machine_sync.zig");
+}
+
+test "auth_host.formatRfc3339Ms round-trips 1:1 with rules.parseTime" {
+    const std = @import("std");
+    const auth_host = @import("auth_host.zig");
+    const rules = @import("rules.zig");
+    const samples = [_]i64{
+        0,
+        1_700_000_000_123,
+        1_794_334_057_524,
+        1_799_884_800_000, // 2027-01-14T00:00:00.000Z
+        1_835_395_200_999, // 2028-02-29 leap day
+    };
+    for (samples) |ms| {
+        var buf: [32]u8 = undefined;
+        const formatted = auth_host.formatRfc3339Ms(&buf, ms);
+        try std.testing.expectEqual(@as(?i64, ms), rules.parseTime(formatted));
+    }
 }

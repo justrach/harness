@@ -175,8 +175,13 @@ fn onAuth(a: *App, _: u64, r: rpc.Reply) void {
     switch (r) {
         .item => |v| {
             const user = readUser(a.gpa, v) catch return;
+            const became_signed_in = (a.account.user == null and user != null);
             if (a.account.user) |*u| u.deinit(a.gpa);
             a.account.user = user;
+            if (became_signed_in and a.engine.scene == null) {
+                a.account.scope = .synced;
+                refresh(a);
+            }
         },
         .done, .err => a.account.w_auth = null,
         .ok => {},

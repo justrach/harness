@@ -17,6 +17,7 @@ const net = Io.net;
 const Allocator = std.mem.Allocator;
 const build_info = @import("build_info");
 const acp_host = @import("acp_host.zig");
+const auth_host = @import("auth_host.zig");
 const docs_store = @import("docs_store.zig");
 const engine_mod = @import("engine.zig");
 const engine_host = @import("engine_host.zig");
@@ -65,6 +66,7 @@ pub fn main(init: std.process.Init) !void {
     var host = try engine_host.EngineHost.init(gpa, "zig-local-device", "Zig Local Host");
     defer host.deinit();
     host.io = io;
+    host.agent_accounts.configureFromEnv(init.environ_map) catch {};
     var default_data_dir_buf: [512]u8 = undefined;
     var default_graff_buf: [512]u8 = undefined;
     if (init.environ_map.get("GRAFF_EXECUTABLE")) |ge| {
@@ -107,6 +109,44 @@ pub fn main(init: std.process.Init) !void {
                     host.store = sqlite_store;
                 } else |_| {}
             } else |_| {}
+        }
+    }
+
+    // Configure real CodeGraff OAuth/PKCE + device sign-in (`apps/harness/src/main.rs`),
+    // unless `HARNESS_AUTH_DISABLED=1` or an explicit `HARNESS_EDGE_TOKEN` dev override is set.
+    const auth_disabled = if (init.environ_map.get("HARNESS_AUTH_DISABLED")) |v|
+        (std.mem.eql(u8, v, "1") or std.ascii.eqlIgnoreCase(v, "true"))
+    else
+        false;
+    const edge_token = init.environ_map.get("HARNESS_EDGE_TOKEN");
+    if (!auth_disabled and (edge_token == null or edge_token.?.len == 0)) {
+        const edge_url = init.environ_map.get("HARNESS_EDGE_URL") orelse auth_host.default_edge_url;
+        const client_id = init.environ_map.get("HARNESS_CODEGRAFF_CLIENT_ID") orelse auth_host.default_codegraff_client_id;
+        const api_base = init.environ_map.get("HARNESS_CODEGRAFF_API_BASE") orelse auth_host.default_codegraff_api_base;
+        const gateway = init.environ_map.get("HARNESS_CODEGRAFF_GATEWAY") orelse auth_host.default_codegraff_gateway;
+        try host.auth.configureCodegraff(edge_url, client_id, api_base, resolved_data_dir);
+        try host.auth.setCodegraffGateway(gateway);
+        if (init.environ_map.get("HARNESS_CALLBACK_PORT")) |p_str| {
+            if (std.fmt.parseInt(u16, p_str, 10)) |cb_port| {
+                host.auth.callback_port = cb_port;
+            } else |_| {}
+        }
+        if (init.environ_map.get("CODEGRAFF_API_KEY")) |env_key| {
+            const trimmed_key = std.mem.trim(u8, env_key, " \t\r\n");
+            if (trimmed_key.len > 0) {
+                host.auth.adoptCodegraffKey(null, trimmed_key, null) catch {};
+            }
+        }
+        if (host.auth.loadPersistedSession(io)) {
+            host.workspace_scope = "synced";
+            _ = host.syncFromEdgeRegistry(io);
+        } else {
+            host.workspace_scope = "local";
+        }
+    } else if (edge_token) |tok| {
+        if (tok.len > 0) {
+            host.auth.signInWithKey(tok) catch {};
+            host.workspace_scope = "development";
         }
     }
 
