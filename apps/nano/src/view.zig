@@ -327,10 +327,13 @@ fn chatPanel(c: *ui.Context, a: *App, k: theme.Colors) void {
 fn focused(c: *ui.Context, a: *App, k: theme.Colors) void {
     // The Write page takes the pane: the transcript and composer step aside.
     if (a.view.write_open) return @import("view_write.zig").page(c, a, k, transcript_view.paneWidth(c, a));
+    // The catch-up, a bot's details or the new-bot form take it the same way.
+    if (a.bots.page != .none) return @import("view_bots_page.zig").page(c, a, k, transcript_view.paneWidth(c, a));
     if (a.selected == null) {
         @import("view_newchat.zig").canvas(c, a, k);
     } else {
         if (a.settings.hierarchyProfile().shows_action_toolbar) @import("view_actions.zig").toolbar(c, a, k);
+        @import("view_bots.zig").strip(c, a, k, @min(transcript_view.paneWidth(c, a), transcript_view.column_w));
         transcript_view.transcript(c, a, k);
         @import("view_composer.zig").docked(c, a, k);
         @import("view_actions.zig").dock(c, a, k);

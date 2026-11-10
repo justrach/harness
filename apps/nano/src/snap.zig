@@ -73,6 +73,32 @@ pub fn main(init: std.process.Init) !void {
     if (scene.get("auth")) |v| a.account.user = try acct.readUser(gpa, v);
     if (scene.get("codegraff")) |v| a.account.codegraff = try acct.readCodegraff(gpa, v);
     if (str(scene, "open")) |id| a.openChat(id, null);
+    // Bots: a `BotsState` reply as "bots", the clock its times are read
+    // against as "botsNow" (ms), and the page shown: "inbox", "new" or a
+    // bot's name. "botsDetail" is what `BotDetail` would answer for its
+    // "bot": that bot's memory and log.
+    if (scene.get("bots")) |v| {
+        const bots = @import("bots.zig");
+        if (scene.get("botsNow")) |n| if (n == .integer) {
+            a.bots.clock_ms = n.integer;
+        };
+        a.bots.launch_seen = true;
+        try bots.apply(&a, v);
+        if (scene.get("botsDetail")) |d| if (d == .object) {
+            if (str(d.object, "bot")) |name| try a.bots.detail_of.appendSlice(gpa, name);
+            if (d.object.get("memory")) |m| if (m == .string) try a.bots.memory.appendSlice(gpa, m.string);
+            if (d.object.get("log")) |l| if (l == .string) try a.bots.log.appendSlice(gpa, l.string);
+        };
+        if (str(scene, "botsPage")) |p| {
+            if (std.mem.eql(u8, p, "inbox")) a.bots.page = .inbox else if (std.mem.eql(u8, p, "new")) {
+                a.bots.page = .new;
+                a.bots.new_primary = false;
+            } else {
+                try a.bots.focus.appendSlice(gpa, p);
+                a.bots.page = .bot;
+            }
+        }
+    }
 
     var t: ui.Tester = undefined;
     try t.init(gpa, .init(&a, @import("view.zig").view), .{

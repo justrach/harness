@@ -70,6 +70,11 @@ pub fn cases(gpa: std.mem.Allocator) ![]Case {
         try case(gpa, "run a project action", r.runAction(space, chat, "test", null), false),
         try case(gpa, "add a project action", r.upsertAction(space, null, .{ .name = "Test", .command = "echo hi", .icon = "test", .runOnWorktreeCreate = false }, null), false),
         try case(gpa, "change a project action", r.upsertAction(space, "test", .{ .name = "Test", .command = "echo hello", .icon = "play", .runOnWorktreeCreate = true }, null), false),
+        // Bots that aren't there: understood, and nothing is started for them.
+        try case(gpa, "list bots", r.none("BotsState"), false),
+        try case(gpa, "read a bot", r.botDetail("parity-bot"), false),
+        try case(gpa, "pause a bot's routine", r.botAction(.{ .action = "routinePause", .bot = "parity-bot", .routine = "r1" }), false),
+        try case(gpa, "run a bot", r.runBot("parity-bot", "What is new?", null), false),
         // A host that isn't there: the engine refuses them, understood.
         try case(gpa, "watch a host's updates", r.updateStatus("host-parity"), true),
         try case(gpa, "check a host for updates", r.checkForUpdates("host-parity"), false),

@@ -618,6 +618,7 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
         },
     }
     cards.draftCard(c, a, k);
+    cards.botsCard(c, a, k);
     cards.titlesCard(c, a, k);
 }
 

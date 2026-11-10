@@ -1,0 +1,235 @@
+{
+ "width": 1280,
+ "height": 800,
+ "dark": true,
+ "scale": 2,
+ "devices": [
+  {
+   "id": "d",
+   "name": "This Mac"
+  }
+ ],
+ "spaces": [
+  {
+   "id": "s-comet",
+   "deviceId": "d",
+   "path": "/work/comet"
+  },
+  {
+   "id": "s-atlas",
+   "deviceId": "d",
+   "path": "/work/atlas"
+  }
+ ],
+ "chats": [
+  {
+   "id": "a",
+   "deviceId": "d",
+   "title": "Sketch the onboarding flow",
+   "archived": false,
+   "spaceId": "s-comet",
+   "lastMessageAt": "2027-01-14T23:04:00Z",
+   "lastSeenAt": "2027-01-14T23:30:00Z"
+  },
+  {
+   "id": "b",
+   "deviceId": "d",
+   "title": "Tidy the release notes",
+   "archived": false,
+   "spaceId": "s-comet",
+   "lastMessageAt": "2027-01-13T18:00:00Z",
+   "lastSeenAt": "2027-01-13T19:00:00Z"
+  },
+  {
+   "id": "c-notes",
+   "deviceId": "d",
+   "title": "notes",
+   "archived": false,
+   "spaceId": "s-comet",
+   "lastMessageAt": "2027-01-14T22:10:00Z",
+   "lastMessagePreview": "Draft is ready for comet 0.4. Three items: fixes, known issues, upgrade."
+  },
+  {
+   "id": "c-triage",
+   "deviceId": "d",
+   "title": "triage",
+   "archived": false,
+   "spaceId": "s-comet",
+   "lastMessageAt": "2027-01-14T21:05:00Z",
+   "lastMessagePreview": "GitHub token rejected. 3 issues unlabeled."
+  },
+  {
+   "id": "c-deps",
+   "deviceId": "d",
+   "title": "deps",
+   "archived": false,
+   "spaceId": "s-atlas",
+   "lastMessageAt": "2027-01-14T18:40:00Z",
+   "lastSeenAt": "2027-01-14T18:41:00Z"
+  }
+ ],
+ "sessions": [
+  {
+   "chatId": "c-triage",
+   "status": "errored",
+   "updatedAt": "2027-01-15T08:06:00Z"
+  },
+  {
+   "chatId": "c-deps",
+   "status": "awaitingInput",
+   "updatedAt": "2027-01-15T08:06:00Z"
+  }
+ ],
+ "open": "a",
+ "transcripts": {
+  "a": [
+   {
+    "id": "u1",
+    "role": "user",
+    "parts": [
+     {
+      "id": "p",
+      "kind": "text",
+      "text": "The first screen should be the project name, not a tour."
+     }
+    ]
+   },
+   {
+    "id": "a1",
+    "role": "assistant",
+    "parts": [
+     {
+      "id": "p",
+      "kind": "text",
+      "text": "I'll keep the first screen to the project name and one line of what the checkout is. No tour, no sample prompt."
+     }
+    ],
+    "status": "complete"
+   }
+  ],
+  "c-notes": [
+   {
+    "id": "u1",
+    "role": "user",
+    "parts": [
+     {
+      "id": "p",
+      "kind": "text",
+      "text": "Draft the release notes for comet 0.4."
+     }
+    ]
+   },
+   {
+    "id": "a1",
+    "role": "assistant",
+    "parts": [
+     {
+      "id": "p",
+      "kind": "text",
+      "text": "Draft is ready for comet 0.4. Three items: fixes, known issues, upgrade.\n\nWrote notes/0.4.md"
+     }
+    ],
+    "status": "complete"
+   }
+  ]
+ },
+ "bots": {
+  "enabled": true,
+  "nowMs": 1800000360000,
+  "lastCheckMs": 1800000360000,
+  "gapFromMs": 1799966460000,
+  "gapToMs": 1800000360000,
+  "about": "Alex. Pacific time.",
+  "bots": [
+   {
+    "name": "ada",
+    "job": "Coordinate. Don't do their work.",
+    "primary": true,
+    "chat": "",
+    "routines": []
+   },
+   {
+    "name": "deps",
+    "job": "Keep dependencies current",
+    "project": "/work/atlas",
+    "chat": "c-deps",
+    "routines": []
+   },
+   {
+    "name": "notes",
+    "job": "Draft release notes. Don't publish them.",
+    "project": "/work/comet",
+    "chat": "c-notes",
+    "routines": [
+     {
+      "id": "r1",
+      "instruction": "Draft the release notes",
+      "atMs": 1800007800000,
+      "intervalMs": 21600000,
+      "runs": 11,
+      "lastRunMs": 1799964600000,
+      "missedAtMs": 1799986200000,
+      "missedOpen": 1
+     }
+    ]
+   },
+   {
+    "name": "triage",
+    "job": "Label new issues",
+    "project": "/work/comet",
+    "chat": "c-triage",
+    "routines": [
+     {
+      "id": "r1",
+      "instruction": "Label unlabeled issues",
+      "atMs": 1800003900000,
+      "intervalMs": 7200000,
+      "runs": 40,
+      "lastRunMs": 1799960700000,
+      "missedAtMs": 1799967900000,
+      "missedOpen": 5
+     }
+    ]
+   }
+  ]
+ },
+ "botsNow": 1800000360000,
+ "botsDetail": {
+  "memory": "- No marketing adjectives.\n- Keep the three bullets: fixes, known issues, upgrade.",
+  "log": "- 2027-01-14 16:02Z chat: Drafting from the last three merged items\n- 2027-01-14 22:10Z routine r1: Draft is ready for comet 0.4",
+  "bot": "notes"
+ },
+ "botsPage": "inbox",
+ "steps": [
+  {
+   "expect": "While you were away"
+  },
+  {
+   "expect": "Did not run"
+  },
+  {
+   "snap": "bots-catch-up"
+  },
+  {
+   "click": "notes"
+  },
+  {
+   "expect": "Details"
+  },
+  {
+   "snap": "bots-chat"
+  },
+  {
+   "click": "Details"
+  },
+  {
+   "expect": "Every 6 hours · Draft the release notes"
+  },
+  {
+   "expect": "No marketing adjectives."
+  },
+  {
+   "snap": "bots-details"
+  }
+ ]
+}
