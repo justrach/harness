@@ -519,7 +519,7 @@ fn graff_spec() -> AcpAgentSpec {
         // Graff's vendor model catalog advertises per-seat effort ladders;
         // session effort selection uses the standard ACP thought_level option.
         models: Vec::new,
-        steering_mode: SteeringMode::TurnBoundary,
+        steering_mode: SteeringMode::StepBoundary,
         reasoning_levels: &[
             ReasoningLevel::Low,
             ReasoningLevel::Medium,

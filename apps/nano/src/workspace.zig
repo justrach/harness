@@ -280,7 +280,9 @@ fn parseHarness(a: Allocator, o: json.ObjectMap) ?Harness {
         (std.mem.eql(u8, id, "graff") or std.mem.eql(u8, id, "codex") or std.mem.eql(u8, id, "claude-code"));
     const steers = if (o.get("supportsSteering")) |v| v == .bool and v.bool else false;
     const mode = if (o.get("steeringMode")) |v| v == .string and std.mem.eql(u8, v.string, "step-boundary") else false;
-    return .{ .id = id, .name = str(a, o, "name") orelse id, .offered = offered, .installed = installed, .levels = stringList(a, o, "reasoningLevels"), .steers_mid_turn = steers and mode };
+    const default_steers = o.get("supportsSteering") == null and o.get("steeringMode") == null and
+        (std.mem.eql(u8, id, "graff") or std.mem.eql(u8, id, "codex") or std.mem.eql(u8, id, "claude-code") or std.mem.eql(u8, id, "pi"));
+    return .{ .id = id, .name = str(a, o, "name") orelse id, .offered = offered, .installed = installed, .levels = stringList(a, o, "reasoningLevels"), .steers_mid_turn = (steers and mode) or default_steers };
 }
 
 fn parseModel(a: Allocator, o: json.ObjectMap) ?Model {

@@ -140,6 +140,7 @@ pub fn footer(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
             ui.div(c).row().grow().w(0).hFull().gap(4).itemsCenter().clip();
         defer slot.end();
         modeSwitch(c, a, k);
+        composer.followUpChip(c, a, k);
         // Keep the execution target beside the draft, not only in the
         // titlebar. Picking another host clears an incompatible project.
         const strip = @import("view_tab_strip.zig");
