@@ -95,6 +95,9 @@ name (default: the local engine's device).
 | `respond_to_input` | `QueueCommand` RespondInput                               |
 | `dismiss_input`    | `QueueCommand` DismissInput (never an answer or approval) |
 | `archive_chat`     | `Mutate setChatArchived`                                  |
+| `list_bots`        | `graff bot list`, `routine list`, `due` in the project    |
+| `run_bot`          | `graff bot prompt`, then `create_chat` with a first send  |
+| `run_due_bots`     | `graff bot due --claim`, then one `create_chat` per row   |
 
 Watch streams are the engine's only read surface (there is no one-shot "get
 transcript" RPC); a snapshot is "subscribe, take the first item, drop" — drop
@@ -124,6 +127,32 @@ not the entire historical transcript.
 turn that still owns the specified question and pauses automatic queue delivery.
 A stale request cannot stop a newer turn; an orphaned question is resolved
 without starting a replacement turn. Dismissal never supplies answer labels.
+
+### Bots
+
+A graff Bot is a standing role kept in a project's `.graff/bots/<name>/`: one
+job, a memory file, a work log and scheduled routines. graff owns that store
+and the wording of every prompt; the three tools read both through
+`graff bot … --json`, so nothing about a bot is kept in the engine.
+
+A run is an ordinary graff chat in the bot's project, titled with the bot's
+name (and the routine id). Its first message is the bot's standing text from
+`graff bot prompt` followed by the task, so the run's approvals, steering and
+result are where its owner already looks. In a chat the bot edits its memory
+file and adds its own log line with `graff bot log`.
+
+- The project defaults to the calling chat's. It must be hosted on this
+  device: bots are files in the project folder.
+- `run_bot` with `routine` runs it now and leaves its schedule alone.
+  `run_due_bots` claims first (`--claim` moves each due routine to its next
+  slot), so two callers do not start the same run; a chat that fails to start
+  after the claim is listed under `failed`.
+- Nothing calls `run_due_bots` on a timer. A routine runs when a chat calls it,
+  or when the user runs `graff bot tick` from cron or launchd.
+- A bot's `model` is a graff model name. One this device does not offer is
+  dropped and returned as `modelIgnored`.
+- A graff from before bots reads `bot list` as a prompt, so the server checks
+  `graff --help` for the command first and refuses with "update graff".
 
 ## Graff delegated-context diagnostics
 
