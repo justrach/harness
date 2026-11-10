@@ -392,4 +392,61 @@ theorem mid_frame_pane_click_defers_focus :
     decidePaneClickAction false = .queueForNextPreTree := by
   rfl
 
+/-- Two-frame immediate-mode click survival (`view_composer.zig`, `view_write.zig`):
+In `nanoui`, `b.clicked()` completes on the `mouseUp` frame (`t + 1`) only if the button
+remained mounted on both `mouseDown` (`t`) and `mouseUp` (`t + 1`). When `ui.textField` runs
+before the expanded action bar on `mouseDown`, a press on `composer-write` outside the text
+field's rect clears `c.focus := 0` (`focusedAfterPress = false`).
+Gating `composer-write` on `hasText || focused` (`mountWriteButtonOld`) unmounts the button
+before `mouseUp` whenever `hasText = false` (e.g., an attachment-only draft). Mounting it
+unconditionally in the expanded action bar (`mountWriteButtonFixed`) guarantees click completion. -/
+def mountWriteButtonOld (hasText focused : Bool) : Bool :=
+  hasText || focused
+
+def mountWriteButtonFixed (expanded : Bool) (_hasText _focused : Bool) : Bool :=
+  expanded
+
+theorem old_write_button_unmounts_on_attachment_only_press :
+    mountWriteButtonOld false false = false := by
+  rfl
+
+theorem fixed_write_button_survives_focus_blur (hasText focused : Bool) :
+    mountWriteButtonFixed true hasText focused = true := by
+  rfl
+
+/-- Sidebar `Last activity` filter (`view_sidebar.zig`):
+Historical sessions whose last reply hasn't been opened carry `Mark.completed` (`✓`), not
+`Mark.idle` (`•`). Filtering only `Mark.idle` (`keepChatOld`) leaks `.completed` sessions
+from weeks ago into `1d`/`3d`/`7d`/`30d` views. Filtering all non-live marks (`keepChatFixed`)
+filters `.completed` and `.idle` alike while preserving active `.working` / `.awaitingInput` turns. -/
+inductive SidebarMark where
+  | working
+  | awaitingInput
+  | errored
+  | completed
+  | idle
+deriving DecidableEq, Repr, BEq
+
+def keepChatOld (m : SidebarMark) (inWindow : Bool) : Bool :=
+  m != .idle || inWindow
+
+def keepChatFixed (m : SidebarMark) (inWindow : Bool) : Bool :=
+  m == .working || m == .awaitingInput || inWindow
+
+theorem old_filter_leaks_completed_outside_window :
+    keepChatOld .completed false = true := by
+  rfl
+
+theorem fixed_filter_hides_completed_and_idle_outside_window :
+    keepChatFixed .completed false = false ∧
+    keepChatFixed .idle false = false ∧
+    keepChatFixed .errored false = false := by
+  decide
+
+theorem fixed_filter_keeps_live_or_in_window (m : SidebarMark) :
+    keepChatFixed m true = true ∧
+    keepChatFixed .working false = true ∧
+    keepChatFixed .awaitingInput false = true := by
+  cases m <;> decide
+
 end Nano.FrameSchedule

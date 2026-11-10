@@ -243,6 +243,25 @@ test "desktop parity sidebar starts with project filter and exposes only current
     try h.t.clickText("7d");
     h.t.settle(0.3);
     try testing.expectEqual(settings.LastActivity.d7, h.a.settings.lastActivity());
+    // Completed (unseen ✓) and pinned sessions older than 7d must be filtered out.
+    const now = std.Io.Clock.Timestamp.now(testing.io, .real).raw.toMilliseconds();
+    const old_ms = now - 14 * 24 * 60 * 60 * 1000;
+    const recent_ms = now - 2 * 60 * 60 * 1000;
+    const aged = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"recent-chat","deviceId":"synthetic-device","title":"Recent item","spaceId":"synthetic-project","archived":false},
+        \\ {"id":"old-completed","deviceId":"synthetic-device","title":"Old completed","spaceId":"synthetic-project","archived":false},
+        \\ {"id":"old-pinned","deviceId":"synthetic-device","title":"Old pinned","spaceId":"synthetic-project","archived":false}]
+    , .{});
+    defer aged.deinit();
+    try h.a.chats.replace(aged.value);
+    h.a.chats.items[0].last_message_ms = recent_ms;
+    h.a.chats.items[1].last_message_ms = old_ms;
+    h.a.chats.items[2].last_message_ms = old_ms;
+    h.a.settings.setPins(&.{"old-pinned"});
+    h.t.settle(0.3);
+    try testing.expect(h.t.hasText("Recent item"));
+    try testing.expect(!h.t.hasText("Old completed"));
+    try testing.expect(!h.t.hasText("Old pinned"));
     try h.t.clickText("Last activity");
     h.a.settings.setText("sidebarLastActivity", "all");
     h.t.settle(0.3);
@@ -312,6 +331,26 @@ test "desktop parity Write Escape saves the draft and restores persistent starte
     try testing.expect(h.t.hasText("Build something new"));
     try testing.expectEqualStrings("Synthetic keyboard round trip", h.a.composer.text());
     h.snap("desktop-write-keyboard-roundtrip");
+}
+
+test "clicking the composer expand button opens Write even on an attachment-only draft with empty text" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try @import("app_attachments.zig").stage(&h.a, "image.png", "synthetic-png-bytes");
+    h.t.settle(0.3);
+    try testing.expectEqual(@as(usize, 0), h.a.composer.text().len);
+    var expand_rect: ?ui.Rect = null;
+    for (h.t.ctx.nodes.items) |node| {
+        if (node.rect.w == 28 and node.rect.h == 28 and node.rect.y > 680 and node.rect.x > 300 and node.rect.x < 500) {
+            expand_rect = node.rect;
+        }
+    }
+    const r = expand_rect orelse return error.NoExpandButton;
+    h.t.click(r.x + r.w / 2, r.y + r.h / 2);
+    h.t.settle(0.3);
+    try testing.expect(h.a.view.write_open);
+    try testing.expect(h.t.hasText("Edit message"));
 }
 
 test "desktop parity layout rules cover narrow wrapping, reserved context, and Write gutters" {

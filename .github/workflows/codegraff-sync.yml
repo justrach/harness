@@ -63,6 +63,10 @@ jobs:
           tar -xzf "$dir/$asset" -C "$dir"
           test -x "$dir/graff-aarch64-macos/graff"
           echo "binary=$dir/graff-aarch64-macos/graff" >>"$GITHUB_OUTPUT"
+      - uses: mlugg/setup-zig@v2
+        if: steps.selected.outputs.tag != '' && steps.cache.outputs.cache-hit != 'true'
+        with:
+          version: 0.17.0
       - uses: Swatinem/rust-cache@v2
         if: steps.selected.outputs.tag != '' && steps.cache.outputs.cache-hit != 'true'
         with:

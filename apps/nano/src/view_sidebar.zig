@@ -312,7 +312,9 @@ fn listed(a: *const App, chat: workspace.Chat) bool {
 /// The pins this list shows, in pin order: listed and not archived.
 pub fn visiblePins(a: *const App, gpa: std.mem.Allocator) []const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
-    for (a.settings.pins.items) |id| if (a.findChat(id)) |ch| if (!ch.archived and listed(a, ch)) out.append(gpa, id) catch {};
+    const last_activity = a.settings.lastActivity();
+    const now = a.nowMs();
+    for (a.settings.pins.items) |id| if (a.findChat(id)) |ch| if (!ch.archived and listed(a, ch) and last_activity.matches(ch.timeMs(), now)) out.append(gpa, id) catch {};
     return out.items;
 }
 
@@ -393,7 +395,7 @@ fn prepareItems(c: *ui.Context, a: *App, pins: []const []const u8, grouped: bool
         if (!ch.archived and !is_pinned and last_activity != .all) {
             const sess = if (a.sessions.items.len > 8) session_map.get(ch.id) else workspace.sessionOf(a.sessions.items, ch.id);
             const mark = workspace.markOf(ch, sess, by.now);
-            if (mark == .idle and !last_activity.matches(@max(ch.timeMs(), ch.calledMs()), by.now)) {
+            if (mark != .working and mark != .awaiting_input and !last_activity.matches(ch.timeMs(), by.now)) {
                 out[idx] = .{};
                 continue;
             }

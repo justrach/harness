@@ -147,7 +147,7 @@ pub fn pill(c: *ui.Context, a: *App, k: theme.Colors, w: f32, shape: Shape, corn
     defer box.end();
     // The whole writing plane focuses the input, including its padding.
     // Picker controls keep their own focus when they open.
-    if (box.clicked() and a.picker == .none) a.view.focus_composer = true;
+    if (box.clicked() and a.picker == .none and !a.view.write_open) a.view.focus_composer = true;
     if (c.rects.get(c.node(box.index).id)) |r| a.view.composer_anchor = r else if (a.window == null) c.animationFrame();
     if (shape == .expanded) attachmentStrip(c, a, k, w);
     {
@@ -177,11 +177,13 @@ pub fn pill(c: *ui.Context, a: *App, k: theme.Colors, w: f32, shape: Shape, corn
     const actions = ui.div(c).row().wFull().h(42).px(12).pt(2).pb(8).itemsCenter();
     defer actions.end();
     attachButtons(c, a, k);
-    // The Write page, while there's a draft or the field has the keys.
-    if (a.composer.text().len > 0 or focused) {
-        _ = c.leaf(.{ .width = .{ .px = 2 } }, .none, null);
-        @import("view_write.zig").button(c, a, k);
-    }
+    // Keep the expand button mounted whenever the composer is expanded
+    // (`fixed_write_button_survives_focus_blur` in `Nano/FrameSchedule.lean`),
+    // so `ui.textField` blurring `c.focus` on `mouseDown` never unmounts
+    // `composer-write` before `mouseUp` completes `clicked()`.
+    _ = c.leaf(.{ .width = .{ .px = 2 } }, .none, null);
+    @import("view_write.zig").button(c, a, k);
+    if (a.view.write_open) a.view.focus_composer = false;
     ui.spacer(c);
     send(c, a, k);
 }

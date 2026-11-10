@@ -504,7 +504,9 @@ pub fn activityCount(a: *const App, window: settings.LastActivity) usize {
         if (ch.archived or ch.parent_chat_id != null) continue;
         if (ch.space_id) |sid| if (a.findSpace(sid) == null) continue;
         if (filter_space) |f| if (ch.space_id == null or !std.mem.eql(u8, ch.space_id.?, f)) continue;
-        if (window.matches(@max(ch.timeMs(), ch.calledMs()), now)) count += 1;
+        const sess = workspace.sessionOf(a.sessions.items, ch.id);
+        const mark = workspace.markOf(ch, sess, now);
+        if (mark == .working or mark == .awaiting_input or window.matches(ch.timeMs(), now)) count += 1;
     }
     return count;
 }
@@ -581,8 +583,7 @@ fn view(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
         var row = ui.div(c).row().wFull().h(30).px(8).gap(10).itemsCenter().rounded(7);
         row = if (open or m.group == gi) row.bg(k.selected) else row.hover(k.selected);
         defer row.end();
-        // Coming onto a group opens its menu; a click on the group closes
-        // it until the pointer comes back.
+        // Coming onto a group opens its menu; a click on the group toggles it.
         if (row.hovered() and m.group != gi) {
             m.group = gi;
             m.open = gi;
@@ -590,7 +591,7 @@ fn view(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
         }
         if (row.clicked()) {
             m.group = gi;
-            m.open = null;
+            m.open = if (m.open == gi) null else gi;
         }
         label(c, k, g.label, row.hovered() or open);
         if (gi < groups.len) {
@@ -610,11 +611,15 @@ fn view(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
         var row = ui.div(c).row().wFull().h(30).px(8).gap(10).itemsCenter().rounded(7);
         row = if (m.group == groups.len) row.bg(k.selected) else row.hover(k.selected);
         defer row.end();
-        if (row.hovered()) {
+        if (row.hovered() and (m.open == null or c.input.mouse.x <= x + w - 28)) {
             m.group = groups.len;
             m.open = null;
         }
-        if (row.clicked()) a.settings.toggle(.sidebar_compact);
+        if (row.clicked()) {
+            m.group = groups.len;
+            m.open = null;
+            a.settings.toggle(.sidebar_compact);
+        }
         label(c, k, "Compact", row.hovered());
         toggle(c, k, a.settings.get(.sidebar_compact));
     }
@@ -624,11 +629,15 @@ fn view(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
         const on = chosen(a, ch);
         const row = menuRow(c, k, on, m.group == index);
         defer row.end();
-        if (row.hovered()) {
+        if (row.hovered() and (m.open == null or c.input.mouse.x <= x + w - 28)) {
             m.group = index;
             m.open = null;
         }
-        if (row.clicked()) choose(a, ch);
+        if (row.clicked()) {
+            m.group = index;
+            m.open = null;
+            choose(a, ch);
+        }
         icons.icon(c, ch.icon(), 15, k.muted, 0);
         label(c, k, ch.label(), row.hovered() or on);
         const check = ui.div(c).row().w(14);
