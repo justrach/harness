@@ -1,0 +1,9 @@
+name = "HarnessProofs"
+defaultTargets = ["HarnessProofs", "harness-spec-report"]
+
+[[lean_lib]]
+name = "HarnessProofs"
+
+[[lean_exe]]
+name = "harness-spec-report"
+root = "Main"

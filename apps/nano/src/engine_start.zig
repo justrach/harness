@@ -188,7 +188,7 @@ pub fn killLockedEngine(a: *App) bool {
         if (std.c.kill(pid, std.c.SIG.TERM) != 0) return false;
         var step: usize = 0;
         while (step < 15) : (step += 1) {
-            if (std.c.kill(pid, @fromBackingInt(@intCast(0))) != 0) return true;
+            if (std.c.kill(pid, @enumFromInt(0)) != 0) return true;
             std.Io.sleep(a.io, .fromMilliseconds(20), .awake) catch break;
         }
         _ = std.c.kill(pid, std.c.SIG.KILL);

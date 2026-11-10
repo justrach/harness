@@ -6,6 +6,7 @@ Each implementation runs its own test against this one file, so none can drift w
 | Implementation | Side | Runner | Run it |
 | --- | --- | --- | --- |
 | Rust (`crates/sync`) | client (desktop, engine, Android core) | `crates/sync/tests/chat2_vectors.rs` | `cargo test -p harness-sync --test chat2_vectors` |
+| Zig (`apps/nano`) | client & engine (`chat2_wire.zig`) | `apps/nano/src/chat2_wire.zig` | `cd apps/nano && zig build test -Dtest-filter="chat2 vectors"` |
 | Swift (`apps/ios/Harness/Sync`) | client (iOS) | `apps/ios/HarnessTests/Chat2VectorTests.swift` | `xcodebuild … -only-testing:HarnessTests/Chat2VectorTests test` |
 | TypeScript (`edge/src/chat-frames.ts`) | server | `edge/src/chat-frames.vectors.test.ts` | `cd edge && npx vitest run src/chat-frames.vectors.test.ts` |
 

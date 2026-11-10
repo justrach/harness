@@ -124,4 +124,20 @@ test {
     _ = @import("graff_update.zig");
     _ = @import("view_updates.zig");
     _ = @import("sound.zig");
+    _ = @import("chat2_wire.zig");
+    _ = @import("session_doc.zig");
+    _ = @import("docs_store.zig");
+    _ = @import("ws_server.zig");
+    _ = @import("acp_host.zig");
+    _ = @import("adapters_host.zig");
+    _ = @import("workspace_files_host.zig");
+    _ = @import("git_host.zig");
+    _ = @import("terminals_host.zig");
+    _ = @import("registry_sync.zig");
+    _ = @import("chat2_client.zig");
+    _ = @import("auth_host.zig");
+    _ = @import("run_journal.zig");
+    _ = @import("mcp_server.zig");
+    _ = @import("engine_host.zig");
+    _ = @import("multi_machine_sync.zig");
 }

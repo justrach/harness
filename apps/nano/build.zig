@@ -3,10 +3,11 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const lib_optimize: std.builtin.Optimize = if (optimize == .debug) .debug else .small;
     const nanoui = b.dependency("nanoui", .{ .target = target, .optimize = optimize }).module("nanoui");
     // HTTPS with ALPN h2 for what the app asks the network itself (releases,
     // the edge); the engine's own socket is a local WebSocket (src/ws.zig).
-    const http_zig = b.dependency("http_zig", .{ .target = target, .optimize = optimize }).module("http_zig");
+    const http_zig = b.dependency("http_zig", .{ .target = target, .optimize = lib_optimize }).module("http_zig");
     // Harness's bundled fonts (assets/fonts), in a module that embeds them:
     // Geist isn't installed on most Macs.
     const font_files = b.addWriteFiles();
@@ -152,6 +153,27 @@ pub fn build(b: *std.Build) void {
     const write_vectors = b.addRunArtifact(vectors);
     write_vectors.addArg(b.pathJoin(&.{ protocol, "requests.json" }));
     b.step("vectors", "Write protocol/desktop/requests.json").dependOn(&write_vectors.step);
+
+    // `zig build engine`: the Zig headless engine daemon (`ws://127.0.0.1:27664`).
+    const engine_imports: []const std.Build.Module.Import = &.{
+        .{ .name = "build_info", .module = info_mod },
+        .{ .name = "http_zig", .module = http_zig },
+    };
+    const engine_exe = b.addExecutable(.{ .name = "harness-engine", .root_module = b.createModule(.{
+        .root_source_file = b.path("src/engine_main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .strip = optimize != .debug,
+        .imports = engine_imports,
+    }) });
+    b.installArtifact(engine_exe);
+    const run_engine = b.addRunArtifact(engine_exe);
+    run_engine.addPassthruArgs();
+    b.step("engine", "Run the Zig harness-engine daemon").dependOn(&run_engine.step);
+
     // Large UI artifacts must never use Zig's self-hosted backend.
-    inline for (.{ exe, tests, snap, profile, vectors }) |artifact| artifact.use_llvm = true;
+    inline for (.{ exe, tests, snap, profile, vectors, engine_exe }) |artifact| {
+        artifact.use_llvm = true;
+        artifact.root_module.linkSystemLibrary("sqlite3", .{});
+    }
 }
