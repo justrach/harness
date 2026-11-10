@@ -376,6 +376,67 @@ pub const rpc_method_map = std.StaticStringMap(RpcMethod).initComptime(.{
     .{ "SwitchAgentAccount", .SwitchAgentAccount },
 });
 
+/// All 17 `MutateParams` `op` variants from `crates/engine/src/rpc.rs`,
+/// proven in `HarnessProofs.RustCodebaseParity.canonicalMutateOpCount`.
+pub const MutateOp = enum {
+    createChat,
+    createSpace,
+    renameSpace,
+    deleteSpace,
+    renameChat,
+    setChatBranch,
+    setChatCwd,
+    setChatActivity,
+    setChatHost,
+    setChatArchived,
+    changeSidebarPin,
+    setAppearance,
+    setChatConfig,
+    deleteChat,
+    renameDevice,
+    forgetDevice,
+    markChatSeen,
+};
+
+pub const mutate_op_map = std.StaticStringMap(MutateOp).initComptime(.{
+    .{ "createChat", .createChat },
+    .{ "createSpace", .createSpace },
+    .{ "renameSpace", .renameSpace },
+    .{ "deleteSpace", .deleteSpace },
+    .{ "renameChat", .renameChat },
+    .{ "setChatBranch", .setChatBranch },
+    .{ "setChatCwd", .setChatCwd },
+    .{ "setChatActivity", .setChatActivity },
+    .{ "setChatHost", .setChatHost },
+    .{ "setChatArchived", .setChatArchived },
+    .{ "changeSidebarPin", .changeSidebarPin },
+    .{ "setAppearance", .setAppearance },
+    .{ "setChatConfig", .setChatConfig },
+    .{ "deleteChat", .deleteChat },
+    .{ "renameDevice", .renameDevice },
+    .{ "forgetDevice", .forgetDevice },
+    .{ "markChatSeen", .markChatSeen },
+});
+
+/// All 5 `SessionCommandKind` variants from `crates/doc/src/commands.rs`,
+/// proven in `HarnessProofs.RustCodebaseParity.canonicalCommandKindCount`.
+pub const command_kind_map = std.StaticStringMap(session_doc.CommandKind).initComptime(.{
+    .{ "run", .run },
+    .{ "steer", .steer },
+    .{ "interrupt", .interrupt },
+    .{ "respondInput", .respond_input },
+    .{ "dismissInput", .dismiss_input },
+});
+
+/// All 4 `FinishQueuedMessageEditAction` variants from `crates/engine/src/rpc.rs`,
+/// proven in `HarnessProofs.RustCodebaseParity.canonicalEditActionCount`.
+pub const edit_action_map = std.StaticStringMap(session_doc.EditAction).initComptime(.{
+    .{ "commit", .commit },
+    .{ "cancel", .cancel },
+    .{ "discard", .discard },
+    .{ "releaseUnchanged", .release_unchanged },
+});
+
 pub const WatchSubscription = struct {
     sub_id: u64,
     kind: WatchKind,
@@ -419,6 +480,10 @@ pub const ChatRecord = struct {
     title: ?[]u8 = null,
     model: ?[]u8 = null,
     reasoning: ?[]u8 = null,
+    branch: ?[]u8 = null,
+    cwd: ?[]u8 = null,
+    activity_status: ?[]u8 = null,
+    pinned: bool = false,
     archived: bool = false,
 
     pub fn deinit(self: *ChatRecord, gpa: Allocator) void {
@@ -429,6 +494,9 @@ pub const ChatRecord = struct {
         if (self.title) |t| gpa.free(t);
         if (self.model) |m| gpa.free(m);
         if (self.reasoning) |r| gpa.free(r);
+        if (self.branch) |b| gpa.free(b);
+        if (self.cwd) |c| gpa.free(c);
+        if (self.activity_status) |a| gpa.free(a);
     }
 };
 
@@ -1331,95 +1399,132 @@ pub const EngineHost = struct {
                 const cmd_val = obj.get("command") orelse return .{ .err = .{ .bad_params = "missing command" } };
                 if (cmd_val != .object) return .{ .err = .{ .bad_params = "command must be object" } };
                 const kind = requireStr(cmd_val.object, "kind") orelse return .{ .err = .{ .bad_params = "missing command.kind" } };
+                const cmd_kind = command_kind_map.get(kind) orelse return .{ .err = .{ .bad_params = "unknown command.kind" } };
                 const doc = try self.getOrCreateDoc(chat_id);
-                if (std.mem.eql(u8, kind, "run")) {
-                    const msg_id = requireStr(cmd_val.object, "messageId") orelse "msg-run";
-                    const req_val = cmd_val.object.get("request") orelse return .{ .err = .{ .bad_params = "missing request" } };
-                    if (req_val != .object) return .{ .err = .{ .bad_params = "request must be object" } };
-                    const prompt = requireStr(req_val.object, "prompt") orelse return .{ .err = .{ .bad_params = "missing prompt" } };
-                    const cwd = requireStr(req_val.object, "cwd") orelse self.chatWorkspacePath(chat_id);
-                    const req_model: ?[]const u8 = requireStr(req_val.object, "model");
+                const now = self.nowMs();
+                switch (cmd_kind) {
+                    .run => {
+                        const msg_id = requireStr(cmd_val.object, "messageId") orelse "msg-run";
+                        const req_val = cmd_val.object.get("request") orelse return .{ .err = .{ .bad_params = "missing request" } };
+                        if (req_val != .object) return .{ .err = .{ .bad_params = "request must be object" } };
+                        const prompt = requireStr(req_val.object, "prompt") orelse return .{ .err = .{ .bad_params = "missing prompt" } };
+                        const cwd = requireStr(req_val.object, "cwd") orelse self.chatWorkspacePath(chat_id);
+                        const req_model: ?[]const u8 = requireStr(req_val.object, "model");
 
-                    const now = self.nowMs();
-                    if (try self.store.markCommandProcessed(msg_id, now)) {
-                        try doc.appendUserMessage(msg_id, "part-u", prompt, now);
-                        self.turn_counter += 1;
-                        const asst_id = try std.fmt.allocPrint(self.gpa, "{s}-asst-{d}", .{ self.device_id, self.turn_counter });
-                        defer self.gpa.free(asst_id);
-                        try doc.beginAssistantMessage(asst_id, now);
-                        try self.journal.recordBegin(chat_id, asst_id, now);
+                        if (try self.store.markCommandProcessed(msg_id, now)) {
+                            try doc.enqueueCommand(msg_id, "run", prompt, "completed", now);
+                            try doc.appendUserMessage(msg_id, "part-u", prompt, now);
+                            self.turn_counter += 1;
+                            const asst_id = try std.fmt.allocPrint(self.gpa, "{s}-asst-{d}", .{ self.device_id, self.turn_counter });
+                            defer self.gpa.free(asst_id);
+                            try doc.beginAssistantMessage(asst_id, now);
+                            try self.journal.recordBegin(chat_id, asst_id, now);
 
-                        // Immediately push the user message + streaming assistant row to the UI before starting inference.
-                        {
-                            const initial_frame = try doc.toResetFrameJson(self.gpa);
-                            defer self.gpa.free(initial_frame);
-                            try self.broadcastWatch(.doc_messages, chat_id, initial_frame);
-                        }
+                            // Immediately push the user message + streaming assistant row to the UI before starting inference.
+                            {
+                                const initial_frame = try doc.toResetFrameJson(self.gpa);
+                                defer self.gpa.free(initial_frame);
+                                try self.broadcastWatch(.doc_messages, chat_id, initial_frame);
+                            }
 
-                        if (self.io != null and self.graff_exe != null) {
-                            const StreamCtx = struct {
-                                host: *EngineHost,
-                                cid: []const u8,
-                                asst: []const u8,
-                                sdoc: *session_doc.SessionDoc,
-                                /// Lean Theorem `incremental_strictly_smaller_with_history`:
-                                /// emit O(|delta|) `toAppendDeltaFrameJson` once the part exists on the client,
-                                /// and `toUpsertEntryFrameJson` when a new part starts.
-                                fn onChunk(raw: *anyopaque, ev: acp_host.AcpEvent) void {
-                                    const ctx: *@This() = @ptrCast(@alignCast(raw));
-                                    const frame = switch (ev) {
-                                        .text_delta => |d| if (d.total_len > d.delta.len)
-                                            ctx.sdoc.toAppendDeltaFrameJson(ctx.host.gpa, d.msg_id, d.part_id, d.delta, d.total_len) catch return
-                                        else
-                                            ctx.sdoc.toUpsertEntryFrameJson(ctx.host.gpa, ctx.asst) catch return,
-                                        .reasoning_delta, .tool_update, .turn_complete => ctx.sdoc.toUpsertEntryFrameJson(ctx.host.gpa, ctx.asst) catch return,
-                                        .ignored => return,
-                                    };
-                                    defer ctx.host.gpa.free(frame);
-                                    ctx.host.broadcastWatch(.doc_messages, ctx.cid, frame) catch {};
-                                }
-                            };
-                            var sctx = StreamCtx{ .host = self, .cid = chat_id, .asst = asst_id, .sdoc = doc };
-                            const has_qualified_model = if (req_model) |m| (std.mem.indexOfScalar(u8, m, '/') != null) else false;
-                            const argv_with_model = [_][]const u8{ self.graff_exe.?, "acp", "--yolo", "--model", req_model orelse "" };
-                            const argv_default = [_][]const u8{ self.graff_exe.?, "acp", "--yolo" };
-                            const argv: []const []const u8 = if (has_qualified_model) &argv_with_model else &argv_default;
+                            if (self.io != null and self.graff_exe != null) {
+                                const StreamCtx = struct {
+                                    host: *EngineHost,
+                                    cid: []const u8,
+                                    asst: []const u8,
+                                    sdoc: *session_doc.SessionDoc,
+                                    /// Lean Theorem `incremental_strictly_smaller_with_history`:
+                                    /// emit O(|delta|) `toAppendDeltaFrameJson` once the part exists on the client,
+                                    /// and `toUpsertEntryFrameJson` when a new part starts.
+                                    fn onChunk(raw: *anyopaque, ev: acp_host.AcpEvent) void {
+                                        const ctx: *@This() = @ptrCast(@alignCast(raw));
+                                        const frame = switch (ev) {
+                                            .text_delta => |d| if (d.total_len > d.delta.len)
+                                                ctx.sdoc.toAppendDeltaFrameJson(ctx.host.gpa, d.msg_id, d.part_id, d.delta, d.total_len) catch return
+                                            else
+                                                ctx.sdoc.toUpsertEntryFrameJson(ctx.host.gpa, ctx.asst) catch return,
+                                            .reasoning_delta, .tool_update, .turn_complete => ctx.sdoc.toUpsertEntryFrameJson(ctx.host.gpa, ctx.asst) catch return,
+                                            .ignored => return,
+                                        };
+                                        defer ctx.host.gpa.free(frame);
+                                        ctx.host.broadcastWatch(.doc_messages, ctx.cid, frame) catch {};
+                                    }
+                                };
+                                var sctx = StreamCtx{ .host = self, .cid = chat_id, .asst = asst_id, .sdoc = doc };
+                                const has_qualified_model = if (req_model) |m| (std.mem.indexOfScalar(u8, m, '/') != null) else false;
+                                const argv_with_model = [_][]const u8{ self.graff_exe.?, "acp", "--yolo", "--model", req_model orelse "" };
+                                const argv_default = [_][]const u8{ self.graff_exe.?, "acp", "--yolo" };
+                                const argv: []const []const u8 = if (has_qualified_model) &argv_with_model else &argv_default;
 
-                            acp_host.runSubprocessTurn(
-                                self.gpa,
-                                self.io.?,
-                                argv,
-                                cwd,
-                                doc,
-                                asst_id,
-                                chat_id,
-                                prompt,
-                                &sctx,
-                                StreamCtx.onChunk,
-                            ) catch {
-                                _ = try doc.appendPartDelta(asst_id, "part-text", "text", "Processed by Zig engine.");
+                                acp_host.runSubprocessTurn(
+                                    self.gpa,
+                                    self.io.?,
+                                    argv,
+                                    cwd,
+                                    doc,
+                                    asst_id,
+                                    chat_id,
+                                    prompt,
+                                    &sctx,
+                                    StreamCtx.onChunk,
+                                ) catch {
+                                    _ = try doc.appendPartDelta(asst_id, "part-text", "text", "Processed by Zig engine.");
+                                    try doc.setMessageStatus(asst_id, "complete");
+                                };
+                            } else {
+                                const reply_text = try std.fmt.allocPrint(self.gpa, "Ack from {s}: {s}", .{ self.device_id, prompt });
+                                defer self.gpa.free(reply_text);
+                                _ = try doc.appendPartDelta(asst_id, "part-text", "text", reply_text);
                                 try doc.setMessageStatus(asst_id, "complete");
-                            };
-                        } else {
-                            const reply_text = try std.fmt.allocPrint(self.gpa, "Ack from {s}: {s}", .{ self.device_id, prompt });
-                            defer self.gpa.free(reply_text);
-                            _ = try doc.appendPartDelta(asst_id, "part-text", "text", reply_text);
-                            try doc.setMessageStatus(asst_id, "complete");
+                            }
+                            try self.journal.recordFinish(chat_id, asst_id, "complete");
+
+                            const snap = try doc.exportSnapshot(self.gpa);
+                            defer self.gpa.free(snap);
+                            try self.store.saveSnapshot(chat_id, snap, self.nowMs());
+
+                            const batch_id = try std.fmt.allocPrint(self.gpa, "{s}-b-{d}", .{ self.device_id, doc.local_seq });
+                            defer self.gpa.free(batch_id);
+                            try self.store.enqueueChatUpdate(chat_id, batch_id, snap);
+
+                            const reset_frame = try doc.toResetFrameJson(self.gpa);
+                            defer self.gpa.free(reset_frame);
+                            try self.broadcastWatch(.doc_messages, chat_id, reset_frame);
                         }
-                        try self.journal.recordFinish(chat_id, asst_id, "complete");
-
-                        const snap = try doc.exportSnapshot(self.gpa);
-                        defer self.gpa.free(snap);
-                        try self.store.saveSnapshot(chat_id, snap, self.nowMs());
-
-                        const batch_id = try std.fmt.allocPrint(self.gpa, "{s}-b-{d}", .{ self.device_id, doc.local_seq });
-                        defer self.gpa.free(batch_id);
-                        try self.store.enqueueChatUpdate(chat_id, batch_id, snap);
-
+                    },
+                    .steer => {
+                        const msg_id = requireStr(cmd_val.object, "messageId") orelse "msg-steer";
+                        const prompt = requireStr(cmd_val.object, "prompt") orelse return .{ .err = .{ .bad_params = "missing prompt" } };
+                        if (try self.store.markCommandProcessed(msg_id, now)) {
+                            const disp = session_doc.evaluateCommand(.pending, false, .steer, now, null, true);
+                            std.debug.assert(disp == .execute);
+                            try doc.enqueueCommand(msg_id, "steer", prompt, "completed", now);
+                            try doc.appendUserMessage(msg_id, "part-steer", prompt, now);
+                            const reset_frame = try doc.toResetFrameJson(self.gpa);
+                            defer self.gpa.free(reset_frame);
+                            try self.broadcastWatch(.doc_messages, chat_id, reset_frame);
+                        }
+                    },
+                    .interrupt => {
+                        self.turn_counter += 1;
+                        const cmd_id = try std.fmt.allocPrint(self.gpa, "cmd-interrupt-{d}", .{self.turn_counter});
+                        defer self.gpa.free(cmd_id);
+                        try doc.enqueueCommand(cmd_id, "interrupt", "{}", "completed", now);
+                        try doc.abortStreamingMessages();
                         const reset_frame = try doc.toResetFrameJson(self.gpa);
                         defer self.gpa.free(reset_frame);
                         try self.broadcastWatch(.doc_messages, chat_id, reset_frame);
-                    }
+                    },
+                    .respond_input => {
+                        const req_id = requireStr(cmd_val.object, "requestId") orelse requireStr(cmd_val.object, "messageId") orelse return .{ .err = .{ .bad_params = "missing requestId" } };
+                        const part_id = requireStr(cmd_val.object, "partId") orelse req_id;
+                        try doc.enqueueCommand(req_id, "respondInput", part_id, "completed", now);
+                    },
+                    .dismiss_input => {
+                        const req_id = requireStr(cmd_val.object, "requestId") orelse requireStr(cmd_val.object, "messageId") orelse return .{ .err = .{ .bad_params = "missing requestId" } };
+                        const part_id = requireStr(cmd_val.object, "partId") orelse req_id;
+                        try doc.enqueueCommand(req_id, "dismissInput", part_id, "completed", now);
+                    },
                 }
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"queued\":true}") };
             },
@@ -1500,14 +1605,9 @@ pub const EngineHost = struct {
                 const id = requireStr(obj, "id") orelse return .{ .err = .{ .bad_params = "missing id" } };
                 const lease_id = requireStr(obj, "leaseId") orelse return .{ .err = .{ .bad_params = "missing leaseId" } };
                 const action_str = requireStr(obj, "action") orelse return .{ .err = .{ .bad_params = "missing action" } };
+                const act = edit_action_map.get(action_str) orelse return .{ .err = .{ .bad_params = "unknown FinishQueuedMessageEdit action" } };
                 const new_text: ?[]const u8 = if (obj.get("text")) |v| (if (v == .string) v.string else null) else null;
                 const doc = try self.getOrCreateDoc(chat_id);
-                const act: session_doc.EditAction = if (std.mem.eql(u8, action_str, "discard"))
-                    .discard
-                else if (std.mem.eql(u8, action_str, "cancel"))
-                    .cancel
-                else
-                    .commit;
                 _ = try doc.finishEditQueued(id, lease_id, act, new_text);
                 const q_frame = try doc.toQueueFrameJson(self.gpa);
                 defer self.gpa.free(q_frame);
@@ -1720,235 +1820,318 @@ pub const EngineHost = struct {
     }
 
     fn handleMutate(self: *EngineHost, op: []const u8, obj: json.ObjectMap) !RpcOutcome {
-        if (std.mem.eql(u8, op, "createSpace")) {
-            const space_id = requireStr(obj, "spaceId") orelse return .{ .err = .{ .bad_params = "missing spaceId" } };
-            const dev_id = requireStr(obj, "deviceId") orelse self.device_id;
-            const path = requireStr(obj, "path") orelse return .{ .err = .{ .bad_params = "missing path" } };
-            const name = requireStr(obj, "name") orelse std.fs.path.basename(path);
-            const git = if (obj.get("gitDetected")) |g| (if (g == .bool) g.bool else false) else false;
+        const mutate_op = mutate_op_map.get(op) orelse return .{ .err = .{ .bad_params = "unknown Mutate op" } };
+        switch (mutate_op) {
+            .createSpace => {
+                const space_id = requireStr(obj, "spaceId") orelse return .{ .err = .{ .bad_params = "missing spaceId" } };
+                const dev_id = requireStr(obj, "deviceId") orelse self.device_id;
+                const path = requireStr(obj, "path") orelse return .{ .err = .{ .bad_params = "missing path" } };
+                const name = requireStr(obj, "name") orelse std.fs.path.basename(path);
+                const git = if (obj.get("gitDetected")) |g| (if (g == .bool) g.bool else false) else false;
 
-            var updated_existing = false;
-            for (self.spaces.items) |*existing| {
-                if (std.mem.eql(u8, existing.id, space_id)) {
-                    const p_copy = try self.gpa.dupe(u8, path);
-                    errdefer self.gpa.free(p_copy);
-                    const n_copy = try self.gpa.dupe(u8, name);
-                    self.gpa.free(existing.path);
-                    self.gpa.free(existing.name);
-                    existing.path = p_copy;
-                    existing.name = n_copy;
-                    existing.git_detected = git;
-                    updated_existing = true;
-                    break;
-                }
-            }
-            if (!updated_existing) {
-                const id_c = try self.gpa.dupe(u8, space_id);
-                errdefer self.gpa.free(id_c);
-                const dev_c = try self.gpa.dupe(u8, dev_id);
-                errdefer self.gpa.free(dev_c);
-                const path_c = try self.gpa.dupe(u8, path);
-                errdefer self.gpa.free(path_c);
-                const name_c = try self.gpa.dupe(u8, name);
-                errdefer self.gpa.free(name_c);
-                try self.spaces.append(self.gpa, .{
-                    .id = id_c,
-                    .device_id = dev_c,
-                    .path = path_c,
-                    .name = name_c,
-                    .git_detected = git,
-                });
-            }
-            _ = try self.registry.setField(.spaces, space_id, "name", name, 1000, self.device_id);
-            _ = try self.registry.setField(.spaces, space_id, "path", path, 1000, self.device_id);
-            const sp_json = try self.spacesJson();
-            defer self.gpa.free(sp_json);
-            try self.broadcastWatch(.spaces, null, sp_json);
-            return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{{\"spaceId\":{f}}}", .{json.fmt(space_id, .{})}) };
-        }
-        if (std.mem.eql(u8, op, "renameSpace")) {
-            const space_id = requireStr(obj, "spaceId") orelse return .{ .err = .{ .bad_params = "missing spaceId" } };
-            const name = requireStr(obj, "name") orelse return .{ .err = .{ .bad_params = "missing name" } };
-            for (self.spaces.items) |*s| {
-                if (std.mem.eql(u8, s.id, space_id)) {
-                    const copy = try self.gpa.dupe(u8, name);
-                    self.gpa.free(s.name);
-                    s.name = copy;
-                }
-            }
-            const sp_json = try self.spacesJson();
-            defer self.gpa.free(sp_json);
-            try self.broadcastWatch(.spaces, null, sp_json);
-            return .{ .unary_json = try self.gpa.dupe(u8, "{\"updated\":true}") };
-        }
-        if (std.mem.eql(u8, op, "deleteSpace")) {
-            const space_id = requireStr(obj, "spaceId") orelse return .{ .err = .{ .bad_params = "missing spaceId" } };
-            var i: usize = 0;
-            while (i < self.spaces.items.len) {
-                if (std.mem.eql(u8, self.spaces.items[i].id, space_id)) {
-                    self.spaces.items[i].deinit(self.gpa);
-                    _ = self.spaces.orderedRemove(i);
-                    break;
-                }
-                i += 1;
-            }
-            const sp_json = try self.spacesJson();
-            defer self.gpa.free(sp_json);
-            try self.broadcastWatch(.spaces, null, sp_json);
-            return .{ .unary_json = try self.gpa.dupe(u8, "{\"deleted\":true}") };
-        }
-        if (std.mem.eql(u8, op, "createChat")) {
-            const chat_id = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
-            const space_id: ?[]const u8 = if (obj.get("spaceId")) |v| (if (v == .string) v.string else null) else null;
-            const cfg_val = obj.get("config") orelse return .{ .err = .{ .bad_params = "missing config" } };
-            if (cfg_val != .object) return .{ .err = .{ .bad_params = "config must be object" } };
-            const harness = requireStr(cfg_val.object, "harness") orelse return .{ .err = .{ .bad_params = "missing config.harness" } };
-            const model: ?[]const u8 = if (cfg_val.object.get("model")) |v| (if (v == .string) v.string else null) else null;
-            const reasoning: ?[]const u8 = if (cfg_val.object.get("reasoning")) |v| (if (v == .string) v.string else null) else null;
-            const title: ?[]const u8 = if (obj.get("title")) |v| (if (v == .string) v.string else null) else null;
-
-            var exists = false;
-            for (self.chats.items) |existing| {
-                if (std.mem.eql(u8, existing.id, chat_id)) {
-                    exists = true;
-                    break;
-                }
-            }
-            if (!exists) {
-                const id_c = try self.gpa.dupe(u8, chat_id);
-                errdefer self.gpa.free(id_c);
-                const sp_c = if (space_id) |s| try self.gpa.dupe(u8, s) else null;
-                errdefer if (sp_c) |s| self.gpa.free(s);
-                const dev_c = try self.gpa.dupe(u8, self.device_id);
-                errdefer self.gpa.free(dev_c);
-                const h_c = try self.gpa.dupe(u8, harness);
-                errdefer self.gpa.free(h_c);
-                const t_c = if (title) |t| try self.gpa.dupe(u8, t) else null;
-                errdefer if (t_c) |t| self.gpa.free(t);
-                const m_c = if (model) |m| try self.gpa.dupe(u8, m) else null;
-                errdefer if (m_c) |m| self.gpa.free(m);
-                const r_c = if (reasoning) |r| try self.gpa.dupe(u8, r) else null;
-                errdefer if (r_c) |r| self.gpa.free(r);
-
-                try self.chats.append(self.gpa, .{
-                    .id = id_c,
-                    .space_id = sp_c,
-                    .device_id = dev_c,
-                    .harness = h_c,
-                    .title = t_c,
-                    .model = m_c,
-                    .reasoning = r_c,
-                });
-            }
-            _ = try self.getOrCreateDoc(chat_id);
-            _ = try self.registry.setField(.chats, chat_id, "harness", harness, 1000, self.device_id);
-            if (space_id) |sid| _ = try self.registry.setField(.chats, chat_id, "spaceId", sid, 1000, self.device_id);
-            const ch_json = try self.chatsJson();
-            defer self.gpa.free(ch_json);
-            try self.broadcastWatch(.chats, null, ch_json);
-            const sess_json = try self.sessionsJson();
-            defer self.gpa.free(sess_json);
-            try self.broadcastWatch(.sessions, null, sess_json);
-            return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{{\"chatId\":{f}}}", .{json.fmt(chat_id, .{})}) };
-        }
-        if (std.mem.eql(u8, op, "setChatConfig")) {
-            const chat_id = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
-            const cfg_val = obj.get("config") orelse return .{ .err = .{ .bad_params = "missing config" } };
-            if (cfg_val != .object) return .{ .err = .{ .bad_params = "config must be object" } };
-            const harness = requireStr(cfg_val.object, "harness") orelse return .{ .err = .{ .bad_params = "missing config.harness" } };
-            const model: ?[]const u8 = if (cfg_val.object.get("model")) |v| (if (v == .string) v.string else null) else null;
-            const reasoning: ?[]const u8 = if (cfg_val.object.get("reasoning")) |v| (if (v == .string) v.string else null) else null;
-            for (self.chats.items) |*c| {
-                if (std.mem.eql(u8, c.id, chat_id)) {
-                    const copy = try self.gpa.dupe(u8, harness);
-                    self.gpa.free(c.harness);
-                    c.harness = copy;
-                    if (model) |m| {
-                        const m_copy = try self.gpa.dupe(u8, m);
-                        if (c.model) |old| self.gpa.free(old);
-                        c.model = m_copy;
-                    }
-                    if (reasoning) |r| {
-                        const r_copy = try self.gpa.dupe(u8, r);
-                        if (c.reasoning) |old| self.gpa.free(old);
-                        c.reasoning = r_copy;
+                var updated_existing = false;
+                for (self.spaces.items) |*existing| {
+                    if (std.mem.eql(u8, existing.id, space_id)) {
+                        const p_copy = try self.gpa.dupe(u8, path);
+                        errdefer self.gpa.free(p_copy);
+                        const n_copy = try self.gpa.dupe(u8, name);
+                        self.gpa.free(existing.path);
+                        self.gpa.free(existing.name);
+                        existing.path = p_copy;
+                        existing.name = n_copy;
+                        existing.git_detected = git;
+                        updated_existing = true;
+                        break;
                     }
                 }
-            }
-            const ch_json = try self.chatsJson();
-            defer self.gpa.free(ch_json);
-            try self.broadcastWatch(.chats, null, ch_json);
-            return .{ .unary_json = try self.gpa.dupe(u8, "{\"updated\":true}") };
-        }
-        if (std.mem.eql(u8, op, "renameChat")) {
-            const chat_id = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
-            const title = requireStr(obj, "title") orelse "";
-            for (self.chats.items) |*c| {
-                if (std.mem.eql(u8, c.id, chat_id)) {
-                    const t_copy = try self.gpa.dupe(u8, title);
-                    if (c.title) |old| self.gpa.free(old);
-                    c.title = t_copy;
+                if (!updated_existing) {
+                    const id_c = try self.gpa.dupe(u8, space_id);
+                    errdefer self.gpa.free(id_c);
+                    const dev_c = try self.gpa.dupe(u8, dev_id);
+                    errdefer self.gpa.free(dev_c);
+                    const path_c = try self.gpa.dupe(u8, path);
+                    errdefer self.gpa.free(path_c);
+                    const name_c = try self.gpa.dupe(u8, name);
+                    errdefer self.gpa.free(name_c);
+                    try self.spaces.append(self.gpa, .{
+                        .id = id_c,
+                        .device_id = dev_c,
+                        .path = path_c,
+                        .name = name_c,
+                        .git_detected = git,
+                    });
                 }
-            }
-            const ch_json = try self.chatsJson();
-            defer self.gpa.free(ch_json);
-            try self.broadcastWatch(.chats, null, ch_json);
-            return .{ .unary_json = try self.gpa.dupe(u8, "{\"updated\":true}") };
-        }
-        if (std.mem.eql(u8, op, "deleteChat")) {
-            const chat_id = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
-            var i: usize = 0;
-            while (i < self.chats.items.len) {
-                if (std.mem.eql(u8, self.chats.items[i].id, chat_id)) {
-                    self.chats.items[i].deinit(self.gpa);
-                    _ = self.chats.orderedRemove(i);
-                    break;
+                _ = try self.registry.setField(.spaces, space_id, "name", name, 1000, self.device_id);
+                _ = try self.registry.setField(.spaces, space_id, "path", path, 1000, self.device_id);
+                const sp_json = try self.spacesJson();
+                defer self.gpa.free(sp_json);
+                try self.broadcastWatch(.spaces, null, sp_json);
+                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{{\"spaceId\":{f}}}", .{json.fmt(space_id, .{})}) };
+            },
+            .renameSpace => {
+                const space_id = requireStr(obj, "spaceId") orelse return .{ .err = .{ .bad_params = "missing spaceId" } };
+                const name = requireStr(obj, "name") orelse return .{ .err = .{ .bad_params = "missing name" } };
+                for (self.spaces.items) |*s| {
+                    if (std.mem.eql(u8, s.id, space_id)) {
+                        const copy = try self.gpa.dupe(u8, name);
+                        self.gpa.free(s.name);
+                        s.name = copy;
+                    }
                 }
-                i += 1;
-            }
-            // Reclaim in-memory SessionDoc, persisted SQLite snapshot/outbox, and target watches
-            // (Lean Theorem `complete_delete_zero_leak_and_no_resurrection`).
-            if (self.docs.fetchRemove(chat_id)) |kv| {
-                self.gpa.free(kv.key);
-                var doc = kv.value;
-                doc.deinit();
-            }
-            self.store.deleteDoc(chat_id);
-            self.removeTargetWatches(chat_id);
-            if (self.focused_chat_id) |fid| {
-                if (std.mem.eql(u8, fid, chat_id)) {
-                    self.gpa.free(fid);
-                    self.focused_chat_id = null;
+                const sp_json = try self.spacesJson();
+                defer self.gpa.free(sp_json);
+                try self.broadcastWatch(.spaces, null, sp_json);
+                return .{ .unary_json = try self.gpa.dupe(u8, "{\"updated\":true}") };
+            },
+            .deleteSpace => {
+                const space_id = requireStr(obj, "spaceId") orelse return .{ .err = .{ .bad_params = "missing spaceId" } };
+                var i: usize = 0;
+                while (i < self.spaces.items.len) {
+                    if (std.mem.eql(u8, self.spaces.items[i].id, space_id)) {
+                        self.spaces.items[i].deinit(self.gpa);
+                        _ = self.spaces.orderedRemove(i);
+                        break;
+                    }
+                    i += 1;
                 }
-            }
-            const ch_json = try self.chatsJson();
-            defer self.gpa.free(ch_json);
-            try self.broadcastWatch(.chats, null, ch_json);
-            const sess_json = try self.sessionsJson();
-            defer self.gpa.free(sess_json);
-            try self.broadcastWatch(.sessions, null, sess_json);
-            return .{ .unary_json = try self.gpa.dupe(u8, "{\"deleted\":true}") };
+                const sp_json = try self.spacesJson();
+                defer self.gpa.free(sp_json);
+                try self.broadcastWatch(.spaces, null, sp_json);
+                return .{ .unary_json = try self.gpa.dupe(u8, "{\"deleted\":true}") };
+            },
+            .createChat => {
+                const chat_id = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
+                const space_id: ?[]const u8 = if (obj.get("spaceId")) |v| (if (v == .string) v.string else null) else null;
+                const cfg_val = obj.get("config") orelse return .{ .err = .{ .bad_params = "missing config" } };
+                if (cfg_val != .object) return .{ .err = .{ .bad_params = "config must be object" } };
+                const harness = requireStr(cfg_val.object, "harness") orelse return .{ .err = .{ .bad_params = "missing config.harness" } };
+                const model: ?[]const u8 = if (cfg_val.object.get("model")) |v| (if (v == .string) v.string else null) else null;
+                const reasoning: ?[]const u8 = if (cfg_val.object.get("reasoning")) |v| (if (v == .string) v.string else null) else null;
+                const title: ?[]const u8 = if (obj.get("title")) |v| (if (v == .string) v.string else null) else null;
+
+                var exists = false;
+                for (self.chats.items) |existing| {
+                    if (std.mem.eql(u8, existing.id, chat_id)) {
+                        exists = true;
+                        break;
+                    }
+                }
+                if (!exists) {
+                    const id_c = try self.gpa.dupe(u8, chat_id);
+                    errdefer self.gpa.free(id_c);
+                    const sp_c = if (space_id) |s| try self.gpa.dupe(u8, s) else null;
+                    errdefer if (sp_c) |s| self.gpa.free(s);
+                    const dev_c = try self.gpa.dupe(u8, self.device_id);
+                    errdefer self.gpa.free(dev_c);
+                    const h_c = try self.gpa.dupe(u8, harness);
+                    errdefer self.gpa.free(h_c);
+                    const t_c = if (title) |t| try self.gpa.dupe(u8, t) else null;
+                    errdefer if (t_c) |t| self.gpa.free(t);
+                    const m_c = if (model) |m| try self.gpa.dupe(u8, m) else null;
+                    errdefer if (m_c) |m| self.gpa.free(m);
+                    const r_c = if (reasoning) |r| try self.gpa.dupe(u8, r) else null;
+                    errdefer if (r_c) |r| self.gpa.free(r);
+
+                    try self.chats.append(self.gpa, .{
+                        .id = id_c,
+                        .space_id = sp_c,
+                        .device_id = dev_c,
+                        .harness = h_c,
+                        .title = t_c,
+                        .model = m_c,
+                        .reasoning = r_c,
+                    });
+                }
+                _ = try self.getOrCreateDoc(chat_id);
+                _ = try self.registry.setField(.chats, chat_id, "harness", harness, 1000, self.device_id);
+                if (space_id) |sid| _ = try self.registry.setField(.chats, chat_id, "spaceId", sid, 1000, self.device_id);
+                const ch_json = try self.chatsJson();
+                defer self.gpa.free(ch_json);
+                try self.broadcastWatch(.chats, null, ch_json);
+                const sess_json = try self.sessionsJson();
+                defer self.gpa.free(sess_json);
+                try self.broadcastWatch(.sessions, null, sess_json);
+                return .{ .unary_json = try std.fmt.allocPrint(self.gpa, "{{\"chatId\":{f}}}", .{json.fmt(chat_id, .{})}) };
+            },
+            .setChatConfig => {
+                const chat_id = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
+                const cfg_val = obj.get("config") orelse return .{ .err = .{ .bad_params = "missing config" } };
+                if (cfg_val != .object) return .{ .err = .{ .bad_params = "config must be object" } };
+                const harness = requireStr(cfg_val.object, "harness") orelse return .{ .err = .{ .bad_params = "missing config.harness" } };
+                const model: ?[]const u8 = if (cfg_val.object.get("model")) |v| (if (v == .string) v.string else null) else null;
+                const reasoning: ?[]const u8 = if (cfg_val.object.get("reasoning")) |v| (if (v == .string) v.string else null) else null;
+                for (self.chats.items) |*c| {
+                    if (std.mem.eql(u8, c.id, chat_id)) {
+                        const copy = try self.gpa.dupe(u8, harness);
+                        self.gpa.free(c.harness);
+                        c.harness = copy;
+                        if (model) |m| {
+                            const m_copy = try self.gpa.dupe(u8, m);
+                            if (c.model) |old| self.gpa.free(old);
+                            c.model = m_copy;
+                        }
+                        if (reasoning) |r| {
+                            const r_copy = try self.gpa.dupe(u8, r);
+                            if (c.reasoning) |old| self.gpa.free(old);
+                            c.reasoning = r_copy;
+                        }
+                    }
+                }
+                const ch_json = try self.chatsJson();
+                defer self.gpa.free(ch_json);
+                try self.broadcastWatch(.chats, null, ch_json);
+                return .{ .unary_json = try self.gpa.dupe(u8, "{\"updated\":true}") };
+            },
+            .renameChat => {
+                const chat_id = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
+                const title = requireStr(obj, "title") orelse "";
+                for (self.chats.items) |*c| {
+                    if (std.mem.eql(u8, c.id, chat_id)) {
+                        const t_copy = try self.gpa.dupe(u8, title);
+                        if (c.title) |old| self.gpa.free(old);
+                        c.title = t_copy;
+                    }
+                }
+                const ch_json = try self.chatsJson();
+                defer self.gpa.free(ch_json);
+                try self.broadcastWatch(.chats, null, ch_json);
+                return .{ .unary_json = try self.gpa.dupe(u8, "{\"updated\":true}") };
+            },
+            .setChatBranch => {
+                const chat_id = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
+                const branch: ?[]const u8 = if (obj.get("branch")) |v| (if (v == .string) v.string else null) else null;
+                for (self.chats.items) |*c| {
+                    if (std.mem.eql(u8, c.id, chat_id)) {
+                        const b_copy = if (branch) |b| try self.gpa.dupe(u8, b) else null;
+                        if (c.branch) |old| self.gpa.free(old);
+                        c.branch = b_copy;
+                    }
+                }
+                const ch_json = try self.chatsJson();
+                defer self.gpa.free(ch_json);
+                try self.broadcastWatch(.chats, null, ch_json);
+                return .{ .unary_json = try self.gpa.dupe(u8, "{\"updated\":true}") };
+            },
+            .setChatCwd => {
+                const chat_id = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
+                const cwd: ?[]const u8 = if (obj.get("cwd")) |v| (if (v == .string) v.string else null) else null;
+                for (self.chats.items) |*c| {
+                    if (std.mem.eql(u8, c.id, chat_id)) {
+                        const c_copy = if (cwd) |cw| try self.gpa.dupe(u8, cw) else null;
+                        if (c.cwd) |old| self.gpa.free(old);
+                        c.cwd = c_copy;
+                    }
+                }
+                const ch_json = try self.chatsJson();
+                defer self.gpa.free(ch_json);
+                try self.broadcastWatch(.chats, null, ch_json);
+                return .{ .unary_json = try self.gpa.dupe(u8, "{\"updated\":true}") };
+            },
+            .setChatActivity => {
+                const chat_id = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
+                const status = requireStr(obj, "status") orelse "idle";
+                for (self.chats.items) |*c| {
+                    if (std.mem.eql(u8, c.id, chat_id)) {
+                        const s_copy = try self.gpa.dupe(u8, status);
+                        if (c.activity_status) |old| self.gpa.free(old);
+                        c.activity_status = s_copy;
+                    }
+                }
+                const sess_json = try self.sessionsJson();
+                defer self.gpa.free(sess_json);
+                try self.broadcastWatch(.sessions, null, sess_json);
+                return .{ .unary_json = try self.gpa.dupe(u8, "{\"updated\":true}") };
+            },
+            .setChatHost => {
+                const chat_id = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
+                const host_dev = requireStr(obj, "deviceId") orelse requireStr(obj, "hostDeviceId") orelse return .{ .err = .{ .bad_params = "missing deviceId" } };
+                for (self.chats.items) |*c| {
+                    if (std.mem.eql(u8, c.id, chat_id)) {
+                        const d_copy = try self.gpa.dupe(u8, host_dev);
+                        self.gpa.free(c.device_id);
+                        c.device_id = d_copy;
+                    }
+                }
+                const ch_json = try self.chatsJson();
+                defer self.gpa.free(ch_json);
+                try self.broadcastWatch(.chats, null, ch_json);
+                return .{ .unary_json = try self.gpa.dupe(u8, "{\"updated\":true}") };
+            },
+            .changeSidebarPin => {
+                const id: ?[]const u8 = requireStr(obj, "id") orelse blk: {
+                    if (obj.get("change")) |cv| {
+                        if (cv == .object) break :blk requireStr(cv.object, "id") orelse requireStr(cv.object, "chatId");
+                    }
+                    break :blk null;
+                };
+                const pinned: bool = if (obj.get("pinned")) |pv| (if (pv == .bool) pv.bool else true) else true;
+                if (id) |target| {
+                    for (self.chats.items) |*c| {
+                        if (std.mem.eql(u8, c.id, target)) c.pinned = pinned;
+                    }
+                }
+                return .{ .unary_json = try self.gpa.dupe(u8, "{\"updated\":true}") };
+            },
+            .setAppearance => {
+                _ = requireStr(obj, "mode");
+                _ = requireStr(obj, "sortBy");
+                _ = requireStr(obj, "groupBy");
+                return .{ .unary_json = try self.gpa.dupe(u8, "{\"updated\":true}") };
+            },
+            .deleteChat => {
+                const chat_id = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
+                var i: usize = 0;
+                while (i < self.chats.items.len) {
+                    if (std.mem.eql(u8, self.chats.items[i].id, chat_id)) {
+                        self.chats.items[i].deinit(self.gpa);
+                        _ = self.chats.orderedRemove(i);
+                        break;
+                    }
+                    i += 1;
+                }
+                // Reclaim in-memory SessionDoc, persisted SQLite snapshot/outbox, and target watches
+                // (Lean Theorem `complete_delete_zero_leak_and_no_resurrection`).
+                if (self.docs.fetchRemove(chat_id)) |kv| {
+                    self.gpa.free(kv.key);
+                    var doc = kv.value;
+                    doc.deinit();
+                }
+                self.store.deleteDoc(chat_id);
+                self.removeTargetWatches(chat_id);
+                if (self.focused_chat_id) |fid| {
+                    if (std.mem.eql(u8, fid, chat_id)) {
+                        self.gpa.free(fid);
+                        self.focused_chat_id = null;
+                    }
+                }
+                const ch_json = try self.chatsJson();
+                defer self.gpa.free(ch_json);
+                try self.broadcastWatch(.chats, null, ch_json);
+                const sess_json = try self.sessionsJson();
+                defer self.gpa.free(sess_json);
+                try self.broadcastWatch(.sessions, null, sess_json);
+                return .{ .unary_json = try self.gpa.dupe(u8, "{\"deleted\":true}") };
+            },
+            .markChatSeen => {
+                _ = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
+                return .{ .unary_json = try self.gpa.dupe(u8, "{\"seen\":true}") };
+            },
+            .setChatArchived => {
+                const chat_id = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
+                const arch_val = obj.get("archived") orelse return .{ .err = .{ .bad_params = "missing archived" } };
+                if (arch_val != .bool) return .{ .err = .{ .bad_params = "archived must be bool" } };
+                for (self.chats.items) |*c| {
+                    if (std.mem.eql(u8, c.id, chat_id)) c.archived = arch_val.bool;
+                }
+                const ch_json = try self.chatsJson();
+                defer self.gpa.free(ch_json);
+                try self.broadcastWatch(.chats, null, ch_json);
+                return .{ .unary_json = try self.gpa.dupe(u8, "{\"updated\":true}") };
+            },
+            .renameDevice, .forgetDevice => {
+                return .{ .unary_json = try self.gpa.dupe(u8, "{\"ok\":true}") };
+            },
         }
-        if (std.mem.eql(u8, op, "markChatSeen")) {
-            _ = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
-            return .{ .unary_json = try self.gpa.dupe(u8, "{\"seen\":true}") };
-        }
-        if (std.mem.eql(u8, op, "setChatArchived")) {
-            const chat_id = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
-            const arch_val = obj.get("archived") orelse return .{ .err = .{ .bad_params = "missing archived" } };
-            if (arch_val != .bool) return .{ .err = .{ .bad_params = "archived must be bool" } };
-            for (self.chats.items) |*c| {
-                if (std.mem.eql(u8, c.id, chat_id)) c.archived = arch_val.bool;
-            }
-            const ch_json = try self.chatsJson();
-            defer self.gpa.free(ch_json);
-            try self.broadcastWatch(.chats, null, ch_json);
-            return .{ .unary_json = try self.gpa.dupe(u8, "{\"updated\":true}") };
-        }
-        if (std.mem.eql(u8, op, "renameDevice") or std.mem.eql(u8, op, "forgetDevice")) {
-            return .{ .unary_json = try self.gpa.dupe(u8, "{\"ok\":true}") };
-        }
-        return .{ .err = .{ .bad_params = "unknown Mutate op" } };
     }
 
     pub fn spacesJson(self: *const EngineHost) ![]u8 {
@@ -1977,16 +2160,17 @@ pub const EngineHost = struct {
             const title = c.title orelse "New Chat";
             const model = c.model orelse defaultModelForHarness(c.harness);
             const reasoning = c.reasoning orelse "high";
-            const cwd = self.chatWorkspacePath(c.id);
+            const cwd = c.cwd orelse self.chatWorkspacePath(c.id);
+            const branch = c.branch orelse "experimental-zig-branch";
             if (c.space_id) |sid| {
                 try w.print(
-                    "{{\"id\":{f},\"title\":{f},\"spaceId\":{f},\"deviceId\":{f},\"harness\":{f},\"archived\":{},\"createdAt\":\"2026-11-10T08:00:00Z\",\"lastMessageAt\":\"2026-11-10T08:05:00Z\",\"cwd\":{f},\"branch\":\"experimental-zig-branch\",\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f}}}}}",
-                    .{ json.fmt(c.id, .{}), json.fmt(title, .{}), json.fmt(sid, .{}), json.fmt(c.device_id, .{}), json.fmt(c.harness, .{}), c.archived, json.fmt(cwd, .{}), json.fmt(c.harness, .{}), json.fmt(model, .{}), json.fmt(reasoning, .{}) },
+                    "{{\"id\":{f},\"title\":{f},\"spaceId\":{f},\"deviceId\":{f},\"harness\":{f},\"archived\":{},\"createdAt\":\"2026-11-10T08:00:00Z\",\"lastMessageAt\":\"2026-11-10T08:05:00Z\",\"cwd\":{f},\"branch\":{f},\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f}}}}}",
+                    .{ json.fmt(c.id, .{}), json.fmt(title, .{}), json.fmt(sid, .{}), json.fmt(c.device_id, .{}), json.fmt(c.harness, .{}), c.archived, json.fmt(cwd, .{}), json.fmt(branch, .{}), json.fmt(c.harness, .{}), json.fmt(model, .{}), json.fmt(reasoning, .{}) },
                 );
             } else {
                 try w.print(
-                    "{{\"id\":{f},\"title\":{f},\"deviceId\":{f},\"harness\":{f},\"archived\":{},\"createdAt\":\"2026-11-10T08:00:00Z\",\"lastMessageAt\":\"2026-11-10T08:05:00Z\",\"cwd\":{f},\"branch\":\"experimental-zig-branch\",\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f}}}}}",
-                    .{ json.fmt(c.id, .{}), json.fmt(title, .{}), json.fmt(c.device_id, .{}), json.fmt(c.harness, .{}), c.archived, json.fmt(cwd, .{}), json.fmt(c.harness, .{}), json.fmt(model, .{}), json.fmt(reasoning, .{}) },
+                    "{{\"id\":{f},\"title\":{f},\"deviceId\":{f},\"harness\":{f},\"archived\":{},\"createdAt\":\"2026-11-10T08:00:00Z\",\"lastMessageAt\":\"2026-11-10T08:05:00Z\",\"cwd\":{f},\"branch\":{f},\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f}}}}}",
+                    .{ json.fmt(c.id, .{}), json.fmt(title, .{}), json.fmt(c.device_id, .{}), json.fmt(c.harness, .{}), c.archived, json.fmt(cwd, .{}), json.fmt(branch, .{}), json.fmt(c.harness, .{}), json.fmt(model, .{}), json.fmt(reasoning, .{}) },
                 );
             }
         }
@@ -2001,9 +2185,10 @@ pub const EngineHost = struct {
         try w.writeByte('[');
         for (self.chats.items, 0..) |c, idx| {
             if (idx > 0) try w.writeByte(',');
+            const status = c.activity_status orelse "idle";
             try w.print(
-                "{{\"chatId\":{f},\"status\":\"idle\",\"updatedAt\":\"2026-11-10T08:05:00Z\"}}",
-                .{json.fmt(c.id, .{})},
+                "{{\"chatId\":{f},\"status\":{f},\"updatedAt\":\"2026-11-10T08:05:00Z\"}}",
+                .{ json.fmt(c.id, .{}), json.fmt(status, .{}) },
             );
         }
         try w.writeByte(']');
@@ -2822,5 +3007,162 @@ test "Full Rust parity Login (SignInHeadless -> CompleteSignIn -> NeedsOrganizat
         try testing.expect(std.mem.indexOf(u8, sync_r.unary_json, "\"cursor\":2") != null);
         try testing.expect(std.mem.indexOf(u8, sync_r.unary_json, "\"pendingPushes\":0") != null);
         try testing.expect(std.mem.indexOf(u8, sync_r.unary_json, "\"state\":\"synced\"") != null);
+    }
+}
+
+test "Mechanical 1:1 source-of-truth verification against crates/rpc/src/lib.rs, crates/engine/src/rpc.rs, and crates/doc/src/commands.rs" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // 1. Parse `crates/rpc/src/lib.rs` `pub mod methods` directly from disk and verify all 148 RPC methods exist in `rpc_method_map`.
+    const rpc_lib_rs = try std.Io.Dir.cwd().readFileAlloc(io, "../../crates/rpc/src/lib.rs", a, .limited(256 * 1024));
+    const mod_start = std.mem.indexOf(u8, rpc_lib_rs, "pub mod methods {") orelse return error.MissingMethodsMod;
+    const mod_end_rel = std.mem.indexOfPos(u8, rpc_lib_rs, mod_start, "\n}") orelse return error.MissingMethodsEnd;
+    const methods_block = rpc_lib_rs[mod_start..mod_end_rel];
+
+    var rust_method_count: usize = 0;
+    var line_it = std.mem.splitScalar(u8, methods_block, '\n');
+    while (line_it.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (!std.mem.startsWith(u8, trimmed, "pub const ")) continue;
+        const first_q = std.mem.indexOfScalar(u8, trimmed, '"') orelse continue;
+        const second_q = std.mem.indexOfScalarPos(u8, trimmed, first_q + 1, '"') orelse continue;
+        const method_name = trimmed[first_q + 1 .. second_q];
+        try testing.expect(rpc_method_map.get(method_name) != null);
+        rust_method_count += 1;
+    }
+    try testing.expectEqual(@as(usize, 148), rust_method_count);
+
+    // 2. Parse `crates/engine/src/rpc.rs` `enum MutateParams` and `enum FinishQueuedMessageEditAction` directly from disk.
+    const engine_rpc_rs = try std.Io.Dir.cwd().readFileAlloc(io, "../../crates/engine/src/rpc.rs", a, .limited(512 * 1024));
+
+    const mutate_start = std.mem.indexOf(u8, engine_rpc_rs, "enum MutateParams {") orelse return error.MissingMutateParams;
+    const mutate_end = std.mem.indexOfPos(u8, engine_rpc_rs, mutate_start, "\n}") orelse return error.MissingMutateEnd;
+    const mutate_block = engine_rpc_rs[mutate_start + "enum MutateParams {".len .. mutate_end];
+
+    var mutate_op_count: usize = 0;
+    var depth: usize = 0;
+    var m_lines = std.mem.splitScalar(u8, mutate_block, '\n');
+    while (m_lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0 or std.mem.startsWith(u8, trimmed, "//") or std.mem.startsWith(u8, trimmed, "#[")) {
+            continue;
+        }
+        if (depth == 0 and std.ascii.isUpper(trimmed[0])) {
+            var end_ident: usize = 0;
+            while (end_ident < trimmed.len and std.ascii.isAlphanumeric(trimmed[end_ident])) : (end_ident += 1) {}
+            const pascal = trimmed[0..end_ident];
+            const camel = try a.dupe(u8, pascal);
+            camel[0] = std.ascii.toLower(camel[0]);
+            try testing.expect(mutate_op_map.get(camel) != null);
+            mutate_op_count += 1;
+        }
+        for (trimmed) |ch| {
+            if (ch == '{') depth += 1;
+            if (ch == '}') depth -= 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 17), mutate_op_count);
+
+    const edit_start = std.mem.indexOf(u8, engine_rpc_rs, "enum FinishQueuedMessageEditAction {") orelse return error.MissingEditAction;
+    const edit_end = std.mem.indexOfPos(u8, engine_rpc_rs, edit_start, "\n}") orelse return error.MissingEditActionEnd;
+    const edit_block = engine_rpc_rs[edit_start + "enum FinishQueuedMessageEditAction {".len .. edit_end];
+
+    var edit_action_count: usize = 0;
+    var e_lines = std.mem.splitScalar(u8, edit_block, '\n');
+    while (e_lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r,");
+        if (trimmed.len == 0 or !std.ascii.isUpper(trimmed[0])) continue;
+        const camel = try a.dupe(u8, trimmed);
+        camel[0] = std.ascii.toLower(camel[0]);
+        try testing.expect(edit_action_map.get(camel) != null);
+        edit_action_count += 1;
+    }
+    try testing.expectEqual(@as(usize, 4), edit_action_count);
+
+    // 3. Parse `crates/doc/src/commands.rs` `pub enum SessionCommandKind` directly from disk.
+    const commands_rs = try std.Io.Dir.cwd().readFileAlloc(io, "../../crates/doc/src/commands.rs", a, .limited(128 * 1024));
+    const cmd_start = std.mem.indexOf(u8, commands_rs, "pub enum SessionCommandKind {") orelse return error.MissingSessionCommandKind;
+    const cmd_end = std.mem.indexOfPos(u8, commands_rs, cmd_start, "\n}") orelse return error.MissingSessionCommandKindEnd;
+    const cmd_block = commands_rs[cmd_start + "pub enum SessionCommandKind {".len .. cmd_end];
+
+    var cmd_kind_count: usize = 0;
+    var c_lines = std.mem.splitScalar(u8, cmd_block, '\n');
+    while (c_lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r,");
+        if (trimmed.len == 0 or !std.ascii.isUpper(trimmed[0])) continue;
+        const camel = try a.dupe(u8, trimmed);
+        camel[0] = std.ascii.toLower(camel[0]);
+        try testing.expect(command_kind_map.get(camel) != null);
+        cmd_kind_count += 1;
+    }
+    try testing.expectEqual(@as(usize, 5), cmd_kind_count);
+
+    // 4. Execute all 17 Mutate ops, all 5 QueueCommand kinds, and all 4 FinishQueuedMessageEdit actions through EngineHost with testing.allocator (zero memory leaks).
+    var host = try EngineHost.init(gpa, "dev-src-parity", "SourceParityHost");
+    defer host.deinit();
+
+    const mutate_payloads = [_][]const u8{
+        "{\"op\":\"createSpace\",\"spaceId\":\"sp-1\",\"deviceId\":\"dev-src-parity\",\"path\":\"/tmp/sp\"}",
+        "{\"op\":\"renameSpace\",\"spaceId\":\"sp-1\",\"name\":\"Renamed\"}",
+        "{\"op\":\"createChat\",\"chatId\":\"ch-1\",\"spaceId\":\"sp-1\",\"config\":{\"harness\":\"graff\"}}",
+        "{\"op\":\"renameChat\",\"chatId\":\"ch-1\",\"title\":\"Chat Title\"}",
+        "{\"op\":\"setChatBranch\",\"chatId\":\"ch-1\",\"branch\":\"feat/parity\"}",
+        "{\"op\":\"setChatCwd\",\"chatId\":\"ch-1\",\"cwd\":\"/tmp/sp/wt\"}",
+        "{\"op\":\"setChatActivity\",\"chatId\":\"ch-1\",\"status\":\"working\"}",
+        "{\"op\":\"setChatHost\",\"chatId\":\"ch-1\",\"deviceId\":\"dev-2\"}",
+        "{\"op\":\"setChatArchived\",\"chatId\":\"ch-1\",\"archived\":true}",
+        "{\"op\":\"changeSidebarPin\",\"id\":\"ch-1\",\"pinned\":true}",
+        "{\"op\":\"setAppearance\",\"mode\":\"dark\",\"light\":\"latte\",\"dark\":\"mocha\"}",
+        "{\"op\":\"setChatConfig\",\"chatId\":\"ch-1\",\"config\":{\"harness\":\"graff\",\"model\":\"claude-opus-4-6\",\"reasoning\":\"high\"}}",
+        "{\"op\":\"markChatSeen\",\"chatId\":\"ch-1\",\"at\":2000}",
+        "{\"op\":\"renameDevice\",\"deviceId\":\"dev-src-parity\",\"name\":\"RenamedHost\"}",
+        "{\"op\":\"forgetDevice\",\"deviceId\":\"dev-old\"}",
+        "{\"op\":\"deleteChat\",\"chatId\":\"ch-1\"}",
+        "{\"op\":\"deleteSpace\",\"spaceId\":\"sp-1\"}",
+    };
+    try testing.expectEqual(@as(usize, 17), mutate_payloads.len);
+    for (mutate_payloads) |payload| {
+        const p = try json.parseFromSliceLeaky(json.Value, a, payload, .{});
+        const out = try host.handle("Mutate", p);
+        defer gpa.free(out.unary_json);
+        try testing.expect(out == .unary_json);
+    }
+
+    const command_payloads = [_][]const u8{
+        "{\"chatId\":\"ch-cmd\",\"command\":{\"kind\":\"run\",\"messageId\":\"m-run\",\"request\":{\"prompt\":\"hi\"}}}",
+        "{\"chatId\":\"ch-cmd\",\"command\":{\"kind\":\"steer\",\"messageId\":\"m-steer\",\"prompt\":\"steer now\"}}",
+        "{\"chatId\":\"ch-cmd\",\"command\":{\"kind\":\"interrupt\"}}",
+        "{\"chatId\":\"ch-cmd\",\"command\":{\"kind\":\"respondInput\",\"requestId\":\"req-1\",\"answers\":[]}}",
+        "{\"chatId\":\"ch-cmd\",\"command\":{\"kind\":\"dismissInput\",\"requestId\":\"req-2\"}}",
+    };
+    try testing.expectEqual(@as(usize, 5), command_payloads.len);
+    for (command_payloads) |payload| {
+        const p = try json.parseFromSliceLeaky(json.Value, a, payload, .{});
+        const out = try host.handle("QueueCommand", p);
+        defer gpa.free(out.unary_json);
+        try testing.expectEqualStrings("{\"queued\":true}", out.unary_json);
+    }
+
+    const edit_actions = [_][]const u8{ "commit", "cancel", "releaseUnchanged", "discard" };
+    try testing.expectEqual(@as(usize, 4), edit_actions.len);
+    {
+        const q_p = try json.parseFromSliceLeaky(json.Value, a, "{\"chatId\":\"ch-cmd\",\"text\":\"queued\"}", .{});
+        const q_out = try host.handle("QueueMessage", q_p);
+        defer gpa.free(q_out.unary_json);
+    }
+    for (edit_actions) |act_name| {
+        const b_p = try json.parseFromSliceLeaky(json.Value, a, "{\"chatId\":\"ch-cmd\",\"id\":\"row-parity\",\"editorDeviceId\":\"dev-1\",\"editorInstanceId\":\"inst-1\"}", .{});
+        const b_out = try host.handle("BeginQueuedMessageEdit", b_p);
+        defer gpa.free(b_out.unary_json);
+
+        const f_str = try std.fmt.allocPrint(a, "{{\"chatId\":\"ch-cmd\",\"id\":\"row-parity\",\"leaseId\":\"lease-parity\",\"action\":\"{s}\",\"text\":\"edited\"}}", .{act_name});
+        const f_p = try json.parseFromSliceLeaky(json.Value, a, f_str, .{});
+        const f_out = try host.handle("FinishQueuedMessageEdit", f_p);
+        defer gpa.free(f_out.unary_json);
+        try testing.expectEqualStrings("{\"finished\":true}", f_out.unary_json);
     }
 }

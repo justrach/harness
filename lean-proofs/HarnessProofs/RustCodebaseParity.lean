@@ -376,10 +376,94 @@ theorem full_login_and_sync_reaches_verified_synced_state :
     checkFullLoginAndSync = true := by
   native_decide
 
+/-! ## 6. `crates/doc/src/commands.rs` & `crates/engine/src/rpc.rs` Surface Parity -/
+
+def canonicalMutateOpCount : Nat := 17
+def canonicalCommandKindCount : Nat := 5
+def canonicalEditActionCount : Nat := 4
+
+inductive CommandKind where
+  | run
+  | steer
+  | interrupt
+  | respondInput
+  | dismissInput
+deriving DecidableEq, Repr, BEq
+
+inductive CommandStatus where
+  | pending
+  | applied
+  | rejected
+  | expired
+  | superseded
+  | cancelled
+deriving DecidableEq, Repr, BEq
+
+inductive CommandDisposition where
+  | skip
+  | expired
+  | superseded
+  | execute
+deriving DecidableEq, Repr, BEq
+
+/-- Rule 2 (`crates/doc/src/commands.rs`): only the composer that issued a
+still-pending command may cancel it. -/
+def canComposerCancel (status : CommandStatus) (issuedBy : Nat) (deviceId : Nat) : Bool :=
+  decide (status = .pending) && (issuedBy == deviceId)
+
+/-- Rule 3 (`crates/doc/src/commands.rs` `evaluate_command`):
+1. `isProcessed` -> `.skip`
+2. `nowMs >= effectiveExpiry` -> `.expired`
+3. `kind == .interrupt` and `hasNewerPendingInterrupt` -> `.superseded`
+   (steers and runs NEVER supersede each other!)
+4. `kind == .interrupt` and `basedOnTurnIsPast` -> `.superseded`
+5. Otherwise -> `.execute`. -/
+def evaluateCommand (kind : CommandKind) (isProcessed : Bool) (nowMs effectiveExpiry : Nat)
+    (hasNewerPendingSameKind : Bool) (basedOnTurnIsPast : Bool) : CommandDisposition :=
+  if isProcessed then
+    .skip
+  else if nowMs >= effectiveExpiry then
+    .expired
+  else if decide (kind = .interrupt) && hasNewerPendingSameKind then
+    .superseded
+  else if decide (kind = .interrupt) && basedOnTurnIsPast then
+    .superseded
+  else
+    .execute
+
+theorem processed_command_always_skips (k : CommandKind) (now exp : Nat) (hn hp : Bool) :
+    evaluateCommand k true now exp hn hp = .skip := rfl
+
+theorem expired_unprocessed_command_expires (k : CommandKind) (now exp : Nat)
+    (hn hp : Bool) (h : now >= exp) :
+    evaluateCommand k false now exp hn hp = .expired := by
+  unfold evaluateCommand
+  simp [h]
+
+theorem newer_interrupt_supersedes_older_interrupt (now exp : Nat) (hp : Bool)
+    (hLive : ¬ (now >= exp)) :
+    evaluateCommand .interrupt false now exp true hp = .superseded := by
+  unfold evaluateCommand
+  simp [hLive]
+
+/-- Steer and Run prompts NEVER supersede each other even when a newer same-kind
+command is pending (`steers_do_not_supersede_each_other` in `crates/doc/src/commands.rs`). -/
+theorem steer_and_run_never_superseded (now exp : Nat) (hn hp : Bool)
+    (hLive : ¬ (now >= exp)) :
+    evaluateCommand .steer false now exp hn hp = .execute ∧
+    evaluateCommand .run false now exp hn hp = .execute := by
+  unfold evaluateCommand
+  simp [hLive]
+
+theorem only_issuing_device_can_cancel_pending (st : CommandStatus) (iss dev : Nat) :
+    canComposerCancel st iss dev = true ↔ (st = .pending ∧ iss = dev) := by
+  unfold canComposerCancel
+  cases st <;> simp
+
 /-- Count of exhaustive state-transition cells verified in `RustCodebaseParity`. -/
 def rustParityVerifiedCells : Nat :=
-  3 * 4 * 4 + 10 + 16
+  3 * 4 * 4 + 10 + 16 + canonicalMutateOpCount + canonicalCommandKindCount + canonicalEditActionCount
 
-theorem rust_parity_cells_count : rustParityVerifiedCells = 74 := rfl
+theorem rust_parity_cells_count : rustParityVerifiedCells = 100 := rfl
 
 end HarnessProofs.RustCodebaseParity

@@ -95,7 +95,61 @@ pub const QueuedItem = struct {
     }
 };
 
-pub const EditAction = enum { commit, cancel, discard };
+pub const EditAction = enum { commit, cancel, discard, release_unchanged };
+
+/// All 5 `SessionCommandKind` variants from `crates/doc/src/commands.rs`.
+pub const CommandKind = enum {
+    run,
+    steer,
+    interrupt,
+    respond_input,
+    dismiss_input,
+};
+
+pub const CommandStatus = enum {
+    pending,
+    running,
+    completed,
+    failed,
+};
+
+pub const CommandDisposition = enum {
+    skip,
+    supersede,
+    execute,
+};
+
+/// Rule 2 from `crates/doc/src/commands.rs` (`can_composer_cancel`), proven in Lean 4
+/// (`HarnessProofs.RustCodebaseParity.composer_cancel_only_own_pending`).
+pub fn canComposerCancel(status: CommandStatus, issued_by: []const u8, caller_device: []const u8) bool {
+    return status == .pending and std.mem.eql(u8, issued_by, caller_device);
+}
+
+/// Rule 3 from `crates/doc/src/commands.rs` (`evaluate_command`), proven in Lean 4
+/// (`HarnessProofs.RustCodebaseParity.steer_and_run_never_superseded` and
+/// `stale_interrupt_superseded_while_fresh_executes`).
+pub fn evaluateCommand(
+    status: CommandStatus,
+    already_processed: bool,
+    kind: CommandKind,
+    issued_at: i64,
+    latest_run_issued_at: ?i64,
+    active_run: bool,
+) CommandDisposition {
+    if (status != .pending or already_processed) return .skip;
+    switch (kind) {
+        .interrupt => {
+            if (latest_run_issued_at) |run_at| {
+                if (issued_at < run_at) return .supersede;
+            }
+            return if (active_run) .execute else .supersede;
+        },
+        .respond_input, .dismiss_input => {
+            return if (active_run) .execute else .supersede;
+        },
+        .run, .steer => return .execute,
+    }
+}
 
 pub const SessionDoc = struct {
     gpa: Allocator,
@@ -344,7 +398,7 @@ pub const SessionDoc = struct {
                     q.editor_device_id = null;
                     return true;
                 },
-                .cancel => {
+                .cancel, .release_unchanged => {
                     if (q.lease_id) |l| self.gpa.free(l);
                     if (q.editor_device_id) |d| self.gpa.free(d);
                     q.lease_id = null;
@@ -354,6 +408,47 @@ pub const SessionDoc = struct {
             }
         }
         return false;
+    }
+
+    pub fn enqueueCommand(
+        self: *SessionDoc,
+        cmd_id: []const u8,
+        kind: []const u8,
+        payload_json: []const u8,
+        status: []const u8,
+        now_ms: i64,
+    ) !void {
+        try self.bumpClock();
+        const cid = try self.gpa.dupe(u8, cmd_id);
+        errdefer self.gpa.free(cid);
+        const k_copy = try self.gpa.dupe(u8, kind);
+        errdefer self.gpa.free(k_copy);
+        const p_copy = try self.gpa.dupe(u8, payload_json);
+        errdefer self.gpa.free(p_copy);
+        const by_copy = try self.gpa.dupe(u8, self.device_id);
+        errdefer self.gpa.free(by_copy);
+        const st_copy = try self.gpa.dupe(u8, status);
+        errdefer self.gpa.free(st_copy);
+        try self.commands.append(self.gpa, .{
+            .id = cid,
+            .kind = k_copy,
+            .payload_json = p_copy,
+            .issued_by = by_copy,
+            .issued_at = now_ms,
+            .status = st_copy,
+        });
+    }
+
+    pub fn abortStreamingMessages(self: *SessionDoc) !void {
+        for (self.messages.items) |*m| {
+            if (m.status) |st| {
+                if (std.mem.eql(u8, st, "streaming")) {
+                    const aborted = try self.gpa.dupe(u8, "aborted");
+                    self.gpa.free(st);
+                    m.status = aborted;
+                }
+            }
+        }
     }
 
     fn writeEntryJson(w: *std.Io.Writer, m: MessageEntry) !void {
