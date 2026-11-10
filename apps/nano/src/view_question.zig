@@ -2,15 +2,60 @@
 //! `render_wizard`): its header and "1/2", the question, numbered options
 //! (1–9 pick them while the answer box is empty), the answer box, and
 //! "Cancel question", "Back", "Next" or "Submit".
+//!
+//! The panel is never taller than its pane gives the composer dock: the
+//! question and the options scroll in what the header, the answer box and
+//! the buttons leave (`Nano/QuestionPanel.lean`).
 const std = @import("std");
 const nanoui = @import("nanoui");
 const ui = nanoui.ui;
 const theme = @import("theme.zig");
 const icons = @import("icons.zig");
 const kit = @import("view_kit.zig");
+const rules = @import("motion_rules.zig");
 const App = @import("app.zig").App;
 
-pub fn panel(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
+/// Where the panel may grow to (view_composer.zig `docked`).
+pub const Room = struct {
+    /// The dock's share of its pane's height.
+    height: f32,
+    /// The dock's box, which also holds its foot padding, the queue tray
+    /// and dictation status.
+    dock: u32,
+};
+
+/// A box's height as last laid out (`fallback` before it has been). Layout
+/// runs again when this frame changes it.
+fn laidHeight(c: *ui.Context, index: u32, fallback: f32) f32 {
+    c.node(index).layout_dependent = true;
+    return if (c.rects.get(c.node(index).id)) |r| r.h else fallback;
+}
+
+/// A box that is its content's height up to a limit set once the panel is
+/// built, and scrolls past it under an overlay bar (the content keeps its
+/// width, so its height doesn't depend on the limit).
+fn scrolls(c: *ui.Context, k: theme.Colors) ui.Div {
+    return ui.div(c).column().wFull().maxH(0).scrollY().scrollbar(.{ .overlay = k.faint.alpha(0.5) });
+}
+
+/// Over the foot of a box that scrolls on (`view`, its content
+/// `content_h` tall): its last 20 points fade into the panel while more is
+/// below, the transcript's `TRANSCRIPT_FADE_BAND` upside down. Drawn after
+/// the box, in the frame that holds it. The panel is its own opaque
+/// surface on glass too, so the tint is its colour.
+fn fadeFoot(c: *ui.Context, k: theme.Colors, view: u32, content_h: f32) void {
+    if (!std.math.isFinite(content_h)) return;
+    const id = c.node(view).id;
+    const r = c.rects.get(id) orelse return;
+    if (content_h - r.h - (c.scroll.get(id) orelse 0) <= 0.5) return;
+    const band: f32 = @min(20, r.h);
+    var y: f32 = 0;
+    while (y < band) : (y += 1) {
+        _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.composer.alpha((y + 0.5) / band), .absolute = true, .offset = .{ .x = 0, .y = r.h - band + y } }, .none, null);
+    }
+}
+
+pub fn panel(c: *ui.Context, a: *App, k: theme.Colors, w: f32, room: Room) void {
     const wz = if (a.wizard) |*x| x else return;
     const q = wz.question();
     const typed_empty = std.mem.trim(u8, a.composer.text(), " \n\t").len == 0;
@@ -26,12 +71,29 @@ pub fn panel(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
     };
     const box = kit.shadowLg(ui.div(c).column().w(w).bg(k.composer).border(k.border).borderW(1).rounded(@import("view_composer.zig").radius));
     defer box.end();
+    // What the dock holds besides this panel, as both were last laid out
+    // (its 40-point foot before the panel has been).
+    const dock_h = laidHeight(c, room.dock, 0);
+    const self_h = laidHeight(c, box.index, 0);
+    const around = if (dock_h > 0 and self_h > 0) @max(0, dock_h - self_h) else 40;
+    const max_h = rules.questionPanelMax(room.height, around);
+    c.node(box.index).style.max_height = max_h;
+    // The parts that stay put: the body's insets, the header, the hint, the
+    // answer box and the buttons. The question and the options, each in a
+    // box that scrolls, share the rest.
+    var pinned: f32 = 16 + 12;
+    const unknown = std.math.inf(f32);
+    var question_box: u32 = undefined;
+    var question_h: f32 = unknown;
+    var options_box: ?u32 = null;
+    var options_h: f32 = 0;
     {
         const body = ui.div(c).column().wFull().px(16).pt(16).pb(12);
         defer body.end();
         {
             const head = ui.div(c).row().gap(10).itemsCenter().control();
             defer head.end();
+            pinned += laidHeight(c, head.index, 14);
             ui.text(c, tracked(c, if (q.header.len > 0) q.header else "Question"), .{ .size = 10.5, .weight = .medium, .color = k.muted.alpha(0.6) });
             if (wz.questions.len > 1) {
                 const counter = ui.div(c).row().h(20).px(6).rounded(6).itemsCenter().bg(k.ink(0.06));
@@ -40,11 +102,20 @@ pub fn panel(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
             }
         }
         {
+            const frame = ui.div(c).column().wFull();
+            defer frame.end();
+            defer fadeFoot(c, k, question_box, question_h);
+            // Keyed by its page: the next question starts at its top.
+            ui.key(c, c.print("wizard-question-{s}-{d}", .{ wz.request_id, wz.page }));
+            const view = scrolls(c, k);
+            defer view.end();
+            question_box = view.index;
             const q_hash = std.hash.Wyhash.hash(0, q.question);
             ui.key(c, c.print("wizard-q-{s}-{d}-{x}", .{ wz.request_id, wz.page, q_hash }));
             const qt = ui.div(c).column().wFull().pt(6);
             c.node(qt.index).style.selectable = true;
             defer qt.end();
+            question_h = laidHeight(c, qt.index, unknown);
             // Agents write questions in Markdown (bold, code spans, lists),
             // as their replies (composer.rs `question_markdown`).
             @import("view_markdown.zig").markdown(c, k, q.question);
@@ -52,11 +123,20 @@ pub fn panel(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
         if (q.multi_select) {
             const hint = ui.div(c).row().pt(4).control();
             defer hint.end();
+            pinned += laidHeight(c, hint.index, 20);
             ui.text(c, "Select one or more options.", .{ .size = 12, .color = k.muted.alpha(0.65) });
         }
         if (q.options.len > 0) {
+            const frame = ui.div(c).column().wFull();
+            defer frame.end();
+            defer fadeFoot(c, k, options_box.?, options_h);
+            ui.key(c, c.print("wizard-options-{s}-{d}", .{ wz.request_id, wz.page }));
+            const view = scrolls(c, k);
+            defer view.end();
+            options_box = view.index;
             const list = ui.div(c).column().wFull().pt(12).gap(4).control();
             defer list.end();
+            options_h = laidHeight(c, list.index, unknown);
             for (q.options, 0..) |opt, i| {
                 ui.key(c, c.print("opt-{d}-{d}", .{ wz.page, i }));
                 const on = wz.picked(i) and typed_empty;
@@ -76,6 +156,7 @@ pub fn panel(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
     {
         const editor = ui.div(c).column().wFull().px(16);
         defer editor.end();
+        pinned += laidHeight(c, editor.index, 40);
         _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.wash(0.06) }, .none, null);
         const field = ui.div(c).column().wFull().pt(12).pb(4).px(4);
         defer field.end();
@@ -110,12 +191,18 @@ pub fn panel(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
         }
         if (r.submitted) act = .advance;
     }
-    const foot = ui.div(c).row().wFull().px(16).pb(16).pt(4).itemsCenter().control();
-    defer foot.end();
-    if (button(c, k, "Cancel question", false, true)) act = .dismiss;
-    ui.spacer(c);
-    if (wz.page > 0 and button(c, k, "Back", false, true)) act = .back;
-    if (button(c, k, if (wz.last()) "Submit" else "Next", true, wz.canAdvance() or !typed_empty)) act = .advance;
+    {
+        const foot = ui.div(c).row().wFull().px(16).pb(16).pt(4).itemsCenter().control();
+        defer foot.end();
+        pinned += laidHeight(c, foot.index, 50);
+        if (button(c, k, "Cancel question", false, true)) act = .dismiss;
+        ui.spacer(c);
+        if (wz.page > 0 and button(c, k, "Back", false, true)) act = .back;
+        if (button(c, k, if (wz.last()) "Submit" else "Next", true, wz.canAdvance() or !typed_empty)) act = .advance;
+    }
+    const share = rules.questionPanelSplit(max_h - pinned, question_h, options_h);
+    c.node(question_box).style.max_height = share.question;
+    if (options_box) |index| c.node(index).style.max_height = share.options;
 }
 
 /// 1–9 pick while the answer box is empty; Escape steps back a page.
@@ -152,16 +239,30 @@ pub fn button(c: *ui.Context, k: theme.Colors, label: []const u8, primary: bool,
 }
 
 /// The question as the transcript keeps it: a chip, "Waiting for you"
-/// until it is answered.
-pub fn chip(c: *ui.Context, k: theme.Colors, question: []const u8, resolved: bool) void {
+/// until it is answered. It ends inside its column, `col` wide: the
+/// question fades to fit, and in a column too narrow for both the status
+/// is left to the panel under the transcript.
+pub fn chip(c: *ui.Context, k: theme.Colors, question: []const u8, resolved: bool, col: f32) void {
     const outer = ui.div(c).column().py(4).control();
     defer outer.end();
-    const r = ui.div(c).row().h(34).px(8).gap(8).itemsCenter().rounded(10).border(k.wash(0.08)).borderW(1).bg(k.ink(0.045)).clip();
+    const word_st: ui.TextStyle = .{ .size = 12, .weight = .medium, .color = k.muted };
+    const question_st: ui.TextStyle = .{ .size = 12, .color = k.text.alpha(0.9) };
+    const status_st: ui.TextStyle = .{ .size = 12, .color = k.muted };
+    const status = "Waiting for you";
+    // Two 8-point insets, the tile, "Question" and the gaps after each.
+    const lead = 8 + 20 + 8 + @ceil(c.text.width("Question", word_st)) + 8 + 8;
+    const fit = rules.questionChipFit(
+        col,
+        lead,
+        @ceil(c.text.width(question, question_st)),
+        if (resolved) 0 else 8 + @ceil(c.text.width(status, status_st)),
+    );
+    const r = ui.div(c).row().h(34).maxW(col).px(8).gap(8).itemsCenter().rounded(10).border(k.wash(0.08)).borderW(1).bg(k.ink(0.045)).clip();
     defer r.end();
     const tile = ui.div(c).row().size(20, 20).center().rounded(6).bg(k.ink(0.09));
     icons.icon(c, .@"chat-round-line", 12, k.muted, 0);
     tile.end();
-    ui.text(c, "Question", .{ .size = 12, .weight = .medium, .color = k.muted });
-    kit.fadeText(c, question, .{ .size = 12, .color = k.text.alpha(0.9) }, 420);
-    if (!resolved) ui.text(c, "Waiting for you", .{ .size = 12, .color = k.muted });
+    ui.text(c, "Question", word_st);
+    kit.fadeText(c, question, question_st, fit.label);
+    if (fit.waiting) ui.text(c, status, status_st);
 }

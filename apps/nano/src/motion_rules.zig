@@ -7,6 +7,7 @@
 //! - `Nano/Tween.lean`         (30-cell C⁰ retarget continuity & viewport culling cube)
 //! - `Nano/StripMenu.lean`     (slot chip width conservation, scrim top, menu focus cube)
 //! - `Nano/FooterChips.lean`   (4806-cell draft footer chip allocation & split-window cube)
+//! - `Nano/QuestionPanel.lean` (15025-cell agent question panel height split & transcript chip cube)
 //!
 //! Designed with zero `App` dependency so the motion and scroll kernels can be
 //! shared directly with `nanoui`.
@@ -414,6 +415,66 @@ pub fn footerRoom(w: f32, model_w: f32, note_w: f32) f32 {
     const lead = model_w + gap + (if (w >= footer_wide_w) 3 + gap else 0);
     const tail = if (note_w > 0) gap + note_w else 0;
     return @max(0, w - (20 + lead + tail));
+}
+
+/// What an agent's question keeps before its options are shortened
+/// (`Nano.QuestionPanel.floorH`).
+pub const question_floor: f32 = 120;
+/// The gap between the question panel and the bar over the conversation.
+pub const question_top_gap: f32 = 12;
+
+/// The height an agent's question panel may take (`Nano.QuestionPanel.panelMax`)
+/// in the `room` its pane gives the composer dock, which holds `around`
+/// besides the panel (its foot padding, the queue tray, dictation status).
+pub fn questionPanelMax(room: f32, around: f32) f32 {
+    return @max(0, @floor(room) - @ceil(around) - question_top_gap);
+}
+
+pub const QuestionSplit = struct {
+    question: f32,
+    options: f32,
+};
+
+/// How the height the panel's pinned parts leave (`budget`) is shared
+/// between the question, `question_h` tall, and its options, each scrolling
+/// in what it gets (`Nano.QuestionPanel.split`).
+///
+/// Guarantees (`split_within_budget`, `split_whole_when_fits`,
+/// `split_question_yields_first`, `panel_ends_inside_pane`):
+/// 1. The two never take more than `budget`, so the options, the answer
+///    box and Submit end inside the pane.
+/// 2. When both fit, neither is shortened.
+/// 3. A long question gives way first: the options are whole until it is
+///    down to `question_floor` (half of a budget under twice that).
+pub fn questionPanelSplit(budget_in: f32, question_h: f32, options_h: f32) QuestionSplit {
+    const budget = @max(0, @floor(budget_in));
+    const keep = @min(question_floor, @floor(budget / 2));
+    const options = @min(@max(0, options_h), budget - @min(@max(0, question_h), keep));
+    return .{ .question = @min(@max(0, question_h), budget - options), .options = options };
+}
+
+/// The widest a question's transcript chip draws it (GPUI's 420-point label).
+pub const question_chip_cap: f32 = 420;
+/// "Waiting for you" is drawn while the question keeps this much.
+pub const question_chip_min_label: f32 = 96;
+
+pub const QuestionChip = struct {
+    /// The width the question may take, fading at its end.
+    label: f32,
+    /// Whether "Waiting for you" is drawn after it.
+    waiting: bool,
+};
+
+/// A question's transcript chip in a column `col` wide
+/// (`Nano.QuestionPanel.chipFit`): `lead` is everything but the question
+/// (insets, tile, "Question" and their gaps), `waiting_w` "Waiting for you"
+/// with its gap (0 once answered). Proven (`chip_within_column`) to end
+/// inside the column at every width.
+pub fn questionChipFit(col: f32, lead: f32, question_w: f32, waiting_w: f32) QuestionChip {
+    const room = @max(0, @floor(col) - lead);
+    if (waiting_w > 0 and waiting_w + @min(question_w, question_chip_min_label) <= room)
+        return .{ .label = @min(question_chip_cap, room - waiting_w), .waiting = true };
+    return .{ .label = @min(question_chip_cap, room), .waiting = false };
 }
 
 pub const BillingTier = enum { plan, local, credits, api };
@@ -986,6 +1047,51 @@ test "lean UiMode state machine: default is zen, toggle is involutive, and zen f
         for (MovingPart.all) |other| if (other != part) {
             try std.testing.expectEqual(zen.partEnabled(other), zen.togglePart(part).partEnabled(other));
             try std.testing.expectEqual(dev.partEnabled(other), dev.togglePart(part).partEnabled(other));
+        };
+    }
+}
+
+test "lean QuestionPanel kernel: the question and its options share the budget, the question yielding first" {
+    // `screenshot_question_scrolls_over_whole_options`.
+    try std.testing.expectEqual(QuestionSplit{ .question = 550, .options = 150 }, questionPanelSplit(700, 1400, 150));
+    try std.testing.expectEqual(@as(f32, 628), questionPanelMax(680, 40));
+    try std.testing.expectEqual(@as(f32, 0), questionPanelMax(40, 80));
+    // A height not yet measured counts as unbounded.
+    const unknown = std.math.inf(f32);
+    try std.testing.expectEqual(QuestionSplit{ .question = 120, .options = 380 }, questionPanelSplit(500, unknown, unknown));
+
+    const heights_q = [_]f32{ 0, 40, 120, 300, 900 };
+    const heights_o = [_]f32{ 0, 60, 150, 400, 900 };
+    var budget: f32 = 0;
+    while (budget <= 600) : (budget += 1) {
+        const keep = @min(question_floor, @floor(budget / 2));
+        for (heights_q) |q| for (heights_o) |o| {
+            const s = questionPanelSplit(budget, q, o);
+            const next = questionPanelSplit(budget + 1, q, o);
+            try std.testing.expect(s.question + s.options <= budget);
+            try std.testing.expect(s.question <= q and s.options <= o);
+            if (q + o <= budget) try std.testing.expectEqual(QuestionSplit{ .question = q, .options = o }, s);
+            try std.testing.expect(@min(q, keep) <= s.question);
+            if (s.options < o) try std.testing.expect(s.question <= keep);
+            try std.testing.expect(s.question <= next.question and s.options <= next.options);
+        };
+    }
+}
+
+test "lean QuestionPanel kernel: a question's transcript chip ends inside its column" {
+    // `screenshot_chip_keeps_waiting`.
+    try std.testing.expectEqual(QuestionChip{ .label = 314, .waiting = true }, questionChipFit(520, 108, 700, 98));
+    // Too narrow for both: the status goes, the question keeps what is left.
+    try std.testing.expectEqual(QuestionChip{ .label = 172, .waiting = false }, questionChipFit(280, 108, 700, 98));
+    try std.testing.expectEqual(QuestionChip{ .label = 420, .waiting = false }, questionChipFit(736, 108, 700, 0));
+    var col: f32 = 0;
+    while (col <= 800) : (col += 1) {
+        for ([_]f32{ 0, 60, 200, 700 }) |qw| for ([_]f32{ 0, 98 }) |ww| {
+            const chip = questionChipFit(col, 108, qw, ww);
+            const drawn = 108 + @min(qw, chip.label) + (if (chip.waiting) ww else 0);
+            if (col >= 108) try std.testing.expect(drawn <= col);
+            try std.testing.expect(chip.label <= question_chip_cap);
+            if (chip.waiting) try std.testing.expect(@min(qw, question_chip_min_label) <= chip.label);
         };
     }
 }
