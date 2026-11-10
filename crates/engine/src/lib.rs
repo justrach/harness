@@ -17,6 +17,7 @@ use harness_sync::DocsStore;
 
 pub mod agent_accounts;
 pub mod auth;
+pub mod bots;
 pub mod browse_link;
 mod build_wait;
 pub mod change_requests;
@@ -1018,6 +1019,12 @@ impl Engine {
             stop_tx,
         });
         let server = serve_ipc(config.ipc_port, service).await?;
+        // Bot routines run only while this engine does: it checks them once
+        // a minute, and graff records what came due in between.
+        let bot_ticker = bots::spawn_ticker(
+            runtime.core().rpc_service(),
+            bots::Bots::on_device(&runtime.core().agent_accounts.graff_home()),
+        );
 
         tokio::select! {
             result = shutdown_signal() => result?,
@@ -1039,6 +1046,7 @@ impl Engine {
             }
         }
         tracing::info!("shutting down");
+        bot_ticker.abort();
         server.abort();
         runtime.shutdown().await;
         Ok(())

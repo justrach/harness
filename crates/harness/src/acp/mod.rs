@@ -36,6 +36,7 @@ mod compaction;
 mod devin_models;
 mod elicitation;
 pub mod exo_bridge;
+pub mod graff_bot;
 pub mod graff_client;
 #[cfg(target_os = "macos")]
 mod graff_connections;

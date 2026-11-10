@@ -303,6 +303,12 @@ pub mod methods {
     // disable|login`); per-device like the sign-ins above.
     pub const LIST_MCP_SERVERS: &str = "ListMcpServers";
     pub const MCP_SERVER_ACTION: &str = "McpServerAction";
+    // graff's Bots on a device (`graff bot --user …`): standing roles with
+    // their own memory and routines; per-device like the MCP servers.
+    pub const BOTS_STATE: &str = "BotsState";
+    pub const BOT_DETAIL: &str = "BotDetail";
+    pub const BOT_ACTION: &str = "BotAction";
+    pub const RUN_BOT: &str = "RunBot";
     // Uploads / attachments (ControlRpc, relay-forwardable — target the chat's host device).
     pub const UPLOAD_CHUNK: &str = "UploadChunk";
     pub const UPLOAD_COMMIT: &str = "UploadCommit";

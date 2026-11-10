@@ -586,6 +586,12 @@ struct McpServerActionParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct BotDetailParams {
+    bot: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct LoginIdParams {
     login_id: String,
 }
@@ -983,6 +989,11 @@ impl EngineRpc {
     ) -> Self {
         self.external_history = Some(history);
         self
+    }
+
+    /// The user's graff bots on this device.
+    fn bots(&self) -> crate::bots::Bots {
+        crate::bots::Bots::on_device(&self.agent_accounts.graff_home())
     }
 
     fn external_history(&self) -> Result<crate::external_history::ExternalHistory, RpcError> {
@@ -1515,6 +1526,8 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         // A reconnect handshakes every server; a login waits on a browser page.
         methods::LIST_MCP_SERVERS => Duration::from_secs(70),
         methods::MCP_SERVER_ACTION => Duration::from_secs(6 * 60),
+        // A bot's first run may wait on graff's model list.
+        methods::RUN_BOT => Duration::from_secs(150),
         // A relayed sign-in finishes on the host after graff exchanges the code.
         methods::COMPLETE_AGENT_LOGIN => Duration::from_secs(120),
         _ => Duration::from_secs(30),
@@ -1632,6 +1645,11 @@ fn forwardable(method: &str) -> bool {
             // graff's MCP config, caches and sign-ins are per device.
             | methods::LIST_MCP_SERVERS
             | methods::MCP_SERVER_ACTION
+            // graff's bots live in the home of the device that runs them.
+            | methods::BOTS_STATE
+            | methods::BOT_DETAIL
+            | methods::BOT_ACTION
+            | methods::RUN_BOT
             // Uploads/attachments target the chat's host device (the agent reads
             // the committed file from that device's disk).
             | methods::UPLOAD_CHUNK
@@ -3789,6 +3807,41 @@ impl RpcService for EngineRpc {
                 .await
                 .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&rows)
+            }
+            methods::BOTS_STATE => {
+                let state = self
+                    .bots()
+                    .state()
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&state)
+            }
+            methods::BOT_DETAIL => {
+                let p: BotDetailParams = parse_params(params)?;
+                let detail = self
+                    .bots()
+                    .detail(&p.bot)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&detail)
+            }
+            methods::BOT_ACTION => {
+                let p: crate::bots::BotActionParams = parse_params(params)?;
+                let state = self
+                    .bots()
+                    .act(self, p)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&state)
+            }
+            methods::RUN_BOT => {
+                let p: crate::bots::RunBotParams = parse_params(params)?;
+                let ran = self
+                    .bots()
+                    .run(self, p)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&ran)
             }
             methods::SIGN_OUT_GRAFF_LOGIN => {
                 let p: SignOutGraffLoginParams = parse_params(params)?;
