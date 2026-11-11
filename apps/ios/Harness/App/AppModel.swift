@@ -1630,6 +1630,7 @@ final class AppModel {
     private func storeIsProtected(_ store: SessionStore) -> Bool {
         !store.pendingSends.isEmpty
             || !store.outbox.isEmpty
+            || store.docIsBusy
             || store.entries.last?.status == .streaming
     }
 
