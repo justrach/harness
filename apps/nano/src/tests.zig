@@ -119,6 +119,7 @@ test {
     _ = @import("view_context.zig");
     _ = @import("tests_ui_desktop_sidebar_composer.zig");
     _ = @import("tests_ui_tool_tree.zig");
+    _ = @import("tests_ui_agent_work.zig");
     _ = @import("tests_ui_actions_toolbar.zig");
     _ = @import("tests_ui_sessions.zig");
     _ = @import("tests_desktop_regressions.zig");

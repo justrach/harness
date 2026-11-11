@@ -65,6 +65,9 @@ pub fn main(init: std.process.Init) !void {
         a.engine.scene = try json.parseFromSlice(json.Value, gpa, try json.Stringify.valueAlloc(init.arena.allocator(), v, .{}), .{});
         a.engine.state = .connected;
         a.device_id = try gpa.dupe(u8, first(scene, "spaces", "deviceId") orelse first(scene, "devices", "id") orelse "local");
+    } else if (flag(scene, "connected")) {
+        a.engine.state = .connected;
+        a.device_id = try gpa.dupe(u8, first(scene, "spaces", "deviceId") orelse first(scene, "devices", "id") orelse "local");
     }
     // The account badge's: "workspaceScope", "auth" (an AuthStatus item),
     // "codegraff" (a CodegraffAuthStatus reply).
@@ -73,6 +76,7 @@ pub fn main(init: std.process.Init) !void {
     if (scene.get("auth")) |v| a.account.user = try acct.readUser(gpa, v);
     if (scene.get("codegraff")) |v| a.account.codegraff = try acct.readCodegraff(gpa, v);
     if (str(scene, "open")) |id| a.openChat(id, null);
+    if (scene.get("toolProgress")) |v| try a.tool_progress.replace(&a, v);
     // Bots: a `BotsState` reply as "bots", the clock its times are read
     // against as "botsNow" (ms), and the page shown: "inbox", "new" or a
     // bot's name. "botsDetail" is what `BotDetail` would answer for its
@@ -111,6 +115,12 @@ pub fn main(init: std.process.Init) !void {
     defer t.deinit();
     const transcripts = if (scene.get("transcripts")) |v| (if (v == .object) v.object else null) else null;
     settle(&t, &a, transcripts, init.arena.allocator());
+    if (scene.get("contextUsage")) |u| {
+        var cu_frame: json.ObjectMap = .empty;
+        try cu_frame.put(init.arena.allocator(), "contextUsage", u);
+        a.transcript.apply(.{ .object = cu_frame }) catch {};
+        t.settle(1);
+    }
 
     var snaps: usize = 0;
     const steps = if (scene.get("steps")) |v| (if (v == .array) v.array.items else &.{}) else &.{};
@@ -220,6 +230,7 @@ fn parity(init: std.process.Init, scene: json.ObjectMap, name: []const u8, out: 
     if (str(scene, "selectedSpace") orelse first(scene, "spaces", "id")) |sp| a.space = try gpa.dupe(u8, sp);
     if (str(scene, "selectedChat")) |id| {
         a.openChat(id, null);
+        if (scene.get("toolProgress")) |v| try a.tool_progress.replace(&a, v);
         if (scene.get("transcript")) |v| {
             var frame = (reset(arena, v) orelse return error.OutOfMemory);
             // The chat's context meter rides its transcript frame.
@@ -364,6 +375,11 @@ fn settle(t: *ui.Tester, a: *App, transcripts: ?json.ObjectMap, arena: std.mem.A
     };
     for (a.peers.items) |*p| if (p.transcript.entries.items.len == 0) if (all.get(p.id)) |v| {
         p.transcript.apply(reset(arena, v) orelse continue) catch {};
+        filled = true;
+    };
+    for (a.panels.tabs.items) |tab| if (tab.agent) |sub| if (sub.transcript.entries.items.len == 0) if (all.get(sub.doc)) |v| {
+        sub.transcript.apply(reset(arena, v) orelse continue) catch {};
+        sub.loaded = true;
         filled = true;
     };
     if (filled) t.settle(1);

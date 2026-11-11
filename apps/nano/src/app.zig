@@ -18,6 +18,7 @@ const agent = @import("app_agent.zig");
 const requests = @import("requests.zig");
 const question = @import("app_question.zig");
 const queue_mod = @import("app_queue.zig");
+const tool_progress_mod = @import("app_tool_progress.zig");
 const drafts = @import("app_drafts.zig");
 const account = @import("app_account.zig");
 const change_requests = @import("app_change_requests.zig");
@@ -138,6 +139,11 @@ pub const View = struct {
     model_picker: @import("model_picker.zig").State = .{},
     /// The context ring's hover card (view_context.zig).
     context: @import("view_context.zig").State = .{},
+    /// The Agent Work footer pill's hover/pin card (view_agent_work.zig).
+    agent_work: @import("view_agent_work.zig").State = .{},
+    /// Mid-task steer field in an open subagent surface (view_host.zig).
+    subagent_steer: nanoui.ui.TextBuffer = .{},
+    subagent_steer_focus: bool = false,
     composer_anchor: ?nanoui.ui.Rect = null,
     /// A press in a peer, including its message/control descendants.
     pane_press: ?struct { tab: usize, pane: usize } = null,
@@ -224,6 +230,7 @@ pub const View = struct {
 
     pub fn deinit(v: *View, gpa: Allocator) void {
         @import("text_buffer.zig").deinit(&v.settings_search);
+        @import("text_buffer.zig").deinit(&v.subagent_steer);
         v.project_setup.deinit();
         v.open_chooser.deinit();
         @import("text_buffer.zig").deinit(&v.search.query);
@@ -425,6 +432,9 @@ pub const App = struct {
     /// being edited in the composer (or asked for).
     queue: @import("queue.zig").Rows,
     w_queue: Watch = .{},
+    /// Live `WatchToolProgress` tails and subagent states for the open chat.
+    tool_progress: tool_progress_mod.State,
+    w_progress: Watch = .{},
     caps: queue_mod.Caps = .{},
     queue_edit: ?queue_mod.Edit = null,
     queue_begin: ?[]u8 = null,
@@ -497,6 +507,7 @@ pub const App = struct {
             .sessions = .init(gpa),
             .devices = .init(gpa),
             .queue = .init(gpa),
+            .tool_progress = .init(gpa),
             .panels = .init(gpa),
             .actions = .init(gpa),
             .tabs = .init(gpa),
@@ -566,6 +577,7 @@ pub const App = struct {
         a.view.deinit(a.gpa);
         question.deinit(a);
         queue_mod.deinit(a);
+        a.tool_progress.deinit();
         a.panels.deinit();
         a.actions.deinit();
         a.transcript.deinit();
@@ -670,6 +682,7 @@ pub const App = struct {
                 if (a.selected != null) {
                     a.watchDoc(true);
                     queue_mod.watch(a);
+                    tool_progress_mod.watch(a);
                     @import("app_panels.zig").chatChanged(a);
                 }
                 @import("engine_start.zig").connected(a);
@@ -684,6 +697,7 @@ pub const App = struct {
                 a.w_sessions = .{};
                 a.w_doc = .{};
                 a.w_queue = .{};
+                a.w_progress = .{};
                 change_requests.disconnected(a);
                 @import("agent_updates.zig").disconnected(a);
                 // Nothing answers: start an engine, as a person would.
@@ -751,6 +765,7 @@ pub const App = struct {
         if (change_requests.tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (@import("agent_updates.zig").tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (@import("app_subagents.zig").tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
+        if (tool_progress_mod.tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (a.w_queue.retry_at) |t| if (now >= t) {
             a.w_queue = .{};
             queue_mod.watch(a);
@@ -1626,6 +1641,8 @@ pub const App = struct {
         a.notice_len = 0;
         queue_mod.stop(a);
         const same = if (a.selected) |s| (if (chat_id) |c| std.mem.eql(u8, s, c) else false) else chat_id == null;
+        if (!same) tool_progress_mod.stop(a);
+        if (!same) a.view.agent_work = .{};
         if (!same and !a.nav_restoring) a.recordNav(a.selected, chat_id);
         if (!same) if (a.selected) |s| a.retireSlice(s);
         if (!same) a.selected = if (chat_id) |c| a.gpa.dupe(u8, c) catch null else null;
@@ -1646,6 +1663,7 @@ pub const App = struct {
         a.markSeen(chat);
         if (!same and a.w_doc.id == null and a.w_doc.retry_at == null) a.watchDoc(true);
         queue_mod.watch(a);
+        tool_progress_mod.watch(a);
         @import("app_panels.zig").chatChanged(a);
         a.ensureModels(a.target().harness);
         a.redraw();

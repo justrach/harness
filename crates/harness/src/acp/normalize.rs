@@ -128,6 +128,78 @@ fn graff_agent_control(update: &Value, title: &str, raw: Option<&Value>) -> Opti
     })
 }
 
+/// Graff's `todo_write` tool (`_meta["graff/toolName"] == "todo_write"` or
+/// `rawInput.todos`) maps to the typed [`ToolCall::Todo`] checklist so the
+/// transcript, working banner, and agent-work timeline see structured steps
+/// instead of an opaque `todo_write` JSON blob.
+fn graff_todo(update: &Value, title: &str, raw: Option<&Value>) -> Option<ToolCall> {
+    let tool = update
+        .get("_meta")
+        .and_then(|m| m.get("graff/toolName"))
+        .and_then(Value::as_str);
+    let named_todo = tool == Some("todo_write")
+        || matches!(title.trim(), "todo_write" | "TodoWrite" | "Update TODOs");
+    let todos = raw.and_then(|r| r.get("todos")).and_then(Value::as_array);
+    if !named_todo && todos.is_none() {
+        return None;
+    }
+    let items = todos
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|entry| {
+                    let text = ["content", "text", "title", "description"]
+                        .iter()
+                        .find_map(|k| entry.get(*k).and_then(Value::as_str))
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())?
+                        .to_owned();
+                    let done = entry.get("done").and_then(Value::as_bool) == Some(true)
+                        || matches!(
+                            entry.get("status").and_then(Value::as_str),
+                            Some("completed" | "done" | "cancelled" | "canceled")
+                        );
+                    Some(TodoItem { text, done })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(ToolCall::Todo { items })
+}
+
+/// True when a `tool_call_update` carries graff's subagent progress metadata
+/// (`_meta["graff/subagent"]`) without introducing a new `kind` or `rawInput`.
+/// Its `title` is `"<Name> · <model>"`, so re-typing the call from it would
+/// clobber the opening spawn's `"Agent: <task>"` description and input.
+fn is_graff_subagent_meta_only_update(update: &Value) -> bool {
+    update.pointer("/_meta/graff~1subagent").is_some()
+        && update.get("kind").is_none()
+        && update.get("rawInput").is_none()
+}
+
+/// True when an incoming `session/update` payload represents real model turn
+/// output that opens a graff autonomous turn while no `session/prompt` is
+/// outstanding. Session metadata (`session_info_update`, `usage_update`,
+/// command/config/mode boilerplate) and detached cross-turn subagent progress
+/// frames stream while parked without starting a turn.
+pub(crate) fn opens_autonomous_graff_turn(update: &Value) -> bool {
+    match update.get("sessionUpdate").and_then(Value::as_str) {
+        None
+        | Some(
+            ""
+            | "available_commands_update"
+            | "config_option_update"
+            | "current_mode_update"
+            | "session_info_update"
+            | "usage_update"
+            | "user_message_chunk"
+            | "gui_turn_end",
+        ) => false,
+        Some("agent_message_chunk" | "agent_thought_chunk") => chunk_text(update).is_some(),
+        Some("tool_call_update") if is_graff_subagent_meta_only_update(update) => false,
+        Some(_) => true,
+    }
+}
+
 /// First location path (`locations: [{path, line?}]`), for read/edit calls.
 fn first_location(update: &Value) -> Option<String> {
     let path = update.get("locations")?.as_array()?.first()?.get("path")?;
@@ -204,6 +276,9 @@ fn typed_call(update: &Value) -> ToolCall {
     let title = str_field(update, "title");
     let raw = update.get("rawInput").filter(|v| !v.is_null());
     if let Some(call) = graff_agent_control(update, &title, raw) {
+        return call;
+    }
+    if let Some(call) = graff_todo(update, &title, raw) {
         return call;
     }
     let raw_str = |key: &str| -> Option<String> {
@@ -321,9 +396,49 @@ fn typed_call(update: &Value) -> ToolCall {
         {
             ToolCall::Unknown {
                 name: raw_str("description")
+                    .or_else(|| raw_str("task"))
+                    .or_else(|| raw_str("label"))
+                    .or_else(|| arg_from_title(&title))
                     .map(|d| format!("Agent: {d}"))
                     .unwrap_or_else(|| "Agent".into()),
                 input: raw.cloned(),
+            }
+        }
+        _ if update.pointer("/_meta/graff~1subagent").is_some() => {
+            let sub = update.pointer("/_meta/graff~1subagent");
+            let sub_str = |key: &str| -> Option<String> {
+                sub.and_then(|s| s.get(key))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+            };
+            let label = raw_str("description")
+                .or_else(|| raw_str("task"))
+                .or_else(|| sub_str("name"))
+                .or_else(|| {
+                    arg_from_title(&title).map(|t| {
+                        t.split_once(" · ")
+                            .map(|(head, _)| head.trim().to_owned())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or(t)
+                    })
+                });
+            let synthesized = || {
+                let mut map = serde_json::Map::new();
+                if let Some(model) = sub_str("model") {
+                    map.insert("model".into(), Value::String(model));
+                }
+                if let Some(name) = sub_str("name") {
+                    map.insert("subagent_type".into(), Value::String(name));
+                }
+                (!map.is_empty()).then_some(Value::Object(map))
+            };
+            ToolCall::Unknown {
+                name: label
+                    .map(|d| format!("Agent: {d}"))
+                    .unwrap_or_else(|| "Agent".into()),
+                input: raw.cloned().or_else(synthesized),
             }
         }
         // Devin's run_subagent tool uses a coarse ACP kind; its private meta
@@ -433,10 +548,11 @@ pub(crate) fn map_update(update: &Value) -> Vec<AgentEvent> {
             // title, rawInput, or a diff. Result-only content (output text)
             // must not re-type the call: a kindless completion update would
             // clobber the opening call's `Exec` into `Unknown`.
-            if update.get("kind").is_some()
-                || update.get("title").is_some()
-                || update.get("rawInput").is_some()
-                || tool_diff(update).is_some()
+            if !is_graff_subagent_meta_only_update(update)
+                && (update.get("kind").is_some()
+                    || update.get("title").is_some()
+                    || update.get("rawInput").is_some()
+                    || tool_diff(update).is_some())
             {
                 events.push(AgentEvent::ToolCall {
                     id: id.clone(),
@@ -459,6 +575,16 @@ pub(crate) fn map_update(update: &Value) -> Vec<AgentEvent> {
                         .pointer("/_meta/graff~1subagent/state")
                         .and_then(Value::as_str)
                         .map(str::to_owned),
+                });
+            } else if let Some(state) = update
+                .pointer("/_meta/graff~1subagent/state")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                events.push(AgentEvent::ToolProgress {
+                    id,
+                    output: String::new(),
+                    state: Some(state.to_owned()),
                 });
             }
             events
@@ -528,10 +654,33 @@ pub(crate) fn map_update(update: &Value) -> Vec<AgentEvent> {
             None => Vec::new(),
         },
         "current_mode_update" => Vec::new(),
-        "session_info_update" => super::graff_worktree::session_cwd(update)
-            .map(|cwd| AgentEvent::SessionCwdChanged { cwd })
-            .into_iter()
-            .collect(),
+        "session_info_update" => {
+            let mut events: Vec<AgentEvent> = super::graff_worktree::session_cwd(update)
+                .map(|cwd| AgentEvent::SessionCwdChanged { cwd })
+                .into_iter()
+                .collect();
+            if let Some(waiting) = update.pointer("/_meta/graff~1waiting") {
+                if waiting.is_null() {
+                    events.push(AgentEvent::ToolProgress {
+                        id: harness_proto::GRAFF_WAITING_TOOL_ID.into(),
+                        output: String::new(),
+                        state: Some("completed".into()),
+                    });
+                } else if waiting.is_object() {
+                    let state = if waiting.get("wakes").and_then(Value::as_bool) == Some(true) {
+                        "waking"
+                    } else {
+                        "parked"
+                    };
+                    events.push(AgentEvent::ToolProgress {
+                        id: harness_proto::GRAFF_WAITING_TOOL_ID.into(),
+                        output: waiting.to_string(),
+                        state: Some(state.into()),
+                    });
+                }
+            }
+            events
+        }
         // Stateful across frames: the session loop's CompactionTracker.
         "compaction_update" | "compaction_summary_chunk" => Vec::new(),
         _ => Vec::new(),
@@ -1319,6 +1468,169 @@ mod tests {
         assert!(matches!(map_update(&update).as_slice(),
             [AgentEvent::ToolCall { id, call: ToolCall::Unknown { name, .. } }]
                 if id == "tool-1" && name == "Agent: Inspect tests"));
+    }
+
+    #[test]
+    fn graff_todo_write_maps_to_typed_todo_checklist() {
+        let update = json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "todo-1",
+            "kind": "think",
+            "title": "todo_write",
+            "_meta": {"graff/toolName": "todo_write"},
+            "rawInput": {
+                "todos": [
+                    {"content": "Audit session RPC handlers", "status": "completed"},
+                    {"content": "Stream subagent progress tails", "status": "in_progress"},
+                    {"content": "Publish desktop parity vectors", "status": "pending"},
+                    {"content": "Drop legacy shim", "status": "cancelled"}
+                ]
+            }
+        });
+        assert_eq!(
+            map_update(&update),
+            vec![AgentEvent::ToolCall {
+                id: "todo-1".into(),
+                call: ToolCall::Todo {
+                    items: vec![
+                        TodoItem {
+                            text: "Audit session RPC handlers".into(),
+                            done: true,
+                        },
+                        TodoItem {
+                            text: "Stream subagent progress tails".into(),
+                            done: false,
+                        },
+                        TodoItem {
+                            text: "Publish desktop parity vectors".into(),
+                            done: false,
+                        },
+                        TodoItem {
+                            text: "Drop legacy shim".into(),
+                            done: true,
+                        },
+                    ],
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn graff_subagent_progress_frame_preserves_parent_agent_call_and_streams_tail() {
+        // Mid-run progress carries `title: "Scout · claude-sonnet-5"` and
+        // `_meta["graff/subagent"]` with no `kind` or `rawInput`. It must emit
+        // only `ToolProgress` instead of clobbering the parent's `Agent:` row.
+        let progress = json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "sub-call-1",
+            "title": "Scout · claude-sonnet-5",
+            "content": [{
+                "type": "content",
+                "content": {"type": "text", "text": "▸ bash: zig build test"}
+            }],
+            "_meta": {
+                "graff/subagent": {
+                    "sessionId": "child-1",
+                    "name": "Scout",
+                    "state": "running",
+                    "provider": "anthropic",
+                    "model": "claude-sonnet-5"
+                }
+            }
+        });
+        assert_eq!(
+            map_update(&progress),
+            vec![AgentEvent::ToolProgress {
+                id: "sub-call-1".into(),
+                output: "▸ bash: zig build test".into(),
+                state: Some("running".into()),
+            }]
+        );
+        assert!(!opens_autonomous_graff_turn(&progress));
+
+        // State-only progress (empty content) still reports the child's state.
+        let state_only = json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "sub-call-1",
+            "title": "Scout · claude-sonnet-5",
+            "_meta": {"graff/subagent": {"sessionId": "child-1", "name": "Scout", "state": "completed"}}
+        });
+        assert_eq!(
+            map_update(&state_only),
+            vec![AgentEvent::ToolProgress {
+                id: "sub-call-1".into(),
+                output: String::new(),
+                state: Some("completed".into()),
+            }]
+        );
+
+        // An opening `tool_call` carrying `_meta["graff/subagent"]` keeps Agent
+        // naming and synthesizes model metadata when `rawInput` is absent.
+        let opened = json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "sub-call-2",
+            "kind": "other",
+            "title": "Verifier · claude-sonnet-5",
+            "_meta": {
+                "graff/subagent": {
+                    "sessionId": "child-2",
+                    "name": "Verifier",
+                    "state": "running",
+                    "model": "claude-sonnet-5"
+                }
+            }
+        });
+        assert_eq!(
+            map_update(&opened),
+            vec![AgentEvent::ToolCall {
+                id: "sub-call-2".into(),
+                call: ToolCall::Unknown {
+                    name: "Agent: Verifier".into(),
+                    input: Some(json!({
+                        "model": "claude-sonnet-5",
+                        "subagent_type": "Verifier",
+                    })),
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn graff_waiting_session_info_emits_live_progress_without_opening_turn() {
+        let waiting = json!({
+            "sessionUpdate": "session_info_update",
+            "_meta": {
+                "graff/waiting": {
+                    "text": "Waiting on 1 subagent, 1 job",
+                    "wakes": true,
+                    "jobs": [{"id": 1, "command": "zig build test", "persistent": false}],
+                    "agents": [{"id": 2, "subagentId": "sub-2", "label": "Verifier"}]
+                }
+            }
+        });
+        assert!(!opens_autonomous_graff_turn(&waiting));
+        let events = map_update(&waiting);
+        assert!(matches!(
+            events.as_slice(),
+            [AgentEvent::ToolProgress { id, state: Some(state), output }]
+                if id == harness_proto::GRAFF_WAITING_TOOL_ID
+                    && state == "waking"
+                    && output.contains("Verifier")
+        ));
+
+        let cleared = json!({
+            "sessionUpdate": "session_info_update",
+            "_meta": {"graff/waiting": null}
+        });
+        assert!(!opens_autonomous_graff_turn(&cleared));
+        assert_eq!(
+            map_update(&cleared),
+            vec![AgentEvent::ToolProgress {
+                id: harness_proto::GRAFF_WAITING_TOOL_ID.into(),
+                output: String::new(),
+                state: Some("completed".into()),
+            }]
+        );
     }
 
     #[test]

@@ -3,6 +3,11 @@
 
 pub const BUILD_WAIT_TOOL_ID: &str = "harness:build-wait";
 
+/// Reserved, live-only `WatchToolProgress` record carrying graff's
+/// `_meta["graff/waiting"]` payload while a parked session waits on detached
+/// background jobs or subagents.
+pub const GRAFF_WAITING_TOOL_ID: &str = "harness:graff-waiting";
+
 pub fn build_wait_item(since: i64) -> crate::ToolProgressItem {
     crate::ToolProgressItem {
         tool_id: BUILD_WAIT_TOOL_ID.into(),

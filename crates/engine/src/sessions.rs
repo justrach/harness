@@ -1917,17 +1917,23 @@ impl Inner {
             .clone()
     }
 
-    /// A running tool's latest live output: replaces its previous one.
+    /// A running tool's latest live output: replaces its previous one. A
+    /// state-only update (`output` empty, `state` present) preserves any
+    /// already-streamed log tail while advancing the child's lifecycle state.
     fn set_tool_progress(&self, chat_id: &str, tool_id: &str, output: &str, state: Option<&str>) {
-        let item = harness_proto::ToolProgressItem {
-            tool_id: tool_id.to_string(),
-            output: output.to_string(),
-            state: state.map(str::to_owned),
-        };
         self.tool_progress_channel(chat_id).send_modify(|items| {
             match items.iter_mut().find(|i| i.tool_id == tool_id) {
-                Some(existing) => *existing = item,
-                None => items.push(item),
+                Some(existing) => {
+                    if !output.is_empty() || state.is_none() {
+                        existing.output = output.to_string();
+                    }
+                    existing.state = state.map(str::to_owned);
+                }
+                None => items.push(harness_proto::ToolProgressItem {
+                    tool_id: tool_id.to_string(),
+                    output: output.to_string(),
+                    state: state.map(str::to_owned),
+                }),
             }
         });
     }
@@ -3881,16 +3887,42 @@ async fn drive_run(
                     // fall through — this event is the new segment's first part.
                     entry_id = new_id();
                     segment_started = now_ms();
+                    inner.clear_tool_progress(&chat_id, Some(harness_proto::GRAFF_WAITING_TOOL_ID));
                     inner.set_status(&chat_id, SessionStatus::Working, true);
                 }
             } else {
                 match &event {
                     AgentEvent::Steered { .. } => {
                         idle_since = None;
+                        inner.clear_tool_progress(
+                            &chat_id,
+                            Some(harness_proto::GRAFF_WAITING_TOOL_ID),
+                        );
                         inner.set_status(&chat_id, SessionStatus::Working, true);
                     }
                     AgentEvent::Done { .. } => {
                         idle_since = None;
+                    }
+                    // Detached background subagents and graff's post-turn
+                    // `graff/waiting` notice stream live progress while the
+                    // parent turn stays parked (ADR 0330).
+                    AgentEvent::ToolProgress { id, output, state } => {
+                        if id == harness_proto::GRAFF_WAITING_TOOL_ID
+                            && (output.is_empty()
+                                || matches!(
+                                    state.as_deref(),
+                                    Some("completed" | "failed" | "cancelled" | "disconnected")
+                                ))
+                        {
+                            inner.clear_tool_progress(&chat_id, Some(id));
+                        } else {
+                            inner.set_tool_progress(&chat_id, id, output, state.as_deref());
+                        }
+                        continue;
+                    }
+                    AgentEvent::ToolResult { id, .. } => {
+                        inner.clear_tool_progress(&chat_id, Some(id));
+                        continue;
                     }
                     // A question with NO turn behind it (post-turn permission
                     // noise): answer it empty right here. Un-parking into
@@ -3987,7 +4019,17 @@ async fn drive_run(
         // history for the whole subagent run.
         match &event {
             AgentEvent::ToolProgress { id, output, state } => {
-                inner.set_tool_progress(&chat_id, id, output, state.as_deref());
+                if id == harness_proto::GRAFF_WAITING_TOOL_ID
+                    && (output.is_empty()
+                        || matches!(
+                            state.as_deref(),
+                            Some("completed" | "failed" | "cancelled" | "disconnected")
+                        ))
+                {
+                    inner.clear_tool_progress(&chat_id, Some(id));
+                } else {
+                    inner.set_tool_progress(&chat_id, id, output, state.as_deref());
+                }
                 continue;
             }
             AgentEvent::ToolResult { id, .. } => inner.clear_tool_progress(&chat_id, Some(id)),
@@ -4928,6 +4970,7 @@ mod tests {
     /// Hand-fed harness: the test pushes wire events and decides when the
     /// stream ends.
     struct FeedHarness {
+        steerable: bool,
         feed: std::sync::Mutex<
             Option<tokio::sync::mpsc::UnboundedReceiver<harness_proto::AgentEvent>>,
         >,
@@ -4942,7 +4985,7 @@ mod tests {
             "Feed"
         }
         fn supports_steering(&self) -> bool {
-            false
+            self.steerable
         }
         fn steering_mode(&self) -> harness_proto::SteeringMode {
             harness_proto::SteeringMode::StepBoundary
@@ -4983,6 +5026,7 @@ mod tests {
         let (feed, rx) = tokio::sync::mpsc::unbounded_channel();
         let registry = crate::registry::HarnessRegistry::new();
         registry.register(std::sync::Arc::new(FeedHarness {
+            steerable: false,
             feed: std::sync::Mutex::new(Some(rx)),
         }));
         let dir = tempfile::tempdir().unwrap();
@@ -5031,6 +5075,114 @@ mod tests {
             session_id: None,
         })
         .unwrap();
+        core.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn parked_session_streams_cross_turn_tool_progress_without_unparking() {
+        use super::{AgentEvent, DoneStatus, SessionStatus};
+        use std::time::Duration;
+
+        let (feed, rx) = tokio::sync::mpsc::unbounded_channel();
+        let registry = crate::registry::HarnessRegistry::new();
+        registry.register(std::sync::Arc::new(FeedHarness {
+            steerable: true,
+            feed: std::sync::Mutex::new(Some(rx)),
+        }));
+        let dir = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble(
+            dir.path(),
+            std::sync::Arc::new(registry),
+            HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let chat = "chat-parked-progress";
+        let rx_progress = core.sessions.watch_tool_progress(chat);
+        core.sessions
+            .dispatch(chat, HarnessId::Mock, request(), None)
+            .await
+            .unwrap();
+
+        feed.send(AgentEvent::TextDelta {
+            text: "Spawned background verifier.".into(),
+        })
+        .unwrap();
+        feed.send(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: Some("ses-1".into()),
+        })
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert_eq!(
+            core.sessions.session_status(chat).map(|s| s.status),
+            Some(SessionStatus::Idle),
+        );
+
+        // Post-Done graff/waiting and detached subagent progress arrive while
+        // the session is parked; they must reach watchers without flipping Working.
+        feed.send(AgentEvent::ToolProgress {
+            id: harness_proto::GRAFF_WAITING_TOOL_ID.into(),
+            output: r#"{"text":"Waiting on 1 subagent","wakes":true,"jobs":[],"agents":[{"id":1,"subagentId":"sub-1","label":"Verifier"}]}"#.into(),
+            state: Some("waking".into()),
+        })
+        .unwrap();
+        feed.send(AgentEvent::ToolProgress {
+            id: "sub-call-1".into(),
+            output: "▸ bash: zig build test".into(),
+            state: Some("running".into()),
+        })
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        assert_eq!(
+            core.sessions.session_status(chat).map(|s| s.status),
+            Some(SessionStatus::Idle),
+        );
+        let items = rx_progress.borrow().clone();
+        assert_eq!(
+            items.len(),
+            2,
+            "expected waiting + subagent progress: {items:?}"
+        );
+        assert!(items.iter().any(|i| {
+            i.tool_id == harness_proto::GRAFF_WAITING_TOOL_ID
+                && i.state.as_deref() == Some("waking")
+        }));
+        assert!(items.iter().any(|i| {
+            i.tool_id == "sub-call-1"
+                && i.output == "▸ bash: zig build test"
+                && i.state.as_deref() == Some("running")
+        }));
+
+        // State-only update keeps the rolling log tail while updating state,
+        // and clearing graff/waiting drops the reserved record.
+        feed.send(AgentEvent::ToolProgress {
+            id: "sub-call-1".into(),
+            output: String::new(),
+            state: Some("completed".into()),
+        })
+        .unwrap();
+        feed.send(AgentEvent::ToolProgress {
+            id: harness_proto::GRAFF_WAITING_TOOL_ID.into(),
+            output: String::new(),
+            state: Some("completed".into()),
+        })
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        let items = rx_progress.borrow().clone();
+        assert_eq!(items.len(), 1, "graff/waiting should clear: {items:?}");
+        assert_eq!(items[0].tool_id, "sub-call-1");
+        assert_eq!(items[0].output, "▸ bash: zig build test");
+        assert_eq!(items[0].state.as_deref(), Some("completed"));
+        assert_eq!(
+            core.sessions.session_status(chat).map(|s| s.status),
+            Some(SessionStatus::Idle),
+        );
+
         core.shutdown().await;
     }
 }

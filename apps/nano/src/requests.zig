@@ -110,6 +110,10 @@ pub fn watchDoc(chat_id: []const u8, opening_tail: bool) Request(struct { chatId
     return .{ .method = "WatchDocMessages", .params = .{ .chatId = chat_id, .openingTail = opening_tail } };
 }
 
+pub fn watchToolProgress(chat_id: []const u8) Request(struct { chatId: []const u8 }) {
+    return .{ .method = "WatchToolProgress", .params = .{ .chatId = chat_id } };
+}
+
 pub fn fetchToolBlob(blob_ref: []const u8) Request(struct { blobRef: []const u8 }) {
     return .{ .method = "FetchToolBlob", .params = .{ .blobRef = blob_ref } };
 }

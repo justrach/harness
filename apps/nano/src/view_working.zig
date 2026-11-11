@@ -100,7 +100,12 @@ pub fn trailer(c: *ui.Context, a: *App, k: theme.Colors, chat_id: ?[]const u8, t
         now - s.updated_ms > workspace.stale_ms
     else
         false;
-    if (pending == null and (session == null or session.?.status != .working or (quiet and !turnOpen(t)))) return;
+    if (pending == null and (session == null or session.?.status != .working or (quiet and !turnOpen(t)))) {
+        if (a.selected) |sel| if (std.mem.eql(u8, sel, id)) if (a.tool_progress.waiting) |w| {
+            parkedWaitingBanner(c, k, w);
+        };
+        return;
+    }
     // A pending question owns the surface, just as GPUI's QuestionPanel.
     for (t.entries.items) |e| for (e.parts.items) |p| {
         if (p.kind == .input and !p.resolved) return;
@@ -152,6 +157,26 @@ fn detailLine(c: *ui.Context, k: theme.Colors, label: []const u8, text: []const 
     const body = ui.div(c).column().wFull();
     defer body.end();
     ui.text(c, text, kit.style(c, 12, 18, .{ .wrap = true, .color = color }));
+}
+
+fn parkedWaitingBanner(c: *ui.Context, k: theme.Colors, w: @import("app_tool_progress.zig").Waiting) void {
+    ui.key(c, "parked-waiting-trailer");
+    const box = ui.div(c).row().wFull().pt(14).gap(8).itemsCenter().control();
+    defer box.end();
+    @import("view_agent_work.zig").paintSpinner(c, 12, 1.4, k.accent, k.accent.alpha(0.2));
+    const summary = if (w.text.len > 0)
+        w.text
+    else if (w.agents.len > 0 and w.jobs.len > 0)
+        c.print("Waiting on {d} subagent{s} and {d} job{s}", .{ w.agents.len, if (w.agents.len == 1) "" else "s", w.jobs.len, if (w.jobs.len == 1) "" else "s" })
+    else if (w.agents.len > 0)
+        c.print("Waiting on {d} background subagent{s}", .{ w.agents.len, if (w.agents.len == 1) "" else "s" })
+    else
+        c.print("Waiting on {d} background job{s}", .{ w.jobs.len, if (w.jobs.len == 1) "" else "s" });
+    ui.text(c, summary, kit.style(c, 12, 18, .{ .color = k.muted }));
+    if (w.wakes) {
+        ui.text(c, "· wakes when done", kit.style(c, 11, 18, .{ .color = k.faint }));
+    }
+    if (!c.reduced_motion) kit.loaderFrame(c, 1.0 / 30.0);
 }
 
 test "a quiet but unanswered turn keeps its working activity" {

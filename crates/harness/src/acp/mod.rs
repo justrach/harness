@@ -4600,6 +4600,9 @@ async fn run_session(session: Session) {
                         && turn.is_none()
                         && method == "session/update"
                         && !boilerplate
+                        && params
+                            .get("update")
+                            .is_some_and(normalize::opens_autonomous_graff_turn)
                     {
                         autonomous_turn = true;
                     }

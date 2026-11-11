@@ -27,10 +27,147 @@ pub fn host(c: *ui.Context, a: *App, k: theme.Colors) void {
         .file => file(c, a, k, t.path),
         .browser => if (t.browser) |b| @import("view_browser.zig").draw(c, a, k, b),
         .tool_access => @import("view_tool_access.zig").draw(c, a, k),
-        .subagent => if (t.agent) |s| {
-            _ = @import("view_transcript.zig").entries(c, a, k, &s.transcript, @max(0, a.view.chrome.host_width - 2), !s.transcript.complete, 16);
-        },
+        .subagent => if (t.agent) |s| subagentSurface(c, a, k, s),
     }
+}
+
+fn subagentSurface(c: *ui.Context, a: *App, k: theme.Colors, s: *@import("app_subagents.zig").Agent) void {
+    const aw = @import("agent_work.zig");
+    const vaw = @import("view_agent_work.zig");
+
+    // Resolve live state and model from the parent transcript + WatchToolProgress.
+    var model: []const u8 = "";
+    var sub_state: aw.AgentState = if (!s.frozen and !s.transcript.complete) .running else .completed;
+    const parent_working = a.selectedStatus() == .working;
+    for (a.transcript.entries.items) |*e| {
+        for (e.parts.items) |*p| {
+            if (!p.agent or !std.mem.eql(u8, p.subagent_ref, s.doc)) continue;
+            const live = a.tool_progress.find(p.id);
+            sub_state = aw.resolveAgentState(
+                if (live) |l| l.state else null,
+                p.subagent_status,
+                p.resolved,
+                p.is_error,
+                e.status == .streaming or parent_working,
+            );
+            const m = aw.invocationModel(c.alloc(), p.invocation);
+            if (m.len > 0) model = m;
+        }
+    }
+
+    // 1. Subagent header bar.
+    {
+        ui.key(c, "subagent-header");
+        const bar = ui.div(c).row().wFull().h(36).px(12).gap(8).itemsCenter().clip();
+        defer bar.end();
+        const harness = if (a.findChat(s.parent)) |chat| chat.harness orelse "graff" else "graff";
+        const mark = icons.harnessMark(harness);
+        icons.icon(c, mark.name, 13, mark.brand orelse k.muted, 0);
+        const title_cap = @max(80, a.view.chrome.host_width - (if (model.len > 0) @as(f32, 240) else @as(f32, 160)));
+        kit.fadeText(c, s.title, kit.style(c, 12.5, 18, .{ .weight = .semibold, .color = k.text }), title_cap);
+        if (model.len > 0) {
+            kit.fadeText(c, model, kit.style(c, 11, 16, .{ .color = k.faint }), 96);
+        }
+        ui.spacer(c);
+
+        {
+            const pill_bg = switch (sub_state) {
+                .running => k.accent.alpha(0.14),
+                .failed => k.danger.alpha(0.14),
+                .completed, .cancelled => k.ink(0.06),
+            };
+            const pill_fg = switch (sub_state) {
+                .running => k.accent,
+                .failed => k.danger,
+                .completed, .cancelled => k.muted,
+            };
+            const pill_label = switch (sub_state) {
+                .running => "Running",
+                .completed => "Done",
+                .failed => "Failed",
+                .cancelled => "Stopped",
+            };
+            const pill = ui.div(c).row().h(22).px(8).gap(5).itemsCenter().rounded(11).bg(pill_bg);
+            if (sub_state == .running) vaw.paintSpinner(c, 10, 1.35, k.accent, k.accent.alpha(0.22));
+            ui.text(c, pill_label, kit.style(c, 11, 15, .{ .weight = .medium, .color = pill_fg }));
+            pill.end();
+        }
+
+        if (kit.iconButton(c, k, .close, .{ .size = 22, .icon = 11, .tip = .{ .text = "Close subagent" } })) {
+            panels.closeTab(a, a.panels.active);
+            return;
+        }
+    }
+    _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
+
+    // 2. Scrollable subagent transcript.
+    _ = @import("view_transcript.zig").entries(
+        c,
+        a,
+        k,
+        &s.transcript,
+        @max(0, a.view.chrome.host_width - 2),
+        !s.transcript.complete and !s.loaded,
+        14,
+    );
+
+    // 3. Mid-task Steer subagent bar (routes through parent session, never FocusChat/Run on s.doc).
+    _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
+    {
+        ui.key(c, "subagent-steer-bar");
+        const bar = ui.div(c).row().wFull().px(10).py(8).gap(6).itemsCenter().bg(k.background);
+        defer bar.end();
+        const box = ui.div(c).row().grow().w(0).h(30).px(9).gap(6).itemsCenter().rounded(7).border(k.border).borderW(1).bg(k.ink(0.03));
+        defer box.end();
+        icons.icon(c, .bot, 12, k.muted, 0);
+        ui.key(c, "subagent-steer-field");
+        const at = c.nodes.items.len;
+        const placeholder = if (sub_state == .running)
+            c.print("Steer {s}…", .{s.title})
+        else
+            c.print("Follow up on {s}…", .{s.title});
+        const res = ui.textField(c, &a.view.subagent_steer, .{
+            .bare = true,
+            .width = .fill,
+            .size = 12,
+            .line_height = 18,
+            .placeholder = placeholder,
+            .placeholder_color = k.faint,
+        });
+        const field_id = c.node(@intCast(at)).id;
+        if (a.view.subagent_steer_focus) {
+            c.focus = field_id;
+            c.changed = true;
+            a.view.subagent_steer_focus = false;
+        }
+        const trimmed = std.mem.trim(u8, a.view.subagent_steer.text(), " \t\r\n");
+        const can_send = trimmed.len > 0 and a.engine.state == .connected;
+        var send_btn = ui.div(c).row().size(22, 22).center().rounded(11).bg(if (can_send) k.accent else k.ink(0.06));
+        if (can_send) send_btn = kit.pressFeedback(send_btn.control());
+        icons.icon(c, .@"arrow-up", 11, if (can_send) .hex(0xffffff) else k.faint, 0);
+        const clicked_send = send_btn.clicked() and can_send;
+        send_btn.end();
+
+        if ((res.submitted or clicked_send) and can_send) {
+            submitSubagentSteer(a, s, trimmed);
+        }
+    }
+}
+
+fn submitSubagentSteer(a: *App, s: *const @import("app_subagents.zig").Agent, text: []const u8) void {
+    const prompt = std.fmt.allocPrint(a.gpa, "For subagent \"{s}\": {s}", .{ s.title, text }) catch return;
+    defer a.gpa.free(prompt);
+    const saved = a.gpa.dupe(u8, a.composer.text()) catch return;
+    defer a.gpa.free(saved);
+    if (a.selected == null or !std.mem.eql(u8, a.selected.?, s.parent)) {
+        a.openChat(s.parent, null);
+    }
+    a.composer.set(prompt);
+    const can_steer_now = a.queues() and @import("app_queue.zig").steerBlocker(a, true, false) == null;
+    a.sendFollowUp(if (can_steer_now) .steer else null);
+    a.composer.set(saved);
+    a.view.subagent_steer.clear();
+    a.redraw();
 }
 
 fn band(c: *ui.Context, a: *App, k: theme.Colors) void {

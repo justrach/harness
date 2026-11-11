@@ -22,6 +22,7 @@
     {"name": "answer a question", "method": "QueueCommand", "stream": false, "params": {"chatId":"chat-parity","command":{"kind":"respondInput","requestId":"req-parity","answers":[{"questionId":"q1","labels":["Event-driven"]},{"questionId":"q2","labels":["Unit","E2E"]}]}}},
     {"name": "dismiss a question", "method": "QueueCommand", "stream": false, "params": {"chatId":"chat-parity","command":{"kind":"dismissInput","requestId":"req-parity"}}},
     {"name": "watch the queue", "method": "WatchQueue", "stream": true, "params": {"chatId":"chat-parity"}},
+    {"name": "watch tool progress", "method": "WatchToolProgress", "stream": true, "params": {"chatId":"chat-parity"}},
     {"name": "queue a message", "method": "QueueMessage", "stream": false, "params": {"chatId":"chat-parity","text":"Then update the changelog","holdForTurnEnd":true}},
     {"name": "remove a queued message", "method": "RemoveQueuedMessage", "stream": false, "params": {"chatId":"chat-parity","id":"row-parity"}},
     {"name": "send a queued message now", "method": "SendQueuedMessageNow", "stream": false, "params": {"chatId":"chat-parity","id":"row-parity"}},

@@ -64,6 +64,9 @@ pub const Compaction = struct {
 /// One file of an edit's `diffStats`.
 pub const Stat = struct { path: []const u8, additions: u64, deletions: u64 };
 
+/// One item of a structured `ToolCall::Todo` checklist (`crates/proto/src/agent.rs`).
+pub const TodoItem = struct { text: []u8, done: bool };
+
 /// The compaction chip's tool name (`COMPACTION_TOOL_NAME`).
 pub const compaction_tool = "Compact context";
 
@@ -75,6 +78,8 @@ pub const Part = struct {
     text: std.ArrayList(u8) = .empty,
     /// A todo call's first unfinished item, as the working trailer's plan step.
     todo_step: []u8 = &.{},
+    /// All items of a structured `todo` call, retained for the checklist and footer timeline.
+    todo_items: []TodoItem = &.{},
     tool: ToolKind = .unknown,
     /// A tool's chip, as the desktop labels it ("Run", "Agent", "Waiting on").
     chip: []const u8 = "Tool",
@@ -93,6 +98,7 @@ pub const Part = struct {
     subagent_ref: []u8 = &.{},
     subagent_title: []u8 = &.{},
     subagent_status: ?@import("agent_link.zig").Status = null,
+    subagent_tail: []u8 = &.{},
     saved_view: ?@import("saved_view.zig").View = null,
     /// An edit's lines added and removed (`diffStats`, or its inline
     /// `diff`), and the stats' paths one to a line when they name any.
@@ -121,12 +127,15 @@ pub const Part = struct {
     pub fn deinit(p: *Part, gpa: Allocator) void {
         gpa.free(p.id);
         gpa.free(p.todo_step);
+        for (p.todo_items) |it| gpa.free(it.text);
+        gpa.free(p.todo_items);
         gpa.free(p.path);
         gpa.free(p.invocation);
         gpa.free(p.output);
         gpa.free(p.output_ref);
         gpa.free(p.subagent_ref);
         gpa.free(p.subagent_title);
+        gpa.free(p.subagent_tail);
         gpa.free(p.stat_paths);
         gpa.free(p.stats);
         if (p.diff_old) |s| gpa.free(s);
@@ -383,7 +392,9 @@ fn parsePart(gpa: Allocator, o: json.ObjectMap) !Part {
             if (string(o.get("outputRef"))) |s| p.output_ref = try gpa.dupe(u8, s);
             p.output_bytes = uint(o.get("outputBytes"));
             if (string(o.get("subagentRef"))) |s| p.subagent_ref = try gpa.dupe(u8, s);
-            p.subagent_status = std.meta.stringToEnum(@import("agent_link.zig").Status, string(o.get("subagentStatus")) orelse "");
+            const raw_sub_st = string(o.get("subagentStatus")) orelse "";
+            p.subagent_status = if (std.mem.eql(u8, raw_sub_st, "completed")) .done else std.meta.stringToEnum(@import("agent_link.zig").Status, raw_sub_st);
+            if (string(o.get("subagentTail"))) |s| p.subagent_tail = try gpa.dupe(u8, s);
             if (o.get("view")) |v| p.saved_view = @import("saved_view.zig").View.parse(v);
             try diffStats(gpa, &p, o);
         },
@@ -470,7 +481,10 @@ fn toolCall(gpa: Allocator, p: *Part, call: ?json.Value) !void {
     p.invocation = try json.Stringify.valueAlloc(gpa, c, .{ .whitespace = .indent_2 });
     const o = c.object;
     p.tool = std.meta.stringToEnum(ToolKind, string(o.get("kind")) orelse "") orelse .unknown;
-    if (p.tool == .todo) p.todo_step = try todoStep(gpa, o);
+    if (p.tool == .todo) {
+        p.todo_step = try todoStep(gpa, o);
+        p.todo_items = try todoItems(gpa, o);
+    }
     if (p.tool == .unknown and std.mem.eql(u8, string(o.get("name")) orelse "", compaction_tool)) {
         var m: Compaction = .{};
         if (o.get("input")) |i| if (i == .object) {
@@ -506,6 +520,23 @@ fn todoStep(gpa: Allocator, o: json.ObjectMap) ![]u8 {
         return gpa.dupe(u8, text);
     }
     return &.{};
+}
+
+fn todoItems(gpa: Allocator, o: json.ObjectMap) ![]TodoItem {
+    var list: std.ArrayList(TodoItem) = .empty;
+    errdefer {
+        for (list.items) |it| gpa.free(it.text);
+        list.deinit(gpa);
+    }
+    for (array(o.get("items"))) |item| {
+        if (item != .object) continue;
+        const raw = string(item.object.get("text")) orelse continue;
+        const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+        if (trimmed.len == 0) continue;
+        const done = if (item.object.get("done")) |v| v == .bool and v.bool else false;
+        try list.append(gpa, .{ .text = try gpa.dupe(u8, trimmed), .done = done });
+    }
+    return list.toOwnedSlice(gpa);
 }
 
 const testing = std.testing;
