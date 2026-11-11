@@ -68,6 +68,20 @@ fn destination(a: *const App, pane: ?usize) ?u64 {
     return hash.final();
 }
 
+/// The legacy attachment_drop_veil: shade only the receiving conversation
+/// while OS files hover, without activating it until the actual drop.
+/// Never retain hover state: native exit/cancellation clears drag_over.
+pub fn shade(c: *ui.Context, a: *App, k: @import("theme.zig").Colors, index: u32) void {
+    if (blocked(a)) return;
+    const point = c.input.drag_over orelse return;
+    const rect = c.rects.get(c.node(index).id) orelse return;
+    if (!rect.contains(point)) return;
+    const scrim: ui.Color = .{ .a = if (k.dark) 0.4 else 0.32 * (0.4 / 0.6) };
+    const veil = ui.div(c).absolute().offset(0, 0).sizeFull().center().layer(5).bg(scrim).rounded(9);
+    defer veil.end();
+    ui.text(c, "Drop to attach", .{ .size = 13, .color = k.text });
+}
+
 pub fn target(c: *ui.Context, a: *App, index: u32, pane: ?usize) void {
     if (blocked(a)) return;
     c.acceptDrop(index);
