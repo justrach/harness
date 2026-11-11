@@ -224,9 +224,9 @@ impl Repos {
 
     /// Run `git <args>` (optionally under `cwd`), returning trimmed stdout.
     async fn git(&self, args: &[&str], cwd: Option<&Path>) -> Result<String, EngineError> {
-        let mut cmd = tokio::process::Command::new("git");
-        // Git hooks may need the user's shell tools.
-        harness_adapters::compose_login_shell_path(&mut cmd);
+        // Git hooks may need the user's shell tools. Resolved against that
+        // PATH up front: a bare `git` with PATH set would fork the engine.
+        let mut cmd = harness_adapters::login_shell_command("git");
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
