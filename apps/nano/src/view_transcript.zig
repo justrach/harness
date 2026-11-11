@@ -234,7 +234,13 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     _ = loading;
     const scroll_rect = c.rects.get(drawn.box);
     const has_selection = c.selection.anchor != null or c.selection.dragging;
-    const cull_offscreen = !has_selection and (!a.offscreen or tweening or resizing) and @import("motion_rules.zig").shouldCullOffscreen(tweening, resizing, streaming, a.view.rail.glide != null);
+    // A working sidebar row also animates a completed open transcript.
+    // Use its existing height spacers on those frames, not just while the
+    // selected reply streams. Keep selection and rail navigation intact.
+    const working = for (a.sessions.items) |session| {
+        if (session.status == .working) break true;
+    } else false;
+    const cull_offscreen = !has_selection and (!a.offscreen or tweening or resizing) and @import("motion_rules.zig").shouldCullOffscreen(tweening, resizing, streaming or working, a.view.rail.glide != null);
     const cull: Cull = .{ .on = cull_offscreen, .loose = tweening or resizing, .pad = if (tweening or resizing) 220 else 380, .view = scroll_rect, .col = col };
     // A message sent while its turn works is drawn where it arrived, and
     // what the reply gains after it under it (steer_order.zig).

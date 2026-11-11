@@ -75,6 +75,7 @@ test {
     _ = @import("tests_ui_split.zig");
     _ = @import("tests_streaming.zig");
     _ = @import("tests_ui_streaming_visibility.zig");
+    _ = @import("tests_ui_redraw.zig");
     _ = @import("tests_ui_sidebar_motion.zig");
     _ = @import("markdown.zig");
     _ = @import("markdown_html.zig");
