@@ -19,6 +19,8 @@ pub const list_width: f32 = 360;
 pub const mark_size: f32 = 22;
 pub const mark_step: f32 = 14;
 pub const max_marks: usize = 3;
+/// The dismiss button (24) and the gap before it (4).
+const dismiss_w: f32 = 28;
 
 const ActionSpec = struct {
     label: []const u8,
@@ -215,7 +217,7 @@ pub fn island(c: *ui.Context, a: *App, k: theme.Colors, pane_w: f32, pane_h: f32
     const title_w = @ceil(c.text.width(title, .{ .size = 12, .weight = theme.ui_medium_weight }));
     const max_w = @max(0, pane_w - 32);
     const max_h = @max(chip_height, pane_h - 64);
-    const compact_w = @min(max_w, 12 + marks_w + 8 + title_w + (if (has_activity) @as(f32, 22) else 0) + controls_w + trailing + 4);
+    const compact_w = @min(max_w, 12 + marks_w + 8 + title_w + (if (has_activity) @as(f32, 22) else 0) + controls_w + dismiss_w + trailing + 4);
 
     const target = motion_rules.updateIslandTarget(expanded, compact_w, max_w, rows.len, max_h);
     s.width_tween = retargetTween(s.width_tween, target.w, c.time, c.reduced_motion);
@@ -254,9 +256,7 @@ pub fn island(c: *ui.Context, a: *App, k: theme.Colors, pane_w: f32, pane_h: f32
         var sum = ui.div(c).row().wFull().h(summary_height).pl(12).pr(trailing).itemsCenter().control();
         if (multiple) sum = sum.hover(k.hover.alpha(0.45));
         defer sum.end();
-        if (multiple and sum.clicked()) {
-            updates.setExpanded(a, !s.expanded, c.time, c.reduced_motion);
-        }
+        var dismissed = false;
         // Collapsing brand mark stack (`0..0.55`).
         const mark_slot_w = marks_w * (1 - reveal);
         if (mark_slot_w > 0.5) {
@@ -268,7 +268,7 @@ pub fn island(c: *ui.Context, a: *App, k: theme.Colors, pane_w: f32, pane_h: f32
         {
             const tbox = ui.div(c).row().grow().w(0).clip();
             defer tbox.end();
-            kit.ellipsisText(c, title, .{ .size = 12, .line_height = 16, .weight = theme.ui_medium_weight, .color = k.text }, @max(40, cur_w - 48));
+            kit.ellipsisText(c, title, .{ .size = 12, .line_height = 16, .weight = theme.ui_medium_weight, .color = k.text }, @max(40, cur_w - 48 - dismiss_w));
         }
         if (has_activity) {
             const act_box = ui.div(c).row().pl(8).itemsCenter();
@@ -289,6 +289,22 @@ pub fn island(c: *ui.Context, a: *App, k: theme.Colors, pane_w: f32, pane_h: f32
             const chev_wrap = ui.div(c).row().pl(8).itemsCenter();
             defer chev_wrap.end();
             summaryChevron(c, k, reveal);
+        }
+        {
+            ui.key(c, "home-harness-update-dismiss");
+            const wrap = ui.div(c).row().pl(4).itemsCenter();
+            defer wrap.end();
+            const btn = ui.div(c).row().size(24, 24).center().roundedFull().hover(k.wash(0.12)).control();
+            defer btn.end();
+            icons.icon(c, .close, 11, k.muted, 0);
+            if (btn.clicked()) dismissed = true;
+        }
+        if (dismissed) {
+            updates.dismiss(a);
+            return;
+        }
+        if (multiple and sum.clicked()) {
+            updates.setExpanded(a, !s.expanded, c.time, c.reduced_motion);
         }
     }
 
