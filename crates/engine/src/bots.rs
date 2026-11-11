@@ -16,6 +16,10 @@
 //!   came due more than five minutes before a check is not run late: graff
 //!   records it, and the client shows it as "was due, did not run".
 //!
+//! - The main bot (graff's `primary`) starts work as chats in any project.
+//!   When one of those finishes, asks or fails, the engine tells the main
+//!   bot's thread (bots_reports.rs).
+//!
 //! Chats are reached through the engine's own RPC surface, so tests drive
 //! this module with a recording service and canned graff output.
 
@@ -50,6 +54,11 @@ const SESSION_STALE_SECS: i64 = 45;
 
 pub const TOO_OLD: &str = "This graff can't run bots yet. Update graff to use them here.";
 pub const OFF: &str = "Bots are off. Turn them on in Settings › Agents.";
+/// The main bot a device gets when bots are turned on and it has none: the
+/// one thread for every project (codegraff ADR 0335). The user can rename
+/// its job, or make another bot primary.
+pub const MAIN_BOT: &str = "main";
+pub const MAIN_JOB: &str = "Keep my work moving across my projects. Start each piece of work where it belongs and tell me what came back.";
 
 /// Runs `graff bot --user <args>`.
 #[async_trait]
@@ -352,6 +361,9 @@ impl Bots {
             _ => None,
         };
         self.cli.run(args).await?;
+        if matches!(p.action, BotVerb::Enable) {
+            self.ensure_main().await?;
+        }
         if let Some(chat_id) = chat {
             // Its history stays readable under archived chats.
             let _ = call(
@@ -362,6 +374,19 @@ impl Bots {
             .await;
         }
         self.state().await
+    }
+
+    /// Turning bots on gives the device a main bot when no bot is primary.
+    /// A bot already named `main` is the user's and is left as it is.
+    async fn ensure_main(&self) -> Result<(), EngineError> {
+        let state = self.state().await?;
+        if state.bots.iter().any(|b| b.primary || b.name == MAIN_BOT) {
+            return Ok(());
+        }
+        self.cli
+            .run(words(&["create", MAIN_BOT, "--primary", "--", MAIN_JOB]))
+            .await?;
+        Ok(())
     }
 
     /// One run of a bot in its standing conversation. Returns the chat.
@@ -483,21 +508,7 @@ impl Bots {
             } else {
                 turn.trim().to_owned()
             };
-            let sessions: Vec<Session> = snapshot(rpc, methods::WATCH_SESSIONS).await?;
-            if busy(&sessions, chat) {
-                queue_message(rpc, &chat.id, text).await?;
-                return Ok((chat.id.clone(), false));
-            }
-            let space = chat
-                .space_id
-                .as_deref()
-                .and_then(|id| spaces.iter().find(|s| s.id == id));
-            let cwd = chat
-                .cwd
-                .clone()
-                .or_else(|| space.map(|s| s.path.clone()))
-                .unwrap_or_else(|| "~".into());
-            queue_run(rpc, &chat.id, chat.config.clone(), cwd, text).await?;
+            send_into(rpc, chat, &spaces, text).await?;
             return Ok((chat.id.clone(), false));
         }
 
@@ -547,6 +558,30 @@ impl Bots {
         queue_run(rpc, &new_id, Some(config), cwd, framed).await?;
         Ok((new_id, true))
     }
+}
+
+/// Put a message into a chat that exists: behind the turn that is running
+/// or the question that is open, else as a new turn.
+async fn send_into(
+    rpc: &dyn RpcService,
+    chat: &Chat,
+    spaces: &[Space],
+    text: String,
+) -> Result<(), EngineError> {
+    let sessions: Vec<Session> = snapshot(rpc, methods::WATCH_SESSIONS).await?;
+    if busy(&sessions, chat) {
+        return queue_message(rpc, &chat.id, text).await;
+    }
+    let space = chat
+        .space_id
+        .as_deref()
+        .and_then(|id| spaces.iter().find(|s| s.id == id));
+    let cwd = chat
+        .cwd
+        .clone()
+        .or_else(|| space.map(|s| s.path.clone()))
+        .unwrap_or_else(|| "~".into());
+    queue_run(rpc, &chat.id, chat.config.clone(), cwd, text).await
 }
 
 /// A bot's standing text, then the turn: one message.
@@ -677,25 +712,32 @@ async fn snapshot<T: DeserializeOwned>(
 /// on record before a client asks.
 pub fn spawn_ticker(rpc: Arc<dyn RpcService>, bots: Bots) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut every = tokio::time::interval(TICK_EVERY);
-        every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut said = String::new();
-        loop {
-            every.tick().await;
-            match bots.tick(rpc.as_ref()).await {
-                Ok(_) => said.clear(),
-                // Once per distinct failure, not once a minute.
-                Err(err) => {
-                    let text = err.to_string();
-                    if text != said {
-                        tracing::warn!("bot routines were not checked: {text}");
-                        said = text;
+        let checks = async {
+            let mut every = tokio::time::interval(TICK_EVERY);
+            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut said = String::new();
+            loop {
+                every.tick().await;
+                match bots.tick(rpc.as_ref()).await {
+                    Ok(_) => said.clear(),
+                    // Once per distinct failure, not once a minute.
+                    Err(err) => {
+                        let text = err.to_string();
+                        if text != said {
+                            tracing::warn!("bot routines were not checked: {text}");
+                            said = text;
+                        }
                     }
                 }
             }
-        }
+        };
+        // Both run for as long as the engine does; aborting the task ends both.
+        tokio::join!(checks, reports::follow(rpc.clone(), bots.clone()));
     })
 }
+
+#[path = "bots_reports.rs"]
+pub mod reports;
 
 #[cfg(test)]
 #[path = "bots_tests.rs"]

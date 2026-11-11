@@ -3,6 +3,10 @@
 //! folder. Its header says how many things need looking at, and opens the
 //! catch-up (view_bots_page.zig). A bot's standing chat is listed here and
 //! nowhere else, and wears a strip naming the bot.
+//!
+//! The main bot comes first, with the work it started under it: chats in
+//! any project that are still going or have something to read. Its helpers
+//! follow.
 const std = @import("std");
 const nanoui = @import("nanoui");
 const ui = nanoui.ui;
@@ -23,6 +27,34 @@ pub fn folder(path: []const u8) []const u8 {
     const trimmed = std.mem.trimEnd(u8, path, "/\\");
     const at = std.mem.lastIndexOfAny(u8, trimmed, "/\\") orelse return trimmed;
     return trimmed[at + 1 ..];
+}
+
+/// The project a chat is in: its project's name, else its folder's.
+pub fn projectOf(a: *const App, ch: workspace.Chat) []const u8 {
+    if (a.findSpace(ch.space_id)) |s| return s.name;
+    return if (ch.cwd) |cwd| folder(cwd) else "";
+}
+
+/// How many of the main bot's chats the sidebar lists before its page does.
+const cap_work = 4;
+
+/// A chat the main bot started, under its row.
+fn workRow(c: *ui.Context, a: *App, k: theme.Colors, w: bots.Work) void {
+    ui.key(c, c.print("bot-work-{s}", .{w.chat.id}));
+    const selected = a.bots.page == .none and a.selected != null and std.mem.eql(u8, a.selected.?, w.chat.id);
+    var r = ui.div(c).row().wFull().h(row_h - 4).pl(27).pr(8).gap(6).itemsCenter().rounded(8);
+    r = if (selected) r.bg(k.selected) else r.hover(k.hover);
+    defer r.end();
+    statusSlot(c, k, w.mark, false);
+    const where = projectOf(a, w.chat);
+    const where_w: f32 = if (where.len > 0) c.text.width(where, .{ .size = 11 }) + 6 else 0;
+    kit.fadeText(c, w.chat.title orelse "New chat", kit.style(c, 12.5, 17, .{ .color = if (selected) k.text else k.text.alpha(0.8) }), @max(@import("view_sidebar.zig").widthOf(a) - 16 - 27 - 8 - 13 - 6 - where_w - 6, 24));
+    ui.spacer(c);
+    if (where.len > 0) ui.text(c, where, .{ .size = 11, .color = k.faint });
+    if (r.clicked()) {
+        a.bots.page = .none;
+        a.openChatInTab(w.chat.id);
+    }
 }
 
 fn statusSlot(c: *ui.Context, k: theme.Colors, mark: workspace.Mark, missed: bool) void {
@@ -46,6 +78,11 @@ fn rowNote(c: *ui.Context, a: *App, bot: bots.Bot, mark: workspace.Mark, missed:
         .working => .{ .text = "", .loud = false },
         .completed, .idle => blk: {
             if (missed and mark == .idle) break :blk .{ .text = "Did not run", .loud = true };
+            // The main bot between turns: how much of what it started is still going.
+            if (bot.primary) {
+                const going = bots.openCount(bots.work(c.alloc(), bot, a.chats.items, a.sessions.items, at));
+                if (going > 0) break :blk .{ .text = c.print("{d} going", .{going}), .loud = false };
+            }
             const ch = if (bot.chat.len > 0) a.findChat(bot.chat) else null;
             if (ch) |x| break :blk .{ .text = rules.relativeTime(c.alloc().alloc(u8, 16) catch &.{}, at, x.timeMs()), .loud = false };
             break :blk .{ .text = "", .loud = false };
@@ -133,11 +170,21 @@ pub fn group(c: *ui.Context, a: *App, k: theme.Colors) void {
         return;
     }
     if (!b.group_open) return;
-    if (list.len > cap_rows) {
-        ui.scroll(c, .{ .width = .fill, .height = .{ .px = cap_rows * (row_h + 2) }, .gap = 2 });
-        defer ui.end(c);
-        for (list) |bot| botRow(c, a, k, bot, at);
-    } else for (list) |bot| botRow(c, a, k, bot, at);
+    // Under the main bot: what it started that is still going or unread.
+    const main_bot = b.main();
+    var under: std.ArrayList(bots.Work) = .empty;
+    for (bots.work(c.alloc(), main_bot, a.chats.items, a.sessions.items, at)) |w| {
+        if (w.mark != .idle and under.items.len < cap_work) under.append(c.alloc(), w) catch {};
+    }
+    // Many bots scroll; the main bot's work adds its own room above them.
+    const scrolls = list.len > cap_rows;
+    if (scrolls) ui.scroll(c, .{ .width = .fill, .height = .{ .px = cap_rows * (row_h + 2) + @as(f32, @floatFromInt(under.items.len)) * (row_h - 2) }, .gap = 2 });
+    defer if (scrolls) ui.end(c);
+    if (main_bot) |bot| {
+        botRow(c, a, k, bot, at);
+        for (under.items) |w| workRow(c, a, k, w);
+    }
+    for (list) |bot| if (!bot.primary) botRow(c, a, k, bot, at);
 }
 
 /// Over a bot's standing chat: whose conversation this is, and the way to

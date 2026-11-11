@@ -2,6 +2,11 @@
 //! (`BotsState`; crates/engine/src/bots.rs). Each has one job, its own
 //! memory, routines it starts by itself, and one standing chat.
 //!
+//! One bot is the main bot (graff's `primary`): the one thread for every
+//! project. It starts each piece of work as an ordinary chat in the project
+//! it belongs to, and those chats (the ones its standing chat started) are
+//! its work: in progress, or done. The others are helpers with one job.
+//!
 //! Bots are experimental and off until the user turns them on (Settings ›
 //! Agents, or `graff bot enable`). While they are off nothing here is drawn.
 //!
@@ -150,6 +155,12 @@ pub const Bots = struct {
         return null;
     }
 
+    /// The main bot: the one thread for every project.
+    pub fn main(b: *const Bots) ?Bot {
+        for (b.list.items) |bot| if (bot.primary) return bot;
+        return null;
+    }
+
     pub fn focused(b: *const Bots) ?Bot {
         return if (b.focus.items.len > 0) b.find(b.focus.items) else null;
     }
@@ -184,7 +195,49 @@ pub const Item = struct {
     at_ms: i64 = 0,
     /// How many slots were missed.
     count: i64 = 0,
+    /// A chat the main bot started, when the item is about one; "" when it
+    /// is about the bot's own standing chat.
+    chat: []const u8 = "",
 };
+
+/// A chat the main bot started in some project, and where it stands.
+pub const Work = struct {
+    chat: workspace.Chat,
+    mark: workspace.Mark,
+
+    /// Still going: working, or stopped on a question.
+    pub fn open(w: Work) bool {
+        return w.mark == .working or w.mark == .awaiting_input;
+    }
+};
+
+/// Everything the main bot started: the chats whose parent is its standing
+/// chat, newest first. Nothing is kept for this; the engine records which
+/// chat started a chat.
+pub fn work(alloc: Allocator, main_bot: ?Bot, chats: []const workspace.Chat, sessions: []const workspace.Session, now_ms: i64) []const Work {
+    const bot = main_bot orelse return &.{};
+    if (bot.chat.len == 0) return &.{};
+    var out: std.ArrayList(Work) = .empty;
+    for (chats) |ch| {
+        if (ch.archived) continue;
+        const parent = ch.parent_chat_id orelse continue;
+        if (!std.mem.eql(u8, parent, bot.chat)) continue;
+        out.append(alloc, .{ .chat = ch, .mark = workspace.markOf(ch, workspace.sessionOf(sessions, ch.id), now_ms) }) catch {};
+    }
+    std.sort.insertion(Work, out.items, {}, struct {
+        fn newer(_: void, x: Work, y: Work) bool {
+            return x.chat.calledMs() > y.chat.calledMs();
+        }
+    }.newer);
+    return out.items;
+}
+
+/// How many of them are still going.
+pub fn openCount(list: []const Work) usize {
+    var n: usize = 0;
+    for (list) |w| n += @intFromBool(w.open());
+    return n;
+}
 
 /// A bot's status, from its standing chat (`workspace.markOf`).
 pub fn markOf(bot: Bot, chats: []const workspace.Chat, sessions: []const workspace.Session, now_ms: i64) workspace.Mark {
@@ -199,24 +252,38 @@ fn chatOf(bot: Bot, chats: []const workspace.Chat) ?workspace.Chat {
     return null;
 }
 
+fn kindOf(mark: workspace.Mark) ?Kind {
+    return switch (mark) {
+        .awaiting_input => .waiting,
+        .errored => .failed,
+        .completed => .done,
+        .working, .idle => null,
+    };
+}
+
 /// Everything to look at, most pressing first: a question waiting on the
 /// user, a failed run, a finished one not yet read, then what was due and
-/// did not run. An item leaves when its cause does: the question is
+/// did not run. A bot's own chat comes before the work the main bot started
+/// in a project. An item leaves when its cause does: the question is
 /// answered, the chat is read, the missed slot is run or dismissed.
 pub fn items(alloc: Allocator, bots: []const Bot, chats: []const workspace.Chat, sessions: []const workspace.Session, now_ms: i64) []const Item {
     var out: std.ArrayList(Item) = .empty;
+    var main_bot: ?Bot = null;
+    for (bots) |bot| if (bot.primary) {
+        main_bot = bot;
+    };
+    const started = work(alloc, main_bot, chats, sessions, now_ms);
     inline for (.{ Kind.waiting, Kind.failed, Kind.done }) |want| {
         for (bots) |bot| {
-            const kind: ?Kind = switch (markOf(bot, chats, sessions, now_ms)) {
-                .awaiting_input => .waiting,
-                .errored => .failed,
-                .completed => .done,
-                .working, .idle => null,
-            };
+            const kind = kindOf(markOf(bot, chats, sessions, now_ms));
             if (kind != null and kind.? == want) {
                 const ch = chatOf(bot, chats);
                 out.append(alloc, .{ .kind = want, .bot = bot.name, .text = if (ch) |x| x.preview orelse "" else "", .at_ms = if (ch) |x| x.last_message_ms else 0 }) catch {};
             }
+        }
+        for (started) |w| {
+            const kind = kindOf(w.mark);
+            if (kind != null and kind.? == want) out.append(alloc, .{ .kind = want, .bot = main_bot.?.name, .text = w.chat.preview orelse "", .at_ms = w.chat.last_message_ms, .chat = w.chat.id }) catch {};
         }
     }
     for (bots) |bot| for (bot.routines) |r| {
@@ -524,6 +591,53 @@ test "what needs looking at: a question first, then a failure, a finished run, a
     try testing.expectEqual(@as(i64, 2), got[3].count);
     // A bot with no chat, one working, and one already read are not items.
     for (got) |it| for ([_][]const u8{ "ada", "busy", "read" }) |quiet| try testing.expect(!std.mem.eql(u8, it.bot, quiet));
+}
+
+test "the main bot's work is the chats its thread started, in any project" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const at: i64 = 1_000_000;
+    var main_bot = made("main", "c-main", &.{});
+    main_bot.primary = true;
+    const list = [_]Bot{ main_bot, made("notes", "c-notes", &.{}) };
+    const base: workspace.Chat = .{ .id = "", .title = null, .space_id = null, .archived = false, .preview = null, .harness = null, .model = null, .cwd = null };
+    var chats: [6]workspace.Chat = @splat(base);
+    chats[0].id = "c-main";
+    chats[1].id = "c-notes";
+    // Started by the main bot: one working in comet, one that asked, one
+    // finished and unread in atlas, one archived.
+    for ([_]usize{ 2, 3, 4, 5 }, [_][]const u8{ "w-old", "w-ask", "w-done", "w-gone" }, [_]i64{ 100, 300, 200, 400 }) |ix, id, called| {
+        chats[ix].id = id;
+        chats[ix].parent_chat_id = "c-main";
+        chats[ix].last_prompt_ms = called;
+    }
+    chats[4].last_message_ms = 900;
+    chats[4].preview = "Bumped two dependencies";
+    chats[5].archived = true;
+    const sessions = [_]workspace.Session{
+        .{ .chat_id = "w-old", .status = .working, .updated_ms = at },
+        .{ .chat_id = "w-ask", .status = .awaiting_input, .updated_ms = at },
+    };
+    const got = work(arena.allocator(), main_bot, &chats, &sessions, at);
+    // Newest first, and never an archived chat or another bot's.
+    try testing.expectEqual(@as(usize, 3), got.len);
+    try testing.expectEqualStrings("w-ask", got[0].chat.id);
+    try testing.expectEqualStrings("w-done", got[1].chat.id);
+    try testing.expectEqualStrings("w-old", got[2].chat.id);
+    try testing.expectEqual(@as(usize, 2), openCount(got));
+    try testing.expect(!got[1].open());
+    // A bot that has not started its thread has started nothing.
+    try testing.expectEqual(@as(usize, 0), work(arena.allocator(), made("main", "", &.{}), &chats, &sessions, at).len);
+    try testing.expectEqual(@as(usize, 0), work(arena.allocator(), null, &chats, &sessions, at).len);
+
+    // What it started asks for the user the same way a bot's own chat does.
+    const its = items(arena.allocator(), &list, &chats, &sessions, at);
+    try testing.expectEqual(@as(usize, 2), its.len);
+    try testing.expectEqual(Kind.waiting, its[0].kind);
+    try testing.expectEqualStrings("w-ask", its[0].chat);
+    try testing.expectEqualStrings("main", its[0].bot);
+    try testing.expectEqual(Kind.done, its[1].kind);
+    try testing.expectEqualStrings("Bumped two dependencies", its[1].text);
 }
 
 test "a launch opens on the catch-up only after a gap, and only with something to report" {

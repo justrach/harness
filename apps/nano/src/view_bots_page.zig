@@ -1,6 +1,7 @@
 //! The main column's Bots pages, in the chat's place: the catch-up (what
 //! bots did, need, or did not do), one bot's job, routines and memory, and
-//! the form that makes a bot.
+//! the form that makes a bot. The main bot's page also lists its work
+//! across projects (view_bots_work.zig).
 //!
 //! Nothing here runs a bot or reads its files: every button is a request
 //! to the engine (bots.zig), and graff owns the store behind it.
@@ -19,11 +20,11 @@ const phi: f32 = 1.618;
 /// The column's inside width this frame: wrapped text needs it up front.
 var inner_w: f32 = 640;
 
-fn space(c: *ui.Context, h: f32) void {
+pub fn space(c: *ui.Context, h: f32) void {
     _ = c.leaf(.{ .width = .fill, .height = .{ .px = h } }, .none, null);
 }
 
-fn line(c: *ui.Context, text: []const u8, size: f32, color: ui.Color, w: f32) void {
+pub fn line(c: *ui.Context, text: []const u8, size: f32, color: ui.Color, w: f32) void {
     const box = ui.div(c).column().w(w);
     defer box.end();
     ui.text(c, text, .{ .size = size, .line_height = size * phi, .wrap = true, .color = color });
@@ -59,15 +60,15 @@ fn field(c: *ui.Context, k: theme.Colors, key: []const u8, buf: *ui.TextBuffer, 
     return ui.textField(c, buf, .{ .placeholder = placeholder, .placeholder_color = k.faint, .width = .fill, .bare = true, .size = 13, .mono = mono }).submitted;
 }
 
-fn card(c: *ui.Context, k: theme.Colors) ui.Div {
+pub fn card(c: *ui.Context, k: theme.Colors) ui.Div {
     return ui.div(c).column().wFull().p(1).rounded(12).border(k.border).borderW(1).bg(if (k.frosted) k.card else k.shell);
 }
 
-fn divider(c: *ui.Context, k: theme.Colors) void {
+pub fn divider(c: *ui.Context, k: theme.Colors) void {
     _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
 }
 
-fn sectionLabel(c: *ui.Context, k: theme.Colors, label: []const u8) void {
+pub fn sectionLabel(c: *ui.Context, k: theme.Colors, label: []const u8) void {
     space(c, 22);
     ui.text(c, label, .{ .size = 11.5, .line_height = 16, .weight = theme.ui_medium_weight, .color = k.muted.alpha(0.7) });
     space(c, 8);
@@ -168,7 +169,7 @@ fn inbox(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
     for (its) |it| {
         space(c, 10);
-        ui.key(c, c.print("item-{s}-{s}-{s}", .{ @tagName(it.kind), it.bot, it.routine }));
+        ui.key(c, c.print("item-{s}-{s}-{s}-{s}", .{ @tagName(it.kind), it.bot, it.routine, it.chat }));
         const cd = card(c, k);
         defer cd.end();
         const row = ui.div(c).row().wFull().px(16).py(13).gap(14);
@@ -182,8 +183,13 @@ fn inbox(c: *ui.Context, a: *App, k: theme.Colors) void {
         const body = ui.div(c).column().w(body_w).gap(3);
         defer body.end();
         const bot = b.find(it.bot);
-        const where = if (bot) |x| (if (x.project.len > 0) folder(x.project) else "") else "";
-        ui.text(c, if (where.len > 0) c.print("{s} · {s}", .{ it.bot, where }) else it.bot, .{ .size = 13, .line_height = 18, .weight = .medium, .color = k.text });
+        // Work the main bot started is named by what it is and where; a
+        // bot's own chat by the bot.
+        const started: ?workspace.Chat = if (it.chat.len > 0) a.findChat(it.chat) else null;
+        const what = if (started) |ch| ch.title orelse "New chat" else it.bot;
+        const where = if (started) |ch| @import("view_bots.zig").projectOf(a, ch) else if (bot) |x| (if (x.project.len > 0) folder(x.project) else "") else "";
+        ui.text(c, if (where.len > 0) c.print("{s} · {s}", .{ what, where }) else what, .{ .size = 13, .line_height = 18, .weight = .medium, .color = k.text });
+        if (started != null) line(c, c.print("Started by {s}.", .{it.bot}), 12, k.muted.alpha(0.65), body_w);
         switch (it.kind) {
             .missed => {
                 var t: [8]u8 = undefined;
@@ -197,14 +203,14 @@ fn inbox(c: *ui.Context, a: *App, k: theme.Colors) void {
         const actions = ui.div(c).row().gap(6);
         defer actions.end();
         switch (it.kind) {
-            .waiting => if (button(c, k, "open", "Open to answer", .solid, true)) open(a, bot),
+            .waiting => if (button(c, k, "open", "Open to answer", .solid, true)) open(a, bot, it.chat),
             .done => {
-                if (button(c, k, "open", "Open", .plain, true)) open(a, bot);
-                if (button(c, k, "read", "Mark read", .plain, true)) markRead(a, bot);
+                if (button(c, k, "open", "Open", .plain, true)) open(a, bot, it.chat);
+                if (button(c, k, "read", "Mark read", .plain, true)) markRead(a, bot, it.chat);
             },
             .failed => {
-                if (button(c, k, "open", "Open", .plain, true)) open(a, bot);
-                if (button(c, k, "dismiss", "Dismiss", .plain, true)) markRead(a, bot);
+                if (button(c, k, "open", "Open", .plain, true)) open(a, bot, it.chat);
+                if (button(c, k, "dismiss", "Dismiss", .plain, true)) markRead(a, bot, it.chat);
             },
             .missed => {
                 // A new turn, now: the night is not filled in after the fact.
@@ -220,13 +226,18 @@ fn firstLine(s: []const u8) []const u8 {
     return trimmed[0 .. std.mem.indexOfScalar(u8, trimmed, '\n') orelse trimmed.len];
 }
 
-fn open(a: *App, bot: ?bots.Bot) void {
+/// The chat an item is about: one the main bot started, else the bot's own.
+fn open(a: *App, bot: ?bots.Bot, started: []const u8) void {
+    if (started.len > 0) {
+        a.bots.page = .none;
+        return a.openChatInTab(started);
+    }
     if (bot) |x| bots.openRow(a, x);
 }
 
-fn markRead(a: *App, bot: ?bots.Bot) void {
-    const x = bot orelse return;
-    if (x.chat.len > 0) a.request(@import("requests.zig").markChatSeen(x.chat), .of(App, a, App.onNotice));
+fn markRead(a: *App, bot: ?bots.Bot, started: []const u8) void {
+    const chat = if (started.len > 0) started else if (bot) |x| x.chat else "";
+    if (chat.len > 0) a.request(@import("requests.zig").markChatSeen(chat), .of(App, a, App.onNotice));
 }
 
 // ── one bot ──────────────────────────────────────────────────────────
@@ -248,8 +259,8 @@ fn botPage(c: *ui.Context, a: *App, k: theme.Colors, bot: bots.Bot) void {
     {
         const chips = ui.div(c).row().gap(6).itemsCenter();
         defer chips.end();
-        if (bot.primary) chip(c, k, "Primary · your default contact");
-        chip(c, k, if (bot.project.len > 0) c.print("Works in {s}", .{folder(bot.project)}) else "No project");
+        // The main bot is for every project; a helper has one, or none.
+        if (bot.primary) chip(c, k, "Main bot · every project") else chip(c, k, if (bot.project.len > 0) c.print("Works in {s}", .{folder(bot.project)}) else "No project");
         if (bot.model.len > 0) chip(c, k, bot.model);
     }
     noticeStrip(c, a, k);
@@ -259,14 +270,16 @@ fn botPage(c: *ui.Context, a: *App, k: theme.Colors, bot: bots.Bot) void {
     {
         const send = ui.div(c).row().wFull().gap(8).itemsCenter();
         defer send.end();
-        const entered = field(c, k, "bot-message", &b.message, c.print("Ask {s}…", .{bot.name}), false);
+        const entered = field(c, k, "bot-message", &b.message, if (bot.primary) c.print("Ask {s} for anything, in any project…", .{bot.name}) else c.print("Ask {s}…", .{bot.name}), false);
         const text = std.mem.trim(u8, b.message.text(), " \t\r\n");
         const has_chat = bot.chat.len > 0 and a.findChat(bot.chat) != null;
         if ((button(c, k, "bot-send", "Send", .solid, text.len > 0 and !b.busy) or (entered and text.len > 0 and !b.busy))) bots.run(a, bot.name, text, null);
         if (has_chat and button(c, k, "bot-chat", "Open chat", .plain, true)) bots.openRow(a, bot);
     }
 
-    sectionLabel(c, k, "Routines");
+    if (bot.primary) @import("view_bots_work.zig").sections(c, a, k, bot, inner_w);
+
+    sectionLabel(c, k, if (bot.primary) "Its own routines" else "Routines");
     {
         const cd = card(c, k);
         defer cd.end();
@@ -372,7 +385,7 @@ fn botPage(c: *ui.Context, a: *App, k: theme.Colors, bot: bots.Bot) void {
         line(c, if (b.about.items.len > 0) b.about.items else "Nothing yet.", 12.5, k.text.alpha(0.9), inner_w);
     }
     space(c, 4);
-    line(c, if (bot.primary) "Every one of your bots is shown this." else "Shared by all your bots. Edit it on your primary bot.", 12, k.muted.alpha(0.65), inner_w);
+    line(c, if (bot.primary) "Every one of your bots is shown this." else "Shared by all your bots. Edit it on your main bot.", 12, k.muted.alpha(0.65), inner_w);
 
     if (b.log.items.len > 0) {
         sectionLabel(c, k, "Recent log");
@@ -395,7 +408,7 @@ fn botPage(c: *ui.Context, a: *App, k: theme.Colors, bot: bots.Bot) void {
     {
         const foot = ui.div(c).row().wFull().gap(8).itemsCenter();
         defer foot.end();
-        if (!bot.primary and button(c, k, "make-primary", "Make primary", .plain, !b.busy)) bots.act(a, .{ .action = "setPrimary", .bot = bot.name, .primary = true });
+        if (!bot.primary and button(c, k, "make-primary", "Make main bot", .plain, !b.busy)) bots.act(a, .{ .action = "setPrimary", .bot = bot.name, .primary = true });
         ui.spacer(c);
         if (b.confirm_delete) {
             ui.text(c, c.print("Delete {s} and everything it remembers?", .{bot.name}), .{ .size = 12.5, .line_height = 18, .color = k.muted });
@@ -449,7 +462,7 @@ fn newPage(c: *ui.Context, a: *App, k: theme.Colors) void {
     const b = &a.bots;
     top(c, a, k, "New bot", "");
     space(c, 6);
-    line(c, "A bot keeps one job and its own memory between runs. You can message it from any project.", 13, k.muted, inner_w);
+    line(c, "A helper keeps one job and its own memory between runs. You can message it from any project, and your main bot hands it work that is its job.", 13, k.muted, inner_w);
     noticeStrip(c, a, k);
     space(c, 18);
     ui.text(c, "Name", .{ .size = 12.5, .line_height = 18, .weight = .medium, .color = k.text });
@@ -481,7 +494,7 @@ fn newPage(c: *ui.Context, a: *App, k: theme.Colors) void {
             switchLine(c, a, k, "new-project", c.print("Works in {s}", .{p.name}), "Its runs happen in this project's folder. Without one it has no folder to work in.", &b.new_in_project);
             divider(c, k);
         }
-        switchLine(c, a, k, "new-primary", "Primary", "Your default contact. It knows your other bots, says whose job a request is, and waits for your yes before anything starts.", &b.new_primary);
+        switchLine(c, a, k, "new-primary", "Main bot", "The one thread for every project. It starts each piece of work as a chat where it belongs and tells you what came back. You have one; this replaces it.", &b.new_primary);
     }
     space(c, 18);
     {

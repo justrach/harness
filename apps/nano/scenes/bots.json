@@ -66,6 +66,54 @@
    "spaceId": "s-atlas",
    "lastMessageAt": "2027-01-14T18:40:00Z",
    "lastSeenAt": "2027-01-14T18:41:00Z"
+  },
+  {
+   "id": "c-ada",
+   "deviceId": "d",
+   "title": "ada",
+   "archived": false,
+   "lastMessageAt": "2027-01-14T23:00:00Z",
+   "lastSeenAt": "2027-01-14T23:30:00Z"
+  },
+  {
+   "id": "w-fix",
+   "deviceId": "d",
+   "title": "Fix the flaky login test",
+   "archived": false,
+   "spaceId": "s-comet",
+   "parentChatId": "c-ada",
+   "lastPromptAt": "2027-01-15T08:01:00Z"
+  },
+  {
+   "id": "w-audit",
+   "deviceId": "d",
+   "title": "Audit the billing export",
+   "archived": false,
+   "spaceId": "s-atlas",
+   "parentChatId": "c-ada",
+   "lastPromptAt": "2027-01-15T07:55:00Z"
+  },
+  {
+   "id": "w-bump",
+   "deviceId": "d",
+   "title": "Bump dependencies",
+   "archived": false,
+   "spaceId": "s-atlas",
+   "parentChatId": "c-ada",
+   "lastPromptAt": "2027-01-14T21:30:00Z",
+   "lastMessageAt": "2027-01-14T21:50:00Z",
+   "lastMessagePreview": "Bumped two. One needs a major version; left it."
+  },
+  {
+   "id": "w-changelog",
+   "deviceId": "d",
+   "title": "Write the 0.4 changelog entry",
+   "archived": false,
+   "spaceId": "s-comet",
+   "parentChatId": "c-ada",
+   "lastPromptAt": "2027-01-14T19:00:00Z",
+   "lastMessageAt": "2027-01-14T19:20:00Z",
+   "lastSeenAt": "2027-01-14T19:40:00Z"
   }
  ],
  "sessions": [
@@ -77,6 +125,16 @@
   {
    "chatId": "c-deps",
    "status": "awaitingInput",
+   "updatedAt": "2027-01-15T08:06:00Z"
+  },
+  {
+   "chatId": "w-fix",
+   "status": "working",
+   "updatedAt": "2027-01-15T08:06:00Z"
+  },
+  {
+   "chatId": "w-audit",
+   "status": "working",
    "updatedAt": "2027-01-15T08:06:00Z"
   }
  ],
@@ -143,9 +201,9 @@
   "bots": [
    {
     "name": "ada",
-    "job": "Coordinate. Don't do their work.",
+    "job": "Keep my work moving across my projects.",
     "primary": true,
-    "chat": "",
+    "chat": "c-ada",
     "routines": []
    },
    {
@@ -230,6 +288,24 @@
   },
   {
    "snap": "bots-details"
+  },
+  {
+   "click": "ada"
+  },
+  {
+   "expect": "Details"
+  },
+  {
+   "click": "Details"
+  },
+  {
+   "expect": "In progress"
+  },
+  {
+   "expect": "Audit the billing export"
+  },
+  {
+   "snap": "bots-main"
   }
  ]
 }

@@ -10,6 +10,10 @@ use harness_rpc::RpcError;
 struct FakeCli {
     /// The user's switch: `enable` and `disable` flip it.
     on: std::sync::atomic::AtomicBool,
+    /// Whether `ada` is primary. Off: the store has no main bot.
+    primary: std::sync::atomic::AtomicBool,
+    /// The main bot's thread, as graff has it on record.
+    ada_chat: Mutex<String>,
     /// The chat graff has on record for `notes`, changed by `set notes chat`.
     notes_chat: Mutex<String>,
     due: Value,
@@ -20,6 +24,8 @@ impl FakeCli {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             on: std::sync::atomic::AtomicBool::new(true),
+            primary: std::sync::atomic::AtomicBool::new(true),
+            ada_chat: Mutex::new(String::new()),
             notes_chat: Mutex::new(String::new()),
             due: json!([]),
             calls: Mutex::new(Vec::new()),
@@ -40,7 +46,8 @@ impl BotCli for FakeCli {
             ["state", "--json"] => json!({
                 "now_ms": 9, "last_check_ms": 7, "about": "Alex.",
                 "bots": [
-                    { "name": "ada", "job": "Coordinate.", "primary": true },
+                    { "name": "ada", "job": "Coordinate.", "chat": *self.ada_chat.lock().unwrap(),
+                      "primary": self.primary.load(std::sync::atomic::Ordering::SeqCst) },
                     { "name": "notes", "job": "Draft release notes", "model": "made-up-model", "yolo": true,
                       "project": "/repo/comet/", "chat": *self.notes_chat.lock().unwrap(),
                       "routines": [
@@ -223,12 +230,151 @@ async fn bots_are_off_until_turned_on_and_off_starts_nothing() {
     let on = bots.act(&world, enable).await.unwrap();
     assert!(on.enabled);
     assert_eq!(on.bots.len(), 2);
-    assert_eq!(cli.said(), ["enable", "state --json"]);
+    // A store that already has a primary bot keeps it: no second one is made.
+    assert_eq!(cli.said(), ["enable", "state --json", "state --json"]);
 
     let disable: BotActionParams = serde_json::from_value(json!({ "action": "disable" })).unwrap();
     let off = bots.act(&world, disable).await.unwrap();
     assert!(!off.enabled && off.bots.is_empty());
     assert_eq!(bots.tick(&world).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn turning_bots_on_makes_the_main_bot_when_none_is_primary() {
+    let cli = FakeCli::new();
+    cli.on.store(false, std::sync::atomic::Ordering::SeqCst);
+    cli.primary
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let bots = Bots::with_cli(cli.clone());
+    let world = World::default();
+    let enable: BotActionParams = serde_json::from_value(json!({ "action": "enable" })).unwrap();
+    bots.act(&world, enable).await.unwrap();
+    assert_eq!(
+        cli.said(),
+        [
+            "enable".to_owned(),
+            "state --json".to_owned(),
+            format!("create {MAIN_BOT} --primary -- {MAIN_JOB}"),
+            "state --json".to_owned(),
+        ]
+    );
+    // Nothing is started for it: its thread begins with the user's first message.
+    assert!(world.took().is_empty());
+}
+
+/// A chat, as the main bot's thread or as work it started.
+fn chat_row(id: &str, title: &str, parent: Option<&str>) -> Value {
+    json!({
+        "id": id, "deviceId": "dev-local", "title": title, "archived": false, "spaceId": "space-1",
+        "parentChatId": parent, "lastMessagePreview": "Bumped two.",
+        "config": { "harness": "graff", "model": null, "reasoning": null, "sandbox": "workspace-write" },
+        "createdAt": "2026-09-01T00:00:00Z"
+    })
+}
+
+fn ended(chat: &str, turn: &str, peer_only: bool) -> Session {
+    serde_json::from_value(json!({
+        "chatId": chat, "deviceId": "dev-local", "status": "idle", "lastCompletedTurn": turn,
+        "lastCompletedPeerOnly": peer_only, "updatedAt": chrono::Utc::now().to_rfc3339()
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn the_main_bot_hears_when_work_it_started_ends_and_only_that() {
+    let cli = FakeCli::new();
+    *cli.ada_chat.lock().unwrap() = "chat-ada".into();
+    let bots = Bots::with_cli(cli.clone());
+    let world = World::default();
+    *world.chats.lock().unwrap() = vec![
+        chat_row("chat-ada", "ada", None),
+        chat_row("w1", "Bump deps", Some("chat-ada")),
+        // Another chat's subagent, and a chat nobody's bot started.
+        chat_row("x1", "Someone else's", Some("chat-other")),
+        chat_row("x2", "Typed by hand", None),
+    ];
+    let mut reports = reports::Reports::default();
+    // The first look is how things already were.
+    assert_eq!(
+        bots.hear(&world, &mut reports, &[ended("w1", "t0", true)])
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        cli.said().is_empty(),
+        "nothing changed, so graff was not asked"
+    );
+
+    let now = [
+        ended("w1", "t1", true),
+        ended("x1", "t1", true),
+        ended("x2", "t1", true),
+    ];
+    assert_eq!(bots.hear(&world, &mut reports, &now).await.unwrap(), 1);
+    let writes = world.took();
+    assert_eq!(writes.len(), 1);
+    let (method, params) = &writes[0];
+    assert_eq!(method, methods::QUEUE_COMMAND);
+    assert_eq!(params["chatId"], "chat-ada");
+    let prompt = params["command"]["request"]["prompt"].as_str().unwrap();
+    assert!(
+        prompt.contains("\"Bump deps\" in comet (chat w1) finished its turn."),
+        "{prompt}"
+    );
+    assert!(prompt.contains("Its last words: Bumped two."));
+    // Not something the user typed.
+    assert_eq!(params["command"]["request"]["turnOrigin"], "peer");
+
+    // The same look again says nothing, and a turn the user typed in that
+    // chat is theirs.
+    assert_eq!(bots.hear(&world, &mut reports, &now).await.unwrap(), 0);
+    assert_eq!(
+        bots.hear(&world, &mut reports, &[ended("w1", "t2", false)])
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(world.took().is_empty());
+
+    // A chat the main bot started while answering that report is a step
+    // further from what the user asked for. Three steps are reported, with
+    // the last one saying it is the last; a fourth is not.
+    for (step, id) in [(2, "w2"), (3, "w3"), (4, "w4")] {
+        let mut row = chat_row(id, "Follow-up", Some("chat-ada"));
+        row["createdAt"] = json!(chrono::Utc::now().to_rfc3339());
+        world.chats.lock().unwrap().push(row);
+        let heard = bots
+            .hear(&world, &mut reports, &[ended(id, "t1", true)])
+            .await
+            .unwrap();
+        let writes = world.took();
+        if step <= reports::MAX_STEPS {
+            assert_eq!(heard, 1, "step {step}");
+            let prompt = writes[0].1["command"]["request"]["prompt"]
+                .as_str()
+                .unwrap();
+            assert_eq!(
+                prompt.contains("last report in this chain"),
+                step == reports::MAX_STEPS
+            );
+        } else {
+            assert_eq!(heard, 0);
+            assert!(writes.is_empty());
+        }
+    }
+
+    // With bots off nothing is said and graff is not started.
+    cli.on.store(false, std::sync::atomic::Ordering::SeqCst);
+    let before = cli.said().len();
+    assert_eq!(
+        bots.hear(&world, &mut reports, &[ended("w1", "t3", true)])
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(cli.said().len(), before);
+    assert!(world.took().is_empty());
 }
 
 #[test]
