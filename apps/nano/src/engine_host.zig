@@ -22,6 +22,7 @@ const registry_sync = @import("registry_sync.zig");
 const chat2_client = @import("chat2_client.zig");
 const auth_host = @import("auth_host.zig");
 const agent_accounts_host = @import("agent_accounts_host.zig");
+const bots_host = @import("bots_host.zig");
 const relay_callback = @import("relay_callback.zig");
 const run_journal = @import("run_journal.zig");
 const ws_server = @import("ws_server.zig");
@@ -120,10 +121,10 @@ pub const SyncBudget = struct {
 pub const max_committed_uploads_cache: usize = 8;
 
 /// Exhaustive 1:1 RPC method table matching `crates/rpc/src/lib.rs` (`pub mod methods`,
-/// 154 canonical methods) plus 5 compatibility aliases (159 total), dispatched in O(1)
+/// 158 canonical methods) plus 5 compatibility aliases (163 total), dispatched in O(1)
 /// via `rpc_method_map`.
 pub const RpcMethod = enum {
-    // 154 canonical methods from crates/rpc/src/lib.rs:
+    // 158 canonical methods from crates/rpc/src/lib.rs:
     WatchPreviews,
     ListHarnesses,
     CancelInstall,
@@ -278,6 +279,10 @@ pub const RpcMethod = enum {
     CancelHarnessUpdate,
     DismissHarnessUpdate,
     SetHarnessUpdatePolicy,
+    BotsState,
+    BotDetail,
+    BotAction,
+    RunBot,
     // 5 compatibility aliases:
     GetAuthStatus,
     GetCodegraffStatus,
@@ -441,6 +446,10 @@ pub const rpc_method_map = std.StaticStringMap(RpcMethod).initComptime(.{
     .{ "CancelHarnessUpdate", .CancelHarnessUpdate },
     .{ "DismissHarnessUpdate", .DismissHarnessUpdate },
     .{ "SetHarnessUpdatePolicy", .SetHarnessUpdatePolicy },
+    .{ "BotsState", .BotsState },
+    .{ "BotDetail", .BotDetail },
+    .{ "BotAction", .BotAction },
+    .{ "RunBot", .RunBot },
     // 5 compatibility aliases:
     .{ "GetAuthStatus", .GetAuthStatus },
     .{ "GetCodegraffStatus", .GetCodegraffStatus },
@@ -589,8 +598,7 @@ pub const ChatRecord = struct {
     pinned: bool = false,
     archived: bool = false,
 
-    pub fn deinit(self: *ChatRecord, gpa: Allocator) void {
-        gpa.free(self.id);
+    pub fn deinitFieldsExceptId(self: *ChatRecord, gpa: Allocator) void {
         if (self.space_id) |s| gpa.free(s);
         gpa.free(self.device_id);
         gpa.free(self.harness);
@@ -604,6 +612,11 @@ pub const ChatRecord = struct {
         if (self.harness_session_id) |hs| gpa.free(hs);
         if (self.source_context_json) |sc| gpa.free(sc);
         if (self.activity_status) |a| gpa.free(a);
+    }
+
+    pub fn deinit(self: *ChatRecord, gpa: Allocator) void {
+        gpa.free(self.id);
+        self.deinitFieldsExceptId(gpa);
     }
 };
 
@@ -699,6 +712,10 @@ pub const EngineHost = struct {
     sync_probes: u64 = 0,
     registry_seq: u64 = 0,
     registry_org_id: ?[]u8 = null,
+    bots_env_override: ?[]u8 = null,
+    bots_graff_bin_override: ?[]u8 = null,
+    last_bot_error: ?[]u8 = null,
+    bot_chat_seq: u64 = 0,
     bg_sync_enabled: bool = false,
     sync_wake_seq: std.atomic.Value(u64) = .init(0),
     bg_workers_active: std.atomic.Value(u32) = .init(0),
@@ -777,6 +794,9 @@ pub const EngineHost = struct {
         self.gpa.free(self.sidebar_group_by);
         if (self.data_dir) |d| self.gpa.free(d);
         if (self.registry_org_id) |ro| self.gpa.free(ro);
+        if (self.bots_env_override) |be| self.gpa.free(be);
+        if (self.bots_graff_bin_override) |bb| self.gpa.free(bb);
+        if (self.last_bot_error) |lbe| self.gpa.free(lbe);
         self.store.deinit();
         self.registry.deinit();
         self.terminals.deinit();
@@ -1168,7 +1188,7 @@ pub const EngineHost = struct {
         return self.docs.getPtr(chat_id).?;
     }
 
-    fn nowMs(self: *const EngineHost) i64 {
+    pub fn nowMs(self: *const EngineHost) i64 {
         if (self.io) |io| {
             return @intCast(std.Io.Clock.real.now(io).toMilliseconds());
         }
@@ -1587,7 +1607,7 @@ pub const EngineHost = struct {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"command\":null}") };
             },
             .ListAgentAccounts => {
-                if (self.auth.codegraff_client_id != null) {
+                if (self.auth.codegraff_client_id != null or self.agent_accounts.home_dir != null) {
                     const force_usage: bool = if (requireObj(params)) |obj|
                         (if (obj.get("forceUsage")) |fv| (if (fv == .bool) fv.bool else true) else true)
                     else
@@ -1619,7 +1639,7 @@ pub const EngineHost = struct {
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"jobs\":[]}") };
             },
             .ListGraffLogins => {
-                if (self.auth.codegraff_client_id != null) {
+                if (self.auth.codegraff_client_id != null or self.agent_accounts.home_dir != null) {
                     return .{ .unary_json = try self.agent_accounts.listGraffLoginsJson(self.io) };
                 }
                 return .{ .unary_json = try self.gpa.dupe(
@@ -2562,6 +2582,25 @@ pub const EngineHost = struct {
                 try self.broadcastWatch(.harness_updates, null, snap);
                 return .{ .unary_json = snap };
             },
+            .BotsState => {
+                return self.handleBotsState();
+            },
+            .BotDetail => {
+                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
+                const bot = requireStr(obj, "bot") orelse return .{ .err = .{ .bad_params = "missing bot" } };
+                return self.handleBotDetail(bot);
+            },
+            .BotAction => {
+                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
+                return self.handleBotAction(obj);
+            },
+            .RunBot => {
+                const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
+                const bot = requireStr(obj, "bot") orelse return .{ .err = .{ .bad_params = "missing bot" } };
+                const msg: ?[]const u8 = if (obj.get("message")) |mv| (if (mv == .string) mv.string else null) else null;
+                const routine: ?[]const u8 = if (obj.get("routine")) |rv| (if (rv == .string) rv.string else null) else null;
+                return self.handleRunBot(bot, msg, routine);
+            },
             .OpenTerminal => {
                 const obj = requireObj(params) orelse return .{ .err = .{ .bad_params = "expected object" } };
                 const tid = requireStr(obj, "terminalId") orelse "term-1";
@@ -3335,7 +3374,7 @@ pub const EngineHost = struct {
         return self.storeCachedTailInMemoryOwned(chat_id, msgs_json, false);
     }
 
-    fn storeCachedTailInMemoryOwned(self: *EngineHost, chat_id: []const u8, msgs_json: []u8, write_disk: bool) ?[]const u8 {
+    pub fn storeCachedTailInMemoryOwned(self: *EngineHost, chat_id: []const u8, msgs_json: []u8, write_disk: bool) ?[]const u8 {
         if (write_disk) {
             if (self.io) |io| {
                 if (self.data_dir) |dir| {
@@ -3401,10 +3440,11 @@ pub const EngineHost = struct {
         const cached_org = regOptStr(parsed.value.object, "orgId") orelse return false;
         if (!std.mem.eql(u8, cached_org, expected_org)) return false;
 
-        return self.applyRegistryResponseJson(expected_org, raw, false);
+        _ = self.applyRegistryResponseJson(expected_org, raw, false);
+        return true;
     }
 
-    fn saveRegistryCacheFile(self: *const EngineHost) void {
+    pub fn saveRegistryCacheFile(self: *const EngineHost) void {
         const io = self.io orelse return;
         const dir = self.data_dir orelse return;
         const org_id = self.registry_org_id orelse self.auth.org_id orelse return;
@@ -3622,7 +3662,7 @@ pub const EngineHost = struct {
 
         const rows = rows_val.array.items;
         // O(1) delta fast-path: quiet poll (`rows == []`) skips all index construction, JSON encoding & broadcasts.
-        if (rows.len == 0) return true;
+        if (rows.len == 0) return false;
 
         var dev_idx: std.StringHashMapUnmanaged(usize) = .empty;
         defer dev_idx.deinit(self.gpa);
@@ -3774,11 +3814,12 @@ pub const EngineHost = struct {
             } else |_| {}
         }
 
-        if (persist_disk and (dirty_devices or dirty_spaces or dirty_chats or dirty_sessions)) {
+        const any_dirty = dirty_devices or dirty_spaces or dirty_chats or dirty_sessions;
+        if (persist_disk and any_dirty) {
             self.saveRegistryCacheFile();
         }
 
-        return true;
+        return any_dirty;
     }
 
     /// Reference O(N^2) linear-scan + unconditional full-rescan path preserved solely so
@@ -3793,9 +3834,12 @@ pub const EngineHost = struct {
         for (rows_val.array.items) |row_val| {
             if (row_val != .object) continue;
             const ro = row_val.object;
-            if (ro.get("deleted")) |dv| if (dv == .bool and dv.bool) continue;
             const kind = regOptStr(ro, "kind") orelse continue;
             const row_id = regOptStr(ro, "id") orelse continue;
+            if (ro.get("deleted")) |dv| if (dv == .bool and dv.bool) {
+                if (std.mem.eql(u8, kind, "chats")) _ = self.deleteChat(row_id);
+                continue;
+            };
             const fv = ro.get("fields") orelse continue;
             if (fv != .object) continue;
             const f = fv.object;
@@ -3967,6 +4011,13 @@ pub const EngineHost = struct {
         idx_map: ?*std.StringHashMapUnmanaged(usize),
     ) !void {
         const id = regOptStr(f, "id") orelse row_id;
+        const existing_pos: ?usize = if (idx_map) |m| m.get(id) else blk: {
+            for (self.chats.items, 0..) |c, i| {
+                if (std.mem.eql(u8, c.id, id)) break :blk i;
+            }
+            break :blk null;
+        };
+
         const dev_id = regOptStr(f, "deviceId") orelse self.device_id;
         const space_id = regOptStr(f, "spaceId");
         const title = regOptStr(f, "title");
@@ -3996,13 +4047,13 @@ pub const EngineHost = struct {
         }
 
         var rec = ChatRecord{
-            .id = try self.gpa.dupe(u8, id),
+            .id = if (existing_pos == null) try self.gpa.dupe(u8, id) else &.{},
             .space_id = null,
             .device_id = &.{},
             .harness = &.{},
         };
         errdefer {
-            self.gpa.free(rec.id);
+            if (existing_pos == null) self.gpa.free(rec.id);
             if (rec.space_id) |s| self.gpa.free(s);
             if (rec.device_id.len > 0) self.gpa.free(rec.device_id);
             if (rec.harness.len > 0) self.gpa.free(rec.harness);
@@ -4014,6 +4065,7 @@ pub const EngineHost = struct {
             if (rec.parent_chat_id) |p| self.gpa.free(p);
             if (rec.preview) |pr| self.gpa.free(pr);
             if (rec.harness_session_id) |hs| self.gpa.free(hs);
+            if (rec.source_context_json) |sc| self.gpa.free(sc);
         }
         rec.device_id = try self.gpa.dupe(u8, dev_id);
         rec.harness = try self.gpa.dupe(u8, harness);
@@ -4035,18 +4087,14 @@ pub const EngineHost = struct {
         rec.last_prompt_at_ms = last_prompt_ms;
         rec.last_seen_at_ms = last_seen_ms;
 
-        const existing_pos: ?usize = if (idx_map) |m| m.get(id) else blk: {
-            for (self.chats.items, 0..) |c, i| {
-                if (std.mem.eql(u8, c.id, id)) break :blk i;
-            }
-            break :blk null;
-        };
-
         if (existing_pos) |pos| {
             const existing = &self.chats.items[pos];
             if (last_msg_ms > existing.last_message_at_ms and existing.last_message_at_ms > 0) {
                 self.invalidateCachedTail(id);
             }
+            // Preserve `existing.id`'s heap buffer in-place so `chat_idx`'s key slice remains live
+            // across multi-row delta batches and Pass 2 session status attachment (zero key re-alloc/UAF).
+            rec.id = existing.id;
             rec.pinned = existing.pinned;
             if (existing.activity_status) |st| {
                 rec.activity_status = st;
@@ -4054,9 +4102,8 @@ pub const EngineHost = struct {
             }
             rec.activity_started_at_ms = existing.activity_started_at_ms;
             rec.activity_updated_at_ms = existing.activity_updated_at_ms;
-            existing.deinit(self.gpa);
+            existing.deinitFieldsExceptId(self.gpa);
             existing.* = rec;
-            if (idx_map) |m| m.put(self.gpa, existing.id, pos) catch {};
             return;
         }
         const new_idx = self.chats.items.len;
@@ -4494,6 +4541,452 @@ pub const EngineHost = struct {
         try w.writeAll("]}");
         return aw.toOwnedSlice();
     }
+
+    pub fn setBotsEnvOverride(self: *EngineHost, val: ?[]const u8) !void {
+        const copy = if (val) |v| try self.gpa.dupe(u8, v) else null;
+        if (self.bots_env_override) |old| self.gpa.free(old);
+        self.bots_env_override = copy;
+    }
+
+    fn storeBotError(self: *EngineHost, owned_msg: []u8) RpcOutcome {
+        if (self.last_bot_error) |old| self.gpa.free(old);
+        self.last_bot_error = owned_msg;
+        return .{ .err = .{ .exec_error = owned_msg } };
+    }
+
+    pub fn botsEnabled(self: *const EngineHost) bool {
+        return bots_host.checkMarkerEnabled(
+            self.gpa,
+            self.io,
+            self.agent_accounts.home_dir,
+            self.bots_env_override,
+        );
+    }
+
+    fn runBotCli(self: *EngineHost, args: []const []const u8) !bots_host.CliOutcome {
+        const io = self.io orelse return .{
+            .err_msg = try self.gpa.dupe(u8, "The `graff` CLI was not found on this device — install it first."),
+        };
+        const home = self.agent_accounts.home_dir orelse return .{
+            .err_msg = try self.gpa.dupe(u8, "The `graff` CLI was not found on this device — install it first."),
+        };
+        const bin_override = self.bots_graff_bin_override orelse self.graff_exe;
+        return bots_host.runGraffBotCli(self.gpa, io, home, bin_override, args);
+    }
+
+    fn handleBotsState(self: *EngineHost) !RpcOutcome {
+        if (!self.botsEnabled()) {
+            return .{ .unary_json = try bots_host.disabledStateJsonAlloc(self.gpa) };
+        }
+        const out = try self.runBotCli(&.{ "state", "--json" });
+        switch (out) {
+            .err_msg => |e| return self.storeBotError(e),
+            .ok => |raw| {
+                defer self.gpa.free(raw);
+                const wire = (try bots_host.translateGraffStateToWireJson(self.gpa, raw, true)) orelse {
+                    return .{ .err = .{ .exec_error = bots_host.too_old_msg } };
+                };
+                return .{ .unary_json = wire };
+            },
+        }
+    }
+
+    fn handleBotDetail(self: *EngineHost, bot: []const u8) !RpcOutcome {
+        if (!self.botsEnabled()) {
+            return .{ .err = .{ .exec_error = bots_host.off_msg } };
+        }
+        if (!bots_host.validBotName(bot)) {
+            return .{ .err = .{ .exec_error = "No such bot." } };
+        }
+        const out = try self.runBotCli(&.{ "show", bot, "--json" });
+        switch (out) {
+            .err_msg => |e| return self.storeBotError(e),
+            .ok => |raw| {
+                defer self.gpa.free(raw);
+                const wire = (try bots_host.translateGraffDetailToWireJson(self.gpa, raw)) orelse {
+                    return .{ .err = .{ .exec_error = bots_host.too_old_msg } };
+                };
+                return .{ .unary_json = wire };
+            },
+        }
+    }
+
+    fn findBotStandingChatAlloc(self: *EngineHost, bot_name: []const u8) ?[]u8 {
+        const out = self.runBotCli(&.{ "state", "--json" }) catch return null;
+        switch (out) {
+            .err_msg => |e| {
+                self.gpa.free(e);
+                return null;
+            },
+            .ok => |raw| {
+                defer self.gpa.free(raw);
+                var parsed = json.parseFromSlice(json.Value, self.gpa, raw, .{}) catch return null;
+                defer parsed.deinit();
+                if (parsed.value != .object) return null;
+                const bv = parsed.value.object.get("bots") orelse return null;
+                if (bv != .array) return null;
+                for (bv.array.items) |it| {
+                    if (it != .object) continue;
+                    const nm = regOptStr(it.object, "name") orelse continue;
+                    if (!std.mem.eql(u8, nm, bot_name)) continue;
+                    const cid = regOptStr(it.object, "chat") orelse return null;
+                    if (cid.len == 0) return null;
+                    return self.gpa.dupe(u8, cid) catch null;
+                }
+                return null;
+            },
+        }
+    }
+
+    fn handleBotAction(self: *EngineHost, obj: json.ObjectMap) !RpcOutcome {
+        var plan = try bots_host.buildActionPlan(self.gpa, obj);
+        switch (plan) {
+            .bad_params => |msg| return .{ .err = .{ .bad_params = msg } },
+            .failed_msg => |owned| return self.storeBotError(owned),
+            .ok => |*ok_plan| {
+                defer ok_plan.deinit(self.gpa);
+                if (!self.botsEnabled() and ok_plan.verb != .enable and ok_plan.verb != .disable) {
+                    return .{ .err = .{ .exec_error = bots_host.off_msg } };
+                }
+                const retiring_chat: ?[]u8 = if (ok_plan.verb == .remove and ok_plan.bot_name != null)
+                    self.findBotStandingChatAlloc(ok_plan.bot_name.?)
+                else
+                    null;
+                defer if (retiring_chat) |rc| self.gpa.free(rc);
+
+                var argv_slices: std.ArrayList([]const u8) = .empty;
+                defer argv_slices.deinit(self.gpa);
+                for (ok_plan.argv_tail) |s| try argv_slices.append(self.gpa, s);
+
+                const out = try self.runBotCli(argv_slices.items);
+                switch (out) {
+                    .err_msg => |e| return self.storeBotError(e),
+                    .ok => |raw| self.gpa.free(raw),
+                }
+
+                if (retiring_chat) |cid| {
+                    var changed = false;
+                    for (self.chats.items) |*c| {
+                        if (std.mem.eql(u8, c.id, cid)) {
+                            c.archived = true;
+                            changed = true;
+                        }
+                    }
+                    if (changed) {
+                        if (self.chatsJson()) |chj| {
+                            defer self.gpa.free(chj);
+                            self.broadcastWatch(.chats, null, chj) catch {};
+                        } else |_| {}
+                    }
+                }
+                return self.handleBotsState();
+            },
+        }
+    }
+
+    fn isStandingChatBusy(self: *const EngineHost, chat: ChatRecord) bool {
+        const st = chat.activity_status orelse return false;
+        if (std.mem.eql(u8, st, "awaitingInput") or std.mem.eql(u8, st, "awaiting_input")) return true;
+        if (std.mem.eql(u8, st, "working")) {
+            const now = self.nowMs();
+            const updated = if (chat.activity_updated_at_ms > 0) chat.activity_updated_at_ms else chat.last_message_at_ms;
+            return updated > 0 and (now - updated <= bots_host.session_stale_ms);
+        }
+        return false;
+    }
+
+    fn deliverBotTurn(
+        self: *EngineHost,
+        bot_name: []const u8,
+        bot_project: []const u8,
+        bot_model: []const u8,
+        existing_chat_id: []const u8,
+        standing: []const u8,
+        turn: []const u8,
+        with_standing: bool,
+    ) !struct { chat_id: []u8, created: bool } {
+        const framed = try bots_host.framedPromptAlloc(self.gpa, standing, turn);
+        defer self.gpa.free(framed);
+
+        if (existing_chat_id.len > 0) {
+            for (self.chats.items) |c| {
+                if (std.mem.eql(u8, c.id, existing_chat_id) and !c.archived) {
+                    const text = if (with_standing) framed else std.mem.trim(u8, turn, " \t\r\n");
+                    if (self.isStandingChatBusy(c)) {
+                        const doc = try self.getOrCreateDoc(c.id);
+                        self.queue_seq += 1;
+                        const qid = try std.fmt.allocPrint(self.gpa, "{s}-q-{d}", .{ self.device_id, self.queue_seq });
+                        defer self.gpa.free(qid);
+                        try doc.enqueueMessage(qid, text, false, self.nowMs());
+                        const qj = try doc.toQueueFrameJson(self.gpa);
+                        defer self.gpa.free(qj);
+                        self.broadcastWatch(.queue, c.id, qj) catch {};
+                        return .{ .chat_id = try self.gpa.dupe(u8, c.id), .created = false };
+                    }
+                    const cwd = c.cwd orelse self.chatWorkspacePath(c.id);
+                    try self.executeBotChatRun(c.id, c.model, cwd, text);
+                    return .{ .chat_id = try self.gpa.dupe(u8, c.id), .created = false };
+                }
+            }
+        }
+
+        // Create standing chat on first run (or if previous standing chat was archived).
+        self.bot_chat_seq += 1;
+        const new_id = try std.fmt.allocPrint(self.gpa, "bot-{s}-{d}-{d}", .{ bot_name, self.nowMs(), self.bot_chat_seq });
+        errdefer self.gpa.free(new_id);
+
+        var matched_space_id: ?[]const u8 = null;
+        var matched_space_path: ?[]const u8 = null;
+        if (bot_project.len > 0) {
+            for (self.spaces.items) |s| {
+                if (std.mem.eql(u8, s.device_id, self.device_id) and bots_host.sameFolder(s.path, bot_project)) {
+                    matched_space_id = s.id;
+                    matched_space_path = s.path;
+                    break;
+                }
+            }
+        }
+
+        const sp_c = if (matched_space_id) |sid| try self.gpa.dupe(u8, sid) else null;
+        errdefer if (sp_c) |s| self.gpa.free(s);
+        const cwd_c = if (matched_space_id == null and bot_project.len > 0) try self.gpa.dupe(u8, bot_project) else null;
+        errdefer if (cwd_c) |cw| self.gpa.free(cw);
+        const dev_c = try self.gpa.dupe(u8, self.device_id);
+        errdefer self.gpa.free(dev_c);
+        const h_c = try self.gpa.dupe(u8, "graff");
+        errdefer self.gpa.free(h_c);
+        const title_c = try self.gpa.dupe(u8, bot_name);
+        errdefer self.gpa.free(title_c);
+        const model_c = if (bot_model.len > 0) try self.gpa.dupe(u8, bot_model) else null;
+        errdefer if (model_c) |m| self.gpa.free(m);
+        const id_c = try self.gpa.dupe(u8, new_id);
+        errdefer self.gpa.free(id_c);
+
+        try self.chats.append(self.gpa, .{
+            .id = id_c,
+            .space_id = sp_c,
+            .device_id = dev_c,
+            .harness = h_c,
+            .title = title_c,
+            .model = model_c,
+            .cwd = cwd_c,
+            .created_at_ms = self.nowMs(),
+        });
+
+        // Remember standing chat on the bot BEFORE running its first turn (`crates/engine/src/bots.rs:539-541`).
+        const set_out = try self.runBotCli(&.{ "set", bot_name, "chat", new_id });
+        switch (set_out) {
+            .err_msg => |e| {
+                self.gpa.free(e);
+            },
+            .ok => |raw| self.gpa.free(raw),
+        }
+
+        if (self.chatsJson()) |chj| {
+            defer self.gpa.free(chj);
+            self.broadcastWatch(.chats, null, chj) catch {};
+        } else |_| {}
+        if (self.sessionsJson()) |sj| {
+            defer self.gpa.free(sj);
+            self.broadcastWatch(.sessions, null, sj) catch {};
+        } else |_| {}
+
+        const run_cwd = matched_space_path orelse (if (bot_project.len > 0) bot_project else ".");
+        try self.executeBotChatRun(new_id, if (bot_model.len > 0) bot_model else null, run_cwd, framed);
+        return .{ .chat_id = new_id, .created = true };
+    }
+
+    fn executeBotChatRun(self: *EngineHost, chat_id: []const u8, model: ?[]const u8, cwd: []const u8, prompt: []const u8) !void {
+        self.turn_counter += 1;
+        const msg_id = try std.fmt.allocPrint(self.gpa, "bot-msg-{d}", .{self.turn_counter});
+        defer self.gpa.free(msg_id);
+
+        const run_json = if (model) |m|
+            try std.fmt.allocPrint(
+                self.gpa,
+                "{{\"chatId\":{f},\"command\":{{\"kind\":\"run\",\"messageId\":{f},\"request\":{{\"prompt\":{f},\"cwd\":{f},\"model\":{f}}}}}}}",
+                .{ json.fmt(chat_id, .{}), json.fmt(msg_id, .{}), json.fmt(prompt, .{}), json.fmt(cwd, .{}), json.fmt(m, .{}) },
+            )
+        else
+            try std.fmt.allocPrint(
+                self.gpa,
+                "{{\"chatId\":{f},\"command\":{{\"kind\":\"run\",\"messageId\":{f},\"request\":{{\"prompt\":{f},\"cwd\":{f}}}}}}}",
+                .{ json.fmt(chat_id, .{}), json.fmt(msg_id, .{}), json.fmt(prompt, .{}), json.fmt(cwd, .{}) },
+            );
+        defer self.gpa.free(run_json);
+
+        var parsed = try json.parseFromSlice(json.Value, self.gpa, run_json, .{});
+        defer parsed.deinit();
+        var out = try self.handle("QueueCommand", parsed.value);
+        switch (out) {
+            .unary_json => |b| self.gpa.free(b),
+            .stream_items_json => |*st| st.deinit(self.gpa),
+            .err => {},
+        }
+    }
+
+    fn handleRunBot(self: *EngineHost, bot_name: []const u8, raw_msg: ?[]const u8, routine_id: ?[]const u8) !RpcOutcome {
+        if (!self.botsEnabled()) {
+            return .{ .err = .{ .exec_error = bots_host.off_msg } };
+        }
+        if (!bots_host.validBotName(bot_name)) {
+            return .{ .err = .{ .exec_error = "No such bot." } };
+        }
+
+        const state_out = try self.runBotCli(&.{ "state", "--json" });
+        const state_raw = switch (state_out) {
+            .err_msg => |e| return self.storeBotError(e),
+            .ok => |r| r,
+        };
+        defer self.gpa.free(state_raw);
+
+        var parsed = json.parseFromSlice(json.Value, self.gpa, state_raw, .{}) catch {
+            return .{ .err = .{ .exec_error = bots_host.too_old_msg } };
+        };
+        defer parsed.deinit();
+        if (parsed.value != .object) return .{ .err = .{ .exec_error = bots_host.too_old_msg } };
+        const bots_arr = parsed.value.object.get("bots") orelse return .{ .err = .{ .exec_error = bots_host.too_old_msg } };
+        if (bots_arr != .array) return .{ .err = .{ .exec_error = bots_host.too_old_msg } };
+
+        var found_bot: ?json.ObjectMap = null;
+        for (bots_arr.array.items) |it| {
+            if (it != .object) continue;
+            const nm = regOptStr(it.object, "name") orelse continue;
+            if (std.mem.eql(u8, nm, bot_name)) {
+                found_bot = it.object;
+                break;
+            }
+        }
+        const row = found_bot orelse {
+            return self.storeBotError(try std.fmt.allocPrint(self.gpa, "There is no bot named {s}.", .{bot_name}));
+        };
+
+        const trimmed_msg: ?[]const u8 = if (raw_msg) |m| blk: {
+            const t = std.mem.trim(u8, m, " \t\r\n");
+            break :blk if (t.len > 0) t else null;
+        } else null;
+
+        var turn_text: []const u8 = "";
+        var chosen_routine: ?[]const u8 = null;
+
+        if (trimmed_msg != null and routine_id == null) {
+            turn_text = trimmed_msg.?;
+        } else if (trimmed_msg == null and routine_id != null) {
+            const rid = routine_id.?;
+            var found_routine_msg: ?[]const u8 = null;
+            if (row.get("routines")) |rv| {
+                if (rv == .array) {
+                    for (rv.array.items) |rit| {
+                        if (rit != .object) continue;
+                        const item_id = regOptStr(rit.object, "id") orelse continue;
+                        if (std.mem.eql(u8, item_id, rid)) {
+                            found_routine_msg = regOptStr(rit.object, "message") orelse regOptStr(rit.object, "instruction") orelse "";
+                            break;
+                        }
+                    }
+                }
+            }
+            if (found_routine_msg == null) {
+                return self.storeBotError(try std.fmt.allocPrint(self.gpa, "{s} has no routine {s}.", .{ bot_name, rid }));
+            }
+            turn_text = found_routine_msg.?;
+            chosen_routine = rid;
+        } else {
+            return .{ .err = .{ .exec_error = "Send a message or pick a routine, one of them." } };
+        }
+
+        const prompt_out = try self.runBotCli(&.{ "prompt", bot_name });
+        const standing = switch (prompt_out) {
+            .err_msg => |e| return self.storeBotError(e),
+            .ok => |s| s,
+        };
+        defer self.gpa.free(standing);
+
+        const delivered = try self.deliverBotTurn(
+            bot_name,
+            regOptStr(row, "project") orelse "",
+            regOptStr(row, "model") orelse "",
+            regOptStr(row, "chat") orelse "",
+            standing,
+            turn_text,
+            chosen_routine != null,
+        );
+        defer self.gpa.free(delivered.chat_id);
+
+        if (chosen_routine) |rid| {
+            if (self.runBotCli(&.{ "missed", "clear", bot_name, rid })) |mc| {
+                switch (mc) {
+                    .ok => |s| self.gpa.free(s),
+                    .err_msg => |e| self.gpa.free(e),
+                }
+            } else |_| {}
+        }
+
+        return .{ .unary_json = try std.fmt.allocPrint(
+            self.gpa,
+            "{{\"chatId\":{f},\"bot\":{f},\"routine\":{f}}}",
+            .{ json.fmt(delivered.chat_id, .{}), json.fmt(bot_name, .{}), json.fmt(chosen_routine, .{}) },
+        ) };
+    }
+
+    /// Periodic 60s routine check (`crates/engine/src/bots.rs::tick`).
+    /// Starts zero processes while Bots are disabled.
+    pub fn tickBotsUnlocked(self: *EngineHost, io: std.Io) void {
+        var home_copy: ?[]u8 = null;
+        var bin_copy: ?[]u8 = null;
+        defer {
+            if (home_copy) |h| self.gpa.free(h);
+            if (bin_copy) |b| self.gpa.free(b);
+        }
+        {
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
+            if (self.stop_requested or !self.botsEnabled()) return;
+            const hd = self.agent_accounts.home_dir orelse return;
+            home_copy = self.gpa.dupe(u8, hd) catch return;
+            if (self.bots_graff_bin_override orelse self.graff_exe) |bo| {
+                bin_copy = self.gpa.dupe(u8, bo) catch null;
+            }
+        }
+
+        const due_out = bots_host.runGraffBotCli(
+            self.gpa,
+            io,
+            home_copy.?,
+            bin_copy,
+            &.{ "due", "--claim", "--json", "--stale-after", "300" },
+        ) catch return;
+        const due_raw = switch (due_out) {
+            .err_msg => |e| {
+                self.gpa.free(e);
+                return;
+            },
+            .ok => |s| s,
+        };
+        defer self.gpa.free(due_raw);
+
+        var parsed = json.parseFromSlice(json.Value, self.gpa, due_raw, .{}) catch return;
+        defer parsed.deinit();
+        if (parsed.value != .array or parsed.value.array.items.len == 0) return;
+
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        if (self.stop_requested or !self.botsEnabled()) return;
+
+        for (parsed.value.array.items) |item| {
+            if (item != .object) continue;
+            const ro = item.object;
+            const bname = regOptStr(ro, "bot") orelse continue;
+            const system_txt = regOptStr(ro, "system") orelse "";
+            const msg_txt = regOptStr(ro, "message") orelse continue;
+            const proj = regOptStr(ro, "project") orelse "";
+            const mdl = regOptStr(ro, "model") orelse "";
+            const cid = regOptStr(ro, "chat") orelse "";
+            if (self.deliverBotTurn(bname, proj, mdl, cid, system_txt, msg_txt, true)) |res| {
+                self.gpa.free(res.chat_id);
+            } else |_| {}
+        }
+    }
 };
 
 test "the Zig engine understands every request harness-nano sends (protocol/desktop/requests.json)" {
@@ -4842,8 +5335,8 @@ test "1:1 Rust RPC parity (all 153 methods), O(1) dispatch, and Lean-verified ze
     defer arena.deinit();
     const a = arena.allocator();
 
-    // 1. Verify O(1) static map contains all 154 canonical Rust RPC methods + 5 compatibility aliases = 159.
-    try testing.expectEqual(@as(usize, 159), rpc_method_map.kvs.len);
+    // 1. Verify O(1) static map contains all 158 canonical Rust RPC methods + 5 compatibility aliases = 163.
+    try testing.expectEqual(@as(usize, 163), rpc_method_map.kvs.len);
 
     var host = try EngineHost.init(gpa, "dev-parity", "ParityHost");
     defer host.deinit();
@@ -5188,7 +5681,7 @@ test "Mechanical 1:1 source-of-truth verification against crates/rpc/src/lib.rs,
         try testing.expect(rpc_method_map.get(method_name) != null);
         rust_method_count += 1;
     }
-    try testing.expectEqual(@as(usize, 154), rust_method_count);
+    try testing.expectEqual(@as(usize, 158), rust_method_count);
 
     // 2. Parse `crates/engine/src/rpc.rs` `enum MutateParams` and `enum FinishQueuedMessageEditAction` directly from disk.
     const engine_rpc_rs = try std.Io.Dir.cwd().readFileAlloc(io, "../../crates/engine/src/rpc.rs", a, .limited(512 * 1024));

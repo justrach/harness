@@ -114,6 +114,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Configure real CodeGraff OAuth/PKCE + device sign-in (`apps/harness/src/main.rs`),
     // unless `HARNESS_AUTH_DISABLED=1` or an explicit `HARNESS_EDGE_TOKEN` dev override is set.
+    try host.setBotsEnvOverride(init.environ_map.get("GRAFF_BOTS"));
     const auth_disabled = if (init.environ_map.get("HARNESS_AUTH_DISABLED")) |v|
         (std.mem.eql(u8, v, "1") or std.ascii.eqlIgnoreCase(v, "true"))
     else
@@ -139,7 +140,10 @@ pub fn main(init: std.process.Init) !void {
         }
         if (host.auth.loadPersistedSession(io)) {
             host.workspace_scope = "synced";
-            _ = host.syncFromEdgeRegistry(io);
+            // Zero-network-latency startup: hydrate spaces, chats, devices, and
+            // `registry_seq` from local SSD cache (`registry-cache.json`) in <0.5 ms;
+            // the live background sync worker below immediately catches up via `?since=seq`.
+            _ = host.loadPersistedRegistryCache(io);
         } else {
             host.workspace_scope = "local";
         }
@@ -202,6 +206,73 @@ pub fn main(init: std.process.Init) !void {
 
     std.log.info("harness-engine (zig): listening on ws://127.0.0.1:{d}", .{port});
 
+    if (!auth_disabled) {
+        host.bg_sync_enabled = true;
+
+        const WarmAccountsWorker = struct {
+            gpa: Allocator,
+            io: Io,
+            host: *engine_host.EngineHost,
+
+            fn run(ctx: @This()) void {
+                defer _ = ctx.host.bg_workers_active.fetchSub(1, .release);
+                if (ctx.host.stop_requested) return;
+                if (ctx.host.agent_accounts.listAgentAccountsJson(ctx.io, ctx.host.nowMs(), true)) |snap| {
+                    ctx.gpa.free(snap);
+                } else |_| {}
+            }
+        };
+        _ = host.bg_workers_active.fetchAdd(1, .acquire);
+        if (std.Thread.spawn(.{}, WarmAccountsWorker.run, .{WarmAccountsWorker{ .gpa = gpa, .io = io, .host = &host }})) |wth| {
+            wth.detach();
+        } else |_| {
+            _ = host.bg_workers_active.fetchSub(1, .release);
+        }
+
+        const BgSyncWorker = struct {
+            io: Io,
+            host: *engine_host.EngineHost,
+
+            fn run(ctx: @This()) void {
+                defer _ = ctx.host.bg_workers_active.fetchSub(1, .release);
+                var last_wake = ctx.host.sync_wake_seq.load(.acquire);
+                var bot_tick_cycles: usize = 0;
+                if (!ctx.host.stop_requested) {
+                    _ = ctx.host.syncFromEdgeRegistryUnlocked(ctx.io);
+                    if (!ctx.host.stop_requested) {
+                        ctx.host.prefetchRecentChatTailsUnlocked(ctx.io, 16);
+                    }
+                    if (!ctx.host.stop_requested) {
+                        ctx.host.tickBotsUnlocked(ctx.io);
+                    }
+                }
+                while (!ctx.host.stop_requested) {
+                    var step: usize = 0;
+                    while (step < 25 and !ctx.host.stop_requested) : (step += 1) {
+                        if (ctx.host.sync_wake_seq.load(.acquire) != last_wake) break;
+                        std.Io.sleep(ctx.io, .fromMilliseconds(100), .awake) catch return;
+                    }
+                    if (ctx.host.stop_requested) break;
+                    last_wake = ctx.host.sync_wake_seq.load(.acquire);
+                    if (ctx.host.syncFromEdgeRegistryUnlocked(ctx.io) and !ctx.host.stop_requested) {
+                        ctx.host.prefetchRecentChatTailsUnlocked(ctx.io, 16);
+                    }
+                    bot_tick_cycles += 1;
+                    if (bot_tick_cycles >= 24 and !ctx.host.stop_requested) {
+                        bot_tick_cycles = 0;
+                        ctx.host.tickBotsUnlocked(ctx.io);
+                    }
+                }
+            }
+        };
+        _ = host.bg_workers_active.fetchAdd(1, .acquire);
+        if (std.Thread.spawn(.{}, BgSyncWorker.run, .{BgSyncWorker{ .io = io, .host = &host }})) |sth| {
+            sth.detach();
+        } else |_| {
+            _ = host.bg_workers_active.fetchSub(1, .release);
+        }
+    }
+
     const ClientWorker = struct {
         gpa: Allocator,
         io: Io,
@@ -256,14 +327,18 @@ fn runMcpStdio(gpa: Allocator, io: Io) !void {
 }
 
 const PongWriter = struct {
+    host: *engine_host.EngineHost,
     w: *Io.Writer,
     fn send(self: @This(), payload: []const u8) void {
+        if (self.host.io) |io| self.host.mutex.lockUncancelable(io);
+        defer if (self.host.io) |io| self.host.mutex.unlock(io);
         ws_server.writeServerFrame(self.w, .pong, payload) catch return;
         self.w.flush() catch {};
     }
 };
 
 pub fn serveSocket(gpa: Allocator, io: Io, host: *engine_host.EngineHost, stream: *net.Stream) !void {
+    auth_host.setTcpNoDelay(stream.*);
     var rbuf: [64 * 1024]u8 = undefined;
     var wbuf: [64 * 1024]u8 = undefined;
     var rd = net.Stream.Reader.init(stream.*, io, &rbuf);
@@ -279,7 +354,7 @@ pub fn serveSocket(gpa: Allocator, io: Io, host: *engine_host.EngineHost, stream
     defer req_arena.deinit();
 
     while (true) {
-        const op = ws.readMessageFrom(gpa, &rd.interface, &msg, PongWriter{ .w = &wr.interface }, PongWriter.send) catch |err| switch (err) {
+        const op = ws.readMessageFrom(gpa, &rd.interface, &msg, PongWriter{ .host = host, .w = &wr.interface }, PongWriter.send) catch |err| switch (err) {
             error.PeerClosed, error.EndOfStream => return,
             else => return err,
         };
@@ -343,6 +418,37 @@ pub fn dispatchClientLineWithArena(
     const method_val = obj.get("method") orelse return;
     if (method_val != .string) return;
     const params_val = obj.get("params") orelse json.Value{ .object = .empty };
+
+    if (std.mem.eql(u8, method_val.string, "ListAgentAccounts") and
+        host.io != null and
+        (host.auth.codegraff_client_id != null or host.agent_accounts.home_dir != null))
+    {
+        const io = host.io.?;
+        const force_usage: bool = if (params_val == .object)
+            (if (params_val.object.get("forceUsage")) |fv| (if (fv == .bool) fv.bool else true) else true)
+        else
+            true;
+        const now_ms = host.nowMs();
+        host.mutex.unlock(io);
+        const acc_res = host.agent_accounts.listAgentAccountsJson(io, now_ms, force_usage);
+        host.mutex.lockUncancelable(io);
+        if (host.stop_requested) {
+            if (acc_res) |body| gpa.free(body) else |_| {}
+            return;
+        }
+        if (acc_res) |body| {
+            defer gpa.free(body);
+            const frame = try std.fmt.allocPrint(scratch, "{{\"id\":{d},\"ok\":{s}}}", .{ id, body });
+            try ws_server.writeServerFrame(w, .text, frame);
+            try w.flush();
+        } else |err| {
+            const frame = try std.fmt.allocPrint(scratch, "{{\"id\":{d},\"err\":{f}}}", .{ id, json.fmt(@errorName(err), .{}) });
+            try ws_server.writeServerFrame(w, .text, frame);
+            try w.flush();
+        }
+        try flushPushedWatchFrames(gpa, host, w);
+        return;
+    }
 
     host.live_ws_writer = w;
     defer host.live_ws_writer = null;

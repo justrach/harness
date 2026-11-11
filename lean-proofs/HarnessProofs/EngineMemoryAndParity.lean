@@ -6,9 +6,9 @@
   `acp_host.zig`, `engine_main.zig`):
 
   1. **1:1 Rust RPC Surface & O(1) Dispatch**:
-     All 154 canonical RPC methods from `crates/rpc/src/lib.rs` (`pub mod methods`)
-     plus 5 compatibility aliases (159 total) are exhaustively mapped and dispatched
-     in `1` static map lookup instead of up to `159` linear string comparisons.
+     All 158 canonical RPC methods from `crates/rpc/src/lib.rs` (`pub mod methods`)
+     plus 5 compatibility aliases (163 total) are exhaustively mapped and dispatched
+     in `1` static map lookup instead of up to `163` linear string comparisons.
 
   2. **Zero-Leak & Zero-Resurrection Chat Deletion**:
      Models the 4 coupled stores for a chat (`chats`, `docs`, `snapshots`, `watches`).
@@ -35,22 +35,22 @@ namespace HarnessProofs.EngineMemoryAndParity
 
 /-! ## 1. 1:1 Rust RPC Parity & O(1) Dispatch -/
 
-def canonicalRustRpcCount : Nat := 154
+def canonicalRustRpcCount : Nat := 158
 def compatibilityAliasCount : Nat := 5
 def totalEngineRpcMethods : Nat := canonicalRustRpcCount + compatibilityAliasCount
 
 def staticMapProbes (_methodIdx : Nat) : Nat := 1
 def linearScanProbes (methodIdx : Nat) : Nat := methodIdx + 1
 
-theorem total_rpc_methods_159 : totalEngineRpcMethods = 159 := rfl
+theorem total_rpc_methods_163 : totalEngineRpcMethods = 163 := rfl
 
 theorem static_dispatch_strictly_faster (idx : Nat) (h : idx > 0) :
     staticMapProbes idx < linearScanProbes idx := by
   simp [staticMapProbes, linearScanProbes]
   omega
 
-theorem worst_case_speedup_159x :
-    linearScanProbes (totalEngineRpcMethods - 1) = 159 ∧
+theorem worst_case_speedup_163x :
+    linearScanProbes (totalEngineRpcMethods - 1) = 163 ∧
     staticMapProbes (totalEngineRpcMethods - 1) = 1 := by
   decide
 
@@ -233,6 +233,6 @@ theorem warmed_arena_zero_syscalls_for_normal_req (s : Nat) (reqBytes : Nat)
 def verifiedKernelCells : Nat :=
   totalEngineRpcMethods + 64 + 4 + 32
 
-theorem verified_kernel_cells_count : verifiedKernelCells = 259 := rfl
+theorem verified_kernel_cells_count : verifiedKernelCells = 263 := rfl
 
 end HarnessProofs.EngineMemoryAndParity
