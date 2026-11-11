@@ -370,6 +370,9 @@ pub const App = struct {
     engine_start: @import("engine_start.zig").State = .{},
     /// Drawn offscreen (a scene): no main run loop to post to.
     offscreen: bool = false,
+    /// Mobile UI shell active (always on `.ios`, or `--mobile` on desktop).
+    mobile_preview: bool = false,
+    mobile: @import("view_mobile.zig").State = .{},
     /// Dictation through the device's Codex voice.
     dictation: @import("app_dictation.zig").State = .{},
     composer: nanoui.ui.TextBuffer = .{},
@@ -564,6 +567,7 @@ pub const App = struct {
         a.mcp.deinit(a.gpa);
         a.bots.deinit(a.gpa);
         a.view.deinit(a.gpa);
+        a.mobile.deinit(a.gpa);
         question.deinit(a);
         queue_mod.deinit(a);
         a.panels.deinit();

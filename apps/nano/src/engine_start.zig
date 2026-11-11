@@ -156,6 +156,7 @@ pub fn parseLockPid(raw: []const u8, self_pid: i64) ?i64 {
 /// `{data_dir}/engine.lock` (or `engine.lock.pid` on Windows) so a newly
 /// updated app can immediately start its bundled engine in place.
 pub fn killLockedEngine(a: *App) bool {
+    if (comptime builtin.os.tag == .ios) return false;
     if (a.offscreen or a.engine.scene != null) return false;
     const dir = resolveDataDir(a) orelse return false;
     const lock_file = if (comptime builtin.os.tag == .windows) "engine.lock.pid" else "engine.lock";
@@ -230,6 +231,7 @@ pub fn replaceOlderEngine(a: *App) void {
 }
 
 fn enabled(a: *const App) bool {
+    if (comptime builtin.os.tag == .ios) return false;
     if (a.offscreen or a.engine.scene != null) return false;
     const env = a.env orelse return false;
     return env.get("HARNESS_NANO_NO_ENGINE_START") == null;
@@ -278,6 +280,7 @@ fn tick(a: *App) void {
 /// The engine started from here, if it has stopped: let it go, and count
 /// it when it stopped before answering.
 fn reap(s: *State) void {
+    if (comptime builtin.os.tag == .ios) return;
     const pid = s.pid orelse return;
     if (comptime builtin.os.tag == .windows) {
         const w = struct {
@@ -294,6 +297,7 @@ fn reap(s: *State) void {
 }
 
 fn spawn(a: *App, path: []const u8) !std.c.pid_t {
+    if (comptime !std.process.can_spawn) return error.UnsupportedPlatform;
     var log: ?std.Io.File = null;
     if (a.settings.dataDir()) |dir| {
         const logs = try std.fs.path.join(a.gpa, &.{ dir, "logs" });

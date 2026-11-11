@@ -747,6 +747,47 @@ pub const AuthManager = struct {
         extra_headers: []const http_zig.Header,
         req_body: ?[]const u8,
     ) !EdgeReply {
+        if (comptime builtin.os.tag == .ios) {
+            if (std.mem.startsWith(u8, url, "https://")) {
+                const nanoui = @import("nanoui");
+                var auth_val: ?[]u8 = null;
+                defer if (auth_val) |v| gpa.free(v);
+                if (bearer_token) |tok| {
+                    auth_val = try std.fmt.allocPrint(gpa, "Bearer {s}", .{tok});
+                }
+                var hdrs: [16]nanoui.http.Header = undefined;
+                var hlen: usize = 0;
+                hdrs[hlen] = .{ .name = "user-agent", .value = "harness-ios/0.2" };
+                hlen += 1;
+                hdrs[hlen] = .{ .name = "accept", .value = "application/json" };
+                hlen += 1;
+                if (auth_val) |av| {
+                    hdrs[hlen] = .{ .name = "authorization", .value = av };
+                    hlen += 1;
+                }
+                if (req_body != null) {
+                    hdrs[hlen] = .{ .name = "content-type", .value = "application/json" };
+                    hlen += 1;
+                }
+                for (extra_headers) |eh| {
+                    if (hlen >= hdrs.len) break;
+                    hdrs[hlen] = .{ .name = eh.name, .value = eh.value };
+                    hlen += 1;
+                }
+                var res = nanoui.http.send(gpa, .{
+                    .url = url,
+                    .method = method,
+                    .headers = hdrs[0..hlen],
+                    .body = req_body orelse "",
+                });
+                defer res.deinit();
+                if (res.status() == 0) return error.NetworkError;
+                return .{
+                    .status = res.status(),
+                    .body = try gpa.dupe(u8, res.body()),
+                };
+            }
+        }
         if (std.mem.startsWith(u8, url, "https://")) {
             const u = try http_zig.https.parseHttpsUrl(url);
             const sess = if (pool) |p|
@@ -1338,8 +1379,8 @@ pub const AuthManager = struct {
                 }
             }
         }
-        const rt = self.refresh_token orelse return self.access_token;
-        const edge = self.edge_url orelse return self.access_token;
+        const rt = self.refresh_token orelse return self.access_token orelse self.api_key;
+        const edge = self.edge_url orelse return self.access_token orelse self.api_key;
         const base = std.mem.trimEnd(u8, edge, "/");
         const url = std.fmt.allocPrint(self.gpa, "{s}/auth/refresh", .{base}) catch return self.access_token;
         defer self.gpa.free(url);
@@ -1535,6 +1576,21 @@ pub const AuthManager = struct {
         defer self.gpa.free(url);
         const auth_val = try std.fmt.allocPrint(self.gpa, "Bearer {s}", .{bearer_token});
         defer self.gpa.free(auth_val);
+
+        if (comptime builtin.os.tag == .ios) {
+            const nanoui = @import("nanoui");
+            const headers = [_]nanoui.http.Header{
+                .{ .name = "authorization", .value = auth_val },
+                .{ .name = "accept", .value = "application/json" },
+            };
+            var res = nanoui.http.send(self.gpa, .{
+                .url = url,
+                .method = "GET",
+                .headers = &headers,
+            });
+            defer res.deinit();
+            return res.status() == 200;
+        }
 
         const headers = [_]http_zig.Header{
             .{ .name = "authorization", .value = auth_val },

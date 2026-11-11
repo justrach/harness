@@ -63,12 +63,25 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    var host = try engine_host.EngineHost.init(gpa, "zig-local-device", "Zig Local Host");
-    defer host.deinit();
-    host.io = io;
-    host.agent_accounts.configureFromEnv(init.environ_map) catch {};
     var default_data_dir_buf: [512]u8 = undefined;
     var default_graff_buf: [512]u8 = undefined;
+    const resolved_data_dir: ?[]const u8 = init.environ_map.get("HARNESS_DATA_DIR") orelse
+        init.environ_map.get("DATA_DIR") orelse
+        blk: {
+            const home = init.environ_map.get("HOME") orelse break :blk null;
+            break :blk std.fmt.bufPrint(&default_data_dir_buf, "{s}/.harness", .{home}) catch null;
+        };
+
+    const persisted_dev_id = try engine_host.loadOrCreateDeviceId(gpa, io, resolved_data_dir);
+    defer gpa.free(persisted_dev_id);
+    const detected_dev_name = try engine_host.detectDeviceName(gpa, init.environ_map);
+    defer gpa.free(detected_dev_name);
+
+    var host = try engine_host.EngineHost.init(gpa, persisted_dev_id, detected_dev_name);
+    defer host.deinit();
+    host.io = io;
+    host.ensureLocalDeviceRow();
+    host.agent_accounts.configureFromEnv(init.environ_map) catch {};
     if (init.environ_map.get("GRAFF_EXECUTABLE")) |ge| {
         if (ge.len > 0) host.graff_exe = ge;
     } else if (init.environ_map.get("HOME")) |home| {
@@ -81,13 +94,6 @@ pub fn main(init: std.process.Init) !void {
     if (host.graff_exe) |ge| {
         host.cached_graff_models_json = acp_host.discoverGraffModelsJson(gpa, io, ge) catch null;
     }
-
-    const resolved_data_dir: ?[]const u8 = init.environ_map.get("HARNESS_DATA_DIR") orelse
-        init.environ_map.get("DATA_DIR") orelse
-        blk: {
-            const home = init.environ_map.get("HOME") orelse break :blk null;
-            break :blk std.fmt.bufPrint(&default_data_dir_buf, "{s}/.harness", .{home}) catch null;
-        };
 
     if (resolved_data_dir) |data_dir| {
         if (data_dir.len > 0) {
@@ -154,7 +160,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    // Seed any persisted chats from docs.sqlite into host.chats so they appear in the sidebar.
+    // Seed any persisted chats from docs.sqlite into host.chats so they appear in the sidebar and sync outbound.
     var snap_it = host.store.snapshots.iterator();
     while (snap_it.next()) |entry| {
         const cid = entry.key_ptr.*;
@@ -172,14 +178,50 @@ pub fn main(init: std.process.Init) !void {
             errdefer gpa.free(dev_copy);
             const h_copy = try gpa.dupe(u8, "graff");
             errdefer gpa.free(h_copy);
+
+            var title_copy: ?[]u8 = null;
+            errdefer if (title_copy) |t| gpa.free(t);
+            var preview_copy: ?[]u8 = null;
+            errdefer if (preview_copy) |p| gpa.free(p);
+            var created_ms: i64 = host.nowMs();
+            var last_msg_ms: i64 = created_ms;
+
+            if (host.getOrCreateDoc(cid)) |doc| {
+                if (doc.messages.items.len > 0) {
+                    const first_m = doc.messages.items[0];
+                    if (first_m.created_at > 0) created_ms = first_m.created_at;
+                    const last_m = doc.messages.items[doc.messages.items.len - 1];
+                    if (last_m.created_at > 0) last_msg_ms = last_m.created_at;
+                    for (first_m.parts.items) |pt| {
+                        if (std.mem.eql(u8, pt.kind, "text") and pt.text.items.len > 0) {
+                            const trimmed = std.mem.trim(u8, pt.text.items, " \t\r\n");
+                            const nl = std.mem.indexOfAny(u8, trimmed, "\r\n") orelse trimmed.len;
+                            const first_line = trimmed[0..@min(nl, @as(usize, 64))];
+                            if (first_line.len > 0) title_copy = gpa.dupe(u8, first_line) catch null;
+                            break;
+                        }
+                    }
+                    if (doc.latestTextPreview(140)) |pv| {
+                        preview_copy = gpa.dupe(u8, pv) catch null;
+                    }
+                }
+            } else |_| {}
+
             try host.chats.append(gpa, .{
                 .id = id_copy,
                 .space_id = null,
                 .device_id = dev_copy,
                 .harness = h_copy,
+                .title = title_copy,
+                .preview = preview_copy,
+                .created_at_ms = created_ms,
+                .last_message_at_ms = last_msg_ms,
+                .last_prompt_at_ms = created_ms,
             });
         }
+        host.markChatTailDirty(cid);
     }
+    host.ensureLocalDeviceRow();
 
     if (host.spaces.items.len == 0) {
         const default_path = init.environ_map.get("PWD") orelse "/Users/rachpradhan/harness";

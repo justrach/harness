@@ -8,6 +8,7 @@ const StoredItem = @typeInfo(@FieldType(@FieldType(nanoui.Menu, "items"), "items
 const ItemArg = if (@typeInfo(StoredItem) == .pointer) StoredItem else *StoredItem;
 
 pub fn install(app: *nanoui.App, a: *App) !void {
+    if (comptime builtin.os.tag == .ios) return;
     const view_items = viewItems(a);
     const items = windowItems(a);
     try app.setMenu(&.{
@@ -85,6 +86,7 @@ fn closeTab(a: *App, _: ItemArg) void {
 /// Dispatches through NSMenu, not ui.Tester: AppKit consumes these keys
 /// before the view sees them. No event is posted and no window is shown.
 fn pressClose(menu: *nanoui.Menu) bool {
+    if (comptime builtin.os.tag != .macos) return false;
     const objc = nanoui.objc;
     const event = objc.msg(objc.Object, objc.class("NSEvent"), "keyEventWithType:location:modifierFlags:timestamp:windowNumber:context:characters:charactersIgnoringModifiers:isARepeat:keyCode:", .{
         @as(objc.NSUInteger, 10), objc.CGPoint{}, @as(objc.NSUInteger, 1 << 20), @as(f64, 0), @as(objc.NSInteger, 0), @as(?objc.Object, null), objc.nsString("w"), objc.nsString("w"), objc.NO, @as(u16, 13),

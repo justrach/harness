@@ -150,6 +150,12 @@ test {
     _ = @import("mcp_server.zig");
     _ = @import("engine_host.zig");
     _ = @import("multi_machine_sync.zig");
+    _ = @import("ios_scroll.zig");
+    _ = @import("mobile_glass.zig");
+    _ = @import("mobile_parity.zig");
+    _ = @import("mobile_parity_tests.zig");
+    _ = @import("ios_host.zig");
+    _ = @import("view_mobile.zig");
 }
 
 test "auth_host.formatRfc3339Ms round-trips 1:1 with rules.parseTime" {

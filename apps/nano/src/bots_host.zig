@@ -536,6 +536,12 @@ pub fn runGraffBotCli(
         }
     }
 
+    if (comptime !std.process.can_spawn) {
+        return .{
+            .err_msg = try gpa.dupe(u8, "The `graff` CLI does not run locally on iOS."),
+        };
+    }
+
     const res = std.process.run(gpa, io, .{
         .argv = argv.items,
         .environ_map = &env_map,

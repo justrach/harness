@@ -1148,6 +1148,7 @@ fn readFileJoinAlloc(gpa: Allocator, io: std.Io, dir: []const u8, rel: []const u
 }
 
 fn captureProcessStdout(gpa: Allocator, io: std.Io, argv: []const []const u8) ?[]u8 {
+    if (comptime !std.process.can_spawn) return null;
     var child = std.process.spawn(io, .{
         .argv = argv,
         .stdin = .ignore,

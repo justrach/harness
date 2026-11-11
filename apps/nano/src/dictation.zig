@@ -64,6 +64,7 @@ pub const Runtime = struct { codex: []const u8, helper: []const u8 };
 
 /// The device's Codex CLI with a voice helper, or why there's none.
 pub fn detect(a: Allocator, io: std.Io, env: *const std.process.Environ.Map) HostError!Runtime {
+    if (comptime !std.process.can_spawn) return error.Unavailable;
     const codex = resolveCodex(a, io, env) orelse return error.Unavailable;
     return .{ .codex = codex, .helper = try helperFor(a, io, codex) };
 }
@@ -799,6 +800,7 @@ pub const Running = struct {
     }
 
     fn run(r: *Running, a: Allocator) ?[]const u8 {
+        if (comptime !std.process.can_spawn) return "Dictation helper is unavailable on iOS.";
         // Codex's own folder first on its PATH (`compose_child_path`).
         var env = r.env.clone(a) catch return "Codex could not start.";
         const dir = std.fs.path.dirname(r.runtime.codex) orelse ".";
@@ -845,6 +847,7 @@ const HelperProcess = struct {
     child: ?std.process.Child = null,
 
     fn open(ctx: ?*anyopaque, a: Allocator, io: std.Io) HostError!Host {
+        if (comptime !std.process.can_spawn) return error.RuntimeUnavailable;
         const self: *HelperProcess = @ptrCast(@alignCast(ctx.?));
         const path = self.r.runtime.helper;
         const selection = try deviceSelection(a, io, path);

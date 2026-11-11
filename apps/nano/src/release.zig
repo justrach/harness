@@ -28,8 +28,8 @@ pub const Check = struct {
 
     /// Checks once, in the background; `c` must stay where it is.
     pub fn start(c: *Check) void {
-        // Decided at compile time: on macOS http-zig isn't analysed or linked.
-        if (builtin.os.tag == .macos) {
+        // Decided at compile time: on macOS and iOS http-zig isn't analysed or linked.
+        if (comptime (builtin.os.tag == .macos or builtin.os.tag == .ios)) {
             nanoui.http.fetch(c.gpa, .{
                 .url = manifest_url,
                 .headers = &.{.{ .name = "User-Agent", .value = "harness-nano" }},

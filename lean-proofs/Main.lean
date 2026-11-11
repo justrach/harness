@@ -4,6 +4,7 @@ import HarnessProofs.C2AtomicStore
 import HarnessProofs.EngineMemoryAndParity
 import HarnessProofs.RustCodebaseParity
 import HarnessProofs.PerformanceAndQueueParity
+import HarnessProofs.MobileIosParity
 
 open HarnessProofs
 
@@ -15,3 +16,4 @@ def main : IO Unit := do
   IO.println s!"engine_rpc_methods     {EngineMemoryAndParity.totalEngineRpcMethods}  o1_probes=1  kernel_cells={EngineMemoryAndParity.verifiedKernelCells}"
   IO.println s!"rust_parity_cells      {RustCodebaseParity.rustParityVerifiedCells}  e2e_login_sync={(RustCodebaseParity.runFullLoginAndSync).isSome}"
   IO.println s!"perf_and_queue_cells   {PerformanceAndQueueParity.perfAndQueueVerifiedCells}  export_allocs={PerformanceAndQueueParity.singlePassExportAllocs}  lease_ms={PerformanceAndQueueParity.queueEditLeaseMs}"
+  IO.println s!"mobile_ios_parity      {MobileIosParity.mobileParityVerifiedCells}  presence_sound={MobileIosParity.presenceConsistencyCheck}"

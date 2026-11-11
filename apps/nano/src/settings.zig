@@ -601,12 +601,16 @@ pub const Store = struct {
     }
 
     /// The file in Harness's data folder: `HARNESS_DATA_DIR`, else
-    /// `~/.harness`.
+    /// `~/.harness` (on iOS: `~/Library/Application Support/Harness`).
     pub fn open(gpa: Allocator, io: std.Io, env: *const std.process.Environ.Map) Store {
         if (env.get("HARNESS_DATA_DIR")) |dir| return openIn(gpa, io, dir);
         if (env.get("HOME")) |home| {
-            const dir = std.fs.path.join(gpa, &.{ home, ".harness" }) catch return .{ .gpa = gpa, .io = io };
+            const sub = if (comptime @import("builtin").os.tag == .ios) "Library/Application Support/Harness" else ".harness";
+            const dir = std.fs.path.join(gpa, &.{ home, sub }) catch return .{ .gpa = gpa, .io = io };
             defer gpa.free(dir);
+            if (comptime @import("builtin").os.tag == .ios) {
+                std.Io.Dir.cwd().createDirPath(io, dir) catch {};
+            }
             return openIn(gpa, io, dir);
         }
         return .{ .gpa = gpa, .io = io };

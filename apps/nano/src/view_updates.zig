@@ -445,6 +445,7 @@ fn findHarnessCli(gpa: std.mem.Allocator, io: std.Io, env: ?*const std.process.E
 }
 
 fn appUpdateWorker(a: *App) void {
+    if (comptime !std.process.can_spawn) return;
     const bin = findHarnessCli(a.gpa, a.io, a.env) orelse {
         a.updates.acquire();
         a.updates.app_downloading = false;
@@ -548,7 +549,7 @@ fn appUpdateDelivered(ctx: ?*anyopaque) callconv(.c) void {
 pub fn restartIntoUpdate(a: *App) void {
     if (builtin.is_test or a.offscreen) return;
     @import("engine_start.zig").stopForUpdate(a);
-    if (builtin.os.tag == .macos) {
+    if (comptime builtin.os.tag == .macos) {
         const pid = std.c.getpid();
         var cmd_buf: [256]u8 = undefined;
         const cmd = std.fmt.bufPrint(

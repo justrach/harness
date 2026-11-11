@@ -110,6 +110,7 @@ pub const Image = struct {
 };
 
 fn shrinkWork(image: *Image) void {
+    if (comptime !std.process.can_spawn) return shrinkDone(image, null);
     const gpa = image.app.gpa;
     const io = image.app.io;
     const id = @intFromPtr(image);

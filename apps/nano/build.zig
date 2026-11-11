@@ -51,12 +51,19 @@ pub fn build(b: *std.Build) void {
     // without changing the mobile palette. crates/theme checks this export.
     const theme_files = b.addWriteFiles();
     _ = theme_files.addCopyFile(b.path("themes.json"), "themes.json");
+    _ = theme_files.addCopyFile(b.path("ios_themes.json"), "ios_themes.json");
     const themes_root = theme_files.add("themes_json.zig",
         \\//! The built-in theme catalog, as JSON.
         \\pub const json = @embedFile("themes.json");
         \\
     );
     const themes_json = b.createModule(.{ .root_source_file = themes_root });
+    const ios_themes_root = theme_files.add("ios_themes_json.zig",
+        \\//! The mobile 19-family theme catalog (crates/theme/src/registry.rs), as JSON.
+        \\pub const json = @embedFile("ios_themes.json");
+        \\
+    );
+    const ios_themes_json = b.createModule(.{ .root_source_file = ios_themes_root });
     // Harness's version, read directly from `../../Cargo.toml` via WriteFiles
     // so Zig's build runner hashes `Cargo.toml` on every build and never
     // reuses a stale cached version string across releases.
@@ -89,6 +96,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "icons_svg", .module = icons_svg },
         .{ .name = "file_icons_data", .module = file_icons_data },
         .{ .name = "themes_json", .module = themes_json },
+        .{ .name = "ios_themes_json", .module = ios_themes_json },
     };
 
     const exe = b.addExecutable(.{ .name = "harness-nano", .root_module = b.createModule(.{
@@ -98,6 +106,42 @@ pub fn build(b: *std.Build) void {
         .strip = optimize != .debug,
         .imports = imports,
     }) });
+
+    if (target.result.os.tag == .ios) {
+        exe.use_llvm = true;
+        exe.root_module.linkSystemLibrary("sqlite3", .{});
+        const ios = @import("nanoui").ios;
+        const app_bundle = ios.app(b, exe, .{
+            .name = "Harness",
+            .id = "harness.codegraff.ios",
+            .version = "0.2.186",
+            .multiple_windows = true,
+            .assets = b.path("assets/ios/Assets.xcassets"),
+            .info =
+                \\    <key>CFBundleURLTypes</key>
+                \\    <array>
+                \\        <dict>
+                \\            <key>CFBundleURLName</key>
+                \\            <string>harness.codegraff.ios</string>
+                \\            <key>CFBundleURLSchemes</key>
+                \\            <array><string>harness</string></array>
+                \\        </dict>
+                \\    </array>
+                \\    <key>NSAppTransportSecurity</key>
+                \\    <dict>
+                \\        <key>NSAllowsLocalNetworking</key>
+                \\        <true/>
+                \\    </dict>
+            ,
+        });
+        b.getInstallStep().dependOn(&b.addInstallDirectory(.{
+            .source_dir = app_bundle,
+            .install_dir = .prefix,
+            .install_subdir = "ios/Harness.app",
+        }).step);
+        return;
+    }
+
     b.installArtifact(exe);
     const run = b.addRunArtifact(exe);
     run.addPassthruArgs();
@@ -157,6 +201,7 @@ pub fn build(b: *std.Build) void {
     // `zig build engine`: the Zig headless engine daemon (`ws://127.0.0.1:27664`).
     const engine_imports: []const std.Build.Module.Import = &.{
         .{ .name = "build_info", .module = info_mod },
+        .{ .name = "nanoui", .module = nanoui },
         .{ .name = "http_zig", .module = http_zig },
     };
     const engine_exe = b.addExecutable(.{ .name = "harness-engine", .root_module = b.createModule(.{

@@ -46,6 +46,7 @@ pub fn encodeGraffModels(gpa: Allocator, id: u64) ![]u8 {
 /// Query `graff acp` via the `graff/models` ACP extension (matching `crates/harness/src/acp/graff_models.rs`)
 /// and return the top-level JSON array `[...]` of authenticated models for `ListModels`.
 pub fn discoverGraffModelsJson(gpa: Allocator, io: std.Io, graff_exe: []const u8) ![]u8 {
+    if (comptime !std.process.can_spawn) return error.UnsupportedPlatform;
     var child = try std.process.spawn(io, .{
         .argv = &.{ graff_exe, "acp" },
         .stdin = .pipe,
@@ -304,6 +305,7 @@ pub fn runSubprocessTurn(
     on_update_ctx: ?*anyopaque,
     on_update: ?*const fn (ctx: *anyopaque, ev: AcpEvent) void,
 ) !void {
+    if (comptime !std.process.can_spawn) return error.UnsupportedPlatform;
     var child = try std.process.spawn(io, .{
         .argv = argv,
         .stdin = .pipe,

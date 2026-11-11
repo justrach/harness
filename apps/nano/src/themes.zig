@@ -22,6 +22,7 @@ pub const Variant = struct {
 };
 
 var builtins: ?[]const Variant = null;
+var mobile_builtins: ?[]const Variant = null;
 /// The built-ins, then the library's custom families, as last read.
 var everything: []const Variant = &.{};
 var custom_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
@@ -33,10 +34,27 @@ pub fn all() []const Variant {
         // In an arena: straight from the page allocator, each of the
         // catalog's thousands of strings and objects took a page of its own
         // (87 MB for a 103 KB file).
-        builtins = parse(builtin_arena.allocator(), @import("themes_json").json, true) catch &.{};
+        const catalog_json = if (comptime @import("builtin").os.tag == .ios)
+            @import("ios_themes_json").json
+        else
+            @import("themes_json").json;
+        builtins = parse(builtin_arena.allocator(), catalog_json, true) catch &.{};
         everything = builtins.?;
     }
     return everything;
+}
+
+/// Every variant in the 19-family mobile catalog (`ios_themes.json`, 31 variants).
+pub fn mobileAll() []const Variant {
+    if (mobile_builtins == null) {
+        mobile_builtins = parse(builtin_arena.allocator(), @import("ios_themes_json").json, true) catch &.{};
+    }
+    return mobile_builtins.?;
+}
+
+pub fn findMobile(id: []const u8) ?*const Variant {
+    for (mobileAll()) |*v| if (std.mem.eql(u8, v.id, id)) return v;
+    return null;
 }
 
 /// Reads the theme library in `data_dir` again (`CustomThemeLibrary`):
@@ -329,4 +347,11 @@ test "a custom theme from the library joins the built-ins, its words made readab
     // A library gone, only the built-ins.
     loadLibrary(testing.io, "/nonexistent");
     try testing.expect(find("custom-dim-dark") == null);
+}
+
+test "mobile catalog has all 19 iOS families and 31 variants" {
+    const m = mobileAll();
+    try testing.expectEqual(@as(usize, 31), m.len);
+    try testing.expectEqualStrings("Codegraff Dark", findMobile("codegraff-dark").?.name);
+    try testing.expectEqualStrings("Rosé Pine Moon", findMobile("rose-pine-moon").?.name);
 }

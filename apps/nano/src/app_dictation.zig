@@ -35,6 +35,7 @@ pub const State = struct {
 /// At launch, off the main thread: whether this device can dictate
 /// (`probe_dictation`).
 pub fn probe(a: *App) void {
+    if (comptime !std.process.can_spawn) return;
     const env = a.env orelse return;
     const t = std.Thread.spawn(.{}, look, .{ a, env }) catch return;
     t.detach();

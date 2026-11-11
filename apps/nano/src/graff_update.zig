@@ -9,7 +9,8 @@ const App = @import("app.zig").App;
 const latest_url = "https://api.github.com/repos/justrach/codegraff/releases/latest";
 
 pub fn start(a: *App) void {
-    if (a.offscreen or builtin.os.tag != .macos) return;
+    if (comptime builtin.os.tag != .macos) return;
+    if (a.offscreen) return;
     if (a.env) |env| {
         if (env.get("HARNESS_DEV_GRAFF_NOTICE")) |range| {
             if (std.mem.indexOf(u8, range, "..")) |sep| {
@@ -37,7 +38,8 @@ pub fn start(a: *App) void {
 }
 
 pub fn startManual(a: *App) void {
-    if (a.offscreen or builtin.os.tag != .macos) return;
+    if (comptime builtin.os.tag != .macos) return;
+    if (a.offscreen) return;
     const t = std.Thread.spawn(.{}, runManual, .{a}) catch return;
     t.detach();
 }
@@ -110,6 +112,7 @@ fn installLatest(a: *App, auto_update: bool) void {
 }
 
 fn downloadAndSwap(a: *App, home: []const u8, managed: []const u8, tag: []const u8) bool {
+    if (comptime !std.process.can_spawn) return false;
     const url = std.fmt.allocPrint(a.gpa, "https://github.com/justrach/codegraff/releases/download/{s}/graff-aarch64-macos.tar.gz", .{tag}) catch return false;
     defer a.gpa.free(url);
     const tar = std.fmt.allocPrint(a.gpa, "{s}/.harness/bin/graff-update.tar.gz", .{home}) catch return false;
@@ -138,6 +141,7 @@ fn downloadAndSwap(a: *App, home: []const u8, managed: []const u8, tag: []const 
 }
 
 fn findGraff(a: *App, dir: []const u8) ?[]u8 {
+    if (comptime !std.process.can_spawn) return null;
     const list = std.fmt.allocPrint(a.gpa, "{s}/.list", .{dir}) catch return null;
     defer a.gpa.free(list);
     const file = std.Io.Dir.cwd().createFile(a.io, list, .{}) catch return null;
@@ -195,6 +199,7 @@ fn latestTag(a: *App) ?[]u8 {
 }
 
 fn versionOutput(a: *App, path: []const u8) ?[]u8 {
+    if (comptime !std.process.can_spawn) return null;
     const out_path = std.fmt.allocPrint(a.gpa, "{s}.version", .{path}) catch return null;
     defer a.gpa.free(out_path);
     const file = std.Io.Dir.cwd().createFile(a.io, out_path, .{}) catch return null;

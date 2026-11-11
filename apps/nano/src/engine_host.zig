@@ -656,6 +656,163 @@ pub const HarnessUpdateRecord = struct {
     }
 };
 
+pub fn currentPlatformTag() []const u8 {
+    return switch (@import("builtin").os.tag) {
+        .macos => "macos",
+        .ios => "ios",
+        .linux => "linux",
+        .windows => "windows",
+        else => "macos",
+    };
+}
+
+pub fn isValidEdgeRowId(id: []const u8) bool {
+    if (id.len == 0 or id.len > 256) return false;
+    for (id) |b| {
+        const ok = (b >= 'A' and b <= 'Z') or
+            (b >= 'a' and b <= 'z') or
+            (b >= '0' and b <= '9') or
+            b == '_' or b == '.' or b == ':' or b == '@' or b == '/' or b == '-';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+pub fn isValidEdgeChatTailId(id: []const u8) bool {
+    if (id.len == 0 or id.len > 128) return false;
+    for (id) |b| {
+        const ok = (b >= 'A' and b <= 'Z') or
+            (b >= 'a' and b <= 'z') or
+            (b >= '0' and b <= '9') or
+            b == '_' or b == '-';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+pub fn sanitizeEdgeDeviceId(out: *[128]u8, raw: []const u8) []const u8 {
+    var len: usize = 0;
+    for (raw) |b| {
+        if (len >= out.len) break;
+        const ok = (b >= 'A' and b <= 'Z') or
+            (b >= 'a' and b <= 'z') or
+            (b >= '0' and b <= '9') or
+            b == '_' or b == '-';
+        out[len] = if (ok) b else '-';
+        len += 1;
+    }
+    if (len == 0) return "dev-local";
+    return out[0..len];
+}
+
+/// Monotonic HLC clock matching `crates/doc/src/registry.rs` (`{ms:013}-{counter:06}-{device}`).
+pub const HlcClock = struct {
+    last_ms: i64 = 0,
+    counter: u32 = 0,
+
+    pub fn observe(self: *HlcClock, hlc: []const u8) void {
+        if (hlc.len < 21 or hlc[13] != '-' or hlc[20] != '-') return;
+        const ms = std.fmt.parseInt(i64, hlc[0..13], 10) catch return;
+        const cnt = std.fmt.parseInt(u32, hlc[14..20], 10) catch return;
+        if (ms > self.last_ms) {
+            self.last_ms = ms;
+            self.counter = cnt;
+        } else if (ms == self.last_ms and cnt > self.counter) {
+            self.counter = cnt;
+        }
+    }
+
+    pub fn nextAlloc(self: *HlcClock, gpa: Allocator, now_ms: i64, device_id: []const u8) ![]u8 {
+        const clamped_now = std.math.clamp(now_ms, @as(i64, 0), @as(i64, 9_999_999_999_999));
+        if (clamped_now > self.last_ms) {
+            self.last_ms = clamped_now;
+            self.counter = 0;
+        } else {
+            if (self.counter < 999_999) {
+                self.counter += 1;
+            } else if (self.last_ms < 9_999_999_999_999) {
+                self.last_ms += 1;
+                self.counter = 0;
+            }
+        }
+        var dev_buf: [128]u8 = undefined;
+        const safe_dev = sanitizeEdgeDeviceId(&dev_buf, device_id);
+        const ms_u: u64 = @intCast(self.last_ms);
+        return std.fmt.allocPrint(gpa, "{d:0>13}-{d:0>6}-{s}", .{ ms_u, self.counter, safe_dev });
+    }
+};
+
+/// Load or persist `{data_dir}/device-id` (UUIDv4, matching `crates/engine/src/lib.rs:1420`).
+pub fn loadOrCreateDeviceId(gpa: Allocator, io: std.Io, data_dir: ?[]const u8) ![]u8 {
+    if (data_dir) |dir| {
+        if (dir.len > 0) {
+            if (std.fmt.allocPrint(gpa, "{s}/device-id", .{std.mem.trimEnd(u8, dir, "/")})) |id_path| {
+                defer gpa.free(id_path);
+                if (std.Io.Dir.cwd().readFileAlloc(io, id_path, gpa, .limited(256))) |raw| {
+                    defer gpa.free(raw);
+                    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+                    if (isValidEdgeChatTailId(trimmed)) {
+                        return gpa.dupe(u8, trimmed);
+                    }
+                } else |_| {}
+            } else |_| {}
+        }
+    }
+
+    var raw_uuid: [16]u8 = undefined;
+    io.random(&raw_uuid);
+    raw_uuid[6] = (raw_uuid[6] & 0x0f) | 0x40;
+    raw_uuid[8] = (raw_uuid[8] & 0x3f) | 0x80;
+    const hex = std.fmt.bytesToHex(raw_uuid, .lower);
+    const generated = try std.fmt.allocPrint(
+        gpa,
+        "{s}-{s}-{s}-{s}-{s}",
+        .{ hex[0..8], hex[8..12], hex[12..16], hex[16..20], hex[20..32] },
+    );
+    errdefer gpa.free(generated);
+
+    if (data_dir) |dir| {
+        if (dir.len > 0) {
+            std.Io.Dir.cwd().createDirPath(io, dir) catch {};
+            if (std.fmt.allocPrint(gpa, "{s}/device-id", .{std.mem.trimEnd(u8, dir, "/")})) |id_path| {
+                defer gpa.free(id_path);
+                EngineHost.writePrivateCacheFile(io, id_path, generated);
+            } else |_| {}
+        }
+    }
+    return generated;
+}
+
+/// Detect human-readable local device name without reading user transcripts or account data.
+pub fn detectDeviceName(gpa: Allocator, env: *const std.process.Environ.Map) ![]u8 {
+    if (env.get("HARNESS_DEVICE_NAME")) |dn| {
+        const t = std.mem.trim(u8, dn, " \t\r\n");
+        if (t.len > 0) return gpa.dupe(u8, t);
+    }
+    if (comptime @import("builtin").os.tag == .ios) {
+        return gpa.dupe(u8, "iPhone");
+    }
+    if (comptime @import("builtin").os.tag != .windows) {
+        const C = struct {
+            extern "c" fn gethostname(name: [*]u8, namelen: usize) c_int;
+        };
+        var hbuf: [256]u8 = undefined;
+        if (C.gethostname(&hbuf, hbuf.len) == 0) {
+            const nul = std.mem.indexOfScalar(u8, &hbuf, 0) orelse hbuf.len;
+            var host = std.mem.trim(u8, hbuf[0..nul], " \t\r\n");
+            if (std.mem.endsWith(u8, host, ".local")) {
+                host = host[0 .. host.len - ".local".len];
+            }
+            if (host.len > 0) return gpa.dupe(u8, host);
+        }
+    }
+    if (env.get("HOSTNAME") orelse env.get("COMPUTERNAME")) |hn| {
+        const t = std.mem.trim(u8, hn, " \t\r\n");
+        if (t.len > 0) return gpa.dupe(u8, t);
+    }
+    return gpa.dupe(u8, if (@import("builtin").os.tag == .macos) "Mac" else "Harness Host");
+}
+
 pub const EngineHost = struct {
     /// Maximum warm `SessionDoc` handles kept in memory (`WARM_DOC_CAP = 12` in `crates/engine/src/doc_host.rs`).
     pub const warm_doc_cap: usize = 12;
@@ -712,6 +869,11 @@ pub const EngineHost = struct {
     sync_probes: u64 = 0,
     registry_seq: u64 = 0,
     registry_org_id: ?[]u8 = null,
+    hlc_clock: HlcClock = .{},
+    pending_registry_ops: std.ArrayList([]u8) = .empty,
+    dirty_tail_chats: std.ArrayList([]u8) = .empty,
+    push_batch_seq: u64 = 0,
+    outbound_seeded_gen: u64 = 0,
     bots_env_override: ?[]u8 = null,
     bots_graff_bin_override: ?[]u8 = null,
     last_bot_error: ?[]u8 = null,
@@ -811,6 +973,9 @@ pub const EngineHost = struct {
         self.docs.deinit(self.gpa);
         self.clearRemoteTails();
         self.remote_tails.deinit(self.gpa);
+        self.clearPendingOutboundSync();
+        self.pending_registry_ops.deinit(self.gpa);
+        self.dirty_tail_chats.deinit(self.gpa);
         for (self.devices.items) |*d| d.deinit(self.gpa);
         self.devices.deinit(self.gpa);
         for (self.spaces.items) |*s| s.deinit(self.gpa);
@@ -899,6 +1064,339 @@ pub const EngineHost = struct {
             self.gpa.free(e.value_ptr.*);
         }
         self.remote_tails.clearRetainingCapacity();
+    }
+
+    pub fn clearPendingOutboundSync(self: *EngineHost) void {
+        for (self.pending_registry_ops.items) |op_json| self.gpa.free(op_json);
+        self.pending_registry_ops.clearRetainingCapacity();
+        for (self.dirty_tail_chats.items) |cid| self.gpa.free(cid);
+        self.dirty_tail_chats.clearRetainingCapacity();
+    }
+
+    pub fn wakeBgSync(self: *EngineHost) void {
+        if (self.bg_sync_enabled) {
+            _ = self.sync_wake_seq.fetchAdd(1, .acq_rel);
+        }
+    }
+
+    pub fn ensureLocalDeviceRow(self: *EngineHost) void {
+        const now = self.nowMs();
+        const platform = currentPlatformTag();
+        for (self.devices.items) |*d| {
+            if (std.mem.eql(u8, d.id, self.device_id)) {
+                d.last_seen_at_ms = now;
+                if (d.created_at_ms <= 0) d.created_at_ms = now;
+                return;
+            }
+        }
+        const id_c = self.gpa.dupe(u8, self.device_id) catch return;
+        const name_c = self.gpa.dupe(u8, self.device_name) catch {
+            self.gpa.free(id_c);
+            return;
+        };
+        const plat_c = self.gpa.dupe(u8, platform) catch {
+            self.gpa.free(id_c);
+            self.gpa.free(name_c);
+            return;
+        };
+        const ver_c = self.gpa.dupe(u8, build_info.version) catch null;
+        self.devices.append(self.gpa, .{
+            .id = id_c,
+            .name = name_c,
+            .platform = plat_c,
+            .version = ver_c,
+            .last_seen_at_ms = now,
+            .created_at_ms = now,
+        }) catch {
+            self.gpa.free(id_c);
+            self.gpa.free(name_c);
+            self.gpa.free(plat_c);
+            if (ver_c) |v| self.gpa.free(v);
+        };
+    }
+
+    fn autoTitleFromPrompt(prompt: []const u8, max_bytes: usize) ?[]const u8 {
+        var it = std.mem.splitAny(u8, prompt, "\r\n");
+        while (it.next()) |line_raw| {
+            const trimmed = std.mem.trim(u8, line_raw, " \t#>*`-");
+            if (trimmed.len == 0) continue;
+            if (trimmed.len <= max_bytes) return trimmed;
+            var end = max_bytes;
+            while (end > 0 and (trimmed[end] & 0xC0) == 0x80) : (end -= 1) {}
+            return if (end > 0) trimmed[0..end] else null;
+        }
+        return null;
+    }
+
+    fn normalizeSessionWireStatus(raw: []const u8) []const u8 {
+        if (std.mem.eql(u8, raw, "awaiting_input") or std.mem.eql(u8, raw, "awaitingInput")) return "awaitingInput";
+        if (std.mem.eql(u8, raw, "working")) return "working";
+        if (std.mem.eql(u8, raw, "errored") or std.mem.eql(u8, raw, "error")) return "errored";
+        return "idle";
+    }
+
+    fn enqueueOwnedRegistryOp(self: *EngineHost, op_json: []u8) void {
+        if (self.pending_registry_ops.items.len >= 4096) {
+            self.gpa.free(self.pending_registry_ops.orderedRemove(0));
+        }
+        self.pending_registry_ops.append(self.gpa, op_json) catch {
+            self.gpa.free(op_json);
+        };
+    }
+
+    pub fn markChatTailDirty(self: *EngineHost, chat_id: []const u8) void {
+        if (!isValidEdgeChatTailId(chat_id)) return;
+        for (self.dirty_tail_chats.items) |existing| {
+            if (std.mem.eql(u8, existing, chat_id)) return;
+        }
+        if (self.dirty_tail_chats.items.len >= 512) {
+            self.gpa.free(self.dirty_tail_chats.orderedRemove(0));
+        }
+        const copy = self.gpa.dupe(u8, chat_id) catch return;
+        self.dirty_tail_chats.append(self.gpa, copy) catch {
+            self.gpa.free(copy);
+        };
+    }
+
+    pub fn enqueueDeviceUpsertOp(self: *EngineHost, d: DeviceRecord) void {
+        if (!isValidEdgeRowId(d.id)) return;
+        const now = self.nowMs();
+        const hlc = self.hlc_clock.nextAlloc(self.gpa, now, self.device_id) catch return;
+        defer self.gpa.free(hlc);
+        const seen_ms = if (d.last_seen_at_ms > 0) d.last_seen_at_ms else now;
+        const created_ms = if (d.created_at_ms > 0) d.created_at_ms else now;
+        const plat = if (d.platform.len > 0) d.platform else currentPlatformTag();
+        const ver = d.version orelse build_info.version;
+        const op_json = std.fmt.allocPrint(
+            self.gpa,
+            "{{\"kind\":\"devices\",\"id\":{f},\"op\":\"upsert\",\"hlc\":{f},\"set\":{{\"id\":{f},\"name\":{f},\"platform\":{f},\"version\":{f},\"lastSeenAt\":{d},\"createdAt\":{d},\"capabilities\":[]}}}}",
+            .{
+                json.fmt(d.id, .{}),
+                json.fmt(hlc, .{}),
+                json.fmt(d.id, .{}),
+                json.fmt(d.name, .{}),
+                json.fmt(plat, .{}),
+                json.fmt(ver, .{}),
+                seen_ms,
+                created_ms,
+            },
+        ) catch return;
+        self.enqueueOwnedRegistryOp(op_json);
+    }
+
+    pub fn enqueueSpaceUpsertOp(self: *EngineHost, s: SpaceRecord) void {
+        if (std.mem.eql(u8, s.id, "space-zig-default") or !isValidEdgeRowId(s.id)) return;
+        const now = self.nowMs();
+        const hlc = self.hlc_clock.nextAlloc(self.gpa, now, self.device_id) catch return;
+        defer self.gpa.free(hlc);
+        const created_ms = if (s.created_at_ms > 0) s.created_at_ms else now;
+        const op_json = std.fmt.allocPrint(
+            self.gpa,
+            "{{\"kind\":\"spaces\",\"id\":{f},\"op\":\"upsert\",\"hlc\":{f},\"set\":{{\"id\":{f},\"deviceId\":{f},\"path\":{f},\"name\":{f},\"gitDetected\":{},\"checkoutId\":{f},\"createdAt\":{d}}}}}",
+            .{
+                json.fmt(s.id, .{}),
+                json.fmt(hlc, .{}),
+                json.fmt(s.id, .{}),
+                json.fmt(s.device_id, .{}),
+                json.fmt(s.path, .{}),
+                json.fmt(s.name, .{}),
+                s.git_detected,
+                json.fmt(s.checkout_id, .{}),
+                created_ms,
+            },
+        ) catch return;
+        self.enqueueOwnedRegistryOp(op_json);
+    }
+
+    pub fn enqueueChatUpsertOp(self: *EngineHost, c: ChatRecord) void {
+        if (!isValidEdgeRowId(c.id)) return;
+        const now = self.nowMs();
+        const hlc = self.hlc_clock.nextAlloc(self.gpa, now, self.device_id) catch return;
+        defer self.gpa.free(hlc);
+        const created_ms = if (c.created_at_ms > 0) c.created_at_ms else now;
+        const model = c.model orelse defaultModelForHarness(c.harness);
+        const reasoning = c.reasoning orelse "high";
+        const sc = c.source_context_json orelse "null";
+
+        var aw: std.Io.Writer.Allocating = .init(self.gpa);
+        errdefer aw.deinit();
+        const w = &aw.writer;
+        w.print(
+            "{{\"kind\":\"chats\",\"id\":{f},\"op\":\"upsert\",\"hlc\":{f},\"set\":{{\"id\":{f},\"deviceId\":{f},\"title\":{f},\"archived\":{},\"cwd\":{f},\"branch\":{f},\"sourceContext\":{s},\"lastMessagePreview\":{f},\"createdAt\":{d},\"harnessSessionId\":{f},\"spaceId\":{f},\"parentChatId\":{f}",
+            .{
+                json.fmt(c.id, .{}),
+                json.fmt(hlc, .{}),
+                json.fmt(c.id, .{}),
+                json.fmt(c.device_id, .{}),
+                json.fmt(c.title, .{}),
+                c.archived,
+                json.fmt(c.cwd, .{}),
+                json.fmt(c.branch, .{}),
+                sc,
+                json.fmt(c.preview, .{}),
+                created_ms,
+                json.fmt(c.harness_session_id, .{}),
+                json.fmt(c.space_id, .{}),
+                json.fmt(c.parent_chat_id, .{}),
+            },
+        ) catch {
+            aw.deinit();
+            return;
+        };
+        if (c.last_message_at_ms > 0) {
+            w.print(",\"lastMessageAt\":{d}", .{c.last_message_at_ms}) catch {
+                aw.deinit();
+                return;
+            };
+        }
+        if (c.last_prompt_at_ms > 0) {
+            w.print(",\"lastPromptAt\":{d}", .{c.last_prompt_at_ms}) catch {
+                aw.deinit();
+                return;
+            };
+        }
+        if (c.last_seen_at_ms > 0) {
+            w.print(",\"lastSeenAt\":{d}", .{c.last_seen_at_ms}) catch {
+                aw.deinit();
+                return;
+            };
+        }
+        if (c.chat_mode) {
+            w.print(
+                ",\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f},\"chatMode\":true}}}}}}",
+                .{ json.fmt(c.harness, .{}), json.fmt(model, .{}), json.fmt(reasoning, .{}) },
+            ) catch {
+                aw.deinit();
+                return;
+            };
+        } else {
+            w.print(
+                ",\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f}}}}}}}",
+                .{ json.fmt(c.harness, .{}), json.fmt(model, .{}), json.fmt(reasoning, .{}) },
+            ) catch {
+                aw.deinit();
+                return;
+            };
+        }
+        const op_json = aw.toOwnedSlice() catch {
+            aw.deinit();
+            return;
+        };
+        self.enqueueOwnedRegistryOp(op_json);
+    }
+
+    pub fn enqueueFieldUpdateOp(self: *EngineHost, kind: []const u8, id: []const u8, set_inner_json: []const u8) void {
+        if (!isValidEdgeRowId(id)) return;
+        const hlc = self.hlc_clock.nextAlloc(self.gpa, self.nowMs(), self.device_id) catch return;
+        defer self.gpa.free(hlc);
+        const op_json = std.fmt.allocPrint(
+            self.gpa,
+            "{{\"kind\":{f},\"id\":{f},\"op\":\"update\",\"hlc\":{f},\"set\":{{{s}}}}}",
+            .{ json.fmt(kind, .{}), json.fmt(id, .{}), json.fmt(hlc, .{}), set_inner_json },
+        ) catch return;
+        self.enqueueOwnedRegistryOp(op_json);
+    }
+
+    pub fn enqueueSessionUpsertOp(self: *EngineHost, c: ChatRecord) void {
+        if (!isValidEdgeRowId(c.id)) return;
+        const now = self.nowMs();
+        const hlc = self.hlc_clock.nextAlloc(self.gpa, now, self.device_id) catch return;
+        defer self.gpa.free(hlc);
+        const status = normalizeSessionWireStatus(c.activity_status orelse "idle");
+        const updated_ms = if (c.activity_updated_at_ms > 0) c.activity_updated_at_ms else now;
+        const op_json = if (c.activity_started_at_ms > 0)
+            std.fmt.allocPrint(
+                self.gpa,
+                "{{\"kind\":\"sessions\",\"id\":{f},\"op\":\"upsert\",\"hlc\":{f},\"set\":{{\"chatId\":{f},\"deviceId\":{f},\"status\":{f},\"lastCompletedTurn\":{d},\"lastCompletedPeerOnly\":false,\"startedAt\":{d},\"updatedAt\":{d}}}}}",
+                .{
+                    json.fmt(c.id, .{}),
+                    json.fmt(hlc, .{}),
+                    json.fmt(c.id, .{}),
+                    json.fmt(c.device_id, .{}),
+                    json.fmt(status, .{}),
+                    self.turn_counter,
+                    c.activity_started_at_ms,
+                    updated_ms,
+                },
+            ) catch return
+        else
+            std.fmt.allocPrint(
+                self.gpa,
+                "{{\"kind\":\"sessions\",\"id\":{f},\"op\":\"upsert\",\"hlc\":{f},\"set\":{{\"chatId\":{f},\"deviceId\":{f},\"status\":{f},\"lastCompletedTurn\":{d},\"lastCompletedPeerOnly\":false,\"updatedAt\":{d}}}}}",
+                .{
+                    json.fmt(c.id, .{}),
+                    json.fmt(hlc, .{}),
+                    json.fmt(c.id, .{}),
+                    json.fmt(c.device_id, .{}),
+                    json.fmt(status, .{}),
+                    self.turn_counter,
+                    updated_ms,
+                },
+            ) catch return;
+        self.enqueueOwnedRegistryOp(op_json);
+    }
+
+    pub fn enqueueDeleteOp(self: *EngineHost, kind: []const u8, id: []const u8) void {
+        if (!isValidEdgeRowId(id)) return;
+        const hlc = self.hlc_clock.nextAlloc(self.gpa, self.nowMs(), self.device_id) catch return;
+        defer self.gpa.free(hlc);
+        const op_json = std.fmt.allocPrint(
+            self.gpa,
+            "{{\"kind\":{f},\"id\":{f},\"op\":\"delete\",\"hlc\":{f}}}",
+            .{ json.fmt(kind, .{}), json.fmt(id, .{}), json.fmt(hlc, .{}) },
+        ) catch return;
+        self.enqueueOwnedRegistryOp(op_json);
+    }
+
+    pub fn enqueueSidebarPinOp(self: *EngineHost, chat_id: []const u8, pinned: bool) void {
+        if (!isValidEdgeRowId(chat_id)) return;
+        const hlc = self.hlc_clock.nextAlloc(self.gpa, self.nowMs(), self.device_id) catch return;
+        defer self.gpa.free(hlc);
+        const op_json = if (pinned)
+            std.fmt.allocPrint(
+                self.gpa,
+                "{{\"kind\":\"sidebarPins\",\"id\":{f},\"op\":\"upsert\",\"hlc\":{f},\"set\":{{\"pinned\":true,\"orderKey\":\"80\"}}}}",
+                .{ json.fmt(chat_id, .{}), json.fmt(hlc, .{}) },
+            ) catch return
+        else
+            std.fmt.allocPrint(
+                self.gpa,
+                "{{\"kind\":\"sidebarPins\",\"id\":{f},\"op\":\"upsert\",\"hlc\":{f},\"set\":{{\"pinned\":false}}}}",
+                .{ json.fmt(chat_id, .{}), json.fmt(hlc, .{}) },
+            ) catch return;
+        self.enqueueOwnedRegistryOp(op_json);
+    }
+
+    /// On first sync per auth session (`auth.generation`), advertise our local device row
+    /// and any locally hosted spaces, chats, sessions, and transcripts so pre-existing local
+    /// sessions converge immediately with GPUI desktop, iOS, web, and peer Macs.
+    pub fn seedOutboundSyncIfNeeded(self: *EngineHost) void {
+        const gen = if (self.auth.generation > 0) self.auth.generation else 1;
+        if (self.outbound_seeded_gen == gen) return;
+        self.outbound_seeded_gen = gen;
+
+        self.ensureLocalDeviceRow();
+        for (self.devices.items) |d| {
+            if (std.mem.eql(u8, d.id, self.device_id)) {
+                self.enqueueDeviceUpsertOp(d);
+                break;
+            }
+        }
+        for (self.spaces.items) |s| {
+            if (std.mem.eql(u8, s.id, "space-zig-default")) continue;
+            if (std.mem.eql(u8, s.device_id, self.device_id)) {
+                self.enqueueSpaceUpsertOp(s);
+            }
+        }
+        for (self.chats.items) |c| {
+            if (std.mem.eql(u8, c.device_id, self.device_id)) {
+                self.enqueueChatUpsertOp(c);
+                self.enqueueSessionUpsertOp(c);
+                if (self.docs.contains(c.id) or self.store.loadSnapshot(c.id) != null) {
+                    self.markChatTailDirty(c.id);
+                }
+            }
+        }
     }
 
     const DevicePollCtx = struct {
@@ -1438,6 +1936,8 @@ pub const EngineHost = struct {
                     self.registry_org_id = null;
                 }
                 self.clearRemoteTails();
+                self.clearPendingOutboundSync();
+                self.outbound_seeded_gen = 0;
                 self.clearDiskSyncCaches();
                 self.workspace_scope = "local";
                 try self.broadcastWatch(.auth_status, null, "{\"state\":\"signedOut\"}");
@@ -2054,9 +2554,41 @@ pub const EngineHost = struct {
                                 if (std.mem.eql(u8, c.id, chat_id)) {
                                     c.last_prompt_at_ms = now;
                                     c.last_message_at_ms = now;
+                                    c.archived = false;
+                                    if (c.title == null or c.title.?.len == 0) {
+                                        if (autoTitleFromPrompt(prompt, 64)) |t_slice| {
+                                            if (self.gpa.dupe(u8, t_slice)) |t_copy| {
+                                                if (c.title) |old_t| self.gpa.free(old_t);
+                                                c.title = t_copy;
+                                            } else |_| {}
+                                        }
+                                    }
+                                    if (autoTitleFromPrompt(prompt, 140)) |p_slice| {
+                                        if (self.gpa.dupe(u8, p_slice)) |p_copy| {
+                                            if (c.preview) |old_p| self.gpa.free(old_p);
+                                            c.preview = p_copy;
+                                        } else |_| {}
+                                    }
+                                    if (self.gpa.dupe(u8, "working")) |w_copy| {
+                                        if (c.activity_status) |old_s| self.gpa.free(old_s);
+                                        c.activity_status = w_copy;
+                                    } else |_| {}
+                                    c.activity_started_at_ms = now;
+                                    c.activity_updated_at_ms = now;
+                                    self.enqueueChatUpsertOp(c.*);
+                                    self.enqueueSessionUpsertOp(c.*);
                                     break;
                                 }
                             }
+                            if (self.chatsJson()) |chj| {
+                                defer self.gpa.free(chj);
+                                self.broadcastWatch(.chats, null, chj) catch {};
+                            } else |_| {}
+                            if (self.sessionsJson()) |sj| {
+                                defer self.gpa.free(sj);
+                                self.broadcastWatch(.sessions, null, sj) catch {};
+                            } else |_| {}
+
                             try doc.enqueueCommand(msg_id, "run", prompt, "completed", now);
                             try doc.appendUserMessage(msg_id, "part-u", prompt, now);
                             self.turn_counter += 1;
@@ -2064,6 +2596,8 @@ pub const EngineHost = struct {
                             defer self.gpa.free(asst_id);
                             try doc.beginAssistantMessage(asst_id, now);
                             try self.journal.recordBegin(chat_id, asst_id, now);
+                            self.markChatTailDirty(chat_id);
+                            self.wakeBgSync();
 
                             // Immediately push the user message + streaming assistant row to the UI before starting inference.
                             {
@@ -2124,17 +2658,53 @@ pub const EngineHost = struct {
                             }
                             try self.journal.recordFinish(chat_id, asst_id, "complete");
 
+                            const finish_now = self.nowMs();
                             const snap = try doc.exportSnapshot(self.gpa);
                             defer self.gpa.free(snap);
-                            try self.store.saveSnapshot(chat_id, snap, self.nowMs());
+                            try self.store.saveSnapshot(chat_id, snap, finish_now);
 
                             const batch_id = try std.fmt.allocPrint(self.gpa, "{s}-b-{d}", .{ self.device_id, doc.local_seq });
                             defer self.gpa.free(batch_id);
                             try self.store.enqueueChatUpdate(chat_id, batch_id, snap);
 
+                            if (doc.toTailMessagesArrayJson(self.gpa, session_doc.tail_message_count)) |tail_arr| {
+                                _ = self.storeCachedTailInMemoryOwned(chat_id, tail_arr, true);
+                            } else |_| {}
+                            self.markChatTailDirty(chat_id);
+
+                            for (self.chats.items) |*c| {
+                                if (std.mem.eql(u8, c.id, chat_id)) {
+                                    c.last_message_at_ms = finish_now;
+                                    if (doc.latestTextPreview(140)) |prev_slice| {
+                                        if (self.gpa.dupe(u8, prev_slice)) |p_copy| {
+                                            if (c.preview) |old_p| self.gpa.free(old_p);
+                                            c.preview = p_copy;
+                                        } else |_| {}
+                                    }
+                                    if (self.gpa.dupe(u8, "idle")) |idle_copy| {
+                                        if (c.activity_status) |old_s| self.gpa.free(old_s);
+                                        c.activity_status = idle_copy;
+                                    } else |_| {}
+                                    c.activity_updated_at_ms = finish_now;
+                                    self.enqueueChatUpsertOp(c.*);
+                                    self.enqueueSessionUpsertOp(c.*);
+                                    break;
+                                }
+                            }
+
                             const reset_frame = try doc.toResetFrameJson(self.gpa);
                             defer self.gpa.free(reset_frame);
                             try self.broadcastWatch(.doc_messages, chat_id, reset_frame);
+                            if (self.chatsJson()) |chj| {
+                                defer self.gpa.free(chj);
+                                self.broadcastWatch(.chats, null, chj) catch {};
+                            } else |_| {}
+                            if (self.sessionsJson()) |sj| {
+                                defer self.gpa.free(sj);
+                                self.broadcastWatch(.sessions, null, sj) catch {};
+                            } else |_| {}
+                            self.saveRegistryCacheFile();
+                            self.wakeBgSync();
                         }
                     },
                     .steer => {
@@ -2145,6 +2715,16 @@ pub const EngineHost = struct {
                             std.debug.assert(disp == .execute);
                             try doc.enqueueCommand(msg_id, "steer", prompt, "completed", now);
                             try doc.appendUserMessage(msg_id, "part-steer", prompt, now);
+                            for (self.chats.items) |*c| {
+                                if (std.mem.eql(u8, c.id, chat_id)) {
+                                    c.last_prompt_at_ms = now;
+                                    c.last_message_at_ms = now;
+                                    self.enqueueChatUpsertOp(c.*);
+                                    break;
+                                }
+                            }
+                            self.markChatTailDirty(chat_id);
+                            self.wakeBgSync();
                             const reset_frame = try doc.toResetFrameJson(self.gpa);
                             defer self.gpa.free(reset_frame);
                             try self.broadcastWatch(.doc_messages, chat_id, reset_frame);
@@ -2156,6 +2736,19 @@ pub const EngineHost = struct {
                         defer self.gpa.free(cmd_id);
                         try doc.enqueueCommand(cmd_id, "interrupt", "{}", "completed", now);
                         try doc.abortStreamingMessages();
+                        for (self.chats.items) |*c| {
+                            if (std.mem.eql(u8, c.id, chat_id)) {
+                                if (self.gpa.dupe(u8, "idle")) |idle_copy| {
+                                    if (c.activity_status) |old_s| self.gpa.free(old_s);
+                                    c.activity_status = idle_copy;
+                                } else |_| {}
+                                c.activity_updated_at_ms = now;
+                                self.enqueueSessionUpsertOp(c.*);
+                                break;
+                            }
+                        }
+                        self.markChatTailDirty(chat_id);
+                        self.wakeBgSync();
                         const reset_frame = try doc.toResetFrameJson(self.gpa);
                         defer self.gpa.free(reset_frame);
                         try self.broadcastWatch(.doc_messages, chat_id, reset_frame);
@@ -2253,6 +2846,16 @@ pub const EngineHost = struct {
                     const snap = try doc.exportSnapshot(self.gpa);
                     defer self.gpa.free(snap);
                     try self.store.saveSnapshot(chat_id, snap, now);
+                    for (self.chats.items) |*c| {
+                        if (std.mem.eql(u8, c.id, chat_id)) {
+                            c.last_prompt_at_ms = now;
+                            c.last_message_at_ms = now;
+                            self.enqueueChatUpsertOp(c.*);
+                            break;
+                        }
+                    }
+                    self.markChatTailDirty(chat_id);
+                    self.wakeBgSync();
                     const reset_frame = try doc.toResetFrameJson(self.gpa);
                     defer self.gpa.free(reset_frame);
                     try self.broadcastWatch(.doc_messages, chat_id, reset_frame);
@@ -2721,8 +3324,17 @@ pub const EngineHost = struct {
                         .path = path_c,
                         .name = name_c,
                         .git_detected = git,
+                        .created_at_ms = self.nowMs(),
                     });
                 }
+                for (self.spaces.items) |s| {
+                    if (std.mem.eql(u8, s.id, space_id)) {
+                        self.enqueueSpaceUpsertOp(s);
+                        break;
+                    }
+                }
+                self.saveRegistryCacheFile();
+                self.wakeBgSync();
                 _ = try self.registry.setField(.spaces, space_id, "name", name, 1000, self.device_id);
                 _ = try self.registry.setField(.spaces, space_id, "path", path, 1000, self.device_id);
                 const sp_json = try self.spacesJson();
@@ -2740,6 +3352,12 @@ pub const EngineHost = struct {
                         s.name = copy;
                     }
                 }
+                if (std.fmt.allocPrint(self.gpa, "\"name\":{f}", .{json.fmt(name, .{})})) |inner| {
+                    defer self.gpa.free(inner);
+                    self.enqueueFieldUpdateOp("spaces", space_id, inner);
+                } else |_| {}
+                self.saveRegistryCacheFile();
+                self.wakeBgSync();
                 const sp_json = try self.spacesJson();
                 defer self.gpa.free(sp_json);
                 try self.broadcastWatch(.spaces, null, sp_json);
@@ -2747,6 +3365,24 @@ pub const EngineHost = struct {
             },
             .deleteSpace => {
                 const space_id = requireStr(obj, "spaceId") orelse return .{ .err = .{ .bad_params = "missing spaceId" } };
+                var ci: usize = 0;
+                var removed_chats = false;
+                while (ci < self.chats.items.len) {
+                    if (self.chats.items[ci].space_id) |sid| {
+                        if (std.mem.eql(u8, sid, space_id)) {
+                            const cid_dup = self.gpa.dupe(u8, self.chats.items[ci].id) catch null;
+                            defer if (cid_dup) |cd| self.gpa.free(cd);
+                            if (cid_dup) |cd| {
+                                self.enqueueDeleteOp("chats", cd);
+                                self.enqueueDeleteOp("sessions", cd);
+                                _ = self.deleteChat(cd);
+                                removed_chats = true;
+                                continue;
+                            }
+                        }
+                    }
+                    ci += 1;
+                }
                 var i: usize = 0;
                 while (i < self.spaces.items.len) {
                     if (std.mem.eql(u8, self.spaces.items[i].id, space_id)) {
@@ -2756,9 +3392,22 @@ pub const EngineHost = struct {
                     }
                     i += 1;
                 }
+                self.enqueueDeleteOp("spaces", space_id);
+                self.saveRegistryCacheFile();
+                self.wakeBgSync();
                 const sp_json = try self.spacesJson();
                 defer self.gpa.free(sp_json);
                 try self.broadcastWatch(.spaces, null, sp_json);
+                if (removed_chats) {
+                    if (self.chatsJson()) |ch_j| {
+                        defer self.gpa.free(ch_j);
+                        try self.broadcastWatch(.chats, null, ch_j);
+                    } else |_| {}
+                    if (self.sessionsJson()) |se_j| {
+                        defer self.gpa.free(se_j);
+                        try self.broadcastWatch(.sessions, null, se_j);
+                    } else |_| {}
+                }
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"deleted\":true}") };
             },
             .createChat => {
@@ -2770,6 +3419,8 @@ pub const EngineHost = struct {
                 const model: ?[]const u8 = if (cfg_val.object.get("model")) |v| (if (v == .string) v.string else null) else null;
                 const reasoning: ?[]const u8 = if (cfg_val.object.get("reasoning")) |v| (if (v == .string) v.string else null) else null;
                 const title: ?[]const u8 = if (obj.get("title")) |v| (if (v == .string) v.string else null) else null;
+                const cwd_opt: ?[]const u8 = if (obj.get("cwd")) |v| (if (v == .string) v.string else null) else null;
+                const branch_opt: ?[]const u8 = if (obj.get("branch")) |v| (if (v == .string) v.string else null) else null;
 
                 var exists = false;
                 for (self.chats.items) |existing| {
@@ -2793,6 +3444,10 @@ pub const EngineHost = struct {
                     errdefer if (m_c) |m| self.gpa.free(m);
                     const r_c = if (reasoning) |r| try self.gpa.dupe(u8, r) else null;
                     errdefer if (r_c) |r| self.gpa.free(r);
+                    const cw_c = if (cwd_opt) |cw| try self.gpa.dupe(u8, cw) else null;
+                    errdefer if (cw_c) |cw| self.gpa.free(cw);
+                    const br_c = if (branch_opt) |br| try self.gpa.dupe(u8, br) else null;
+                    errdefer if (br_c) |br| self.gpa.free(br);
 
                     try self.chats.append(self.gpa, .{
                         .id = id_c,
@@ -2802,10 +3457,21 @@ pub const EngineHost = struct {
                         .title = t_c,
                         .model = m_c,
                         .reasoning = r_c,
+                        .cwd = cw_c,
+                        .branch = br_c,
                         .created_at_ms = self.nowMs(),
                     });
                 }
                 _ = try self.getOrCreateDoc(chat_id);
+                for (self.chats.items) |c| {
+                    if (std.mem.eql(u8, c.id, chat_id)) {
+                        self.enqueueChatUpsertOp(c);
+                        self.enqueueSessionUpsertOp(c);
+                        break;
+                    }
+                }
+                self.saveRegistryCacheFile();
+                self.wakeBgSync();
                 _ = try self.registry.setField(.chats, chat_id, "harness", harness, 1000, self.device_id);
                 if (space_id) |sid| _ = try self.registry.setField(.chats, chat_id, "spaceId", sid, 1000, self.device_id);
                 const ch_json = try self.chatsJson();
@@ -2838,8 +3504,20 @@ pub const EngineHost = struct {
                             if (c.reasoning) |old| self.gpa.free(old);
                             c.reasoning = r_copy;
                         }
+                        const eff_model = c.model orelse defaultModelForHarness(c.harness);
+                        const eff_reas = c.reasoning orelse "high";
+                        if (std.fmt.allocPrint(
+                            self.gpa,
+                            "\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f}}}",
+                            .{ json.fmt(c.harness, .{}), json.fmt(eff_model, .{}), json.fmt(eff_reas, .{}) },
+                        )) |inner| {
+                            defer self.gpa.free(inner);
+                            self.enqueueFieldUpdateOp("chats", chat_id, inner);
+                        } else |_| {}
                     }
                 }
+                self.saveRegistryCacheFile();
+                self.wakeBgSync();
                 const ch_json = try self.chatsJson();
                 defer self.gpa.free(ch_json);
                 try self.broadcastWatch(.chats, null, ch_json);
@@ -2855,6 +3533,12 @@ pub const EngineHost = struct {
                         c.title = t_copy;
                     }
                 }
+                if (std.fmt.allocPrint(self.gpa, "\"title\":{f}", .{json.fmt(title, .{})})) |inner| {
+                    defer self.gpa.free(inner);
+                    self.enqueueFieldUpdateOp("chats", chat_id, inner);
+                } else |_| {}
+                self.saveRegistryCacheFile();
+                self.wakeBgSync();
                 const ch_json = try self.chatsJson();
                 defer self.gpa.free(ch_json);
                 try self.broadcastWatch(.chats, null, ch_json);
@@ -2870,6 +3554,12 @@ pub const EngineHost = struct {
                         c.branch = b_copy;
                     }
                 }
+                if (std.fmt.allocPrint(self.gpa, "\"branch\":{f}", .{json.fmt(branch, .{})})) |inner| {
+                    defer self.gpa.free(inner);
+                    self.enqueueFieldUpdateOp("chats", chat_id, inner);
+                } else |_| {}
+                self.saveRegistryCacheFile();
+                self.wakeBgSync();
                 const ch_json = try self.chatsJson();
                 defer self.gpa.free(ch_json);
                 try self.broadcastWatch(.chats, null, ch_json);
@@ -2885,6 +3575,12 @@ pub const EngineHost = struct {
                         c.cwd = c_copy;
                     }
                 }
+                if (std.fmt.allocPrint(self.gpa, "\"cwd\":{f}", .{json.fmt(cwd, .{})})) |inner| {
+                    defer self.gpa.free(inner);
+                    self.enqueueFieldUpdateOp("chats", chat_id, inner);
+                } else |_| {}
+                self.saveRegistryCacheFile();
+                self.wakeBgSync();
                 const ch_json = try self.chatsJson();
                 defer self.gpa.free(ch_json);
                 try self.broadcastWatch(.chats, null, ch_json);
@@ -2893,13 +3589,18 @@ pub const EngineHost = struct {
             .setChatActivity => {
                 const chat_id = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
                 const status = requireStr(obj, "status") orelse "idle";
+                const now = self.nowMs();
                 for (self.chats.items) |*c| {
                     if (std.mem.eql(u8, c.id, chat_id)) {
                         const s_copy = try self.gpa.dupe(u8, status);
                         if (c.activity_status) |old| self.gpa.free(old);
                         c.activity_status = s_copy;
+                        c.activity_updated_at_ms = now;
+                        self.enqueueSessionUpsertOp(c.*);
                     }
                 }
+                self.saveRegistryCacheFile();
+                self.wakeBgSync();
                 const sess_json = try self.sessionsJson();
                 defer self.gpa.free(sess_json);
                 try self.broadcastWatch(.sessions, null, sess_json);
@@ -2915,6 +3616,12 @@ pub const EngineHost = struct {
                         c.device_id = d_copy;
                     }
                 }
+                if (std.fmt.allocPrint(self.gpa, "\"deviceId\":{f}", .{json.fmt(host_dev, .{})})) |inner| {
+                    defer self.gpa.free(inner);
+                    self.enqueueFieldUpdateOp("chats", chat_id, inner);
+                } else |_| {}
+                self.saveRegistryCacheFile();
+                self.wakeBgSync();
                 const ch_json = try self.chatsJson();
                 defer self.gpa.free(ch_json);
                 try self.broadcastWatch(.chats, null, ch_json);
@@ -2932,6 +3639,8 @@ pub const EngineHost = struct {
                     for (self.chats.items) |*c| {
                         if (std.mem.eql(u8, c.id, target)) c.pinned = pinned;
                     }
+                    self.enqueueSidebarPinOp(target, pinned);
+                    self.wakeBgSync();
                 }
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"updated\":true}") };
             },
@@ -2964,6 +3673,10 @@ pub const EngineHost = struct {
             .deleteChat => {
                 const chat_id = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
                 _ = self.deleteChat(chat_id);
+                self.enqueueDeleteOp("chats", chat_id);
+                self.enqueueDeleteOp("sessions", chat_id);
+                self.saveRegistryCacheFile();
+                self.wakeBgSync();
                 const ch_json = try self.chatsJson();
                 defer self.gpa.free(ch_json);
                 try self.broadcastWatch(.chats, null, ch_json);
@@ -2977,7 +3690,15 @@ pub const EngineHost = struct {
                 const seen_at: i64 = if (obj.get("at")) |av| (if (av == .integer) av.integer else self.nowMs()) else self.nowMs();
                 for (self.chats.items) |*c| {
                     if (std.mem.eql(u8, c.id, chat_id)) {
-                        c.last_seen_at_ms = seen_at;
+                        if (seen_at > c.last_seen_at_ms) {
+                            c.last_seen_at_ms = seen_at;
+                            if (std.fmt.allocPrint(self.gpa, "\"lastSeenAt\":{d}", .{seen_at})) |inner| {
+                                defer self.gpa.free(inner);
+                                self.enqueueFieldUpdateOp("chats", chat_id, inner);
+                            } else |_| {}
+                            self.saveRegistryCacheFile();
+                            self.wakeBgSync();
+                        }
                         break;
                     }
                 }
@@ -2990,12 +3711,59 @@ pub const EngineHost = struct {
                 for (self.chats.items) |*c| {
                     if (std.mem.eql(u8, c.id, chat_id)) c.archived = arch_val.bool;
                 }
+                if (std.fmt.allocPrint(self.gpa, "\"archived\":{}", .{arch_val.bool})) |inner| {
+                    defer self.gpa.free(inner);
+                    self.enqueueFieldUpdateOp("chats", chat_id, inner);
+                } else |_| {}
+                self.saveRegistryCacheFile();
+                self.wakeBgSync();
                 const ch_json = try self.chatsJson();
                 defer self.gpa.free(ch_json);
                 try self.broadcastWatch(.chats, null, ch_json);
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"updated\":true}") };
             },
-            .renameDevice, .forgetDevice => {
+            .renameDevice => {
+                if (requireStr(obj, "deviceId")) |did| {
+                    if (requireStr(obj, "name")) |nm| {
+                        if (std.mem.eql(u8, did, self.device_id)) {
+                            if (self.gpa.dupe(u8, nm)) |nc| {
+                                self.gpa.free(self.device_name);
+                                self.device_name = nc;
+                            } else |_| {}
+                        }
+                        for (self.devices.items) |*d| {
+                            if (std.mem.eql(u8, d.id, did)) {
+                                if (self.gpa.dupe(u8, nm)) |nc| {
+                                    self.gpa.free(d.name);
+                                    d.name = nc;
+                                } else |_| {}
+                            }
+                        }
+                        if (std.fmt.allocPrint(self.gpa, "\"name\":{f}", .{json.fmt(nm, .{})})) |inner| {
+                            defer self.gpa.free(inner);
+                            self.enqueueFieldUpdateOp("devices", did, inner);
+                        } else |_| {}
+                        self.saveRegistryCacheFile();
+                        self.wakeBgSync();
+                        if (self.devicesJson()) |dj| {
+                            defer self.gpa.free(dj);
+                            self.broadcastWatch(.devices, null, dj) catch {};
+                        } else |_| {}
+                    }
+                }
+                return .{ .unary_json = try self.gpa.dupe(u8, "{\"ok\":true}") };
+            },
+            .forgetDevice => {
+                if (requireStr(obj, "deviceId")) |did| {
+                    _ = self.forgetDevice(did);
+                    self.enqueueDeleteOp("devices", did);
+                    self.saveRegistryCacheFile();
+                    self.wakeBgSync();
+                    if (self.devicesJson()) |dj| {
+                        defer self.gpa.free(dj);
+                        self.broadcastWatch(.devices, null, dj) catch {};
+                    } else |_| {}
+                }
                 return .{ .unary_json = try self.gpa.dupe(u8, "{\"ok\":true}") };
             },
         }
@@ -3301,7 +4069,7 @@ pub const EngineHost = struct {
         self.registry_org_id = self.gpa.dupe(u8, org_id) catch null;
     }
 
-    fn writePrivateCacheFile(io: std.Io, path: []const u8, body: []const u8) void {
+    pub fn writePrivateCacheFile(io: std.Io, path: []const u8, body: []const u8) void {
         if (std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true })) |f| {
             defer f.close(io);
             f.writeStreamingAll(io, body) catch {};
@@ -3441,6 +4209,27 @@ pub const EngineHost = struct {
         if (!std.mem.eql(u8, cached_org, expected_org)) return false;
 
         _ = self.applyRegistryResponseJson(expected_org, raw, false);
+
+        // Migrate any local chats/spaces created under legacy placeholder device IDs (`zig-local-device` / `ios-local-device`)
+        // to the stable `{data_dir}/device-id` so stranded local sessions sync outbound to Edge on startup.
+        for (self.spaces.items) |*s| {
+            if (std.mem.eql(u8, s.device_id, "zig-local-device") or std.mem.eql(u8, s.device_id, "ios-local-device")) {
+                if (self.gpa.dupe(u8, self.device_id)) |dc| {
+                    self.gpa.free(s.device_id);
+                    s.device_id = dc;
+                } else |_| {}
+            }
+        }
+        for (self.chats.items) |*c| {
+            if (std.mem.eql(u8, c.device_id, "zig-local-device") or std.mem.eql(u8, c.device_id, "ios-local-device")) {
+                if (self.gpa.dupe(u8, self.device_id)) |dc| {
+                    self.gpa.free(c.device_id);
+                    c.device_id = dc;
+                } else |_| {}
+            }
+        }
+        _ = self.forgetDevice("zig-local-device");
+        _ = self.forgetDevice("ios-local-device");
         return true;
     }
 
@@ -3542,8 +4331,101 @@ pub const EngineHost = struct {
         writePrivateCacheFile(io, path, aw.written());
     }
 
-    /// Pull the signed-in organization's cloud Workspace Registry (`GET {edge_url}/registry/{orgId}/rows?since={seq}`),
-    /// reusing warm HTTP/2 connections (`auth.h2_pool`) and applying delta rows in O(N + R) hash-indexed time.
+    const TailUploadItem = struct {
+        cid: []u8,
+        body: []u8,
+
+        fn deinit(self: *TailUploadItem, gpa: Allocator) void {
+            gpa.free(self.cid);
+            gpa.free(self.body);
+        }
+    };
+
+    fn drainRegistryPushBatchLocked(self: *EngineHost, out_ops: *std.ArrayList([]u8)) ?[]u8 {
+        if (self.pending_registry_ops.items.len == 0) return null;
+        const count = @min(self.pending_registry_ops.items.len, @as(usize, 500));
+        out_ops.ensureTotalCapacity(self.gpa, count) catch return null;
+        for (0..count) |i| {
+            out_ops.appendAssumeCapacity(self.pending_registry_ops.items[i]);
+        }
+        const rem = self.pending_registry_ops.items.len - count;
+        if (rem > 0) {
+            std.mem.copyForwards([]u8, self.pending_registry_ops.items[0..rem], self.pending_registry_ops.items[count..]);
+        }
+        self.pending_registry_ops.items.len = rem;
+
+        self.push_batch_seq += 1;
+        var dev_buf: [128]u8 = undefined;
+        const safe_dev = sanitizeEdgeDeviceId(&dev_buf, self.device_id);
+
+        var aw: std.Io.Writer.Allocating = .init(self.gpa);
+        const w = &aw.writer;
+        w.print("{{\"t\":\"push\",\"batch\":\"b-{s}-{d}\",\"ops\":[", .{ safe_dev, self.push_batch_seq }) catch {
+            aw.deinit();
+            self.requeueOpsFrontLocked(out_ops);
+            return null;
+        };
+        for (out_ops.items, 0..) |op_s, idx| {
+            if (idx > 0) w.writeByte(',') catch {
+                aw.deinit();
+                self.requeueOpsFrontLocked(out_ops);
+                return null;
+            };
+            w.writeAll(op_s) catch {
+                aw.deinit();
+                self.requeueOpsFrontLocked(out_ops);
+                return null;
+            };
+        }
+        w.writeAll("]}") catch {
+            aw.deinit();
+            self.requeueOpsFrontLocked(out_ops);
+            return null;
+        };
+        return aw.toOwnedSlice() catch {
+            aw.deinit();
+            self.requeueOpsFrontLocked(out_ops);
+            return null;
+        };
+    }
+
+    fn requeueOpsFrontLocked(self: *EngineHost, ops: *std.ArrayList([]u8)) void {
+        if (ops.items.len == 0) return;
+        self.pending_registry_ops.insertSlice(self.gpa, 0, ops.items) catch {
+            for (ops.items) |s| self.gpa.free(s);
+        };
+        ops.clearRetainingCapacity();
+    }
+
+    fn drainDirtyTailUploadsLocked(self: *EngineHost, out: *std.ArrayList(TailUploadItem)) void {
+        if (self.dirty_tail_chats.items.len == 0) return;
+        const now = self.nowMs();
+        while (self.dirty_tail_chats.items.len > 0) {
+            const cid = self.dirty_tail_chats.orderedRemove(0);
+            const doc = self.getOrCreateDoc(cid) catch {
+                self.gpa.free(cid);
+                continue;
+            };
+            if (doc.messages.items.len == 0) {
+                self.gpa.free(cid);
+                continue;
+            }
+            const body = doc.toTailSidecarJson(self.gpa, now, session_doc.tail_message_count) catch {
+                self.gpa.free(cid);
+                continue;
+            };
+            out.append(self.gpa, .{ .cid = cid, .body = body }) catch {
+                self.gpa.free(cid);
+                self.gpa.free(body);
+            };
+        }
+    }
+
+    /// Two-way sync with the signed-in organization's cloud Workspace Registry & Chat2 Tail sidecars:
+    /// 1) Seeds local device/spaces/chats/sessions on first sync per auth session
+    /// 2) Pushes pending registry ops (`POST {edge_url}/registry/{orgId}/push?device={device}`)
+    /// 3) Pushes dirty chat transcript tails (`PUT {edge_url}/chat2/{chatId}/tail`)
+    /// 4) Pulls delta rows + broadcasts live presence (`GET {edge_url}/registry/{orgId}/rows?since={seq}&device={device}&beat=1`)
     pub fn syncFromEdgeRegistry(self: *EngineHost, io: std.Io) bool {
         if (!self.auth.signed_in) return false;
         const edge_raw = self.auth.edge_url orelse return false;
@@ -3551,20 +4433,110 @@ pub const EngineHost = struct {
         const org_id = self.gpa.dupe(u8, org_id_slice) catch return false;
         defer self.gpa.free(org_id);
         self.ensureRegistryOrgCursor(org_id);
+        self.seedOutboundSyncIfNeeded();
 
-        const tok0 = self.auth.ensureAccessToken(io, false) orelse return false;
+        var tok_cur = self.auth.ensureAccessToken(io, false) orelse return false;
 
         const base = std.mem.trimEnd(u8, edge_raw, "/");
         const enc_org = auth_host.urlEncodeAlloc(self.gpa, org_id) catch return false;
         defer self.gpa.free(enc_org);
+        var dev_buf: [128]u8 = undefined;
+        const safe_dev = sanitizeEdgeDeviceId(&dev_buf, self.device_id);
+        const enc_dev = auth_host.urlEncodeAlloc(self.gpa, safe_dev) catch return false;
+        defer self.gpa.free(enc_dev);
+
+        // 1. Outbound registry op batches (`POST /registry/{org}/push?device={dev}`)
+        while (self.pending_registry_ops.items.len > 0) {
+            var ops_batch: std.ArrayList([]u8) = .empty;
+            defer {
+                for (ops_batch.items) |s| self.gpa.free(s);
+                ops_batch.deinit(self.gpa);
+            }
+            const push_body = self.drainRegistryPushBatchLocked(&ops_batch) orelse break;
+            defer self.gpa.free(push_body);
+
+            const push_url = std.fmt.allocPrint(
+                self.gpa,
+                "{s}/registry/{s}/push?device={s}",
+                .{ base, enc_org, enc_dev },
+            ) catch {
+                self.requeueOpsFrontLocked(&ops_batch);
+                break;
+            };
+            defer self.gpa.free(push_url);
+
+            var presp = auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "POST", push_url, tok_cur, &.{}, push_body) catch {
+                self.requeueOpsFrontLocked(&ops_batch);
+                break;
+            };
+            if (presp.status == 401) {
+                presp.deinit(self.gpa);
+                tok_cur = self.auth.ensureAccessToken(io, true) orelse {
+                    self.requeueOpsFrontLocked(&ops_batch);
+                    return false;
+                };
+                presp = auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "POST", push_url, tok_cur, &.{}, push_body) catch {
+                    self.requeueOpsFrontLocked(&ops_batch);
+                    break;
+                };
+            }
+            const pstatus = presp.status;
+            presp.deinit(self.gpa);
+            if (pstatus >= 500 or pstatus == 429) {
+                self.requeueOpsFrontLocked(&ops_batch);
+                break;
+            }
+            if (pstatus != 200) break;
+        }
+
+        // 2. Outbound chat transcript tails (`PUT /chat2/{chatId}/tail`)
+        {
+            var tail_uploads: std.ArrayList(TailUploadItem) = .empty;
+            defer {
+                for (tail_uploads.items) |*tu| tu.deinit(self.gpa);
+                tail_uploads.deinit(self.gpa);
+            }
+            self.drainDirtyTailUploadsLocked(&tail_uploads);
+            for (tail_uploads.items) |tu| {
+                const enc_cid = auth_host.urlEncodeAlloc(self.gpa, tu.cid) catch continue;
+                defer self.gpa.free(enc_cid);
+                const tail_url = std.fmt.allocPrint(self.gpa, "{s}/chat2/{s}/tail", .{ base, enc_cid }) catch continue;
+                defer self.gpa.free(tail_url);
+
+                var tresp = auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "PUT", tail_url, tok_cur, &.{}, tu.body) catch {
+                    self.markChatTailDirty(tu.cid);
+                    continue;
+                };
+                if (tresp.status == 401) {
+                    tresp.deinit(self.gpa);
+                    if (self.auth.ensureAccessToken(io, true)) |t1| {
+                        tok_cur = t1;
+                        tresp = auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "PUT", tail_url, tok_cur, &.{}, tu.body) catch {
+                            self.markChatTailDirty(tu.cid);
+                            continue;
+                        };
+                    } else {
+                        self.markChatTailDirty(tu.cid);
+                        continue;
+                    }
+                }
+                const tstatus = tresp.status;
+                tresp.deinit(self.gpa);
+                if (tstatus >= 500 or tstatus == 429) {
+                    self.markChatTailDirty(tu.cid);
+                }
+            }
+        }
+
+        // 3. Inbound delta pull + live presence beat (`GET /registry/{org}/rows?since={seq}&device={dev}&beat=1`)
         const url = std.fmt.allocPrint(
             self.gpa,
-            "{s}/registry/{s}/rows?since={d}",
-            .{ base, enc_org, self.registry_seq },
+            "{s}/registry/{s}/rows?since={d}&device={s}&beat=1",
+            .{ base, enc_org, self.registry_seq, enc_dev },
         ) catch return false;
         defer self.gpa.free(url);
 
-        var resp = auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "GET", url, tok0, &.{}, null) catch return false;
+        var resp = auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "GET", url, tok_cur, &.{}, null) catch return false;
         if (resp.status == 401) {
             resp.deinit(self.gpa);
             const tok1 = self.auth.ensureAccessToken(io, true) orelse return false;
@@ -3577,18 +4549,29 @@ pub const EngineHost = struct {
     }
 
     /// Lock-free network variant of `syncFromEdgeRegistry` for the background sync loop:
-    /// snapshots auth credentials under `self.mutex` (< 2µs), executes the HTTP/2 delta fetch
-    /// completely outside `self.mutex`, and re-acquires `self.mutex` (< 200µs) only if delta rows arrived.
+    /// snapshots credentials + drains outbound push batches under `self.mutex` (< 5µs), executes all
+    /// HTTP/2 `POST /push`, `PUT /tail`, and `GET /rows` I/O completely outside `self.mutex`, and
+    /// re-acquires `self.mutex` (< 200µs) to apply incoming delta rows and presence beats.
     pub fn syncFromEdgeRegistryUnlocked(self: *EngineHost, io: std.Io) bool {
         var gen: u64 = 0;
         var edge_copy: ?[]u8 = null;
         var org_copy: ?[]u8 = null;
         var tok_copy: ?[]u8 = null;
+        var dev_copy: ?[]u8 = null;
         var since_seq: u64 = 0;
+        var ops_batch: std.ArrayList([]u8) = .empty;
+        var push_body: ?[]u8 = null;
+        var tail_uploads: std.ArrayList(TailUploadItem) = .empty;
         defer {
             if (edge_copy) |s| self.gpa.free(s);
             if (org_copy) |s| self.gpa.free(s);
             if (tok_copy) |s| self.gpa.free(s);
+            if (dev_copy) |s| self.gpa.free(s);
+            if (push_body) |pb| self.gpa.free(pb);
+            for (ops_batch.items) |s| self.gpa.free(s);
+            ops_batch.deinit(self.gpa);
+            for (tail_uploads.items) |*tu| tu.deinit(self.gpa);
+            tail_uploads.deinit(self.gpa);
         }
 
         {
@@ -3598,21 +4581,115 @@ pub const EngineHost = struct {
             const er = self.auth.edge_url orelse return false;
             const oid = self.auth.org_id orelse return false;
             self.ensureRegistryOrgCursor(oid);
+            self.seedOutboundSyncIfNeeded();
             const tok = self.auth.ensureAccessToken(io, false) orelse return false;
             gen = self.auth.generation;
             since_seq = self.registry_seq;
             edge_copy = self.gpa.dupe(u8, er) catch return false;
             org_copy = self.gpa.dupe(u8, oid) catch return false;
             tok_copy = self.gpa.dupe(u8, tok) catch return false;
+            var dev_buf: [128]u8 = undefined;
+            const safe_dev = sanitizeEdgeDeviceId(&dev_buf, self.device_id);
+            dev_copy = self.gpa.dupe(u8, safe_dev) catch return false;
+            push_body = self.drainRegistryPushBatchLocked(&ops_batch);
+            self.drainDirtyTailUploadsLocked(&tail_uploads);
         }
 
         const base = std.mem.trimEnd(u8, edge_copy.?, "/");
         const enc_org = auth_host.urlEncodeAlloc(self.gpa, org_copy.?) catch return false;
         defer self.gpa.free(enc_org);
+        const enc_dev = auth_host.urlEncodeAlloc(self.gpa, dev_copy.?) catch return false;
+        defer self.gpa.free(enc_dev);
+
+        // 1. Outbound registry push outside lock
+        if (push_body) |pb| {
+            if (std.fmt.allocPrint(self.gpa, "{s}/registry/{s}/push?device={s}", .{ base, enc_org, enc_dev })) |push_url| {
+                defer self.gpa.free(push_url);
+                if (auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "POST", push_url, tok_copy.?, &.{}, pb)) |presp_val| {
+                    var presp = presp_val;
+                    if (presp.status == 401) {
+                        presp.deinit(self.gpa);
+                        var t1_opt: ?[]u8 = null;
+                        {
+                            self.mutex.lockUncancelable(io);
+                            defer self.mutex.unlock(io);
+                            if (!self.stop_requested and self.auth.signed_in and self.auth.generation == gen) {
+                                if (self.auth.ensureAccessToken(io, true)) |t1| {
+                                    t1_opt = self.gpa.dupe(u8, t1) catch null;
+                                }
+                            }
+                        }
+                        if (t1_opt) |t1| {
+                            self.gpa.free(tok_copy.?);
+                            tok_copy = t1;
+                            if (auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "POST", push_url, t1, &.{}, pb)) |retry_resp| {
+                                var rr = retry_resp;
+                                const rstatus = rr.status;
+                                rr.deinit(self.gpa);
+                                if (rstatus >= 500 or rstatus == 429) {
+                                    self.mutex.lockUncancelable(io);
+                                    if (self.auth.generation == gen) self.requeueOpsFrontLocked(&ops_batch);
+                                    self.mutex.unlock(io);
+                                }
+                            } else |_| {
+                                self.mutex.lockUncancelable(io);
+                                if (self.auth.generation == gen) self.requeueOpsFrontLocked(&ops_batch);
+                                self.mutex.unlock(io);
+                            }
+                        } else {
+                            self.mutex.lockUncancelable(io);
+                            if (self.auth.generation == gen) self.requeueOpsFrontLocked(&ops_batch);
+                            self.mutex.unlock(io);
+                        }
+                    } else {
+                        const pstatus = presp.status;
+                        presp.deinit(self.gpa);
+                        if (pstatus >= 500 or pstatus == 429) {
+                            self.mutex.lockUncancelable(io);
+                            if (self.auth.generation == gen) self.requeueOpsFrontLocked(&ops_batch);
+                            self.mutex.unlock(io);
+                        }
+                    }
+                } else |_| {
+                    self.mutex.lockUncancelable(io);
+                    if (self.auth.generation == gen) self.requeueOpsFrontLocked(&ops_batch);
+                    self.mutex.unlock(io);
+                }
+            } else |_| {
+                self.mutex.lockUncancelable(io);
+                if (self.auth.generation == gen) self.requeueOpsFrontLocked(&ops_batch);
+                self.mutex.unlock(io);
+            }
+        }
+
+        // 2. Outbound chat tail uploads outside lock
+        for (tail_uploads.items) |tu| {
+            const enc_cid = auth_host.urlEncodeAlloc(self.gpa, tu.cid) catch continue;
+            defer self.gpa.free(enc_cid);
+            const tail_url = std.fmt.allocPrint(self.gpa, "{s}/chat2/{s}/tail", .{ base, enc_cid }) catch continue;
+            defer self.gpa.free(tail_url);
+
+            if (auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "PUT", tail_url, tok_copy.?, &.{}, tu.body)) |tresp_val| {
+                var tresp = tresp_val;
+                const tstatus = tresp.status;
+                tresp.deinit(self.gpa);
+                if (tstatus >= 500 or tstatus == 429 or tstatus == 401) {
+                    self.mutex.lockUncancelable(io);
+                    if (self.auth.generation == gen) self.markChatTailDirty(tu.cid);
+                    self.mutex.unlock(io);
+                }
+            } else |_| {
+                self.mutex.lockUncancelable(io);
+                if (self.auth.generation == gen) self.markChatTailDirty(tu.cid);
+                self.mutex.unlock(io);
+            }
+        }
+
+        // 3. Inbound delta pull + presence beat outside lock
         const url = std.fmt.allocPrint(
             self.gpa,
-            "{s}/registry/{s}/rows?since={d}",
-            .{ base, enc_org, since_seq },
+            "{s}/registry/{s}/rows?since={d}&device={s}&beat=1",
+            .{ base, enc_org, since_seq, enc_dev },
         ) catch return false;
         defer self.gpa.free(url);
 
@@ -3661,8 +4738,39 @@ pub const EngineHost = struct {
         }
 
         const rows = rows_val.array.items;
-        // O(1) delta fast-path: quiet poll (`rows == []`) skips all index construction, JSON encoding & broadcasts.
-        if (rows.len == 0) return false;
+        // O(1) delta fast-path: quiet poll (`rows == []`) updates in-place presence timestamps with 0 allocations,
+        // broadcasting `.devices` only when a peer's online threshold flips.
+        if (rows.len == 0) {
+            if (obj.get("presence")) |pv| {
+                if (pv == .object) {
+                    const now = self.nowMs();
+                    var online_flipped = false;
+                    for (self.devices.items) |*d| {
+                        if (pv.object.get(d.id)) |ts_v| {
+                            const beat_ms: i64 = switch (ts_v) {
+                                .integer => |i| i,
+                                .float => |fl| @intFromFloat(fl),
+                                else => 0,
+                            };
+                            if (beat_ms > d.last_seen_at_ms) {
+                                const was_online = d.last_seen_at_ms > 0 and (now - d.last_seen_at_ms <= 120_000);
+                                d.last_seen_at_ms = beat_ms;
+                                const now_online = now - d.last_seen_at_ms <= 120_000;
+                                if (!was_online and now_online) online_flipped = true;
+                            }
+                        }
+                    }
+                    if (online_flipped) {
+                        if (self.devicesJson()) |dj| {
+                            defer self.gpa.free(dj);
+                            self.broadcastWatch(.devices, null, dj) catch {};
+                        } else |_| {}
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
 
         var dev_idx: std.StringHashMapUnmanaged(usize) = .empty;
         defer dev_idx.deinit(self.gpa);
@@ -3684,10 +4792,19 @@ pub const EngineHost = struct {
         var dirty_chats = false;
         var dirty_sessions = false;
 
-        // Pass 1: O(1) indexed upserts & tombstone deletions for devices, spaces, chats
+        // Pass 1: O(1) indexed upserts, HLC observation, & tombstone deletions for devices, spaces, chats, sidebarPins
         for (rows) |row_val| {
             if (row_val != .object) continue;
             const ro = row_val.object;
+            if (regOptStr(ro, "delHlc")) |dh| self.hlc_clock.observe(dh);
+            if (ro.get("clocks")) |cv| {
+                if (cv == .object) {
+                    var cit = cv.object.iterator();
+                    while (cit.next()) |ce| {
+                        if (ce.value_ptr.* == .string) self.hlc_clock.observe(ce.value_ptr.string);
+                    }
+                }
+            }
             const kind = regOptStr(ro, "kind") orelse continue;
             const row_id = regOptStr(ro, "id") orelse continue;
             const is_deleted = if (ro.get("deleted")) |dv| (dv == .bool and dv.bool) else false;
@@ -3732,6 +4849,14 @@ pub const EngineHost = struct {
                 if (self.upsertSyncedChatIndexed(row_id, f, &chat_idx)) |_| {
                     dirty_chats = true;
                 } else |_| {}
+            } else if (std.mem.eql(u8, kind, "sidebarPins")) {
+                if (chat_idx.get(row_id)) |c_i| {
+                    const pinned = regOptBool(f, "pinned", false);
+                    if (self.chats.items[c_i].pinned != pinned) {
+                        self.chats.items[c_i].pinned = pinned;
+                        dirty_chats = true;
+                    }
+                }
             }
         }
 
@@ -3760,6 +4885,28 @@ pub const EngineHost = struct {
                 } else |_| {}
                 if (started_ms > 0) c.activity_started_at_ms = started_ms;
                 if (updated_ms > 0) c.activity_updated_at_ms = updated_ms;
+            }
+        }
+
+        // Pass 3: Apply fresh ephemeral presence beats (`presence: { "<deviceId>": <epochMs> }`)
+        if (obj.get("presence")) |pv| {
+            if (pv == .object) {
+                var pit = pv.object.iterator();
+                while (pit.next()) |pe| {
+                    const beat_ms: i64 = switch (pe.value_ptr.*) {
+                        .integer => |i| i,
+                        .float => |fl| @intFromFloat(fl),
+                        else => 0,
+                    };
+                    if (beat_ms > 0) {
+                        if (dev_idx.get(pe.key_ptr.*)) |d_i| {
+                            if (beat_ms > self.devices.items[d_i].last_seen_at_ms) {
+                                self.devices.items[d_i].last_seen_at_ms = beat_ms;
+                                dirty_devices = true;
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -4673,6 +5820,9 @@ pub const EngineHost = struct {
                         }
                     }
                     if (changed) {
+                        self.enqueueFieldUpdateOp("chats", cid, "\"archived\":true");
+                        self.saveRegistryCacheFile();
+                        self.wakeBgSync();
                         if (self.chatsJson()) |chj| {
                             defer self.gpa.free(chj);
                             self.broadcastWatch(.chats, null, chj) catch {};
@@ -4772,6 +5922,15 @@ pub const EngineHost = struct {
             .cwd = cwd_c,
             .created_at_ms = self.nowMs(),
         });
+        for (self.chats.items) |c| {
+            if (std.mem.eql(u8, c.id, new_id)) {
+                self.enqueueChatUpsertOp(c);
+                self.enqueueSessionUpsertOp(c);
+                break;
+            }
+        }
+        self.saveRegistryCacheFile();
+        self.wakeBgSync();
 
         // Remember standing chat on the bot BEFORE running its first turn (`crates/engine/src/bots.rs:539-541`).
         const set_out = try self.runBotCli(&.{ "set", bot_name, "chat", new_id });

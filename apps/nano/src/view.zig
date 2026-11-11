@@ -24,6 +24,12 @@ const cluster_x: f32 = 88;
 const cluster_w: f32 = 24 * 3 + 8 + 2;
 
 pub fn view(a: *App, c: *ui.Context) void {
+    if (comptime @import("builtin").os.tag == .ios) {
+        return @import("view_mobile.zig").view(a, c);
+    }
+    if (a.mobile_preview) {
+        return @import("view_mobile.zig").view(a, c);
+    }
     @import("frame_profile.zig").beginPass();
     a.view.in_pre_tree = true;
     defer a.view.in_pre_tree = false;

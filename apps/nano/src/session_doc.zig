@@ -746,6 +746,8 @@ pub const SessionDoc = struct {
             try w.writeAll(",\"kind\":");
             try json.Stringify.encodeJsonString(p.kind, .{}, w);
             if (std.mem.eql(u8, p.kind, "reasoning")) {
+                try w.writeAll(",\"text\":");
+                try json.Stringify.encodeJsonString(p.text.items, .{}, w);
                 try w.writeAll(",\"reasoning\":");
                 try json.Stringify.encodeJsonString(p.text.items, .{}, w);
             } else if (std.mem.eql(u8, p.kind, "tool")) {
@@ -834,6 +836,70 @@ pub const SessionDoc = struct {
         errdefer aw.deinit();
         try self.writeResetFrame(&aw.writer);
         return aw.toOwnedSlice();
+    }
+
+    /// Build a `SessionTail` JSON sidecar (`PUT /chat2/{chatId}/tail`, `crates/doc/src/schema.rs:1525`):
+    /// `{"chatId":"...","schemaVersion":1,"messages":[...last max_tail...],"totalMessages":N,"updatedAt":ms}`.
+    pub fn toTailSidecarJson(self: *const SessionDoc, gpa: Allocator, updated_at_ms: i64, max_tail: usize) ![]u8 {
+        const total = self.messages.items.len;
+        const start = total -| max_tail;
+        var aw: std.Io.Writer.Allocating = try .initCapacity(gpa, @min(self.live_payload_bytes, 256 * 1024) + 192);
+        errdefer aw.deinit();
+        const w = &aw.writer;
+        try w.writeAll("{\"chatId\":");
+        try json.Stringify.encodeJsonString(self.chat_id, .{}, w);
+        try w.print(",\"schemaVersion\":{d},\"messages\":[", .{schema_version});
+        for (self.messages.items[start..], 0..) |m, mi| {
+            if (mi > 0) try w.writeByte(',');
+            try writeEntryJson(w, m);
+        }
+        try w.print("],\"totalMessages\":{d},\"updatedAt\":{d}}}", .{ total, updated_at_ms });
+        return aw.toOwnedSlice();
+    }
+
+    /// Serialize the last `max_tail` messages as a bare JSON array (`[...]`) for `remote_tails` caching.
+    pub fn toTailMessagesArrayJson(self: *const SessionDoc, gpa: Allocator, max_tail: usize) ![]u8 {
+        const total = self.messages.items.len;
+        const start = total -| max_tail;
+        var aw: std.Io.Writer.Allocating = .init(gpa);
+        errdefer aw.deinit();
+        const w = &aw.writer;
+        try w.writeByte('[');
+        for (self.messages.items[start..], 0..) |m, mi| {
+            if (mi > 0) try w.writeByte(',');
+            try writeEntryJson(w, m);
+        }
+        try w.writeByte(']');
+        return aw.toOwnedSlice();
+    }
+
+    /// Return a trimmed single-line slice (up to `max_len` UTF-8-safe bytes) from the newest non-empty text part.
+    pub fn latestTextPreview(self: *const SessionDoc, max_len: usize) ?[]const u8 {
+        var mi = self.messages.items.len;
+        while (mi > 0) {
+            mi -= 1;
+            const m = self.messages.items[mi];
+            var pi = m.parts.items.len;
+            while (pi > 0) {
+                pi -= 1;
+                const p = m.parts.items[pi];
+                if (!std.mem.eql(u8, p.kind, "text")) continue;
+                const trimmed = std.mem.trim(u8, p.text.items, " \t\r\n");
+                if (trimmed.len == 0) continue;
+                const nl = std.mem.indexOfAny(u8, trimmed, "\r\n") orelse trimmed.len;
+                const line = std.mem.trim(u8, trimmed[0..nl], " \t");
+                if (line.len == 0) continue;
+                return utf8PrefixSlice(line, max_len);
+            }
+        }
+        return null;
+    }
+
+    fn utf8PrefixSlice(s: []const u8, max_bytes: usize) []const u8 {
+        if (s.len <= max_bytes) return s;
+        var end = max_bytes;
+        while (end > 0 and (s[end] & 0xC0) == 0x80) : (end -= 1) {}
+        return s[0..end];
     }
 
     /// Build an incremental `WatchDocMessages` `upsert` delta frame (`{"upsert":[{"after":...,"entry":{...}}],"count":N}`).

@@ -158,6 +158,7 @@ pub fn parseUnifiedDiffToJson(gpa: Allocator, checkout_path: []const u8, branch:
 }
 
 fn captureGitStdout(gpa: Allocator, io: std.Io, cwd: []const u8, argv: []const []const u8) ?[]u8 {
+    if (comptime !std.process.can_spawn) return null;
     var child = std.process.spawn(io, .{
         .argv = argv,
         .stdin = .ignore,

@@ -14,11 +14,38 @@ const crash_log = @import("crash_log.zig");
 pub const std_options: std.Options = .{ .log_level = .warn, .enable_segfault_handler = true };
 
 pub fn main(init: std.process.Init) !void {
+    const builtin = @import("builtin");
+    var mobile_flag = (builtin.os.tag == .ios);
+    var demo_flag = false;
+    if (init.environ_map.get("HARNESS_MOBILE_PREVIEW")) |v| {
+        if (std.mem.eql(u8, v, "1") or std.ascii.eqlIgnoreCase(v, "true")) mobile_flag = true;
+    }
+    if (init.environ_map.get("HARNESS_MOBILE_DEMO")) |v| {
+        if (std.mem.eql(u8, v, "1") or std.ascii.eqlIgnoreCase(v, "true")) demo_flag = true;
+    }
+    {
+        var args_it = try init.minimal.args.iterateAllocator(init.gpa);
+        defer args_it.deinit();
+        _ = args_it.next();
+        while (args_it.next()) |arg| {
+            if (std.mem.eql(u8, arg, "--mobile")) mobile_flag = true;
+            if (std.mem.eql(u8, arg, "--demo")) demo_flag = true;
+        }
+    }
+
+    var embedded_host: ?*@import("ios_host.zig").EmbeddedHost = null;
+    defer if (embedded_host) |eh| eh.stop();
+    if (builtin.os.tag == .ios or (mobile_flag and demo_flag)) {
+        embedded_host = try @import("ios_host.zig").EmbeddedHost.start(init.gpa, init.io, init.environ_map, demo_flag);
+    }
+
     theme.registerFonts();
     const app = try nanoui.App.create(init, .{ .name = "Harness" });
     defer app.destroy();
-    var a: App = .init(init.gpa, init.io, Engine.portFrom(init.environ_map));
+    const engine_port = if (embedded_host) |eh| eh.port else Engine.portFrom(init.environ_map);
+    var a: App = .init(init.gpa, init.io, engine_port);
     defer a.deinit();
+    a.mobile_preview = mobile_flag;
     const harness_override = init.environ_map.get("HARNESS_NANO_HARNESS");
     a.new_harness = try init.gpa.dupe(u8, harness_override orelse "graff");
     a.settings = .open(init.gpa, init.io, init.environ_map);
@@ -38,6 +65,17 @@ pub fn main(init: std.process.Init) !void {
         .light => false,
         .dark => true,
     };
+    if (init.environ_map.get("HARNESS_MOBILE_THEME")) |tid| {
+        if (tid.len > 0) a.mobile.setThemeOverride(init.gpa, tid);
+    }
+    if (init.environ_map.get("HARNESS_MOBILE_SHEET")) |sh| {
+        if (std.mem.eql(u8, sh, "settings")) a.mobile.sheet = .settings;
+        if (std.mem.eql(u8, sh, "new")) a.mobile.sheet = .new_session;
+        if (std.mem.eql(u8, sh, "write")) a.mobile.sheet = .write_dock;
+    }
+    if (init.environ_map.get("HARNESS_MOBILE_SPLIT")) |sp| {
+        a.mobile.split_mode = @import("ios_scroll.zig").SplitMode.parse(sp);
+    }
     try @import("native_menu.zig").install(app, &a);
     // The same window size the desktop reopens with, rather than a one-off
     // Nano size that visibly jumps when moving between the two apps.
@@ -46,9 +84,10 @@ pub fn main(init: std.process.Init) !void {
         .title = "Harness",
         .width = window_size.width,
         .height = window_size.height,
-        .min_width = 760,
-        .min_height = 480,
+        .min_width = if (mobile_flag) 320 else 760,
+        .min_height = if (mobile_flag) 480 else 480,
         .title_bar = .hidden,
+        .full_bleed = mobile_flag,
         .theme = theme.ui(nanoui.isDark()),
         .content = .{ .view = .init(&a, @import("view.zig").view) },
     });
