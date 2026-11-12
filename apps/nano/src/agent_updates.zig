@@ -163,6 +163,22 @@ pub const LastAction = struct {
     harness: []u8,
 };
 
+/// A completed notice gets five seconds; identical snapshots keep its deadline.
+/// Unfinished updates cancel the countdown, and a new completion starts fresh.
+pub const CompletionTimer = struct {
+    signature: ?u64 = null,
+    deadline: ?f64 = null,
+
+    pub fn update(t: *CompletionTimer, signature: ?u64, now: f64) ?f64 {
+        if (signature == null) {
+            t.* = .{};
+        } else if (t.signature != signature) {
+            t.* = .{ .signature = signature, .deadline = now + 5 };
+        }
+        return t.deadline;
+    }
+};
+
 pub const State = struct {
     gpa: Allocator,
     devices: std.ArrayList(*DeviceWatch) = .empty,
@@ -177,6 +193,7 @@ pub const State = struct {
     /// hidden while the visible set is unchanged; any new update, phase change
     /// or version brings it back.
     dismissed_signature: ?u64 = null,
+    completion_timer: CompletionTimer = .{},
 
     pub fn init(gpa: Allocator) State {
         return .{ .gpa = gpa };
@@ -320,7 +337,25 @@ pub fn tick(a: *App, now: f64) ?f64 {
             }
         }
     }
+    if (a.agent_updates.completion_timer.update(completedSignature(a), now)) |deadline| {
+        if (now >= deadline) {
+            dismiss(a);
+        } else {
+            next = if (next) |n| @min(n, deadline) else deadline;
+        }
+    }
     return next;
+}
+
+/// Only successful, finished notices expire. Keep actions and errors visible.
+fn completedSignature(a: *const App) ?u64 {
+    if (!hasVisible(a)) return null;
+    for (a.agent_updates.devices.items) |w| {
+        for (w.statuses) |st| {
+            if (st.phase.showUpdateNotice() and st.phase != .updated) return null;
+        }
+    }
+    return visibleSignature(a);
 }
 
 pub const VisibleRow = struct {
@@ -367,6 +402,7 @@ pub fn dismiss(a: *App) void {
     const s = &a.agent_updates;
     if (noticeCount(a) == 0) return;
     s.dismissed_signature = visibleSignature(a);
+    s.completion_timer = .{};
     s.expanded = false;
     s.reveal_tween = null;
     s.width_tween = null;
