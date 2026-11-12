@@ -7,6 +7,17 @@ pub fn build(b: *std.Build) void {
     // HTTPS with ALPN h2 for what the app asks the network itself (releases,
     // the edge); the engine's own socket is a local WebSocket (src/ws.zig).
     const http_zig = b.dependency("http_zig", .{ .target = target, .optimize = optimize }).module("http_zig");
+    // Retain the original native TeX AST/box engine and its embedded STIX
+    // glyph outlines. Cargo is a child of this build (the enclosing
+    // scripts/heavy-build.sh lock covers both compilers; never nest locks).
+    const rust_target = rustTarget(target.result);
+    const math = b.addSystemCommand(&.{ "cargo", "build", "--quiet", "--locked", "--release", "-j2", "--manifest-path" });
+    math.addFileArg(b.path("native_math/Cargo.toml"));
+    math.addArgs(&.{ "--target", rust_target });
+    math.addFileInput(b.path("native_math/Cargo.lock"));
+    math.addFileInput(b.path("native_math/src/lib.rs"));
+    const math_target = math.addPrefixedOutputDirectoryArg("--target-dir=", "native-math");
+    const math_library = math_target.path(b, b.fmt("{s}/release/{s}", .{ rust_target, if (target.result.os.tag == .windows) "harness_native_math.lib" else "libharness_native_math.a" }));
     // Harness's bundled fonts (assets/fonts), in a module that embeds them:
     // Geist isn't installed on most Macs.
     const font_files = b.addWriteFiles();
@@ -116,7 +127,16 @@ pub fn build(b: *std.Build) void {
     // And the app rules the phones share (apps/parity/vectors).
     opts.addOption([]const u8, "vectors_dir", b.root.joinString(b.allocator, "../parity/vectors") catch @panic("OOM"));
     tests.root_module.addOptions("parity_options", opts);
-    b.step("test", "Run harness-nano tests").dependOn(&b.addRunArtifact(tests).step);
+    const test_step = b.step("test", "Run harness-nano tests");
+    test_step.dependOn(&b.addRunArtifact(tests).step);
+    // Pure AST/box geometry, safety and native-ABI regressions from the
+    // original implementation remain part of the regular nano test gate.
+    const math_tests = b.addSystemCommand(&.{ "cargo", "test", "--quiet", "--locked", "-j2", "--manifest-path" });
+    math_tests.addFileArg(b.path("native_math/Cargo.toml"));
+    math_tests.addArgs(&.{ "--target", rust_target });
+    math_tests.addArg("--target-dir");
+    math_tests.addDirectoryArg(math_target);
+    test_step.dependOn(&math_tests.step);
 
     // `zig build snap -- scene.json out-dir`: the window drawn offscreen
     // from a made-up scene, a PNG per step asked for (src/snap.zig).
@@ -153,5 +173,17 @@ pub fn build(b: *std.Build) void {
     write_vectors.addArg(b.pathJoin(&.{ protocol, "requests.json" }));
     b.step("vectors", "Write protocol/desktop/requests.json").dependOn(&write_vectors.step);
     // Large UI artifacts must never use Zig's self-hosted backend.
-    inline for (.{ exe, tests, snap, profile, vectors }) |artifact| artifact.use_llvm = true;
+    inline for (.{ exe, tests, snap, profile, vectors }) |artifact| {
+        artifact.use_llvm = true;
+        artifact.root_module.addObjectFile(math_library);
+    }
+}
+
+fn rustTarget(target: std.Target) []const u8 {
+    return switch (target.os.tag) {
+        .macos => if (target.cpu.arch == .aarch64) "aarch64-apple-darwin" else "x86_64-apple-darwin",
+        .linux => if (target.cpu.arch == .aarch64) "aarch64-unknown-linux-gnu" else "x86_64-unknown-linux-gnu",
+        .windows => if (target.cpu.arch == .aarch64) "aarch64-pc-windows-msvc" else "x86_64-pc-windows-msvc",
+        else => @panic("native math needs a supported desktop Rust target"),
+    };
 }
