@@ -95,17 +95,19 @@ pub fn trailer(c: *ui.Context, a: *App, k: theme.Colors, chat_id: ?[]const u8, t
     const id = chat_id orelse return;
     const pending = @import("app_send_feedback.zig").active(a, id, t);
     const session = workspace.sessionOf(a.sessions.items, id);
+    const build_wait = @import("app_progress.zig").waitingSince(a, id);
     const now = a.nowMs();
-    const quiet = if (pending) |_| false else if (session) |s|
+    const quiet = if (pending != null or build_wait != null) false else if (session) |s|
         now - s.updated_ms > workspace.stale_ms
     else
         false;
-    if (pending == null and (session == null or session.?.status != .working or (quiet and !turnOpen(t)))) return;
+    if (pending == null and build_wait == null and (session == null or session.?.status != .working or (quiet and !turnOpen(t)))) return;
     // A pending question owns the surface, just as GPUI's QuestionPanel.
     for (t.entries.items) |e| for (e.parts.items) |p| {
         if (p.kind == .input and !p.resolved) return;
     };
-    const started = if (pending) |p| p.started_ms else session.?.started_ms;
+    const wait_label: ?[]const u8 = if (build_wait != null) "Waiting for build slot" else if (pending) |p| (if (p.delivery_pending) (if (p.waiting_for_attachments) "Waiting for attachments" else "Waiting for host") else null) else null;
+    const started: ?i64 = if (build_wait) |since| (std.math.mul(i64, since, 1000) catch now) else if (pending) |p| p.started_ms else session.?.started_ms;
     const elapsed = if (started) |start| @divTrunc(@max(now - start, 0), 1000) else 0;
     ui.key(c, "working-trailer");
     const box = ui.div(c).column().wFull().pt(16).gap(5).control();
@@ -115,7 +117,7 @@ pub fn trailer(c: *ui.Context, a: *App, k: theme.Colors, chat_id: ?[]const u8, t
         const row = ui.div(c).row().wFull().gap(8).itemsCenter();
         defer row.end();
         kit.snake(c, k);
-        ui.text(c, c.print("{s}…", .{word(id, elapsed)}), kit.style(c, 12, 18, .{ .color = k.muted }));
+        ui.text(c, wait_label orelse c.print("{s}…", .{word(id, elapsed)}), kit.style(c, 12, 18, .{ .color = k.muted }));
         var buf: [48]u8 = undefined;
         ui.text(c, c.print("{s}", .{elapsedLabel(&buf, elapsed)}), kit.style(c, 11, 18, .{ .color = k.faint }));
         if (quiet) {
@@ -123,7 +125,7 @@ pub fn trailer(c: *ui.Context, a: *App, k: theme.Colors, chat_id: ?[]const u8, t
             const updated = session.?.updated_ms;
             const silent = @divTrunc(@max(now - updated, 0), 1000);
             ui.text(c, c.print("· Waiting for the model · no update for {s}", .{elapsedLabel(&updated_buf, silent)}), kit.style(c, 11, 18, .{ .color = k.faint }));
-        } else if (live.now == null and live.plan == null and live.thought == null) {
+        } else if (wait_label == null and live.now == null and live.plan == null and live.thought == null) {
             // Before the turn reports a plan, tool or thought, say that it is
             // still deciding what to do without taking another row.
             ui.text(c, "· Working out the next step", kit.style(c, 11, 18, .{ .color = k.faint }));

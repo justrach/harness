@@ -18,7 +18,7 @@ pub fn install(app: *nanoui.App, a: *App) !void {
     });
 }
 
-fn viewItems(a: *App) [7]nanoui.MenuItem {
+pub fn viewItems(a: *App) [7]nanoui.MenuItem {
     return .{
         .{ .label = "Bigger Text", .accelerator = "Cmd+=", .click = .of(a, zoomIn) },
         .{ .label = "Smaller Text", .accelerator = "Cmd+-", .click = .of(a, zoomOut) },
@@ -90,6 +90,33 @@ fn pressClose(menu: *nanoui.Menu) bool {
         @as(objc.NSUInteger, 10), objc.CGPoint{}, @as(objc.NSUInteger, 1 << 20), @as(f64, 0), @as(objc.NSInteger, 0), @as(?objc.Object, null), objc.nsString("w"), objc.nsString("w"), objc.NO, @as(u16, 13),
     });
     return objc.msg(objc.BOOL, menu.ns, "performKeyEquivalent:", .{event});
+}
+
+test "deep native shortcuts Cmd W dismisses folder search before closing and returns typing to the composer" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const objc = nanoui.objc;
+    const pool = objc.Pool.push();
+    defer pool.pop();
+    _ = objc.msg(objc.Object, objc.class("NSApplication"), "sharedApplication", .{});
+    var h: @import("tests_ui_tab_strip.zig").Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.splitPane(.horizontal);
+    const strip = @import("view_tab_strip.zig");
+    strip.open(&h.a, .folder, strip.active(&h.a), .{ .x = 600, .y = 5, .w = 100, .h = 32 });
+    h.t.settle(1);
+    h.t.typeText("field");
+    const items = windowItems(&h.a);
+    const menu = try nanoui.Menu.create(std.testing.allocator, "Fixture", &.{.{ .role = .window_menu, .submenu = &items }});
+    defer menu.destroy();
+    try std.testing.expect(pressClose(menu));
+    h.t.settle(1);
+    try std.testing.expect(h.a.tabs.layout() == null);
+    try std.testing.expect(h.a.view.strip.menu == null);
+    try std.testing.expectEqualStrings("a", h.a.selected.?);
+    h.t.typeText("After native close");
+    try std.testing.expectEqualStrings("After native close", h.a.composer.text());
+    try std.testing.expectEqualStrings("field", h.a.view.strip.query.text());
 }
 
 test "native Cmd+W closes a split pane, then a tab, without closing the app window" {

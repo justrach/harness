@@ -877,6 +877,38 @@ pub const Store = struct {
         s.write("spaceFilter", .null);
     }
 
+    pub fn projectFolderOverride(s: *const Store, device: []const u8) ?[]const u8 {
+        const root = s.doc.get("projectFoldersByDevice") orelse return null;
+        if (root != .object) return null;
+        const pref = root.object.get(device) orelse return null;
+        if (pref != .object) return null;
+        const value = pref.object.get("overridePath") orelse return null;
+        if (value != .string or !@import("project_paths.zig").valid(value.string)) return null;
+        return value.string;
+    }
+
+    /// Only confirmation changes a host's override; resetting preserves its learned history.
+    pub fn setProjectFolderOverride(s: *Store, device: []const u8, path: ?[]const u8) bool {
+        if (device.len == 0) return false;
+        if (path) |value| if (!@import("project_paths.zig").valid(value)) return false;
+        if (s.doc_arena == null) s.doc_arena = .init(s.gpa);
+        const a = s.doc_arena.?.allocator();
+        var root = s.doc.get("projectFoldersByDevice") orelse json.Value{ .object = .empty };
+        if (root != .object) root = .{ .object = .empty };
+        var pref = root.object.get(device) orelse json.Value{ .object = .empty };
+        if (pref != .object) pref = .{ .object = .empty };
+        if (path) |value| {
+            const copy = a.dupe(u8, std.mem.trim(u8, value, " \t\r\n")) catch return false;
+            pref.object.put(a, "overridePath", .{ .string = copy }) catch return false;
+        } else {
+            _ = pref.object.orderedRemove("overridePath");
+        }
+        root.object.put(a, a.dupe(u8, device) catch return false, pref) catch return false;
+        s.remember("projectFoldersByDevice", root);
+        s.write("projectFoldersByDevice", root);
+        return true;
+    }
+
     /// Record only acknowledged project creation, as the desktop does.
     pub fn recordProjectFolder(s: *Store, device: []const u8, path: []const u8, spaces: []const @import("workspace.zig").Space) void {
         if (s.doc_arena == null) s.doc_arena = .init(s.gpa);

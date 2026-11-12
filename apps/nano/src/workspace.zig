@@ -6,6 +6,7 @@ const std = @import("std");
 const json = std.json;
 const Allocator = std.mem.Allocator;
 const rules = @import("rules.zig");
+const alerts = @import("session_alert.zig");
 
 pub const Space = struct {
     id: []const u8,
@@ -77,13 +78,17 @@ pub const Chat = struct {
     }
 };
 
-pub const Status = enum { idle, working, awaiting_input, errored };
+pub const Status = alerts.Status;
 
 pub const Session = struct {
     chat_id: []const u8,
     status: Status,
     started_ms: ?i64 = null,
     updated_ms: i64 = 0,
+    /// Durable success marker, retained while a queued follow-up runs.
+    last_completed_turn: ?[]const u8 = null,
+    /// A peer/room-only result is coordination, not a person's completion.
+    last_completed_peer_only: bool = false,
 };
 
 /// A computer on the account (`WatchDevices`): the header's "@ name".
@@ -104,6 +109,9 @@ pub fn List(comptime T: type, comptime parse: fn (Allocator, json.ObjectMap) ?T)
         arena: std.heap.ArenaAllocator,
         retired: std.ArrayList(std.heap.ArenaAllocator) = .empty,
         items: []T = &.{},
+        /// Session notification state must outlive whole-list arena replacement,
+        /// and die with this App rather than leak into other windows/accounts.
+        notification_baselines: if (T == Session) alerts.Observer else void = if (T == Session) .{} else {},
 
         pub fn init(gpa: Allocator) Self {
             return .{ .arena = .init(gpa) };
@@ -124,6 +132,7 @@ pub fn List(comptime T: type, comptime parse: fn (Allocator, json.ObjectMap) ?T)
         }
 
         pub fn deinit(l: *Self) void {
+            if (T == Session) l.notification_baselines.deinit(l.arena.child_allocator);
             l.reap();
             l.retired.deinit(l.arena.child_allocator);
             l.arena.deinit();
@@ -332,6 +341,8 @@ fn parseSession(a: Allocator, o: json.ObjectMap) ?Session {
     const started = ms(a, o, "startedAt");
     return .{
         .chat_id = str(a, o, "chatId") orelse return null,
+        .last_completed_turn = str(a, o, "lastCompletedTurn"),
+        .last_completed_peer_only = if (o.get("lastCompletedPeerOnly")) |v| v == .bool and v.bool else false,
         .updated_ms = ms(a, o, "updatedAt"),
         .started_ms = if (started == 0) null else started,
         .status = if (std.mem.eql(u8, s, "working"))
@@ -608,4 +619,21 @@ test "the row's own branch is kept apart from the source context's" {
     const ch = parseChat(a, v.object).?;
     try std.testing.expectEqualStrings("feat/footer", ch.row_branch.?);
     try std.testing.expect(ch.branch == null);
+}
+
+test "retention499 session decoding retains durable completion origin and old host defaults" {
+    var sessions: Sessions = .init(std.testing.allocator);
+    defer sessions.deinit();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const value = try json.parseFromSliceLeaky(json.Value, arena.allocator(),
+        \\[{"chatId":"peer","status":"idle","lastCompletedTurn":"result-a","lastCompletedPeerOnly":true},{"chatId":"human","status":"working","lastCompletedTurn":"result-b"},{"chatId":"old-host","status":"idle"}]
+    , .{});
+    try sessions.replace(value);
+    try std.testing.expectEqualStrings("result-a", sessions.items[0].last_completed_turn.?);
+    try std.testing.expect(sessions.items[0].last_completed_peer_only);
+    try std.testing.expectEqualStrings("result-b", sessions.items[1].last_completed_turn.?);
+    try std.testing.expect(!sessions.items[1].last_completed_peer_only);
+    try std.testing.expect(sessions.items[2].last_completed_turn == null);
+    try std.testing.expect(!sessions.items[2].last_completed_peer_only);
 }

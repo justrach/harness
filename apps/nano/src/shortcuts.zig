@@ -165,6 +165,7 @@ pub fn fromShortcut(buf: []u8, s: ui.Shortcut) ?[]const u8 {
     if (!s.cmd and !s.ctrl and !s.alt) return null;
     const S = ui.Shortcut;
     const key: []const u8 = switch (s.key) {
+        ' ' => "space",
         S.tab => "tab",
         S.enter => "enter",
         S.escape => return null,
