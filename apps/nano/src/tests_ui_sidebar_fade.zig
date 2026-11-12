@@ -57,6 +57,17 @@ test "retention 427 native workspace fade masks complete rows over a two-tone un
         try t.init(testing.allocator, .init(&scene, Scene.view), .{ .width = 224, .height = 260, .scale = scale, .dark = true, .theme = theme.ui(true) });
         defer t.deinit();
         t.settle(1);
+        if (@import("builtin").os.tag == .windows) {
+            // Wait for the lazy DirectWrite initialization before overriding
+            // its system LCD setting; the initial zero-opacity frame has not
+            // rasterized the row text yet. Compare grayscale on both sides:
+            // a transparent group's glyphs cannot use opaque-only ClearType.
+            try testing.expect(t.text.atlas.native.factory != null);
+            t.text.atlas.native.cleartype = false;
+            t.text.atlas.reset();
+            t.settle(0.2);
+            try testing.expect(!t.text.atlas.native.cleartype);
+        }
         var scroller: ?u64 = null;
         for (t.ctx.nodes.items) |node| if (node.style.scroll and node.style.max_height == 260) {
             scroller = node.id;
