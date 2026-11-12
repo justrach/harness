@@ -47,7 +47,11 @@ pub const Block = union(enum) {
     table: struct { header: []const Inline, rows: []const []const Inline },
 };
 
+/// Test-only work counter: performance regressions assert parsing work, not timings.
+pub var test_parse_calls: usize = 0;
+
 pub fn parse(arena: std.mem.Allocator, src: []const u8, pal: Palette) []const Block {
+    if (@import("builtin").is_test) test_parse_calls += 1;
     var p: Parser = .{ .arena = arena, .pal = pal };
     p.run(src) catch {};
     return p.blocks.items;

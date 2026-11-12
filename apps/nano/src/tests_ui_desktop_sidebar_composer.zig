@@ -776,6 +776,56 @@ test "zeron Home agent-update island morphs between pill and expandable card and
     try testing.expectEqualStrings("claude-code", last.harness);
 }
 
+test "Home agent-update island dismisses with its close button and returns only when the updates change" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    const devs = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"synthetic-device","name":"Synthetic Mac Studio","online":true}]
+    , .{});
+    defer devs.deinit();
+    try h.a.devices.replace(devs.value);
+    if (h.a.device_id) |old| h.a.gpa.free(old);
+    h.a.device_id = try h.a.gpa.dupe(u8, "synthetic-device");
+
+    const updates = @import("agent_updates.zig");
+    const updated =
+        \\[{"harness":"claude-code","installedVersion":"2.1.322","latestVersion":"2.1.322","phase":"updated"},
+        \\ {"harness":"pi","installedVersion":"1.5.2","latestVersion":"1.5.2","phase":"updated"},
+        \\ {"harness":"opencode","installedVersion":"1.4.15","latestVersion":"1.4.15","phase":"updated"}]
+    ;
+    try updates.setTestStatuses(&h.a, "synthetic-device", true, updated);
+    h.t.settle(1);
+    h.t.frame();
+    try testing.expect(h.t.hasText("3 agents updated \u{00b7} Synthetic Mac Studio"));
+    const pill = h.a.agent_updates.card_rect orelse return error.MissingUpdatePill;
+    h.snap("desktop-agent-updates-dismiss-before");
+
+    // The close button sits at the pill's right edge (1px border, 8px trailing, 24px button).
+    h.t.click(pill.x + pill.w - 1 - 8 - 12, pill.y + pill.h / 2);
+    h.t.settle(1);
+    h.t.frame();
+    try testing.expect(!h.t.hasText("3 agents updated \u{00b7} Synthetic Mac Studio"));
+    try testing.expect(!h.a.agent_updates.expanded);
+    try testing.expect(!updates.hasVisible(&h.a));
+    h.snap("desktop-agent-updates-dismiss-after");
+
+    // The same statuses arriving again (the engine re-sends its snapshot) stay dismissed.
+    try updates.setTestStatuses(&h.a, "synthetic-device", true, updated);
+    h.t.settle(1);
+    h.t.frame();
+    try testing.expect(!updates.hasVisible(&h.a));
+
+    // A new update changes what is visible, so the island comes back.
+    try updates.setTestStatuses(&h.a, "synthetic-device", true,
+        \\[{"harness":"claude-code","installedVersion":"2.1.322","latestVersion":"2.1.330","phase":"available","canApply":true}]
+    );
+    h.t.settle(1);
+    h.t.frame();
+    try testing.expect(updates.hasVisible(&h.a));
+    try testing.expect(h.t.hasText("Claude Code 2.1.330 available \u{00b7} Synthetic Mac Studio"));
+}
+
 test "desktop 3-pane horizontal split contains tool rows, question chips, and session footer within each pane" {
     var h: Harness = undefined;
     try h.init(false);
