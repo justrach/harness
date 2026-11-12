@@ -356,6 +356,7 @@ pub const App = struct {
     selected: ?[]u8 = null,
     space: ?[]u8 = null,
     transcript: Transcript,
+    markdown_cache: @import("markdown_cache.zig").Cache = .{},
     /// UI-only feedback until the engine echoes a locally submitted message.
     pending_sends: std.ArrayList(*@import("app_send_feedback.zig").Pending) = .empty,
     /// Full tool output, keyed by its owned sidecar reference.
@@ -526,6 +527,7 @@ pub const App = struct {
     }
 
     pub fn deinit(a: *App) void {
+        a.markdown_cache.deinit();
         @import("text_buffer.zig").deinit(&a.composer);
         @import("app_surface.zig").deinit(a);
         // Live callbacks must be cancelled before their engine is destroyed.

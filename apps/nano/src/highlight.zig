@@ -210,8 +210,12 @@ pub const State = struct {
     depth: u8 = 0,
 };
 
+/// Test-only work counter for unchanged transcript redraws.
+pub var test_line_calls: usize = 0;
+
 /// Spans coloring one `line` of code in the language `lang` names.
 pub fn line(arena: std.mem.Allocator, src: []const u8, lang: []const u8, pal: Palette, st: *State) []const Span {
+    if (@import("builtin").is_test) test_line_calls += 1;
     const l = language(lang) orelse return &.{};
     const p: Paint = .init(arena, src.len);
     paint(p, src, l, st);

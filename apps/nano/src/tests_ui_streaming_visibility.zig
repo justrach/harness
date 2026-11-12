@@ -120,7 +120,7 @@ test "an unfocused window slows loader redraws and an off-screen spinner schedul
     defer t.deinit();
     t.frame();
     const focused = t.ctx.frame_in orelse return error.LoaderNotScheduled;
-    try testing.expect(focused <= 1.0 / 15.0 + 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), focused, 0.001);
 
     t.ctx.input.window_active = false;
     t.frame();

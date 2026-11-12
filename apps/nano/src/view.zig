@@ -55,6 +55,7 @@ const cluster_x: f32 = 88;
 const cluster_w: f32 = 24 * 3 + 8 + 2;
 
 pub fn view(a: *App, c: *ui.Context) void {
+    a.markdown_cache.beginFrame();
     @import("frame_profile.zig").beginPass();
     a.view.in_pre_tree = true;
     defer a.view.in_pre_tree = false;

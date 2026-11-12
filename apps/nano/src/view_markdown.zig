@@ -10,7 +10,8 @@ const nanoui = @import("nanoui");
 const ui = nanoui.ui;
 const theme = @import("theme.zig");
 const md = @import("markdown.zig");
-const highlight = @import("highlight.zig");
+const cache_mod = @import("markdown_cache.zig");
+var active_cache: ?*cache_mod.Cache = null;
 const kit = @import("view_kit.zig");
 const icons = @import("icons.zig");
 const veil_mod = @import("veil.zig");
@@ -67,6 +68,9 @@ pub fn withLinksVeil(
     row_veil: ?*veil_mod.RowVeil,
     streaming: bool,
 ) void {
+    const old_cache = active_cache;
+    active_cache = &a.markdown_cache;
+    defer active_cache = old_cache;
     const old_owner = link_owner;
     const old_veil = active_veil;
     const old_streaming = active_streaming;
@@ -92,7 +96,8 @@ pub fn markdown(c: *ui.Context, colors: theme.Colors, src: []const u8) void {
     k = colors;
     body = kit.style(c, 15, 22.5, .{ .wrap = true });
     const src_in = if (active_streaming) veil_mod.balanceStreamingMarkdown(c.alloc(), src) else src;
-    const blocks = md.parse(c.alloc(), src_in, .{ .code = k.accent, .code_bg = k.accent_wash, .link = k.text, .muted = k.muted });
+    const palette: md.Palette = .{ .code = k.accent, .code_bg = k.accent_wash, .link = k.text, .muted = k.muted };
+    const blocks = if (active_cache) |cache| cache.parse(c.gpa, c.alloc(), src_in, palette) else md.parse(c.alloc(), src_in, palette);
     const col = ui.div(c).column().wFull();
     c.node(col.index).style.selectable = true;
     defer col.end();
@@ -314,7 +319,6 @@ fn codeBlock(c: *ui.Context, lang: []const u8, src: []const u8) void {
     const lines = ui.div(c).column().wFull().px(12).py(10).gap(0);
     defer lines.end();
     const st = kit.style(c, 12.5, 18, .{ .mono = true, .wrap = true, .color = k.text });
-    var in_block: highlight.State = .{};
     const trimmed_src = std.mem.trimEnd(u8, src, "\n");
     const code_veils: []const veil_mod.VeilSpan = if (active_veil) |v| blk: {
         const vs = v.advance(c.gpa, c.alloc(), current_elem_ix, trimmed_src, veil_now_ms);
@@ -322,9 +326,10 @@ fn codeBlock(c: *ui.Context, lang: []const u8, src: []const u8) void {
         break :blk vs;
     } else &.{};
     var line_offset: usize = 0;
-    var it = std.mem.splitScalar(u8, trimmed_src, '\n');
-    while (it.next()) |l| {
-        const raw_spans = highlight.line(c.alloc(), l, lang, pal, &in_block);
+    const highlighted = if (active_cache) |cache| cache.highlight(c.gpa, c.alloc(), trimmed_src, lang, pal) else cache_mod.highlightLines(c.alloc(), trimmed_src, lang, pal);
+    for (highlighted) |line| {
+        const l = line.text;
+        const raw_spans = line.spans;
         const spans: []const ui.Span = if (code_veils.len > 0 and l.len > 0) blk: {
             const local = veil_mod.sliceSpans(c.alloc(), code_veils, line_offset, line_offset + l.len);
             break :blk veil_mod.applyVeil(c.alloc(), l.len, raw_spans, local, st.color orelse k.text);
