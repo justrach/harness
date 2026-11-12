@@ -6,10 +6,11 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{ .default_target = if (b.graph.host.result.os.tag == .windows) .{ .abi = .msvc } else .{} });
     const optimize = b.standardOptimizeOption(.{});
     const loader = b.option([]const u8, "webview2-loader", "Path to the target's WebView2Loader.dll");
+    const portable = b.option(bool, "portable", "Use portable text and CPU rendering for cross-platform regression tests") orelse false;
     const nanoui_dep = if (target.result.os.tag == .windows)
-        b.dependency("nanoui", .{ .target = target, .optimize = optimize, .webview2 = if (loader != null) "none" else "sdk" })
+        b.dependency("nanoui", .{ .target = target, .optimize = optimize, .portable = portable, .webview2 = if (loader != null) "none" else "sdk" })
     else
-        b.dependency("nanoui", .{ .target = target, .optimize = optimize });
+        b.dependency("nanoui", .{ .target = target, .optimize = optimize, .portable = portable });
     const nanoui = nanoui_dep.module("nanoui");
     if (target.result.os.tag == .windows) {
         if (loader) |path| b.getInstallStep().dependOn(&b.addInstallBinFile(.{ .cwd_relative = path }, "WebView2Loader.dll").step);
@@ -133,7 +134,13 @@ pub fn build(b: *std.Build) void {
         .strip = optimize != .debug,
         .imports = imports,
     }) });
-    if (target.result.os.tag == .windows) exe.subsystem = .windows;
+    if (target.result.os.tag == .windows) {
+        exe.subsystem = .windows;
+        // Rust's native-math archive brings the MSVC CRT. Keep its normal
+        // main startup while suppressing the console window; the GUI CRT
+        // default would instead require a WinMain entry point.
+        if (target.result.abi == .msvc) exe.entry = .{ .symbol_name = "mainCRTStartup" };
+    }
     b.installArtifact(exe);
     const run = b.addRunArtifact(exe);
     run.addPassthruArgs();
