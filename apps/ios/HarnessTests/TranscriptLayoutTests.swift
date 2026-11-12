@@ -11,6 +11,7 @@ final class TranscriptLayoutTests: XCTestCase {
         let folds = ToolGroupFolds()
         var identity = UUID()
         var composerHeight: CGFloat = 64
+        var surfaceWidth: CGFloat?
         var dynamicTypeSize: DynamicTypeSize = .large
         var useEditor = false
         var draft = ""
@@ -32,6 +33,7 @@ final class TranscriptLayoutTests: XCTestCase {
                 }
             }
             .environment(\.dynamicTypeSize, harness.dynamicTypeSize)
+            .frame(width: harness.surfaceWidth)
         }
     }
 
@@ -48,11 +50,12 @@ final class TranscriptLayoutTests: XCTestCase {
         store.setEntries(BenchRunner.syntheticEntries(turns: turns))
         harness = Harness(store: store)
         harness.useEditor = useEditor
+        harness.surfaceWidth = useEditor ? nil : size.width
         let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first!
         window = UIWindow(windowScene: scene)
         window.frame = useEditor ? scene.screen.bounds : CGRect(origin: .zero, size: size)
         window.rootViewController = UIHostingController(rootView: Surface(harness: harness)
-            .frame(width: useEditor ? nil : size.width, height: useEditor ? nil : size.height))
+            .frame(height: useEditor ? nil : size.height))
         window.makeKeyAndVisible()
         if waitForLayout { await settle() }
     }
@@ -719,6 +722,202 @@ final class TranscriptLayoutTests: XCTestCase {
             await settle()
             assertTailVisible()
         }
+    }
+
+    func testFlatDuoSidebarOpeningReflowsMarkdownRowsWithinNarrowerColumn() async {
+        await mount(turns: 4, size: CGSize(width: 574, height: 844))
+        let table = harness.scroll.nativeScrollView as! TranscriptTableView
+
+        func wrappingTextViews(in root: UIView) -> [UITextView] {
+            if root is UIScrollView, !(root is UITableView), !(root is UITextView) {
+                // CodeBlockView wraps unwrapped code inside a horizontal ScrollView.
+                return []
+            }
+            var found: [UITextView] = []
+            if let tv = root as? UITextView { found.append(tv) }
+            for sub in root.subviews { found.append(contentsOf: wrappingTextViews(in: sub)) }
+            return found
+        }
+
+        // Open the 296pt flat Duo sidebar (+ 1pt divider) inside a 669pt inner display -> 372pt chat column.
+        harness.surfaceWidth = 372
+        window.frame.size.width = 372
+        await settle()
+
+        let realized = table.visibleCells.flatMap { wrappingTextViews(in: $0) }
+        XCTAssertFalse(realized.isEmpty)
+        for tv in realized where tv.bounds.width > 0 {
+            let rect = tv.convert(tv.bounds, to: table)
+            XCTAssertGreaterThanOrEqual(rect.minX, CoverLayout.standardPadding - 1.5,
+                "Markdown text view overflowed leading padding (\(rect.minX)) after sidebar opened")
+            XCTAssertLessThanOrEqual(rect.maxX, 372 - CoverLayout.standardPadding + 1.5,
+                "Markdown text view overflowed trailing padding (\(rect.maxX)) after sidebar opened")
+        }
+        assertTailVisible()
+    }
+
+    @Observable final class SidebarToggleState {
+        var shown = false
+    }
+
+    private struct ColdSidebarHost: View {
+        let state: SidebarToggleState
+        var body: some View {
+            HStack(spacing: 0) {
+                if state.shown {
+                    NavigationStack {
+                        List(0..<60, id: \.self) { i in
+                            HStack {
+                                Image(systemName: "sparkles")
+                                VStack(alignment: .leading) {
+                                    Text("Session \(i)")
+                                    Text("harness @ MacBook Pro").font(.caption)
+                                }
+                            }
+                        }
+                        .searchable(text: .constant(""))
+                    }
+                    .frame(width: DuoV3.sidebarWidth)
+                }
+                Color.clear
+            }
+        }
+    }
+
+    private struct WarmSidebarHost: View {
+        let state: SidebarToggleState
+        var body: some View {
+            HStack(spacing: 0) {
+                PrewarmedFlatSidebar(shown: state.shown, width: DuoV3.sidebarWidth) {
+                    NavigationStack {
+                        List(0..<60, id: \.self) { i in
+                            HStack {
+                                Image(systemName: "sparkles")
+                                VStack(alignment: .leading) {
+                                    Text("Session \(i)")
+                                    Text("harness @ MacBook Pro").font(.caption)
+                                }
+                            }
+                        }
+                        .searchable(text: .constant(""))
+                    }
+                }
+                Color.clear
+            }
+        }
+    }
+
+    func testPrewarmedFlatSidebarToggleIsFasterThanColdNavigationStackMount() async {
+        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first!
+        window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 669, height: 844)
+        window.makeKeyAndVisible()
+
+        let coldState = SidebarToggleState()
+        window.rootViewController = UIHostingController(rootView: ColdSidebarHost(state: coldState))
+        try? await Task.sleep(for: .milliseconds(150))
+        window.layoutIfNeeded()
+
+        let coldStart = ContinuousClock.now
+        for _ in 0..<6 {
+            coldState.shown.toggle()
+            window.rootViewController?.view.setNeedsLayout()
+            window.layoutIfNeeded()
+        }
+        let coldElapsed = coldStart.duration(to: .now)
+
+        let warmState = SidebarToggleState()
+        window.rootViewController = UIHostingController(rootView: WarmSidebarHost(state: warmState))
+        try? await Task.sleep(for: .milliseconds(150))
+        window.layoutIfNeeded()
+
+        let warmStart = ContinuousClock.now
+        for _ in 0..<6 {
+            warmState.shown.toggle()
+            window.rootViewController?.view.setNeedsLayout()
+            window.layoutIfNeeded()
+        }
+        let warmElapsed = warmStart.duration(to: .now)
+
+        let coldNs = Double(coldElapsed.components.seconds) * 1e9 + Double(coldElapsed.components.attoseconds) / 1e9
+        let warmNs = max(1, Double(warmElapsed.components.seconds) * 1e9 + Double(warmElapsed.components.attoseconds) / 1e9)
+        XCTAssertGreaterThan(coldNs / warmNs, 3.0,
+            "Prewarmed sidebar toggle (\(warmNs / 1e6)ms) must beat cold NavigationStack mount (\(coldNs / 1e6)ms) by >= 3x")
+    }
+
+    private final class TapProbeBox {
+        let button = UIButton(type: .system)
+        var tapCount = 0
+        init() {
+            button.accessibilityIdentifier = "probe-leading-toggle"
+        }
+    }
+
+    private struct TapProbeView: UIViewControllerRepresentable {
+        let box: TapProbeBox
+
+        func makeUIViewController(context: Context) -> UIViewController {
+            let vc = UIViewController()
+            vc.view.backgroundColor = .clear
+            box.button.frame = CGRect(x: 54, y: 14, width: 44, height: 44)
+            box.button.addAction(UIAction { [weak box] _ in box?.tapCount += 1 }, for: .touchUpInside)
+            vc.view.addSubview(box.button)
+            return vc
+        }
+
+        func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
+    }
+
+    func testHiddenPrewarmedFlatSidebarNeverInterceptsLeadingToolbarTouches() async {
+        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first!
+        window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 669, height: 844)
+        window.makeKeyAndVisible()
+
+        let state = SidebarToggleState()
+        state.shown = true
+        let probe = TapProbeBox()
+
+        struct Root: View {
+            let state: SidebarToggleState
+            let probe: TapProbeBox
+            var body: some View {
+                HStack(spacing: 0) {
+                    PrewarmedFlatSidebar(shown: state.shown, width: DuoV3.sidebarWidth) {
+                        NavigationStack {
+                            List(0..<30, id: \.self) { i in Text("Row \(i)") }
+                        }
+                    }
+                    TapProbeView(box: probe)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .ignoresSafeArea()
+                }
+            }
+        }
+
+        window.rootViewController = UIHostingController(rootView: Root(state: state, probe: probe))
+        try? await Task.sleep(for: .milliseconds(150))
+        window.layoutIfNeeded()
+
+        for expectedShown in [false, true, false, true, false] {
+            state.shown = expectedShown
+            window.rootViewController?.view.setNeedsLayout()
+            window.layoutIfNeeded()
+            try? await Task.sleep(for: .milliseconds(30))
+            window.layoutIfNeeded()
+
+            if !expectedShown {
+                // With sidebar closed (width 0), leading button sits at (76, 36) and MUST receive hit-test.
+                let pt = probe.button.convert(CGPoint(x: probe.button.bounds.midX, y: probe.button.bounds.midY), to: window)
+                XCTAssertEqual(pt.x, 76, accuracy: 1)
+                let hit = window.hitTest(pt, with: nil)
+                XCTAssertNotNil(hit)
+                XCTAssertTrue(hit === probe.button || (hit?.isDescendant(of: probe.button) ?? false),
+                    "Hidden PrewarmedFlatSidebar intercepted hitTest at \(pt): got \(String(describing: hit))")
+                probe.button.sendActions(for: .touchUpInside)
+            }
+        }
+        XCTAssertEqual(probe.tapCount, 3)
     }
 
 }

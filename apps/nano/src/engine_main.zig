@@ -243,7 +243,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const listen_addr = try net.IpAddress.parseIp4("127.0.0.1", port);
-    var server = try listen_addr.listen(io, .{ .reuse_address = true });
+    var server = try listen_addr.listen(io, .{ .reuse_address = false });
     defer server.deinit(io);
 
     std.log.info("harness-engine (zig): listening on ws://127.0.0.1:{d}", .{port});
@@ -290,7 +290,7 @@ pub fn main(init: std.process.Init) !void {
                 }
                 while (!ctx.host.stop_requested) {
                     var step: usize = 0;
-                    while (step < 25 and !ctx.host.stop_requested) : (step += 1) {
+                    while (step < 15 and !ctx.host.stop_requested) : (step += 1) {
                         if (ctx.host.sync_wake_seq.load(.acquire) != last_wake) break;
                         std.Io.sleep(ctx.io, .fromMilliseconds(100), .awake) catch return;
                     }
@@ -299,8 +299,11 @@ pub fn main(init: std.process.Init) !void {
                     if (ctx.host.syncFromEdgeRegistryUnlocked(ctx.io) and !ctx.host.stop_requested) {
                         ctx.host.prefetchRecentChatTailsUnlocked(ctx.io, 16);
                     }
+                    if (!ctx.host.stop_requested) {
+                        ctx.host.pollWatchedChatRoomsUnlocked(ctx.io);
+                    }
                     bot_tick_cycles += 1;
-                    if (bot_tick_cycles >= 24 and !ctx.host.stop_requested) {
+                    if (bot_tick_cycles >= 40 and !ctx.host.stop_requested) {
                         bot_tick_cycles = 0;
                         ctx.host.tickBotsUnlocked(ctx.io);
                     }

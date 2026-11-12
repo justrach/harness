@@ -12,6 +12,7 @@ const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const build_info = @import("build_info");
 const session_doc = @import("session_doc.zig");
+const loro_ffi = @import("loro_ffi.zig");
 const docs_store = @import("docs_store.zig");
 const acp_host = @import("acp_host.zig");
 const adapters_host = @import("adapters_host.zig");
@@ -19,7 +20,9 @@ const workspace_files_host = @import("workspace_files_host.zig");
 const git_host = @import("git_host.zig");
 const terminals_host = @import("terminals_host.zig");
 const registry_sync = @import("registry_sync.zig");
+const chat2_wire = @import("chat2_wire.zig");
 const chat2_client = @import("chat2_client.zig");
+const http_zig = @import("http_zig");
 const auth_host = @import("auth_host.zig");
 const agent_accounts_host = @import("agent_accounts_host.zig");
 const bots_host = @import("bots_host.zig");
@@ -586,6 +589,9 @@ pub const ChatRecord = struct {
     parent_chat_id: ?[]u8 = null,
     preview: ?[]u8 = null,
     harness_session_id: ?[]u8 = null,
+    harness_session_cwd: ?[]u8 = null,
+    local_graff_session_id: ?[]u8 = null,
+    checkout_id: ?[]u8 = null,
     source_context_json: ?[]u8 = null,
     activity_status: ?[]u8 = null,
     activity_started_at_ms: i64 = 0,
@@ -594,6 +600,7 @@ pub const ChatRecord = struct {
     last_message_at_ms: i64 = 0,
     last_prompt_at_ms: i64 = 0,
     last_seen_at_ms: i64 = 0,
+    room_gen: u32 = 2,
     chat_mode: bool = false,
     pinned: bool = false,
     archived: bool = false,
@@ -610,6 +617,9 @@ pub const ChatRecord = struct {
         if (self.parent_chat_id) |p| gpa.free(p);
         if (self.preview) |pr| gpa.free(pr);
         if (self.harness_session_id) |hs| gpa.free(hs);
+        if (self.harness_session_cwd) |hsc| gpa.free(hsc);
+        if (self.local_graff_session_id) |lgs| gpa.free(lgs);
+        if (self.checkout_id) |co| gpa.free(co);
         if (self.source_context_json) |sc| gpa.free(sc);
         if (self.activity_status) |a| gpa.free(a);
     }
@@ -872,6 +882,8 @@ pub const EngineHost = struct {
     hlc_clock: HlcClock = .{},
     pending_registry_ops: std.ArrayList([]u8) = .empty,
     dirty_tail_chats: std.ArrayList([]u8) = .empty,
+    seeded_checkpoints: std.StringHashMapUnmanaged(void) = .empty,
+    outbox_row_seq: u64 = 0,
     push_batch_seq: u64 = 0,
     outbound_seeded_gen: u64 = 0,
     bots_env_override: ?[]u8 = null,
@@ -976,6 +988,7 @@ pub const EngineHost = struct {
         self.clearPendingOutboundSync();
         self.pending_registry_ops.deinit(self.gpa);
         self.dirty_tail_chats.deinit(self.gpa);
+        self.seeded_checkpoints.deinit(self.gpa);
         for (self.devices.items) |*d| d.deinit(self.gpa);
         self.devices.deinit(self.gpa);
         for (self.spaces.items) |*s| s.deinit(self.gpa);
@@ -1071,6 +1084,9 @@ pub const EngineHost = struct {
         self.pending_registry_ops.clearRetainingCapacity();
         for (self.dirty_tail_chats.items) |cid| self.gpa.free(cid);
         self.dirty_tail_chats.clearRetainingCapacity();
+        var sc_it = self.seeded_checkpoints.iterator();
+        while (sc_it.next()) |e| self.gpa.free(e.key_ptr.*);
+        self.seeded_checkpoints.clearRetainingCapacity();
     }
 
     pub fn wakeBgSync(self: *EngineHost) void {
@@ -1217,12 +1233,18 @@ pub const EngineHost = struct {
         const model = c.model orelse defaultModelForHarness(c.harness);
         const reasoning = c.reasoning orelse "high";
         const sc = c.source_context_json orelse "null";
+        const synced_space_id: ?[]const u8 = if (c.space_id) |sid|
+            (if (std.mem.eql(u8, sid, "space-zig-default")) null else sid)
+        else
+            null;
+
+        const room_gen: u32 = if (c.room_gen >= 2) c.room_gen else 2;
 
         var aw: std.Io.Writer.Allocating = .init(self.gpa);
         errdefer aw.deinit();
         const w = &aw.writer;
         w.print(
-            "{{\"kind\":\"chats\",\"id\":{f},\"op\":\"upsert\",\"hlc\":{f},\"set\":{{\"id\":{f},\"deviceId\":{f},\"title\":{f},\"archived\":{},\"cwd\":{f},\"branch\":{f},\"sourceContext\":{s},\"lastMessagePreview\":{f},\"createdAt\":{d},\"harnessSessionId\":{f},\"spaceId\":{f},\"parentChatId\":{f}",
+            "{{\"kind\":\"chats\",\"id\":{f},\"op\":\"upsert\",\"hlc\":{f},\"set\":{{\"id\":{f},\"deviceId\":{f},\"title\":{f},\"archived\":{},\"roomGen\":{d},\"cwd\":{f},\"branch\":{f},\"sourceContext\":{s},\"lastMessagePreview\":{f},\"createdAt\":{d},\"harnessSessionId\":{f},\"harnessSessionCwd\":{f},\"checkoutId\":{f},\"spaceId\":{f},\"parentChatId\":{f}",
             .{
                 json.fmt(c.id, .{}),
                 json.fmt(hlc, .{}),
@@ -1230,13 +1252,16 @@ pub const EngineHost = struct {
                 json.fmt(c.device_id, .{}),
                 json.fmt(c.title, .{}),
                 c.archived,
+                room_gen,
                 json.fmt(c.cwd, .{}),
                 json.fmt(c.branch, .{}),
                 sc,
                 json.fmt(c.preview, .{}),
                 created_ms,
                 json.fmt(c.harness_session_id, .{}),
-                json.fmt(c.space_id, .{}),
+                json.fmt(c.harness_session_cwd, .{}),
+                json.fmt(c.checkout_id, .{}),
+                json.fmt(synced_space_id, .{}),
                 json.fmt(c.parent_chat_id, .{}),
             },
         ) catch {
@@ -1297,6 +1322,51 @@ pub const EngineHost = struct {
         self.enqueueOwnedRegistryOp(op_json);
     }
 
+    /// Emit a full `upsert` when `c` is owned by `self.device_id`, or a targeted field `update`
+    /// when `c` is owned by a remote peer (so Desktop's `deviceId`, `spaceId`, and `harnessSessionId`
+    /// are never clobbered when a follow-up turn is sent from `harness-nano`).
+    pub fn enqueueChatTurnProgressOp(self: *EngineHost, c: ChatRecord) void {
+        if (std.mem.eql(u8, c.device_id, self.device_id)) {
+            self.enqueueChatUpsertOp(c);
+            return;
+        }
+        if (!isValidEdgeRowId(c.id)) return;
+        var aw: std.Io.Writer.Allocating = .init(self.gpa);
+        defer aw.deinit();
+        const w = &aw.writer;
+        const room_gen: u32 = if (c.room_gen >= 2) c.room_gen else 2;
+        w.print("\"archived\":{},\"roomGen\":{d}", .{ c.archived, room_gen }) catch return;
+        if (c.last_message_at_ms > 0) w.print(",\"lastMessageAt\":{d}", .{c.last_message_at_ms}) catch return;
+        if (c.last_prompt_at_ms > 0) w.print(",\"lastPromptAt\":{d}", .{c.last_prompt_at_ms}) catch return;
+        if (c.preview) |pr| w.print(",\"lastMessagePreview\":{f}", .{json.fmt(pr, .{})}) catch return;
+        if (c.title) |t| w.print(",\"title\":{f}", .{json.fmt(t, .{})}) catch return;
+        self.enqueueFieldUpdateOp("chats", c.id, aw.written());
+    }
+
+    /// Sync `only_msg_id` (or all messages when `null`) into `doc.loro_handle` and enqueue the
+    /// resulting incremental Loro 1.13 binary CRDT delta into `DocsStore.outbox` for `POST /chat2/{id}/rows`.
+    pub fn enqueueDocLoroDeltaLocked(
+        self: *EngineHost,
+        chat_id: []const u8,
+        doc: *session_doc.SessionDoc,
+        only_msg_id: ?[]const u8,
+    ) void {
+        if (!isValidEdgeChatTailId(chat_id)) return;
+        const delta = doc.syncEntryToLoroDelta(self.gpa, only_msg_id) catch return;
+        defer self.gpa.free(delta);
+        if (delta.len == 0 or delta.len > 1024 * 1024 - 4096) return;
+        self.outbox_row_seq += 1;
+        var dev_buf: [128]u8 = undefined;
+        const safe_dev = sanitizeEdgeDeviceId(&dev_buf, self.device_id);
+        const batch_id = std.fmt.allocPrint(
+            self.gpa,
+            "{s}-r-{d}-{d}",
+            .{ safe_dev, self.nowMs(), self.outbox_row_seq },
+        ) catch return;
+        defer self.gpa.free(batch_id);
+        self.store.enqueueChatUpdate(chat_id, batch_id, delta) catch {};
+    }
+
     pub fn enqueueSessionUpsertOp(self: *EngineHost, c: ChatRecord) void {
         if (!isValidEdgeRowId(c.id)) return;
         const now = self.nowMs();
@@ -1304,17 +1374,22 @@ pub const EngineHost = struct {
         defer self.gpa.free(hlc);
         const status = normalizeSessionWireStatus(c.activity_status orelse "idle");
         const updated_ms = if (c.activity_updated_at_ms > 0) c.activity_updated_at_ms else now;
+        var turn_buf: [32]u8 = undefined;
+        const turn_str: ?[]const u8 = if (self.turn_counter > 0)
+            std.fmt.bufPrint(&turn_buf, "turn-{d}", .{self.turn_counter}) catch null
+        else
+            null;
         const op_json = if (c.activity_started_at_ms > 0)
             std.fmt.allocPrint(
                 self.gpa,
-                "{{\"kind\":\"sessions\",\"id\":{f},\"op\":\"upsert\",\"hlc\":{f},\"set\":{{\"chatId\":{f},\"deviceId\":{f},\"status\":{f},\"lastCompletedTurn\":{d},\"lastCompletedPeerOnly\":false,\"startedAt\":{d},\"updatedAt\":{d}}}}}",
+                "{{\"kind\":\"sessions\",\"id\":{f},\"op\":\"upsert\",\"hlc\":{f},\"set\":{{\"chatId\":{f},\"deviceId\":{f},\"status\":{f},\"lastCompletedTurn\":{f},\"lastCompletedPeerOnly\":false,\"startedAt\":{d},\"updatedAt\":{d}}}}}",
                 .{
                     json.fmt(c.id, .{}),
                     json.fmt(hlc, .{}),
                     json.fmt(c.id, .{}),
                     json.fmt(c.device_id, .{}),
                     json.fmt(status, .{}),
-                    self.turn_counter,
+                    json.fmt(turn_str, .{}),
                     c.activity_started_at_ms,
                     updated_ms,
                 },
@@ -1322,14 +1397,14 @@ pub const EngineHost = struct {
         else
             std.fmt.allocPrint(
                 self.gpa,
-                "{{\"kind\":\"sessions\",\"id\":{f},\"op\":\"upsert\",\"hlc\":{f},\"set\":{{\"chatId\":{f},\"deviceId\":{f},\"status\":{f},\"lastCompletedTurn\":{d},\"lastCompletedPeerOnly\":false,\"updatedAt\":{d}}}}}",
+                "{{\"kind\":\"sessions\",\"id\":{f},\"op\":\"upsert\",\"hlc\":{f},\"set\":{{\"chatId\":{f},\"deviceId\":{f},\"status\":{f},\"lastCompletedTurn\":{f},\"lastCompletedPeerOnly\":false,\"updatedAt\":{d}}}}}",
                 .{
                     json.fmt(c.id, .{}),
                     json.fmt(hlc, .{}),
                     json.fmt(c.id, .{}),
                     json.fmt(c.device_id, .{}),
                     json.fmt(status, .{}),
-                    self.turn_counter,
+                    json.fmt(turn_str, .{}),
                     updated_ms,
                 },
             ) catch return;
@@ -1394,6 +1469,13 @@ pub const EngineHost = struct {
                 self.enqueueSessionUpsertOp(c);
                 if (self.docs.contains(c.id) or self.store.loadSnapshot(c.id) != null) {
                     self.markChatTailDirty(c.id);
+                    if ((self.store.snapshotCursor(c.id) orelse 0) == 0 and self.store.pendingOutboxCount(c.id) == 0) {
+                        if (self.getOrCreateDoc(c.id)) |doc| {
+                            if (doc.messages.items.len > 0) {
+                                self.enqueueDocLoroDeltaLocked(c.id, doc, null);
+                            }
+                        } else |_| {}
+                    }
                 }
             }
         }
@@ -1678,6 +1760,11 @@ pub const EngineHost = struct {
             if (self.store.loadSnapshot(chat_id)) |snap_bytes| {
                 doc.importSnapshot(snap_bytes) catch {};
             }
+            if (doc.messages.items.len == 0) {
+                if (self.lookupCachedTailJson(chat_id)) |tail_json| {
+                    _ = doc.mergeMessagesArrayJson(tail_json) catch {};
+                }
+            }
             doc.last_access_seq = self.doc_access_clock;
             gop.key_ptr.* = key_copy;
             gop.value_ptr.* = doc;
@@ -1696,6 +1783,12 @@ pub const EngineHost = struct {
     fn chatWorkspacePath(self: *const EngineHost, chat_id: []const u8) []const u8 {
         for (self.chats.items) |c| {
             if (std.mem.eql(u8, c.id, chat_id)) {
+                if (c.cwd) |cw| {
+                    if (cw.len > 0 and !std.mem.eql(u8, cw, "~") and !std.mem.eql(u8, cw, ".")) return cw;
+                }
+                if (c.harness_session_cwd) |hsc| {
+                    if (hsc.len > 0 and !std.mem.eql(u8, hsc, "~") and !std.mem.eql(u8, hsc, ".")) return hsc;
+                }
                 if (c.space_id) |sid| {
                     for (self.spaces.items) |s| {
                         if (std.mem.eql(u8, s.id, sid)) return s.path;
@@ -1704,6 +1797,116 @@ pub const EngineHost = struct {
             }
         }
         return ".";
+    }
+
+    fn homeDirEnvSlice() ?[]const u8 {
+        if (comptime @import("builtin").os.tag != .windows) {
+            if (std.c.getenv("HOME")) |p| {
+                const s = std.mem.span(p);
+                if (s.len > 0) return s;
+            }
+        }
+        return null;
+    }
+
+    fn expandAndValidateDirAlloc(self: *const EngineHost, raw_opt: ?[]const u8) ?[]u8 {
+        const raw = raw_opt orelse return null;
+        const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+        if (trimmed.len == 0 or std.mem.eql(u8, trimmed, ".") or std.mem.eql(u8, trimmed, "~")) return null;
+
+        const candidate = if (std.mem.startsWith(u8, trimmed, "~/")) blk: {
+            const home = homeDirEnvSlice() orelse return null;
+            break :blk std.fmt.allocPrint(self.gpa, "{s}/{s}", .{ std.mem.trimEnd(u8, home, "/"), trimmed[2..] }) catch return null;
+        } else self.gpa.dupe(u8, trimmed) catch return null;
+
+        if (self.io) |io| {
+            if (std.Io.Dir.cwd().openDir(io, candidate, .{})) |dir_val| {
+                var dir = dir_val;
+                dir.close(io);
+                return candidate;
+            } else |_| {
+                self.gpa.free(candidate);
+                return null;
+            }
+        }
+        return candidate;
+    }
+
+    /// Resolve a usable working directory for `chat_id` matching `crates/engine/src/lib.rs`
+    /// (`usable_cwd`): checks explicit `req_cwd` (rejecting `"~"` / `"."`), `c.cwd`,
+    /// `c.harness_session_cwd`, `c.source_context_json` (`cwd` / `repoRoot`), `c.space_id`,
+    /// local spaces matching `checkout_id` or repo basename, and finally `$HOME` / `"."`.
+    pub fn resolveUsableChatCwdAlloc(self: *const EngineHost, chat_id: []const u8, req_cwd: ?[]const u8) ![]u8 {
+        if (self.expandAndValidateDirAlloc(req_cwd)) |p| return p;
+
+        for (self.chats.items) |c| {
+            if (!std.mem.eql(u8, c.id, chat_id)) continue;
+            if (self.expandAndValidateDirAlloc(c.cwd)) |p| return p;
+            if (self.expandAndValidateDirAlloc(c.harness_session_cwd)) |p| return p;
+            if (c.source_context_json) |sc_raw| {
+                if (json.parseFromSlice(json.Value, self.gpa, sc_raw, .{})) |parsed_val| {
+                    var parsed = parsed_val;
+                    defer parsed.deinit();
+                    if (parsed.value == .object) {
+                        if (self.expandAndValidateDirAlloc(regOptStr(parsed.value.object, "cwd"))) |p| return p;
+                        if (self.expandAndValidateDirAlloc(regOptStr(parsed.value.object, "repoRoot"))) |p| return p;
+                    }
+                } else |_| {}
+            }
+            if (c.space_id) |sid| {
+                var target_checkout: ?[]const u8 = c.checkout_id;
+                var target_name: ?[]const u8 = null;
+                for (self.spaces.items) |s| {
+                    if (std.mem.eql(u8, s.id, sid)) {
+                        if (self.expandAndValidateDirAlloc(s.path)) |p| return p;
+                        if (target_checkout == null) target_checkout = s.checkout_id;
+                        target_name = s.name;
+                        break;
+                    }
+                }
+                if (target_checkout) |co| {
+                    for (self.spaces.items) |s2| {
+                        if (s2.checkout_id) |co2| {
+                            if (std.mem.eql(u8, co, co2)) {
+                                if (self.expandAndValidateDirAlloc(s2.path)) |p| return p;
+                            }
+                        }
+                    }
+                }
+                if (target_name) |tname| {
+                    for (self.spaces.items) |s2| {
+                        if (std.mem.eql(u8, s2.name, tname)) {
+                            if (self.expandAndValidateDirAlloc(s2.path)) |p| return p;
+                        }
+                    }
+                }
+            }
+            if (c.checkout_id) |co| {
+                for (self.spaces.items) |s2| {
+                    if (s2.checkout_id) |co2| {
+                        if (std.mem.eql(u8, co, co2)) {
+                            if (self.expandAndValidateDirAlloc(s2.path)) |p| return p;
+                        }
+                    }
+                }
+            }
+            break;
+        }
+
+        for (self.spaces.items) |s| {
+            if (!std.mem.eql(u8, s.id, "space-zig-default") and std.mem.eql(u8, s.device_id, self.device_id)) {
+                if (self.expandAndValidateDirAlloc(s.path)) |p| return p;
+            }
+        }
+        for (self.spaces.items) |s| {
+            if (std.mem.eql(u8, s.id, "space-zig-default")) {
+                if (self.expandAndValidateDirAlloc(s.path)) |p| return p;
+            }
+        }
+        if (homeDirEnvSlice()) |home| {
+            if (self.expandAndValidateDirAlloc(home)) |p| return p;
+        }
+        return self.gpa.dupe(u8, ".");
     }
 
     fn oneStreamItem(self: *EngineHost, checked: bool, json_text: []u8) !RpcOutcome {
@@ -2464,17 +2667,7 @@ pub const EngineHost = struct {
                 const chat_id = requireStr(obj, "chatId") orelse return .{ .err = .{ .bad_params = "missing chatId" } };
                 if (call_id != 0) try self.registerWatch(call_id, .doc_messages, chat_id);
                 const doc = try self.getOrCreateDoc(chat_id);
-                if (doc.messages.items.len == 0 and self.store.loadSnapshot(chat_id) == null) {
-                    if (self.lookupCachedTailJson(chat_id)) |tail_msgs_json| {
-                        return self.oneStreamItem(
-                            false,
-                            try std.fmt.allocPrint(
-                                self.gpa,
-                                "{{\"historyPending\":false,\"reset\":{s}}}",
-                                .{tail_msgs_json},
-                            ),
-                        );
-                    }
+                if (doc.messages.items.len == 0) {
                     if (self.bg_sync_enabled and call_id != 0 and self.live_ws_writer != null and self.auth.signed_in and self.auth.edge_url != null) {
                         if (self.spawnAsyncTailFetch(chat_id)) {
                             return self.oneStreamItem(
@@ -2483,16 +2676,13 @@ pub const EngineHost = struct {
                             );
                         }
                     }
-                    if (self.fetchEdgeChatTailMessagesJson(chat_id)) |tail_msgs_json| {
-                        return self.oneStreamItem(
-                            false,
-                            try std.fmt.allocPrint(
-                                self.gpa,
-                                "{{\"historyPending\":false,\"reset\":{s}}}",
-                                .{tail_msgs_json},
-                            ),
-                        );
-                    }
+                    _ = self.pullChat2RoomLocked(chat_id);
+                } else if (self.bg_sync_enabled and call_id != 0 and self.live_ws_writer != null and self.auth.signed_in and self.auth.edge_url != null) {
+                    // Local snapshot/tail is already warm: serve it in <0.1ms AND kick an async
+                    // chat2 delta catch-up (`?after={cursor}`) so Desktop/iOS rows appear immediately.
+                    _ = self.spawnAsyncTailFetch(chat_id);
+                } else if (!self.bg_sync_enabled and self.store.snapshotCursor(chat_id) == null and self.auth.signed_in and self.auth.edge_url != null) {
+                    _ = self.pullChat2RoomLocked(chat_id);
                 }
                 return self.oneStreamItem(false, try doc.toResetFrameJson(self.gpa));
             },
@@ -2546,15 +2736,74 @@ pub const EngineHost = struct {
                         const req_val = cmd_val.object.get("request") orelse return .{ .err = .{ .bad_params = "missing request" } };
                         if (req_val != .object) return .{ .err = .{ .bad_params = "request must be object" } };
                         const prompt = requireStr(req_val.object, "prompt") orelse return .{ .err = .{ .bad_params = "missing prompt" } };
-                        const cwd = requireStr(req_val.object, "cwd") orelse self.chatWorkspacePath(chat_id);
+                        const req_cwd_raw = requireStr(req_val.object, "cwd");
+                        const cwd = try self.resolveUsableChatCwdAlloc(chat_id, req_cwd_raw);
+                        defer self.gpa.free(cwd);
                         const req_model: ?[]const u8 = requireStr(req_val.object, "model");
 
                         if (try self.store.markCommandProcessed(msg_id, now)) {
+                            // If this chat was synced from Desktop/iOS and its room history hasn't
+                            // finished hydrating into `SessionDoc` yet, pull it BEFORE appending
+                            // the follow-up message so earlier turns never vanish or lose context.
+                            if ((doc.messages.items.len == 0 or doc.loro_handle == null or self.store.snapshotCursor(chat_id) == null) and self.io != null and self.auth.signed_in and self.auth.edge_url != null) {
+                                var should_hydrate = false;
+                                for (self.chats.items) |existing_c| {
+                                    if (std.mem.eql(u8, existing_c.id, chat_id)) {
+                                        if (existing_c.last_message_at_ms > 0 or existing_c.preview != null or !std.mem.eql(u8, existing_c.device_id, self.device_id)) {
+                                            should_hydrate = true;
+                                        }
+                                        break;
+                                    }
+                                }
+                                if (should_hydrate) {
+                                    _ = self.pullChat2RoomLocked(chat_id);
+                                }
+                            }
+
+                            var resume_sid: ?[]u8 = null;
+                            defer if (resume_sid) |s| self.gpa.free(s);
+                            var checkout_changed = false;
+                            var effective_model: ?[]const u8 = req_model;
+
                             for (self.chats.items) |*c| {
                                 if (std.mem.eql(u8, c.id, chat_id)) {
+                                    if (effective_model == null) effective_model = c.model;
+                                    if (c.cwd) |cc| {
+                                        if (cc.len > 0 and !std.mem.eql(u8, cc, "~") and !std.mem.eql(u8, cc, ".")) {
+                                            if (self.expandAndValidateDirAlloc(cc)) |valid_cc| {
+                                                defer self.gpa.free(valid_cc);
+                                                if (!std.mem.eql(u8, valid_cc, cwd)) checkout_changed = true;
+                                            } else {
+                                                checkout_changed = true;
+                                            }
+                                        }
+                                    }
+                                    if (!checkout_changed) {
+                                        if (c.local_graff_session_id) |lgs| {
+                                            if (lgs.len > 0) resume_sid = self.gpa.dupe(u8, lgs) catch null;
+                                        } else if (std.mem.eql(u8, c.harness, "graff")) {
+                                            if (c.harness_session_id) |hsid| {
+                                                const cwd_matches = if (c.harness_session_cwd) |hsc|
+                                                    std.mem.eql(u8, hsc, cwd)
+                                                else
+                                                    true;
+                                                if (hsid.len > 0 and cwd_matches) {
+                                                    resume_sid = self.gpa.dupe(u8, hsid) catch null;
+                                                }
+                                            }
+                                        }
+                                    }
+
                                     c.last_prompt_at_ms = now;
                                     c.last_message_at_ms = now;
                                     c.archived = false;
+                                    if (c.room_gen < 2) c.room_gen = 2;
+                                    if ((c.cwd == null or std.mem.eql(u8, c.cwd.?, "~") or std.mem.eql(u8, c.cwd.?, ".")) and cwd.len > 0 and !std.mem.eql(u8, cwd, ".")) {
+                                        if (self.gpa.dupe(u8, cwd)) |cw_copy| {
+                                            if (c.cwd) |old_cw| self.gpa.free(old_cw);
+                                            c.cwd = cw_copy;
+                                        } else |_| {}
+                                    }
                                     if (c.title == null or c.title.?.len == 0) {
                                         if (autoTitleFromPrompt(prompt, 64)) |t_slice| {
                                             if (self.gpa.dupe(u8, t_slice)) |t_copy| {
@@ -2575,7 +2824,7 @@ pub const EngineHost = struct {
                                     } else |_| {}
                                     c.activity_started_at_ms = now;
                                     c.activity_updated_at_ms = now;
-                                    self.enqueueChatUpsertOp(c.*);
+                                    self.enqueueChatTurnProgressOp(c.*);
                                     self.enqueueSessionUpsertOp(c.*);
                                     break;
                                 }
@@ -2589,6 +2838,11 @@ pub const EngineHost = struct {
                                 self.broadcastWatch(.sessions, null, sj) catch {};
                             } else |_| {}
 
+                            // Build `<earlier-conversation>` fallback BEFORE appending `msg_id` (or excluding `msg_id`)
+                            // so if `session/load` is skipped or fails, the new `graff` session receives full prior context.
+                            var seeded_prompt = try doc.buildEarlierConversationSeedAlloc(self.gpa, msg_id, prompt, checkout_changed);
+                            defer if (seeded_prompt) |sp| self.gpa.free(sp);
+
                             try doc.enqueueCommand(msg_id, "run", prompt, "completed", now);
                             try doc.appendUserMessage(msg_id, "part-u", prompt, now);
                             self.turn_counter += 1;
@@ -2596,8 +2850,6 @@ pub const EngineHost = struct {
                             defer self.gpa.free(asst_id);
                             try doc.beginAssistantMessage(asst_id, now);
                             try self.journal.recordBegin(chat_id, asst_id, now);
-                            self.markChatTailDirty(chat_id);
-                            self.wakeBgSync();
 
                             // Immediately push the user message + streaming assistant row to the UI before starting inference.
                             {
@@ -2605,6 +2857,236 @@ pub const EngineHost = struct {
                                 defer self.gpa.free(initial_frame);
                                 try self.broadcastWatch(.doc_messages, chat_id, initial_frame);
                             }
+
+                            if (self.bg_sync_enabled and self.io != null and self.graff_exe != null) {
+                                self.enqueueDocLoroDeltaLocked(chat_id, doc, null);
+                                if (doc.exportSnapshot(self.gpa)) |init_snap| {
+                                    defer self.gpa.free(init_snap);
+                                    self.store.saveSnapshot(chat_id, init_snap, now) catch {};
+                                } else |_| {}
+                                if (doc.toTailMessagesArrayJson(self.gpa, session_doc.tail_message_count)) |init_tail| {
+                                    _ = self.storeCachedTailInMemoryOwned(chat_id, init_tail, true);
+                                } else |_| {}
+                                self.markChatTailDirty(chat_id);
+                                self.saveRegistryCacheFile();
+                                self.wakeBgSync();
+                                const AsyncTurnWorker = struct {
+                                    host: *EngineHost,
+                                    io: std.Io,
+                                    chat_id: []u8,
+                                    asst_id: []u8,
+                                    cwd: []u8,
+                                    prompt: []u8,
+                                    resume_sid: ?[]u8,
+                                    seeded_prompt: ?[]u8,
+                                    graff_exe: []u8,
+                                    model: ?[]u8,
+                                    last_loro_sync_ms: i64 = 0,
+
+                                    fn isAborted(sdoc: *const session_doc.SessionDoc, aid: []const u8) bool {
+                                        for (sdoc.messages.items) |m| {
+                                            if (std.mem.eql(u8, m.id, aid)) {
+                                                if (m.status) |st| return std.mem.eql(u8, st, "aborted");
+                                                return false;
+                                            }
+                                        }
+                                        return true;
+                                    }
+
+                                    fn onLine(raw: *anyopaque, scratch: Allocator, line: []const u8) bool {
+                                        const ctx: *@This() = @ptrCast(@alignCast(raw));
+                                        const h = ctx.host;
+                                        h.mutex.lockUncancelable(ctx.io);
+                                        defer h.mutex.unlock(ctx.io);
+                                        if (h.stop_requested) return false;
+                                        const sdoc = h.docs.getPtr(ctx.chat_id) orelse return false;
+                                        if (isAborted(sdoc, ctx.asst_id)) return false;
+
+                                        const ev = acp_host.applyAcpLineLeaky(scratch, sdoc, ctx.asst_id, line) catch return false;
+                                        const frame = switch (ev) {
+                                            .text_delta => |d| if (d.total_len > d.delta.len)
+                                                sdoc.toAppendDeltaFrameJson(h.gpa, d.msg_id, d.part_id, d.delta, d.total_len) catch null
+                                            else
+                                                sdoc.toUpsertEntryFrameJson(h.gpa, ctx.asst_id) catch null,
+                                            .reasoning_delta, .tool_update, .turn_complete => sdoc.toUpsertEntryFrameJson(h.gpa, ctx.asst_id) catch null,
+                                            .ignored => null,
+                                        };
+                                        if (frame) |f| {
+                                            defer h.gpa.free(f);
+                                            h.broadcastWatch(.doc_messages, ctx.chat_id, f) catch {};
+                                        }
+                                        if (ev != .ignored) {
+                                            const cur_ms = h.nowMs();
+                                            if (cur_ms - ctx.last_loro_sync_ms >= 400) {
+                                                ctx.last_loro_sync_ms = cur_ms;
+                                                h.enqueueDocLoroDeltaLocked(ctx.chat_id, sdoc, ctx.asst_id);
+                                                h.wakeBgSync();
+                                            }
+                                        }
+                                        return ev != .turn_complete;
+                                    }
+
+                                    fn run(ctx: *@This()) void {
+                                        const h = ctx.host;
+                                        const gpa = h.gpa;
+                                        const io = ctx.io;
+                                        defer {
+                                            gpa.free(ctx.chat_id);
+                                            gpa.free(ctx.asst_id);
+                                            gpa.free(ctx.cwd);
+                                            gpa.free(ctx.prompt);
+                                            if (ctx.resume_sid) |rs| gpa.free(rs);
+                                            if (ctx.seeded_prompt) |sp| gpa.free(sp);
+                                            gpa.free(ctx.graff_exe);
+                                            if (ctx.model) |m| gpa.free(m);
+                                            gpa.destroy(ctx);
+                                            _ = h.bg_workers_active.fetchSub(1, .release);
+                                        }
+
+                                        const has_qualified_model = if (ctx.model) |m| (std.mem.indexOfScalar(u8, m, '/') != null) else false;
+                                        const argv_with_model = [_][]const u8{ ctx.graff_exe, "acp", "--yolo", "--model", ctx.model orelse "" };
+                                        const argv_default = [_][]const u8{ ctx.graff_exe, "acp", "--yolo" };
+                                        const argv: []const []const u8 = if (has_qualified_model) &argv_with_model else &argv_default;
+
+                                        var established_sid: ?[]u8 = null;
+                                        defer if (established_sid) |es| gpa.free(es);
+
+                                        const turn_failed = if (acp_host.runSubprocessTurnResumable(
+                                            gpa,
+                                            io,
+                                            argv,
+                                            ctx.cwd,
+                                            ctx.chat_id,
+                                            ctx.prompt,
+                                            .{
+                                                .resume_session_id = ctx.resume_sid,
+                                                .fallback_seeded_prompt = ctx.seeded_prompt,
+                                                .out_session_id = &established_sid,
+                                            },
+                                            ctx,
+                                            onLine,
+                                        )) |_| false else |_| true;
+
+                                        h.mutex.lockUncancelable(io);
+                                        defer h.mutex.unlock(io);
+                                        if (h.stop_requested) return;
+                                        const sdoc = h.docs.getPtr(ctx.chat_id) orelse return;
+                                        const aborted = isAborted(sdoc, ctx.asst_id);
+                                        if (!aborted) {
+                                            if (turn_failed) {
+                                                _ = sdoc.appendPartDelta(ctx.asst_id, "part-text", "text", "Processed by Zig engine.") catch {};
+                                            }
+                                            sdoc.setMessageStatus(ctx.asst_id, "complete") catch {};
+                                        }
+                                        h.journal.recordFinish(ctx.chat_id, ctx.asst_id, if (aborted) "aborted" else "complete") catch {};
+
+                                        const finish_now = h.nowMs();
+                                        h.enqueueDocLoroDeltaLocked(ctx.chat_id, sdoc, ctx.asst_id);
+                                        if (sdoc.exportSnapshot(gpa)) |snap| {
+                                            defer gpa.free(snap);
+                                            h.store.saveSnapshot(ctx.chat_id, snap, finish_now) catch {};
+                                        } else |_| {}
+
+                                        if (sdoc.toTailMessagesArrayJson(gpa, session_doc.tail_message_count)) |tail_arr| {
+                                            _ = h.storeCachedTailInMemoryOwned(ctx.chat_id, tail_arr, true);
+                                        } else |_| {}
+                                        h.markChatTailDirty(ctx.chat_id);
+
+                                        for (h.chats.items) |*c| {
+                                            if (std.mem.eql(u8, c.id, ctx.chat_id)) {
+                                                c.last_message_at_ms = finish_now;
+                                                if (established_sid) |esid| {
+                                                    if (gpa.dupe(u8, esid)) |es_copy| {
+                                                        if (c.local_graff_session_id) |old_lgs| gpa.free(old_lgs);
+                                                        c.local_graff_session_id = es_copy;
+                                                    } else |_| {}
+                                                    if (std.mem.eql(u8, c.device_id, h.device_id) or c.harness_session_id == null) {
+                                                        if (gpa.dupe(u8, esid)) |hs_copy| {
+                                                            if (c.harness_session_id) |old_hs| gpa.free(old_hs);
+                                                            c.harness_session_id = hs_copy;
+                                                        } else |_| {}
+                                                        if (gpa.dupe(u8, ctx.cwd)) |hsc_copy| {
+                                                            if (c.harness_session_cwd) |old_hsc| gpa.free(old_hsc);
+                                                            c.harness_session_cwd = hsc_copy;
+                                                        } else |_| {}
+                                                    }
+                                                }
+                                                if (sdoc.latestTextPreview(140)) |prev_slice| {
+                                                    if (gpa.dupe(u8, prev_slice)) |p_copy| {
+                                                        if (c.preview) |old_p| gpa.free(old_p);
+                                                        c.preview = p_copy;
+                                                    } else |_| {}
+                                                }
+                                                if (gpa.dupe(u8, "idle")) |idle_copy| {
+                                                    if (c.activity_status) |old_s| gpa.free(old_s);
+                                                    c.activity_status = idle_copy;
+                                                } else |_| {}
+                                                c.activity_updated_at_ms = finish_now;
+                                                h.enqueueChatTurnProgressOp(c.*);
+                                                h.enqueueSessionUpsertOp(c.*);
+                                                break;
+                                            }
+                                        }
+
+                                        if (sdoc.toResetFrameJson(gpa)) |reset_frame| {
+                                            defer gpa.free(reset_frame);
+                                            h.broadcastWatch(.doc_messages, ctx.chat_id, reset_frame) catch {};
+                                        } else |_| {}
+                                        if (h.chatsJson()) |chj| {
+                                            defer gpa.free(chj);
+                                            h.broadcastWatch(.chats, null, chj) catch {};
+                                        } else |_| {}
+                                        if (h.sessionsJson()) |sj| {
+                                            defer gpa.free(sj);
+                                            h.broadcastWatch(.sessions, null, sj) catch {};
+                                        } else |_| {}
+                                        h.saveRegistryCacheFile();
+                                        h.wakeBgSync();
+                                    }
+                                };
+
+                                const wctx = try self.gpa.create(AsyncTurnWorker);
+                                errdefer self.gpa.destroy(wctx);
+                                const cid_c = try self.gpa.dupe(u8, chat_id);
+                                errdefer self.gpa.free(cid_c);
+                                const aid_c = try self.gpa.dupe(u8, asst_id);
+                                errdefer self.gpa.free(aid_c);
+                                const cwd_c = try self.gpa.dupe(u8, cwd);
+                                errdefer self.gpa.free(cwd_c);
+                                const pr_c = try self.gpa.dupe(u8, prompt);
+                                errdefer self.gpa.free(pr_c);
+                                const ge_c = try self.gpa.dupe(u8, self.graff_exe.?);
+                                errdefer self.gpa.free(ge_c);
+                                const md_c = if (effective_model) |m| try self.gpa.dupe(u8, m) else null;
+                                errdefer if (md_c) |m| self.gpa.free(m);
+                                const rsid_c = resume_sid;
+                                resume_sid = null;
+                                const sp_c = seeded_prompt;
+                                seeded_prompt = null;
+
+                                wctx.* = .{
+                                    .host = self,
+                                    .io = self.io.?,
+                                    .chat_id = cid_c,
+                                    .asst_id = aid_c,
+                                    .cwd = cwd_c,
+                                    .prompt = pr_c,
+                                    .resume_sid = rsid_c,
+                                    .seeded_prompt = sp_c,
+                                    .graff_exe = ge_c,
+                                    .model = md_c,
+                                };
+                                _ = self.bg_workers_active.fetchAdd(1, .acquire);
+                                if (std.Thread.spawn(.{}, AsyncTurnWorker.run, .{wctx})) |th| {
+                                    th.detach();
+                                } else |_| {
+                                    AsyncTurnWorker.run(wctx);
+                                }
+                                return .{ .unary_json = try self.gpa.dupe(u8, "{\"queued\":true}") };
+                            }
+
+                            var established_sync_sid: ?[]u8 = null;
+                            defer if (established_sync_sid) |es| self.gpa.free(es);
 
                             if (self.io != null and self.graff_exe != null) {
                                 const StreamCtx = struct {
@@ -2615,37 +3097,44 @@ pub const EngineHost = struct {
                                     /// Lean Theorem `incremental_strictly_smaller_with_history`:
                                     /// emit O(|delta|) `toAppendDeltaFrameJson` once the part exists on the client,
                                     /// and `toUpsertEntryFrameJson` when a new part starts.
-                                    fn onChunk(raw: *anyopaque, ev: acp_host.AcpEvent) void {
+                                    fn onLine(raw: *anyopaque, scratch: Allocator, line: []const u8) bool {
                                         const ctx: *@This() = @ptrCast(@alignCast(raw));
+                                        const ev = acp_host.applyAcpLineLeaky(scratch, ctx.sdoc, ctx.asst, line) catch return false;
                                         const frame = switch (ev) {
                                             .text_delta => |d| if (d.total_len > d.delta.len)
-                                                ctx.sdoc.toAppendDeltaFrameJson(ctx.host.gpa, d.msg_id, d.part_id, d.delta, d.total_len) catch return
+                                                ctx.sdoc.toAppendDeltaFrameJson(ctx.host.gpa, d.msg_id, d.part_id, d.delta, d.total_len) catch null
                                             else
-                                                ctx.sdoc.toUpsertEntryFrameJson(ctx.host.gpa, ctx.asst) catch return,
-                                            .reasoning_delta, .tool_update, .turn_complete => ctx.sdoc.toUpsertEntryFrameJson(ctx.host.gpa, ctx.asst) catch return,
-                                            .ignored => return,
+                                                ctx.sdoc.toUpsertEntryFrameJson(ctx.host.gpa, ctx.asst) catch null,
+                                            .reasoning_delta, .tool_update, .turn_complete => ctx.sdoc.toUpsertEntryFrameJson(ctx.host.gpa, ctx.asst) catch null,
+                                            .ignored => null,
                                         };
-                                        defer ctx.host.gpa.free(frame);
-                                        ctx.host.broadcastWatch(.doc_messages, ctx.cid, frame) catch {};
+                                        if (frame) |f| {
+                                            defer ctx.host.gpa.free(f);
+                                            ctx.host.broadcastWatch(.doc_messages, ctx.cid, f) catch {};
+                                        }
+                                        return ev != .turn_complete;
                                     }
                                 };
                                 var sctx = StreamCtx{ .host = self, .cid = chat_id, .asst = asst_id, .sdoc = doc };
-                                const has_qualified_model = if (req_model) |m| (std.mem.indexOfScalar(u8, m, '/') != null) else false;
-                                const argv_with_model = [_][]const u8{ self.graff_exe.?, "acp", "--yolo", "--model", req_model orelse "" };
+                                const has_qualified_model = if (effective_model) |m| (std.mem.indexOfScalar(u8, m, '/') != null) else false;
+                                const argv_with_model = [_][]const u8{ self.graff_exe.?, "acp", "--yolo", "--model", effective_model orelse "" };
                                 const argv_default = [_][]const u8{ self.graff_exe.?, "acp", "--yolo" };
                                 const argv: []const []const u8 = if (has_qualified_model) &argv_with_model else &argv_default;
 
-                                acp_host.runSubprocessTurn(
+                                acp_host.runSubprocessTurnResumable(
                                     self.gpa,
                                     self.io.?,
                                     argv,
                                     cwd,
-                                    doc,
-                                    asst_id,
                                     chat_id,
                                     prompt,
+                                    .{
+                                        .resume_session_id = resume_sid,
+                                        .fallback_seeded_prompt = seeded_prompt,
+                                        .out_session_id = &established_sync_sid,
+                                    },
                                     &sctx,
-                                    StreamCtx.onChunk,
+                                    StreamCtx.onLine,
                                 ) catch {
                                     _ = try doc.appendPartDelta(asst_id, "part-text", "text", "Processed by Zig engine.");
                                     try doc.setMessageStatus(asst_id, "complete");
@@ -2659,13 +3148,10 @@ pub const EngineHost = struct {
                             try self.journal.recordFinish(chat_id, asst_id, "complete");
 
                             const finish_now = self.nowMs();
+                            self.enqueueDocLoroDeltaLocked(chat_id, doc, null);
                             const snap = try doc.exportSnapshot(self.gpa);
                             defer self.gpa.free(snap);
                             try self.store.saveSnapshot(chat_id, snap, finish_now);
-
-                            const batch_id = try std.fmt.allocPrint(self.gpa, "{s}-b-{d}", .{ self.device_id, doc.local_seq });
-                            defer self.gpa.free(batch_id);
-                            try self.store.enqueueChatUpdate(chat_id, batch_id, snap);
 
                             if (doc.toTailMessagesArrayJson(self.gpa, session_doc.tail_message_count)) |tail_arr| {
                                 _ = self.storeCachedTailInMemoryOwned(chat_id, tail_arr, true);
@@ -2675,6 +3161,22 @@ pub const EngineHost = struct {
                             for (self.chats.items) |*c| {
                                 if (std.mem.eql(u8, c.id, chat_id)) {
                                     c.last_message_at_ms = finish_now;
+                                    if (established_sync_sid) |esid| {
+                                        if (self.gpa.dupe(u8, esid)) |es_copy| {
+                                            if (c.local_graff_session_id) |old_lgs| self.gpa.free(old_lgs);
+                                            c.local_graff_session_id = es_copy;
+                                        } else |_| {}
+                                        if (std.mem.eql(u8, c.device_id, self.device_id) or c.harness_session_id == null) {
+                                            if (self.gpa.dupe(u8, esid)) |hs_copy| {
+                                                if (c.harness_session_id) |old_hs| self.gpa.free(old_hs);
+                                                c.harness_session_id = hs_copy;
+                                            } else |_| {}
+                                            if (self.gpa.dupe(u8, cwd)) |hsc_copy| {
+                                                if (c.harness_session_cwd) |old_hsc| self.gpa.free(old_hsc);
+                                                c.harness_session_cwd = hsc_copy;
+                                            } else |_| {}
+                                        }
+                                    }
                                     if (doc.latestTextPreview(140)) |prev_slice| {
                                         if (self.gpa.dupe(u8, prev_slice)) |p_copy| {
                                             if (c.preview) |old_p| self.gpa.free(old_p);
@@ -2686,7 +3188,7 @@ pub const EngineHost = struct {
                                         c.activity_status = idle_copy;
                                     } else |_| {}
                                     c.activity_updated_at_ms = finish_now;
-                                    self.enqueueChatUpsertOp(c.*);
+                                    self.enqueueChatTurnProgressOp(c.*);
                                     self.enqueueSessionUpsertOp(c.*);
                                     break;
                                 }
@@ -2715,11 +3217,19 @@ pub const EngineHost = struct {
                             std.debug.assert(disp == .execute);
                             try doc.enqueueCommand(msg_id, "steer", prompt, "completed", now);
                             try doc.appendUserMessage(msg_id, "part-steer", prompt, now);
+                            self.enqueueDocLoroDeltaLocked(chat_id, doc, msg_id);
+                            if (doc.exportSnapshot(self.gpa)) |snap| {
+                                defer self.gpa.free(snap);
+                                self.store.saveSnapshot(chat_id, snap, now) catch {};
+                            } else |_| {}
+                            if (doc.toTailMessagesArrayJson(self.gpa, session_doc.tail_message_count)) |tail_arr| {
+                                _ = self.storeCachedTailInMemoryOwned(chat_id, tail_arr, true);
+                            } else |_| {}
                             for (self.chats.items) |*c| {
                                 if (std.mem.eql(u8, c.id, chat_id)) {
                                     c.last_prompt_at_ms = now;
                                     c.last_message_at_ms = now;
-                                    self.enqueueChatUpsertOp(c.*);
+                                    self.enqueueChatTurnProgressOp(c.*);
                                     break;
                                 }
                             }
@@ -2736,6 +3246,11 @@ pub const EngineHost = struct {
                         defer self.gpa.free(cmd_id);
                         try doc.enqueueCommand(cmd_id, "interrupt", "{}", "completed", now);
                         try doc.abortStreamingMessages();
+                        self.enqueueDocLoroDeltaLocked(chat_id, doc, null);
+                        if (doc.exportSnapshot(self.gpa)) |snap| {
+                            defer self.gpa.free(snap);
+                            self.store.saveSnapshot(chat_id, snap, now) catch {};
+                        } else |_| {}
                         for (self.chats.items) |*c| {
                             if (std.mem.eql(u8, c.id, chat_id)) {
                                 if (self.gpa.dupe(u8, "idle")) |idle_copy| {
@@ -4285,8 +4800,9 @@ pub const EngineHost = struct {
             if (row_cnt > 0) w.writeByte(',') catch return;
             row_cnt += 1;
             const sc = c.source_context_json orelse "null";
+            const room_gen: u32 = if (c.room_gen >= 2) c.room_gen else 2;
             w.print(
-                "{{\"kind\":\"chats\",\"id\":{f},\"deleted\":false,\"fields\":{{\"id\":{f},\"deviceId\":{f},\"spaceId\":{f},\"title\":{f},\"archived\":{},\"parentChatId\":{f},\"cwd\":{f},\"branch\":{f},\"lastMessagePreview\":{f},\"harnessSessionId\":{f},\"createdAt\":{d},\"lastMessageAt\":{d},\"lastPromptAt\":{d},\"lastSeenAt\":{d},\"sourceContext\":{s},\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f},\"chatMode\":{}}}}}}}",
+                "{{\"kind\":\"chats\",\"id\":{f},\"deleted\":false,\"fields\":{{\"id\":{f},\"deviceId\":{f},\"spaceId\":{f},\"title\":{f},\"archived\":{},\"roomGen\":{d},\"parentChatId\":{f},\"cwd\":{f},\"branch\":{f},\"lastMessagePreview\":{f},\"harnessSessionId\":{f},\"harnessSessionCwd\":{f},\"checkoutId\":{f},\"createdAt\":{d},\"lastMessageAt\":{d},\"lastPromptAt\":{d},\"lastSeenAt\":{d},\"sourceContext\":{s},\"config\":{{\"harness\":{f},\"model\":{f},\"reasoning\":{f},\"chatMode\":{}}}}}}}",
                 .{
                     json.fmt(c.id, .{}),
                     json.fmt(c.id, .{}),
@@ -4294,11 +4810,14 @@ pub const EngineHost = struct {
                     json.fmt(c.space_id, .{}),
                     json.fmt(c.title, .{}),
                     c.archived,
+                    room_gen,
                     json.fmt(c.parent_chat_id, .{}),
                     json.fmt(c.cwd, .{}),
                     json.fmt(c.branch, .{}),
                     json.fmt(c.preview, .{}),
                     json.fmt(c.harness_session_id, .{}),
+                    json.fmt(c.harness_session_cwd, .{}),
+                    json.fmt(c.checkout_id, .{}),
                     c.created_at_ms,
                     c.last_message_at_ms,
                     c.last_prompt_at_ms,
@@ -4340,6 +4859,143 @@ pub const EngineHost = struct {
             gpa.free(self.body);
         }
     };
+
+    const RowUploadItem = struct {
+        cid: []u8,
+        batch_id: []u8,
+        bytes: []u8,
+
+        fn deinit(self: *RowUploadItem, gpa: Allocator) void {
+            gpa.free(self.cid);
+            gpa.free(self.batch_id);
+            gpa.free(self.bytes);
+        }
+    };
+
+    const CheckpointUploadItem = struct {
+        cid: []u8,
+        seq_covered: u64,
+        frontier_b64: []u8,
+        bytes: []u8,
+
+        fn deinit(self: *CheckpointUploadItem, gpa: Allocator) void {
+            gpa.free(self.cid);
+            gpa.free(self.frontier_b64);
+            gpa.free(self.bytes);
+        }
+    };
+
+    fn prepareOutboxRowUploadsLocked(self: *EngineHost, out: *std.ArrayList(RowUploadItem)) void {
+        if (self.store.outbox.items.len == 0) return;
+
+        // First convert any legacy JSON/`HZD1` outbox items left from pre-Loro builds so Edge
+        // only ever receives genuine Loro 1.13 binary CRDT updates on `/chat2/{chatId}/rows`.
+        var legacy_idx: usize = 0;
+        while (legacy_idx < self.store.outbox.items.len) {
+            const it = self.store.outbox.items[legacy_idx];
+            if (it.bytes.len == 0 or std.mem.startsWith(u8, it.bytes, "HZD1") or it.bytes[0] == '{') {
+                const doc_id_c = self.gpa.dupe(u8, it.doc_id) catch break;
+                defer self.gpa.free(doc_id_c);
+                const batch_id_c = self.gpa.dupe(u8, it.batch_id) catch break;
+                defer self.gpa.free(batch_id_c);
+                self.store.acknowledgeChatUpdate(doc_id_c, batch_id_c);
+                if (self.getOrCreateDoc(doc_id_c)) |doc| {
+                    if (doc.messages.items.len > 0) {
+                        self.enqueueDocLoroDeltaLocked(doc_id_c, doc, null);
+                    }
+                } else |_| {}
+                continue;
+            }
+            legacy_idx += 1;
+        }
+
+        const cap = @min(self.store.outbox.items.len, @as(usize, 64));
+        for (self.store.outbox.items[0..cap]) |it| {
+            if (!isValidEdgeChatTailId(it.doc_id) or it.bytes.len == 0) continue;
+            const cid_c = self.gpa.dupe(u8, it.doc_id) catch break;
+            const bid_c = self.gpa.dupe(u8, it.batch_id) catch {
+                self.gpa.free(cid_c);
+                break;
+            };
+            const b_c = self.gpa.dupe(u8, it.bytes) catch {
+                self.gpa.free(cid_c);
+                self.gpa.free(bid_c);
+                break;
+            };
+            out.append(self.gpa, .{ .cid = cid_c, .batch_id = bid_c, .bytes = b_c }) catch {
+                self.gpa.free(cid_c);
+                self.gpa.free(bid_c);
+                self.gpa.free(b_c);
+                break;
+            };
+        }
+    }
+
+    fn parseRowAckSeq(gpa: Allocator, body: []const u8) u64 {
+        var parsed = json.parseFromSlice(json.Value, gpa, body, .{}) catch return 0;
+        defer parsed.deinit();
+        if (parsed.value != .object) return 0;
+        return regOptU64(parsed.value.object, "seq");
+    }
+
+    fn acknowledgePushedRowLocked(
+        self: *EngineHost,
+        cid: []const u8,
+        batch_id: []const u8,
+        ack_seq: u64,
+        out_cp: *?CheckpointUploadItem,
+    ) void {
+        self.store.acknowledgeChatUpdate(cid, batch_id);
+        var cur = self.store.snapshotCursor(cid) orelse 0;
+        if (ack_seq > 0) {
+            if (chat2_wire.nextRowCursor(cur, ack_seq)) |next_c| {
+                if (next_c > cur) {
+                    cur = next_c;
+                    if (self.store.loadSnapshot(cid)) |sb| {
+                        if (self.gpa.dupe(u8, sb)) |sb_copy| {
+                            defer self.gpa.free(sb_copy);
+                            self.store.saveSnapshotWithCursor(cid, sb_copy, cur, 2, self.nowMs()) catch {};
+                        } else |_| {}
+                    }
+                }
+            }
+        }
+        if (cur > 0 and self.store.pendingOutboxCount(cid) == 0 and !self.seeded_checkpoints.contains(cid)) {
+            if (self.docs.getPtr(cid)) |doc| {
+                const cp_bytes = doc.exportLoroSnapshot(self.gpa) catch return;
+                const fr_bytes = doc.exportLoroFrontier(self.gpa) catch {
+                    self.gpa.free(cp_bytes);
+                    return;
+                };
+                defer self.gpa.free(fr_bytes);
+                if (cp_bytes.len == 0 or fr_bytes.len == 0) {
+                    self.gpa.free(cp_bytes);
+                    return;
+                }
+                const enc = std.base64.standard.Encoder;
+                const fr_b64 = self.gpa.alloc(u8, enc.calcSize(fr_bytes.len)) catch {
+                    self.gpa.free(cp_bytes);
+                    return;
+                };
+                _ = enc.encode(fr_b64, fr_bytes);
+                const cid_c = self.gpa.dupe(u8, cid) catch {
+                    self.gpa.free(fr_b64);
+                    self.gpa.free(cp_bytes);
+                    return;
+                };
+                if (self.gpa.dupe(u8, cid)) |sc_key| {
+                    self.seeded_checkpoints.put(self.gpa, sc_key, {}) catch self.gpa.free(sc_key);
+                } else |_| {}
+                if (out_cp.*) |*prev| prev.deinit(self.gpa);
+                out_cp.* = .{
+                    .cid = cid_c,
+                    .seq_covered = cur,
+                    .frontier_b64 = fr_b64,
+                    .bytes = cp_bytes,
+                };
+            }
+        }
+    }
 
     fn drainRegistryPushBatchLocked(self: *EngineHost, out_ops: *std.ArrayList([]u8)) ?[]u8 {
         if (self.pending_registry_ops.items.len == 0) return null;
@@ -4489,7 +5145,63 @@ pub const EngineHost = struct {
             if (pstatus != 200) break;
         }
 
-        // 2. Outbound chat transcript tails (`PUT /chat2/{chatId}/tail`)
+        // 2a. Outbound chat2 Loro binary CRDT rows + initial checkpoint (`POST /chat2/{chatId}/rows` & `/checkpoint`)
+        {
+            var row_uploads: std.ArrayList(RowUploadItem) = .empty;
+            defer {
+                for (row_uploads.items) |*ru| ru.deinit(self.gpa);
+                row_uploads.deinit(self.gpa);
+            }
+            self.prepareOutboxRowUploadsLocked(&row_uploads);
+            for (row_uploads.items) |ru| {
+                const enc_cid = auth_host.urlEncodeAlloc(self.gpa, ru.cid) catch continue;
+                defer self.gpa.free(enc_cid);
+                const enc_bid = auth_host.urlEncodeAlloc(self.gpa, ru.batch_id) catch continue;
+                defer self.gpa.free(enc_bid);
+                const row_url = std.fmt.allocPrint(
+                    self.gpa,
+                    "{s}/chat2/{s}/rows?device={s}&batchId={s}",
+                    .{ base, enc_cid, enc_dev, enc_bid },
+                ) catch continue;
+                defer self.gpa.free(row_url);
+
+                var rresp = auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "POST", row_url, tok_cur, &.{}, ru.bytes) catch break;
+                if (rresp.status == 401) {
+                    rresp.deinit(self.gpa);
+                    if (self.auth.ensureAccessToken(io, true)) |t1| {
+                        tok_cur = t1;
+                        rresp = auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "POST", row_url, tok_cur, &.{}, ru.bytes) catch break;
+                    } else break;
+                }
+                const rstatus = rresp.status;
+                const ack_seq = if (rstatus == 200) parseRowAckSeq(self.gpa, rresp.body) else 0;
+                rresp.deinit(self.gpa);
+
+                if (rstatus == 200) {
+                    var maybe_cp: ?CheckpointUploadItem = null;
+                    defer if (maybe_cp) |*cp| cp.deinit(self.gpa);
+                    self.acknowledgePushedRowLocked(ru.cid, ru.batch_id, ack_seq, &maybe_cp);
+                    if (maybe_cp) |cp| {
+                        if (std.fmt.allocPrint(self.gpa, "{s}/chat2/{s}/checkpoint?seqCovered={d}", .{ base, enc_cid, cp.seq_covered })) |cp_url| {
+                            defer self.gpa.free(cp_url);
+                            const cp_hdrs = [_]http_zig.Header{
+                                .{ .name = "x-chat2-frontier", .value = cp.frontier_b64 },
+                            };
+                            if (auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "POST", cp_url, tok_cur, &cp_hdrs, cp.bytes)) |cp_resp_val| {
+                                var cp_resp = cp_resp_val;
+                                cp_resp.deinit(self.gpa);
+                            } else |_| {}
+                        } else |_| {}
+                    }
+                } else if (rstatus == 400 or rstatus == 413) {
+                    self.store.acknowledgeChatUpdate(ru.cid, ru.batch_id);
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // 2b. Outbound chat transcript tails (`PUT /chat2/{chatId}/tail`)
         {
             var tail_uploads: std.ArrayList(TailUploadItem) = .empty;
             defer {
@@ -4561,6 +5273,7 @@ pub const EngineHost = struct {
         var since_seq: u64 = 0;
         var ops_batch: std.ArrayList([]u8) = .empty;
         var push_body: ?[]u8 = null;
+        var row_uploads: std.ArrayList(RowUploadItem) = .empty;
         var tail_uploads: std.ArrayList(TailUploadItem) = .empty;
         defer {
             if (edge_copy) |s| self.gpa.free(s);
@@ -4570,6 +5283,8 @@ pub const EngineHost = struct {
             if (push_body) |pb| self.gpa.free(pb);
             for (ops_batch.items) |s| self.gpa.free(s);
             ops_batch.deinit(self.gpa);
+            for (row_uploads.items) |*ru| ru.deinit(self.gpa);
+            row_uploads.deinit(self.gpa);
             for (tail_uploads.items) |*tu| tu.deinit(self.gpa);
             tail_uploads.deinit(self.gpa);
         }
@@ -4592,6 +5307,7 @@ pub const EngineHost = struct {
             const safe_dev = sanitizeEdgeDeviceId(&dev_buf, self.device_id);
             dev_copy = self.gpa.dupe(u8, safe_dev) catch return false;
             push_body = self.drainRegistryPushBatchLocked(&ops_batch);
+            self.prepareOutboxRowUploadsLocked(&row_uploads);
             self.drainDirtyTailUploadsLocked(&tail_uploads);
         }
 
@@ -4662,7 +5378,81 @@ pub const EngineHost = struct {
             }
         }
 
-        // 2. Outbound chat tail uploads outside lock
+        // 2a. Outbound chat2 Loro binary CRDT rows + initial checkpoint outside lock
+        for (row_uploads.items) |ru| {
+            const enc_cid = auth_host.urlEncodeAlloc(self.gpa, ru.cid) catch continue;
+            defer self.gpa.free(enc_cid);
+            const enc_bid = auth_host.urlEncodeAlloc(self.gpa, ru.batch_id) catch continue;
+            defer self.gpa.free(enc_bid);
+            const row_url = std.fmt.allocPrint(
+                self.gpa,
+                "{s}/chat2/{s}/rows?device={s}&batchId={s}",
+                .{ base, enc_cid, enc_dev, enc_bid },
+            ) catch continue;
+            defer self.gpa.free(row_url);
+
+            var rresp_opt = auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "POST", row_url, tok_copy.?, &.{}, ru.bytes) catch null;
+            if (rresp_opt) |*rresp| {
+                if (rresp.status == 401) {
+                    rresp.deinit(self.gpa);
+                    rresp_opt = null;
+                    var t1_opt: ?[]u8 = null;
+                    {
+                        self.mutex.lockUncancelable(io);
+                        defer self.mutex.unlock(io);
+                        if (!self.stop_requested and self.auth.signed_in and self.auth.generation == gen) {
+                            if (self.auth.ensureAccessToken(io, true)) |t1| {
+                                t1_opt = self.gpa.dupe(u8, t1) catch null;
+                            }
+                        }
+                    }
+                    if (t1_opt) |t1| {
+                        self.gpa.free(tok_copy.?);
+                        tok_copy = t1;
+                        rresp_opt = auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "POST", row_url, t1, &.{}, ru.bytes) catch null;
+                    }
+                }
+            }
+            if (rresp_opt) |*rresp| {
+                const rstatus = rresp.status;
+                const ack_seq = if (rstatus == 200) parseRowAckSeq(self.gpa, rresp.body) else 0;
+                rresp.deinit(self.gpa);
+
+                if (rstatus == 200) {
+                    var maybe_cp: ?CheckpointUploadItem = null;
+                    defer if (maybe_cp) |*cp| cp.deinit(self.gpa);
+                    {
+                        self.mutex.lockUncancelable(io);
+                        if (!self.stop_requested and self.auth.generation == gen) {
+                            self.acknowledgePushedRowLocked(ru.cid, ru.batch_id, ack_seq, &maybe_cp);
+                        }
+                        self.mutex.unlock(io);
+                    }
+                    if (maybe_cp) |cp| {
+                        if (std.fmt.allocPrint(self.gpa, "{s}/chat2/{s}/checkpoint?seqCovered={d}", .{ base, enc_cid, cp.seq_covered })) |cp_url| {
+                            defer self.gpa.free(cp_url);
+                            const cp_hdrs = [_]http_zig.Header{
+                                .{ .name = "x-chat2-frontier", .value = cp.frontier_b64 },
+                            };
+                            if (auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "POST", cp_url, tok_copy.?, &cp_hdrs, cp.bytes)) |cp_resp_val| {
+                                var cp_resp = cp_resp_val;
+                                cp_resp.deinit(self.gpa);
+                            } else |_| {}
+                        } else |_| {}
+                    }
+                } else if (rstatus == 400 or rstatus == 413) {
+                    self.mutex.lockUncancelable(io);
+                    if (self.auth.generation == gen) self.store.acknowledgeChatUpdate(ru.cid, ru.batch_id);
+                    self.mutex.unlock(io);
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        // 2b. Outbound chat tail uploads outside lock
         for (tail_uploads.items) |tu| {
             const enc_cid = auth_host.urlEncodeAlloc(self.gpa, tu.cid) catch continue;
             defer self.gpa.free(enc_cid);
@@ -4878,6 +5668,8 @@ pub const EngineHost = struct {
                 const status = regOptStr(f, "status") orelse "idle";
                 const started_ms = regOptEpochMs(f, "startedAt");
                 const updated_ms = regOptEpochMs(f, "updatedAt");
+                const status_changed = if (c.activity_status) |old| !std.mem.eql(u8, old, status) else true;
+                const updated_advanced = updated_ms > c.activity_updated_at_ms;
                 if (self.gpa.dupe(u8, status)) |scopy| {
                     if (c.activity_status) |old| self.gpa.free(old);
                     c.activity_status = scopy;
@@ -4885,6 +5677,12 @@ pub const EngineHost = struct {
                 } else |_| {}
                 if (started_ms > 0) c.activity_started_at_ms = started_ms;
                 if (updated_ms > 0) c.activity_updated_at_ms = updated_ms;
+                const local_active = if (self.docs.getPtr(cid)) |d| d.hasActiveWork() else false;
+                if (self.bg_sync_enabled and !local_active and (status_changed or updated_advanced) and
+                    (self.isDocPinned(cid) or (self.focused_chat_id != null and std.mem.eql(u8, self.focused_chat_id.?, cid))))
+                {
+                    _ = self.spawnAsyncTailFetch(cid);
+                }
             }
         }
 
@@ -5174,6 +5972,10 @@ pub const EngineHost = struct {
         const branch = regOptStr(f, "branch");
         const preview = regOptStr(f, "lastMessagePreview");
         const harness_session_id = regOptStr(f, "harnessSessionId");
+        const harness_session_cwd = regOptStr(f, "harnessSessionCwd");
+        const checkout_id = regOptStr(f, "checkoutId");
+        const raw_rg = regOptU64(f, "roomGen");
+        const room_gen: u32 = if (raw_rg >= 2 and raw_rg <= std.math.maxInt(u32)) @intCast(raw_rg) else 2;
         const created_ms = regOptEpochMs(f, "createdAt");
         const last_msg_ms = regOptEpochMs(f, "lastMessageAt");
         const last_prompt_ms = regOptEpochMs(f, "lastPromptAt");
@@ -5212,6 +6014,8 @@ pub const EngineHost = struct {
             if (rec.parent_chat_id) |p| self.gpa.free(p);
             if (rec.preview) |pr| self.gpa.free(pr);
             if (rec.harness_session_id) |hs| self.gpa.free(hs);
+            if (rec.harness_session_cwd) |hsc| self.gpa.free(hsc);
+            if (rec.checkout_id) |co| self.gpa.free(co);
             if (rec.source_context_json) |sc| self.gpa.free(sc);
         }
         rec.device_id = try self.gpa.dupe(u8, dev_id);
@@ -5225,8 +6029,11 @@ pub const EngineHost = struct {
         rec.parent_chat_id = if (parent_chat_id) |p| try self.gpa.dupe(u8, p) else null;
         rec.preview = if (preview) |pr| try self.gpa.dupe(u8, pr) else null;
         rec.harness_session_id = if (harness_session_id) |hs| try self.gpa.dupe(u8, hs) else null;
+        rec.harness_session_cwd = if (harness_session_cwd) |hsc| try self.gpa.dupe(u8, hsc) else null;
+        rec.checkout_id = if (checkout_id) |co| try self.gpa.dupe(u8, co) else null;
         rec.source_context_json = sc_json;
         sc_json = null;
+        rec.room_gen = room_gen;
         rec.archived = archived;
         rec.chat_mode = chat_mode;
         rec.created_at_ms = created_ms;
@@ -5236,13 +6043,19 @@ pub const EngineHost = struct {
 
         if (existing_pos) |pos| {
             const existing = &self.chats.items[pos];
-            if (last_msg_ms > existing.last_message_at_ms and existing.last_message_at_ms > 0) {
+            const msg_advanced = (last_msg_ms > existing.last_message_at_ms and existing.last_message_at_ms > 0) or
+                (preview != null and (existing.preview == null or !std.mem.eql(u8, existing.preview.?, preview.?)));
+            if (msg_advanced) {
                 self.invalidateCachedTail(id);
             }
             // Preserve `existing.id`'s heap buffer in-place so `chat_idx`'s key slice remains live
             // across multi-row delta batches and Pass 2 session status attachment (zero key re-alloc/UAF).
             rec.id = existing.id;
             rec.pinned = existing.pinned;
+            if (existing.local_graff_session_id) |lgs| {
+                rec.local_graff_session_id = lgs;
+                existing.local_graff_session_id = null;
+            }
             if (existing.activity_status) |st| {
                 rec.activity_status = st;
                 existing.activity_status = null;
@@ -5251,11 +6064,297 @@ pub const EngineHost = struct {
             rec.activity_updated_at_ms = existing.activity_updated_at_ms;
             existing.deinitFieldsExceptId(self.gpa);
             existing.* = rec;
+
+            if (msg_advanced and self.bg_sync_enabled) {
+                const stable_id = self.chats.items[pos].id;
+                const local_active = if (self.docs.getPtr(stable_id)) |d| d.hasActiveWork() else false;
+                if (!local_active and (self.docs.contains(stable_id) or self.isDocPinned(stable_id) or
+                    (self.focused_chat_id != null and std.mem.eql(u8, self.focused_chat_id.?, stable_id))))
+                {
+                    _ = self.spawnAsyncTailFetch(stable_id);
+                }
+            }
             return;
         }
         const new_idx = self.chats.items.len;
         try self.chats.append(self.gpa, rec);
         if (idx_map) |m| m.put(self.gpa, self.chats.items[new_idx].id, new_idx) catch {};
+    }
+
+    pub const Chat2RowItem = struct {
+        seq: u64,
+        payload: []u8,
+    };
+
+    pub const ParsedRowsBatch = struct {
+        has_state: bool = false,
+        state: chat2_wire.StateHeader = .{},
+        state_frontier: []u8 = &.{},
+        rows: std.ArrayList(Chat2RowItem) = .empty,
+        has_rows_done: bool = false,
+        done_head_seq: u64 = 0,
+
+        pub fn deinit(self: *ParsedRowsBatch, gpa: Allocator) void {
+            if (self.state_frontier.len > 0) gpa.free(self.state_frontier);
+            for (self.rows.items) |r| gpa.free(r.payload);
+            self.rows.deinit(gpa);
+        }
+    };
+
+    /// Pure frame batch parser for `GET /chat2/{chatId}/rows?after=` (`crates/sync/src/chat_client.rs`):
+    /// decodes `[u32 LE frame_len][chat2_wire frame]` (`state`, `row`, `rowsDone`).
+    pub fn parseChat2RowsBatch(gpa: Allocator, body: []const u8) !ParsedRowsBatch {
+        var batch = ParsedRowsBatch{};
+        errdefer batch.deinit(gpa);
+
+        var off: usize = 0;
+        while (off + 4 <= body.len) {
+            const frame_len: usize = std.mem.readInt(u32, body[off..][0..4], .little);
+            off += 4;
+            if (off + frame_len > body.len) break;
+            var frame = chat2_wire.decode(gpa, body[off .. off + frame_len]) orelse {
+                off += frame_len;
+                continue;
+            };
+            off += frame_len;
+            defer frame.deinit(gpa);
+
+            const hdr = frame.header_parsed.value.object;
+            switch (frame.kind) {
+                chat2_wire.FrameType.state => {
+                    batch.has_state = true;
+                    batch.state = .{
+                        .head_seq = regOptU64(hdr, "headSeq"),
+                        .seq_floor = regOptU64(hdr, "seqFloor"),
+                        .checkpoint_seq = regOptU64(hdr, "checkpointSeq"),
+                        .checkpoint_size = regOptU64(hdr, "checkpointSize"),
+                        .row_count = regOptU64(hdr, "rowCount"),
+                        .row_bytes = regOptU64(hdr, "rowBytes"),
+                    };
+                    if (batch.state_frontier.len > 0) {
+                        gpa.free(batch.state_frontier);
+                        batch.state_frontier = &.{};
+                    }
+                    if (frame.payload.len > 0) {
+                        batch.state_frontier = try gpa.dupe(u8, frame.payload);
+                    }
+                },
+                chat2_wire.FrameType.row => {
+                    const seq = regOptU64(hdr, "seq");
+                    if (seq > 0) {
+                        const pcopy = try gpa.dupe(u8, frame.payload);
+                        errdefer gpa.free(pcopy);
+                        try batch.rows.append(gpa, .{ .seq = seq, .payload = pcopy });
+                    }
+                },
+                chat2_wire.FrameType.rows_done => {
+                    batch.has_rows_done = true;
+                    batch.done_head_seq = regOptU64(hdr, "headSeq");
+                },
+                else => {},
+            }
+        }
+        return batch;
+    }
+
+    const ApplyChat2Outcome = struct {
+        applied: bool = false,
+        need_checkpoint: bool = false,
+        new_cursor: u64 = 0,
+    };
+
+    fn applyChat2PullLocked(
+        self: *EngineHost,
+        chat_id: []const u8,
+        cursor_start: u64,
+        state: chat2_wire.StateHeader,
+        checkpoint_bytes: ?[]const u8,
+        rows: []const Chat2RowItem,
+        broadcast: bool,
+        force_broadcast_if_empty_resolved: bool,
+    ) ApplyChat2Outcome {
+        const doc = self.getOrCreateDoc(chat_id) catch return .{ .new_cursor = cursor_start };
+        const before_count = doc.messages.items.len;
+        const before_bytes = doc.live_payload_bytes;
+
+        var cursor: u64 = if (cursor_start > state.head_seq) 0 else cursor_start;
+        var changed = false;
+
+        if (checkpoint_bytes) |cp| {
+            if (cp.len > 0) {
+                if (doc.importLoroBytes(cp)) |outcome| {
+                    if (outcome == .applied) {
+                        cursor = @max(cursor, state.checkpoint_seq);
+                        changed = true;
+                    }
+                } else |_| {}
+            }
+        } else if (state.checkpoint_size > 0 and state.checkpoint_seq > cursor) {
+            cursor = @max(cursor, state.checkpoint_seq);
+        }
+
+        for (rows) |r| {
+            if (r.seq <= cursor) continue;
+            const next_c = chat2_wire.nextRowCursor(cursor, r.seq) orelse break;
+            if (r.payload.len > 0) {
+                const outcome = doc.importLoroBytes(r.payload) catch break;
+                if (outcome == .pending_dependencies and checkpoint_bytes == null and state.checkpoint_size > 0) {
+                    return .{ .applied = false, .need_checkpoint = true, .new_cursor = cursor };
+                }
+                if (outcome == .applied) changed = true;
+            }
+            cursor = next_c;
+        }
+
+        const msg_changed = changed or doc.messages.items.len != before_count or doc.live_payload_bytes != before_bytes;
+        if (msg_changed or cursor != cursor_start) {
+            if (doc.exportSnapshot(self.gpa)) |snap| {
+                defer self.gpa.free(snap);
+                self.store.saveSnapshotWithCursor(chat_id, snap, cursor, 2, self.nowMs()) catch {};
+            } else |_| {}
+        }
+
+        if (doc.messages.items.len > 0) {
+            if (doc.toTailMessagesArrayJson(self.gpa, 64)) |tail_arr| {
+                _ = self.storeCachedTailInMemoryOwned(chat_id, tail_arr, true);
+            } else |_| {}
+            if (doc.latestTextPreview(140)) |prev| {
+                for (self.chats.items) |*c| {
+                    if (std.mem.eql(u8, c.id, chat_id)) {
+                        if (c.preview == null or msg_changed) {
+                            if (self.gpa.dupe(u8, prev)) |pcopy| {
+                                if (c.preview) |old| self.gpa.free(old);
+                                c.preview = pcopy;
+                            } else |_| {}
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (broadcast and (msg_changed or force_broadcast_if_empty_resolved)) {
+            if (doc.toResetFrameJson(self.gpa)) |frame_json| {
+                defer self.gpa.free(frame_json);
+                self.broadcastWatch(.doc_messages, chat_id, frame_json) catch {};
+            } else |_| {}
+        }
+
+        return .{
+            .applied = msg_changed or doc.messages.items.len > 0,
+            .need_checkpoint = false,
+            .new_cursor = cursor,
+        };
+    }
+
+    fn applyFallbackTailOrSnapshotLocked(
+        self: *EngineHost,
+        chat_id: []const u8,
+        maybe_snapshot: ?[]const u8,
+        maybe_tail_msgs_json: ?[]const u8,
+        broadcast: bool,
+        force_broadcast_if_empty_resolved: bool,
+    ) bool {
+        const doc = self.getOrCreateDoc(chat_id) catch return false;
+        const before_count = doc.messages.items.len;
+        const before_bytes = doc.live_payload_bytes;
+        var changed = false;
+
+        if (maybe_snapshot) |snap_bytes| {
+            if (snap_bytes.len > 0) {
+                if (doc.importLoroBytes(snap_bytes)) |out| {
+                    if (out == .applied) changed = true;
+                } else |_| {
+                    doc.importSnapshot(snap_bytes) catch {};
+                    if (doc.messages.items.len != before_count or doc.live_payload_bytes != before_bytes) changed = true;
+                }
+            }
+        }
+        if (maybe_tail_msgs_json) |tail_json| {
+            if (tail_json.len > 0) {
+                if (doc.mergeMessagesArrayJson(tail_json) catch false) {
+                    changed = true;
+                }
+            }
+        }
+
+        const msg_changed = changed or doc.messages.items.len != before_count or doc.live_payload_bytes != before_bytes;
+        if (msg_changed) {
+            const cur = self.store.snapshotCursor(chat_id) orelse 0;
+            if (doc.exportSnapshot(self.gpa)) |snap| {
+                defer self.gpa.free(snap);
+                self.store.saveSnapshotWithCursor(chat_id, snap, cur, 2, self.nowMs()) catch {};
+            } else |_| {}
+        }
+
+        if (doc.messages.items.len > 0) {
+            if (doc.toTailMessagesArrayJson(self.gpa, 64)) |tail_arr| {
+                _ = self.storeCachedTailInMemoryOwned(chat_id, tail_arr, true);
+            } else |_| {}
+        } else if (maybe_tail_msgs_json) |tail_json| {
+            if (self.gpa.dupe(u8, tail_json)) |tcopy| {
+                _ = self.storeCachedTailInMemoryOwned(chat_id, tcopy, true);
+            } else |_| {}
+        }
+
+        if (broadcast and (msg_changed or force_broadcast_if_empty_resolved)) {
+            if (doc.toResetFrameJson(self.gpa)) |frame_json| {
+                defer self.gpa.free(frame_json);
+                self.broadcastWatch(.doc_messages, chat_id, frame_json) catch {};
+            } else |_| {}
+        }
+
+        return doc.messages.items.len > 0 or msg_changed;
+    }
+
+    fn edgeGetOutsideLock(
+        self: *EngineHost,
+        io: std.Io,
+        gen: u64,
+        tok_inout: *[]u8,
+        url: []const u8,
+    ) ?auth_host.AuthManager.EdgeReply {
+        var resp = auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "GET", url, tok_inout.*, &.{}, null) catch return null;
+        if (resp.status == 401) {
+            resp.deinit(self.gpa);
+            var t1_copy: ?[]u8 = null;
+            {
+                self.mutex.lockUncancelable(io);
+                defer self.mutex.unlock(io);
+                if (self.stop_requested or !self.auth.signed_in or self.auth.generation != gen) return null;
+                if (self.auth.ensureAccessToken(io, true)) |t1| {
+                    t1_copy = self.gpa.dupe(u8, t1) catch null;
+                }
+            }
+            const t1 = t1_copy orelse return null;
+            self.gpa.free(tok_inout.*);
+            tok_inout.* = t1;
+            resp = auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "GET", url, tok_inout.*, &.{}, null) catch return null;
+        }
+        return resp;
+    }
+
+    fn edgeGetLocked(self: *EngineHost, io: std.Io, url: []const u8) ?auth_host.AuthManager.EdgeReply {
+        const tok0 = self.auth.ensureAccessToken(io, false) orelse return null;
+        var resp = auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "GET", url, tok0, &.{}, null) catch return null;
+        if (resp.status == 401) {
+            resp.deinit(self.gpa);
+            const tok1 = self.auth.ensureAccessToken(io, true) orelse return null;
+            resp = auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "GET", url, tok1, &.{}, null) catch return null;
+        }
+        return resp;
+    }
+
+    fn extractTailMessagesJsonAlloc(gpa: Allocator, body: []const u8) ?[]u8 {
+        var parsed = json.parseFromSlice(json.Value, gpa, body, .{}) catch return null;
+        defer parsed.deinit();
+        if (parsed.value == .array) {
+            return std.fmt.allocPrint(gpa, "{f}", .{json.fmt(parsed.value, .{})}) catch null;
+        }
+        if (parsed.value != .object) return null;
+        const msgs_val = parsed.value.object.get("messages") orelse return null;
+        if (msgs_val != .array) return null;
+        return std.fmt.allocPrint(gpa, "{f}", .{json.fmt(msgs_val, .{})}) catch null;
     }
 
     fn fetchChatTailBodyOutsideLock(
@@ -5272,31 +6371,453 @@ pub const EngineHost = struct {
         const url = std.fmt.allocPrint(self.gpa, "{s}/chat2/{s}/tail", .{ base, enc_cid }) catch return null;
         defer self.gpa.free(url);
 
-        var resp = auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "GET", url, tok0, &.{}, null) catch return null;
-        if (resp.status == 401) {
-            resp.deinit(self.gpa);
-            var t1_copy: ?[]u8 = null;
-            defer if (t1_copy) |t| self.gpa.free(t);
-            {
-                self.mutex.lockUncancelable(io);
-                defer self.mutex.unlock(io);
-                if (self.stop_requested or !self.auth.signed_in or self.auth.generation != gen) return null;
-                if (self.auth.ensureAccessToken(io, true)) |t1| {
-                    t1_copy = self.gpa.dupe(u8, t1) catch null;
-                }
-            }
-            const t1 = t1_copy orelse return null;
-            resp = auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "GET", url, t1, &.{}, null) catch return null;
-        }
+        var tok_mut = self.gpa.dupe(u8, tok0) catch return null;
+        defer self.gpa.free(tok_mut);
+
+        var resp = self.edgeGetOutsideLock(io, gen, &tok_mut, url) orelse return null;
         defer resp.deinit(self.gpa);
         if (resp.status != 200) return null;
+        return extractTailMessagesJsonAlloc(self.gpa, resp.body);
+    }
 
-        var parsed = json.parseFromSlice(json.Value, self.gpa, resp.body, .{}) catch return null;
-        defer parsed.deinit();
-        if (parsed.value != .object) return null;
-        const msgs_val = parsed.value.object.get("messages") orelse return null;
-        if (msgs_val != .array) return null;
-        return std.fmt.allocPrint(self.gpa, "{f}", .{json.fmt(msgs_val, .{})}) catch null;
+    /// Pull a chat room over `chat2` Loro CRDT (`/chat2/{id}/rows` + `/checkpoint`, falling back to
+    /// `/chat2/{id}/tail`, `/snapshot/{id}`, and `/tail/{id}` for pre-`chat2` chats) WITHOUT holding
+    /// `self.mutex` during network I/O.
+    pub fn pullChat2RoomOutsideLock(
+        self: *EngineHost,
+        io: std.Io,
+        edge_raw: []const u8,
+        tok0: []const u8,
+        gen: u64,
+        chat_id: []const u8,
+        broadcast: bool,
+        resolve_pending: bool,
+    ) bool {
+        var cursor0: u64 = 0;
+        var dev_copy: []u8 = undefined;
+        {
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
+            if (self.stop_requested or !self.auth.signed_in or self.auth.generation != gen) return false;
+            cursor0 = self.store.snapshotCursor(chat_id) orelse 0;
+            const raw_dev = if (isValidEdgeRowId(self.device_id)) self.device_id else "dev-zig-host";
+            dev_copy = self.gpa.dupe(u8, raw_dev) catch return false;
+        }
+        defer self.gpa.free(dev_copy);
+
+        var tok_mut = self.gpa.dupe(u8, tok0) catch return false;
+        defer self.gpa.free(tok_mut);
+
+        const base = std.mem.trimEnd(u8, edge_raw, "/");
+        const enc_cid = auth_host.urlEncodeAlloc(self.gpa, chat_id) catch return false;
+        defer self.gpa.free(enc_cid);
+        const enc_dev = auth_host.urlEncodeAlloc(self.gpa, dev_copy) catch return false;
+        defer self.gpa.free(enc_dev);
+
+        // 1. Primary `chat2` Loro CRDT pull (`/chat2/{id}/rows?after={cursor0}&device={dev}`)
+        if (std.fmt.allocPrint(self.gpa, "{s}/chat2/{s}/rows?after={d}&device={s}", .{ base, enc_cid, cursor0, enc_dev })) |rows_url| {
+            defer self.gpa.free(rows_url);
+            if (self.edgeGetOutsideLock(io, gen, &tok_mut, rows_url)) |*rows_resp_val| {
+                var rows_resp = rows_resp_val.*;
+                defer rows_resp.deinit(self.gpa);
+                if (rows_resp.status == 200) {
+                    if (parseChat2RowsBatch(self.gpa, rows_resp.body)) |batch_init| {
+                        var batch = batch_init;
+                        defer batch.deinit(self.gpa);
+                        if (batch.has_state and (batch.state.head_seq > 0 or batch.state.checkpoint_size > 0 or batch.rows.items.len > 0)) {
+                            var plan: chat2_wire.CatchUpPlan = .{ .rows_only = .{ .after = cursor0 } };
+                            var ok_lock = true;
+                            {
+                                self.mutex.lockUncancelable(io);
+                                defer self.mutex.unlock(io);
+                                if (self.stop_requested or !self.auth.signed_in or self.auth.generation != gen) {
+                                    ok_lock = false;
+                                } else if (self.getOrCreateDoc(chat_id)) |doc| {
+                                    const contained = batch.state.checkpoint_size == 0 or doc.frontierContained(self.gpa, batch.state_frontier);
+                                    plan = chat2_wire.planCatchUp(cursor0, batch.state, contained);
+                                } else |_| {
+                                    ok_lock = false;
+                                }
+                            }
+                            if (!ok_lock) return false;
+
+                            var cp_bytes: ?[]u8 = null;
+                            defer if (cp_bytes) |b| self.gpa.free(b);
+
+                            switch (plan) {
+                                .checkpoint_then_rows => |p| {
+                                    if (std.fmt.allocPrint(self.gpa, "{s}/chat2/{s}/checkpoint", .{ base, enc_cid })) |cp_url| {
+                                        defer self.gpa.free(cp_url);
+                                        if (self.edgeGetOutsideLock(io, gen, &tok_mut, cp_url)) |*cp_resp_val| {
+                                            var cp_resp = cp_resp_val.*;
+                                            defer cp_resp.deinit(self.gpa);
+                                            if (cp_resp.status == 200 and cp_resp.body.len > 0) {
+                                                cp_bytes = self.gpa.dupe(u8, cp_resp.body) catch null;
+                                            }
+                                        }
+                                    } else |_| {}
+                                    if (cursor0 > p.after) {
+                                        if (std.fmt.allocPrint(self.gpa, "{s}/chat2/{s}/rows?after={d}&device={s}", .{ base, enc_cid, p.after, enc_dev })) |re_url| {
+                                            defer self.gpa.free(re_url);
+                                            if (self.edgeGetOutsideLock(io, gen, &tok_mut, re_url)) |*re_resp_val| {
+                                                var re_resp = re_resp_val.*;
+                                                defer re_resp.deinit(self.gpa);
+                                                if (re_resp.status == 200) {
+                                                    if (parseChat2RowsBatch(self.gpa, re_resp.body)) |re_batch| {
+                                                        batch.deinit(self.gpa);
+                                                        batch = re_batch;
+                                                    } else |_| {}
+                                                }
+                                            }
+                                        } else |_| {}
+                                        cursor0 = p.after;
+                                    }
+                                },
+                                .rows_only => |p| {
+                                    if (cursor0 > batch.state.head_seq) {
+                                        if (std.fmt.allocPrint(self.gpa, "{s}/chat2/{s}/rows?after={d}&device={s}", .{ base, enc_cid, p.after, enc_dev })) |re_url| {
+                                            defer self.gpa.free(re_url);
+                                            if (self.edgeGetOutsideLock(io, gen, &tok_mut, re_url)) |*re_resp_val| {
+                                                var re_resp = re_resp_val.*;
+                                                defer re_resp.deinit(self.gpa);
+                                                if (re_resp.status == 200) {
+                                                    if (parseChat2RowsBatch(self.gpa, re_resp.body)) |re_batch| {
+                                                        batch.deinit(self.gpa);
+                                                        batch = re_batch;
+                                                    } else |_| {}
+                                                }
+                                            }
+                                        } else |_| {}
+                                        cursor0 = p.after;
+                                    }
+                                },
+                            }
+
+                            var outcome = ApplyChat2Outcome{};
+                            {
+                                self.mutex.lockUncancelable(io);
+                                defer self.mutex.unlock(io);
+                                if (self.stop_requested or !self.auth.signed_in or self.auth.generation != gen) return false;
+                                outcome = self.applyChat2PullLocked(chat_id, cursor0, batch.state, cp_bytes, batch.rows.items, broadcast, resolve_pending);
+                            }
+
+                            if (outcome.need_checkpoint and cp_bytes == null) {
+                                if (std.fmt.allocPrint(self.gpa, "{s}/chat2/{s}/checkpoint", .{ base, enc_cid })) |cp_url| {
+                                    defer self.gpa.free(cp_url);
+                                    if (self.edgeGetOutsideLock(io, gen, &tok_mut, cp_url)) |*cp_resp_val| {
+                                        var cp_resp = cp_resp_val.*;
+                                        defer cp_resp.deinit(self.gpa);
+                                        if (cp_resp.status == 200 and cp_resp.body.len > 0) {
+                                            cp_bytes = self.gpa.dupe(u8, cp_resp.body) catch null;
+                                        }
+                                    }
+                                } else |_| {}
+                                if (cp_bytes != null) {
+                                    self.mutex.lockUncancelable(io);
+                                    defer self.mutex.unlock(io);
+                                    if (self.stop_requested or !self.auth.signed_in or self.auth.generation != gen) return false;
+                                    outcome = self.applyChat2PullLocked(chat_id, cursor0, batch.state, cp_bytes, batch.rows.items, broadcast, resolve_pending);
+                                }
+                            }
+
+                            var page: usize = 0;
+                            while (page < 8 and outcome.new_cursor < batch.state.head_seq) : (page += 1) {
+                                const prev_c = outcome.new_cursor;
+                                const p_url = std.fmt.allocPrint(self.gpa, "{s}/chat2/{s}/rows?after={d}&device={s}", .{ base, enc_cid, prev_c, enc_dev }) catch break;
+                                defer self.gpa.free(p_url);
+                                var p_resp = self.edgeGetOutsideLock(io, gen, &tok_mut, p_url) orelse break;
+                                defer p_resp.deinit(self.gpa);
+                                if (p_resp.status != 200) break;
+                                var p_batch = parseChat2RowsBatch(self.gpa, p_resp.body) catch break;
+                                defer p_batch.deinit(self.gpa);
+                                if (p_batch.rows.items.len == 0) break;
+                                {
+                                    self.mutex.lockUncancelable(io);
+                                    defer self.mutex.unlock(io);
+                                    if (self.stop_requested or !self.auth.signed_in or self.auth.generation != gen) return false;
+                                    outcome = self.applyChat2PullLocked(chat_id, prev_c, batch.state, null, p_batch.rows.items, broadcast, false);
+                                }
+                                if (outcome.new_cursor <= prev_c) break;
+                            }
+
+                            var has_msgs = false;
+                            {
+                                self.mutex.lockUncancelable(io);
+                                defer self.mutex.unlock(io);
+                                if (self.docs.getPtr(chat_id)) |doc| {
+                                    has_msgs = doc.messages.items.len > 0;
+                                }
+                            }
+                            if (has_msgs) return true;
+                        }
+                    } else |_| {}
+                }
+            }
+        } else |_| {}
+
+        // 2. Fallback for unseeded / tail-only / legacy chats (`/chat2/{id}/tail`, `/snapshot/{id}`, `/tail/{id}`)
+        var tail_msgs: ?[]u8 = self.fetchChatTailBodyOutsideLock(io, edge_raw, tok_mut, gen, chat_id);
+        defer if (tail_msgs) |t| self.gpa.free(t);
+
+        var snap_bytes: ?[]u8 = null;
+        defer if (snap_bytes) |s| self.gpa.free(s);
+
+        if (tail_msgs == null or std.mem.eql(u8, tail_msgs.?, "[]")) {
+            if (std.fmt.allocPrint(self.gpa, "{s}/snapshot/{s}", .{ base, enc_cid })) |snap_url| {
+                defer self.gpa.free(snap_url);
+                if (self.edgeGetOutsideLock(io, gen, &tok_mut, snap_url)) |*s_resp_val| {
+                    var s_resp = s_resp_val.*;
+                    defer s_resp.deinit(self.gpa);
+                    if (s_resp.status == 200 and s_resp.body.len > 0) {
+                        snap_bytes = self.gpa.dupe(u8, s_resp.body) catch null;
+                    }
+                }
+            } else |_| {}
+            if (snap_bytes == null) {
+                if (std.fmt.allocPrint(self.gpa, "{s}/tail/{s}", .{ base, enc_cid })) |legacy_url| {
+                    defer self.gpa.free(legacy_url);
+                    if (self.edgeGetOutsideLock(io, gen, &tok_mut, legacy_url)) |*l_resp_val| {
+                        var l_resp = l_resp_val.*;
+                        defer l_resp.deinit(self.gpa);
+                        if (l_resp.status == 200) {
+                            if (extractTailMessagesJsonAlloc(self.gpa, l_resp.body)) |lt| {
+                                if (tail_msgs) |old_t| self.gpa.free(old_t);
+                                tail_msgs = lt;
+                            }
+                        }
+                    }
+                } else |_| {}
+            }
+        }
+
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        if (self.stop_requested or !self.auth.signed_in or self.auth.generation != gen) return false;
+        return self.applyFallbackTailOrSnapshotLocked(chat_id, snap_bytes, tail_msgs, broadcast, resolve_pending);
+    }
+
+    /// Synchronous `chat2` Loro CRDT pull for callers that ALREADY hold `self.mutex` (or single-threaded tests).
+    /// Never acquires `self.mutex`.
+    pub fn pullChat2RoomLocked(self: *EngineHost, chat_id: []const u8) bool {
+        const io = self.io orelse return false;
+        if (!self.auth.signed_in) return false;
+        const edge_raw = self.auth.edge_url orelse return false;
+        const base = std.mem.trimEnd(u8, edge_raw, "/");
+
+        const enc_cid = auth_host.urlEncodeAlloc(self.gpa, chat_id) catch return false;
+        defer self.gpa.free(enc_cid);
+        const raw_dev = if (isValidEdgeRowId(self.device_id)) self.device_id else "dev-zig-host";
+        const enc_dev = auth_host.urlEncodeAlloc(self.gpa, raw_dev) catch return false;
+        defer self.gpa.free(enc_dev);
+
+        var cursor0: u64 = self.store.snapshotCursor(chat_id) orelse 0;
+
+        if (std.fmt.allocPrint(self.gpa, "{s}/chat2/{s}/rows?after={d}&device={s}", .{ base, enc_cid, cursor0, enc_dev })) |rows_url| {
+            defer self.gpa.free(rows_url);
+            if (self.edgeGetLocked(io, rows_url)) |*rows_resp_val| {
+                var rows_resp = rows_resp_val.*;
+                defer rows_resp.deinit(self.gpa);
+                if (rows_resp.status == 200) {
+                    if (parseChat2RowsBatch(self.gpa, rows_resp.body)) |batch_init| {
+                        var batch = batch_init;
+                        defer batch.deinit(self.gpa);
+                        if (batch.has_state and (batch.state.head_seq > 0 or batch.state.checkpoint_size > 0 or batch.rows.items.len > 0)) {
+                            const doc = self.getOrCreateDoc(chat_id) catch return false;
+                            const contained = batch.state.checkpoint_size == 0 or doc.frontierContained(self.gpa, batch.state_frontier);
+                            const plan = chat2_wire.planCatchUp(cursor0, batch.state, contained);
+
+                            var cp_bytes: ?[]u8 = null;
+                            defer if (cp_bytes) |b| self.gpa.free(b);
+
+                            switch (plan) {
+                                .checkpoint_then_rows => |p| {
+                                    if (std.fmt.allocPrint(self.gpa, "{s}/chat2/{s}/checkpoint", .{ base, enc_cid })) |cp_url| {
+                                        defer self.gpa.free(cp_url);
+                                        if (self.edgeGetLocked(io, cp_url)) |*cp_resp_val| {
+                                            var cp_resp = cp_resp_val.*;
+                                            defer cp_resp.deinit(self.gpa);
+                                            if (cp_resp.status == 200 and cp_resp.body.len > 0) {
+                                                cp_bytes = self.gpa.dupe(u8, cp_resp.body) catch null;
+                                            }
+                                        }
+                                    } else |_| {}
+                                    if (cursor0 > p.after) {
+                                        if (std.fmt.allocPrint(self.gpa, "{s}/chat2/{s}/rows?after={d}&device={s}", .{ base, enc_cid, p.after, enc_dev })) |re_url| {
+                                            defer self.gpa.free(re_url);
+                                            if (self.edgeGetLocked(io, re_url)) |*re_resp_val| {
+                                                var re_resp = re_resp_val.*;
+                                                defer re_resp.deinit(self.gpa);
+                                                if (re_resp.status == 200) {
+                                                    if (parseChat2RowsBatch(self.gpa, re_resp.body)) |re_batch| {
+                                                        batch.deinit(self.gpa);
+                                                        batch = re_batch;
+                                                    } else |_| {}
+                                                }
+                                            }
+                                        } else |_| {}
+                                        cursor0 = p.after;
+                                    }
+                                },
+                                .rows_only => |p| {
+                                    if (cursor0 > batch.state.head_seq) {
+                                        if (std.fmt.allocPrint(self.gpa, "{s}/chat2/{s}/rows?after={d}&device={s}", .{ base, enc_cid, p.after, enc_dev })) |re_url| {
+                                            defer self.gpa.free(re_url);
+                                            if (self.edgeGetLocked(io, re_url)) |*re_resp_val| {
+                                                var re_resp = re_resp_val.*;
+                                                defer re_resp.deinit(self.gpa);
+                                                if (re_resp.status == 200) {
+                                                    if (parseChat2RowsBatch(self.gpa, re_resp.body)) |re_batch| {
+                                                        batch.deinit(self.gpa);
+                                                        batch = re_batch;
+                                                    } else |_| {}
+                                                }
+                                            }
+                                        } else |_| {}
+                                        cursor0 = p.after;
+                                    }
+                                },
+                            }
+
+                            var outcome = self.applyChat2PullLocked(chat_id, cursor0, batch.state, cp_bytes, batch.rows.items, false, false);
+                            if (outcome.need_checkpoint and cp_bytes == null) {
+                                if (std.fmt.allocPrint(self.gpa, "{s}/chat2/{s}/checkpoint", .{ base, enc_cid })) |cp_url| {
+                                    defer self.gpa.free(cp_url);
+                                    if (self.edgeGetLocked(io, cp_url)) |*cp_resp_val| {
+                                        var cp_resp = cp_resp_val.*;
+                                        defer cp_resp.deinit(self.gpa);
+                                        if (cp_resp.status == 200 and cp_resp.body.len > 0) {
+                                            cp_bytes = self.gpa.dupe(u8, cp_resp.body) catch null;
+                                        }
+                                    }
+                                } else |_| {}
+                                if (cp_bytes != null) {
+                                    outcome = self.applyChat2PullLocked(chat_id, cursor0, batch.state, cp_bytes, batch.rows.items, false, false);
+                                }
+                            }
+
+                            var page: usize = 0;
+                            while (page < 8 and outcome.new_cursor < batch.state.head_seq) : (page += 1) {
+                                const prev_c = outcome.new_cursor;
+                                const p_url = std.fmt.allocPrint(self.gpa, "{s}/chat2/{s}/rows?after={d}&device={s}", .{ base, enc_cid, prev_c, enc_dev }) catch break;
+                                defer self.gpa.free(p_url);
+                                var p_resp = self.edgeGetLocked(io, p_url) orelse break;
+                                defer p_resp.deinit(self.gpa);
+                                if (p_resp.status != 200) break;
+                                var p_batch = parseChat2RowsBatch(self.gpa, p_resp.body) catch break;
+                                defer p_batch.deinit(self.gpa);
+                                if (p_batch.rows.items.len == 0) break;
+                                outcome = self.applyChat2PullLocked(chat_id, prev_c, batch.state, null, p_batch.rows.items, false, false);
+                                if (outcome.new_cursor <= prev_c) break;
+                            }
+
+                            if (doc.messages.items.len > 0) return true;
+                        }
+                    } else |_| {}
+                }
+            }
+        } else |_| {}
+
+        // Fallback for unseeded / tail-only / legacy chats
+        var tail_msgs: ?[]u8 = null;
+        defer if (tail_msgs) |t| self.gpa.free(t);
+        if (std.fmt.allocPrint(self.gpa, "{s}/chat2/{s}/tail", .{ base, enc_cid })) |tail_url| {
+            defer self.gpa.free(tail_url);
+            if (self.edgeGetLocked(io, tail_url)) |*t_resp_val| {
+                var t_resp = t_resp_val.*;
+                defer t_resp.deinit(self.gpa);
+                if (t_resp.status == 200) {
+                    tail_msgs = extractTailMessagesJsonAlloc(self.gpa, t_resp.body);
+                }
+            }
+        } else |_| {}
+
+        var snap_bytes: ?[]u8 = null;
+        defer if (snap_bytes) |s| self.gpa.free(s);
+        if (tail_msgs == null or std.mem.eql(u8, tail_msgs.?, "[]")) {
+            if (std.fmt.allocPrint(self.gpa, "{s}/snapshot/{s}", .{ base, enc_cid })) |snap_url| {
+                defer self.gpa.free(snap_url);
+                if (self.edgeGetLocked(io, snap_url)) |*s_resp_val| {
+                    var s_resp = s_resp_val.*;
+                    defer s_resp.deinit(self.gpa);
+                    if (s_resp.status == 200 and s_resp.body.len > 0) {
+                        snap_bytes = self.gpa.dupe(u8, s_resp.body) catch null;
+                    }
+                }
+            } else |_| {}
+            if (snap_bytes == null) {
+                if (std.fmt.allocPrint(self.gpa, "{s}/tail/{s}", .{ base, enc_cid })) |legacy_url| {
+                    defer self.gpa.free(legacy_url);
+                    if (self.edgeGetLocked(io, legacy_url)) |*l_resp_val| {
+                        var l_resp = l_resp_val.*;
+                        defer l_resp.deinit(self.gpa);
+                        if (l_resp.status == 200) {
+                            if (extractTailMessagesJsonAlloc(self.gpa, l_resp.body)) |lt| {
+                                if (tail_msgs) |old_t| self.gpa.free(old_t);
+                                tail_msgs = lt;
+                            }
+                        }
+                    }
+                } else |_| {}
+            }
+        }
+
+        return self.applyFallbackTailOrSnapshotLocked(chat_id, snap_bytes, tail_msgs, false, false);
+    }
+
+    /// Poll incremental `chat2` rows (`?after={cursor}`) for open watched chat panes so live streaming
+    /// updates from Desktop or iOS appear in `harness-nano` within ~1-2s even between registry ticks.
+    pub fn pollWatchedChatRoomsUnlocked(self: *EngineHost, io: std.Io) void {
+        var targets: std.ArrayList([]u8) = .empty;
+        defer {
+            for (targets.items) |t| self.gpa.free(t);
+            targets.deinit(self.gpa);
+        }
+        var gen: u64 = 0;
+        var edge_copy: ?[]u8 = null;
+        var tok_copy: ?[]u8 = null;
+        defer {
+            if (edge_copy) |e| self.gpa.free(e);
+            if (tok_copy) |t| self.gpa.free(t);
+        }
+
+        {
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
+            if (self.stop_requested or !self.auth.signed_in or !std.mem.eql(u8, self.workspace_scope, "synced")) return;
+            const er = self.auth.edge_url orelse return;
+            const tok = self.auth.ensureAccessToken(io, false) orelse return;
+            gen = self.auth.generation;
+            edge_copy = self.gpa.dupe(u8, er) catch return;
+            tok_copy = self.gpa.dupe(u8, tok) catch return;
+
+            for (self.watches.items) |w| {
+                if (w.kind != .doc_messages) continue;
+                const tid = w.target_id orelse continue;
+                if (!isValidEdgeChatTailId(tid)) continue;
+                if (self.docs.getPtr(tid)) |doc| {
+                    if (doc.hasActiveWork()) continue;
+                }
+                var dup_seen = false;
+                for (targets.items) |existing| {
+                    if (std.mem.eql(u8, existing, tid)) {
+                        dup_seen = true;
+                        break;
+                    }
+                }
+                if (dup_seen) continue;
+                const tcopy = self.gpa.dupe(u8, tid) catch break;
+                targets.append(self.gpa, tcopy) catch {
+                    self.gpa.free(tcopy);
+                    break;
+                };
+                if (targets.items.len >= 4) break;
+            }
+        }
+
+        for (targets.items) |cid| {
+            if (self.stop_requested) return;
+            _ = self.pullChat2RoomOutsideLock(io, edge_copy.?, tok_copy.?, gen, cid, true, false);
+        }
     }
 
     fn spawnAsyncTailFetch(self: *EngineHost, chat_id: []const u8) bool {
@@ -5322,19 +6843,7 @@ pub const EngineHost = struct {
                     gpa.destroy(ctx);
                     _ = host.bg_workers_active.fetchSub(1, .acq_rel);
                 }
-                const msgs_json = host.fetchChatTailBodyOutsideLock(ctx.wio, ctx.edge, ctx.token, ctx.gen, ctx.cid) orelse return;
-                host.mutex.lockUncancelable(ctx.wio);
-                defer host.mutex.unlock(ctx.wio);
-                if (host.stop_requested or !host.auth.signed_in or host.auth.generation != ctx.gen) {
-                    gpa.free(msgs_json);
-                    return;
-                }
-                if (host.storeCachedTailInMemoryOwned(ctx.cid, msgs_json, true)) |stored| {
-                    if (std.fmt.allocPrint(gpa, "{{\"historyPending\":false,\"reset\":{s}}}", .{stored})) |frame_json| {
-                        defer gpa.free(frame_json);
-                        host.broadcastWatch(.doc_messages, ctx.cid, frame_json) catch {};
-                    } else |_| {}
-                }
+                _ = host.pullChat2RoomOutsideLock(ctx.wio, ctx.edge, ctx.token, ctx.gen, ctx.cid, true, true);
             }
         };
 
@@ -5376,7 +6885,7 @@ pub const EngineHost = struct {
         }
     }
 
-    /// Prefetch `/chat2/{chatId}/tail` for the `max_chats` most recently active uncached synced chats
+    /// Prefetch `chat2` rooms / tails for the `max_chats` most recently active uncached synced chats
     /// across up to 4 concurrent warm HTTP/2 streams without holding `self.mutex` during network I/O.
     pub fn prefetchRecentChatTailsUnlocked(self: *EngineHost, io: std.Io, max_chats: usize) void {
         const Candidate = struct { id: []u8, ts: i64 };
@@ -5441,19 +6950,7 @@ pub const EngineHost = struct {
                     const idx = ctx.cursor.fetchAdd(1, .monotonic);
                     if (idx >= ctx.items.len) return;
                     const cid = ctx.items[idx].id;
-                    const msgs = ctx.host.fetchChatTailBodyOutsideLock(ctx.wio, ctx.edge, ctx.tok, ctx.wgen, cid) orelse continue;
-                    ctx.host.mutex.lockUncancelable(ctx.wio);
-                    defer ctx.host.mutex.unlock(ctx.wio);
-                    if (ctx.host.stop_requested or !ctx.host.auth.signed_in or ctx.host.auth.generation != ctx.wgen) {
-                        ctx.host.gpa.free(msgs);
-                        return;
-                    }
-                    if (ctx.host.storeCachedTailInMemoryOwned(cid, msgs, true)) |stored| {
-                        if (std.fmt.allocPrint(ctx.host.gpa, "{{\"historyPending\":false,\"reset\":{s}}}", .{stored})) |frame_json| {
-                            defer ctx.host.gpa.free(frame_json);
-                            ctx.host.broadcastWatch(.doc_messages, cid, frame_json) catch {};
-                        } else |_| {}
-                    }
+                    _ = ctx.host.pullChat2RoomOutsideLock(ctx.wio, ctx.edge, ctx.tok, ctx.wgen, cid, true, false);
                 }
             }
         };
@@ -5478,38 +6975,11 @@ pub const EngineHost = struct {
         }
     }
 
-    /// Fetch `/chat2/{chatId}/tail` from the edge server over warm HTTP/2 and cache the `messages` JSON array
-    /// in memory and on disk so opening any cloud-synced chat renders its full transcript immediately.
+    /// Pull `chat2` CRDT history (or fallback tail) from the edge server and return the cached `messages` JSON array.
     pub fn fetchEdgeChatTailMessagesJson(self: *EngineHost, chat_id: []const u8) ?[]const u8 {
         if (self.lookupCachedTailJson(chat_id)) |cached| return cached;
-        const io = self.io orelse return null;
-        if (!self.auth.signed_in) return null;
-        const edge_raw = self.auth.edge_url orelse return null;
-        const tok0 = self.auth.ensureAccessToken(io, false) orelse return null;
-
-        const base = std.mem.trimEnd(u8, edge_raw, "/");
-        const enc_cid = auth_host.urlEncodeAlloc(self.gpa, chat_id) catch return null;
-        defer self.gpa.free(enc_cid);
-        const url = std.fmt.allocPrint(self.gpa, "{s}/chat2/{s}/tail", .{ base, enc_cid }) catch return null;
-        defer self.gpa.free(url);
-
-        var resp = auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "GET", url, tok0, &.{}, null) catch return null;
-        if (resp.status == 401) {
-            resp.deinit(self.gpa);
-            const tok1 = self.auth.ensureAccessToken(io, true) orelse return null;
-            resp = auth_host.AuthManager.edgeRequestPooled(&self.auth.h2_pool, self.gpa, io, "GET", url, tok1, &.{}, null) catch return null;
-        }
-        defer resp.deinit(self.gpa);
-        if (resp.status != 200) return null;
-
-        var parsed = json.parseFromSlice(json.Value, self.gpa, resp.body, .{}) catch return null;
-        defer parsed.deinit();
-        if (parsed.value != .object) return null;
-        const msgs_val = parsed.value.object.get("messages") orelse return null;
-        if (msgs_val != .array) return null;
-
-        const msgs_json = std.fmt.allocPrint(self.gpa, "{f}", .{json.fmt(msgs_val, .{})}) catch return null;
-        return self.storeCachedTailInMemoryOwned(chat_id, msgs_json, true);
+        _ = self.pullChat2RoomLocked(chat_id);
+        return self.lookupCachedTailJson(chat_id);
     }
 
     fn regOptStr(o: json.ObjectMap, key: []const u8) ?[]const u8 {
@@ -5521,6 +6991,16 @@ pub const EngineHost = struct {
     fn regOptBool(o: json.ObjectMap, key: []const u8, default_val: bool) bool {
         const v = o.get(key) orelse return default_val;
         return if (v == .bool) v.bool else default_val;
+    }
+
+    fn regOptU64(o: json.ObjectMap, key: []const u8) u64 {
+        const v = o.get(key) orelse return 0;
+        return switch (v) {
+            .integer => |i| if (i > 0) @intCast(i) else 0,
+            .float => |fl| if (fl > 0) @intFromFloat(fl) else 0,
+            .string => |s| std.fmt.parseInt(u64, s, 10) catch 0,
+            else => 0,
+        };
     }
 
     fn regOptEpochMs(o: json.ObjectMap, key: []const u8) i64 {
@@ -6757,7 +8237,6 @@ test "Full Rust parity Login (SignInHeadless -> CompleteSignIn -> NeedsOrganizat
         defer gpa.free(create_r.unary_json);
 
         const doc = try host.getOrCreateDoc("chat-sync-1");
-        const chat2_wire = @import("chat2_wire.zig");
 
         var room = chat2_client.Chat2RoomClient{
             .gpa = gpa,
@@ -7414,4 +8893,388 @@ test "harness-updates-v1 capability and stateful Watch/Check/Policy/Dismiss/Appl
     try testing.expect(std.mem.indexOf(u8, app_out.unary_json, "\"phase\":\"updated\"") != null);
     try testing.expect(std.mem.indexOf(u8, app_out.unary_json, "\"installedVersion\":\"2.1.322\"") != null);
     try testing.expectEqual(@as(usize, 4), host.pushed_frames.items.len);
+}
+
+test "outbound registry chat and session ops match Rust RawChat and RawSession wire schema" {
+    const gpa = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var host = try EngineHost.init(gpa, "dev-wire-1", "Synthetic Zig Mac");
+    defer host.deinit();
+
+    // 1. Creating a chat on synthetic placeholder `space-zig-default` emits `"spaceId":null`
+    //    and `"lastCompletedTurn":null` (never an integer, which Rust `RawSession` rejects).
+    const create_p = try json.parseFromSliceLeaky(
+        json.Value,
+        a,
+        "{\"op\":\"createChat\",\"chatId\":\"chat-wire-1\",\"spaceId\":\"space-zig-default\",\"config\":{\"harness\":\"graff\",\"model\":\"gpt-6.1-sol\",\"reasoning\":\"high\"}}",
+        .{},
+    );
+    const c_out = try host.handle("Mutate", create_p);
+    defer gpa.free(c_out.unary_json);
+    try testing.expectEqual(@as(usize, 2), host.pending_registry_ops.items.len);
+    try testing.expect(std.mem.indexOf(u8, host.pending_registry_ops.items[0], "\"spaceId\":null") != null);
+    try testing.expect(std.mem.indexOf(u8, host.pending_registry_ops.items[0], "space-zig-default") == null);
+    try testing.expect(std.mem.indexOf(u8, host.pending_registry_ops.items[1], "\"lastCompletedTurn\":null") != null);
+    try testing.expect(std.mem.indexOf(u8, host.pending_registry_ops.items[1], "\"lastCompletedTurn\":0") == null);
+
+    host.clearPendingOutboundSync();
+
+    // 2. Running a prompt stamps `cwd`, caches the initial user tail immediately, and emits
+    //    string `"lastCompletedTurn":"turn-1"` on completion while preserving explicit space IDs.
+    const create_p2 = try json.parseFromSliceLeaky(
+        json.Value,
+        a,
+        "{\"op\":\"createChat\",\"chatId\":\"chat-wire-2\",\"spaceId\":\"space-real-1\",\"config\":{\"harness\":\"graff\"}}",
+        .{},
+    );
+    const c_out2 = try host.handle("Mutate", create_p2);
+    defer gpa.free(c_out2.unary_json);
+    host.clearPendingOutboundSync();
+
+    const run_p = try json.parseFromSliceLeaky(
+        json.Value,
+        a,
+        "{\"chatId\":\"chat-wire-2\",\"command\":{\"kind\":\"run\",\"messageId\":\"m-wire-1\",\"request\":{\"prompt\":\"hi\",\"cwd\":\"/work/synth-repo\"}}}",
+        .{},
+    );
+    const r_out = try host.handle("QueueCommand", run_p);
+    defer gpa.free(r_out.unary_json);
+
+    var found_real_space = false;
+    var found_cwd = false;
+    var found_string_turn = false;
+    for (host.pending_registry_ops.items) |op_s| {
+        if (std.mem.indexOf(u8, op_s, "\"spaceId\":\"space-real-1\"") != null) found_real_space = true;
+        if (std.mem.indexOf(u8, op_s, "\"cwd\":\"/work/synth-repo\"") != null) found_cwd = true;
+        if (std.mem.indexOf(u8, op_s, "\"lastCompletedTurn\":\"turn-1\"") != null) found_string_turn = true;
+        try testing.expect(std.mem.indexOf(u8, op_s, "\"lastCompletedTurn\":0") == null);
+        try testing.expect(std.mem.indexOf(u8, op_s, "\"lastCompletedTurn\":1") == null);
+    }
+    try testing.expect(found_real_space);
+    try testing.expect(found_cwd);
+    try testing.expect(found_string_turn);
+    try testing.expect(host.remote_tails.contains("chat-wire-2"));
+}
+
+test "synced Desktop chat2 room hydrates Loro history, resolves usable cwd, seeds follow-up, and roundtrips binary Loro rows" {
+    if (comptime !std.process.can_spawn) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // 1. Build a synthetic Desktop `SessionDoc` (`dev-desktop-pro`) with Turn 1 checkpoint + incremental row 1.
+    var desktop_doc = try session_doc.SessionDoc.init(gpa, "chat-rank-1", "dev-desktop-pro");
+    defer desktop_doc.deinit();
+
+    try desktop_doc.appendUserMessage("msg-d1", "part-u1", "Benchmark our current ranking baseline", 1000);
+    try desktop_doc.beginAssistantMessage("msg-d2", 1010);
+    _ = try desktop_doc.appendPartDelta("msg-d2", "part-t1", "text", "Current ranking score is 0.74 in feat/codegraff-rank.");
+    try desktop_doc.setMessageStatus("msg-d2", "complete");
+
+    const cp_bytes = try desktop_doc.exportLoroSnapshot(gpa);
+    defer gpa.free(cp_bytes);
+    const fr_bytes = try desktop_doc.exportLoroFrontier(gpa);
+    defer gpa.free(fr_bytes);
+    try testing.expect(cp_bytes.len > 0 and fr_bytes.len > 0);
+
+    try desktop_doc.appendUserMessage("msg-d3", "part-u2", "Also check recall@10", 1050);
+    const row1_bytes = try desktop_doc.syncEntryToLoroDelta(gpa, "msg-d3");
+    defer gpa.free(row1_bytes);
+    try testing.expect(row1_bytes.len > 0);
+
+    // Encode `[u32 LE len][state][u32 LE len][row(1)][u32 LE len][rowsDone]` wire body for `GET /chat2/chat-rank-1/rows?after=0`.
+    const state_hdr_str = try std.fmt.allocPrint(
+        a,
+        "{{\"headSeq\":1,\"seqFloor\":1,\"checkpointSeq\":0,\"checkpointSize\":{d},\"rowCount\":1,\"rowBytes\":{d}}}",
+        .{ cp_bytes.len, row1_bytes.len },
+    );
+    const state_hdr = try json.parseFromSliceLeaky(json.Value, a, state_hdr_str, .{});
+    const state_frame = try chat2_wire.encodeValue(gpa, chat2_wire.FrameType.state, state_hdr, fr_bytes);
+    defer gpa.free(state_frame);
+
+    const row1_hdr = try json.parseFromSliceLeaky(json.Value, a, "{\"seq\":1}", .{});
+    const row1_frame = try chat2_wire.encodeValue(gpa, chat2_wire.FrameType.row, row1_hdr, row1_bytes);
+    defer gpa.free(row1_frame);
+
+    const done_hdr = try json.parseFromSliceLeaky(json.Value, a, "{\"headSeq\":1}", .{});
+    const done_frame = try chat2_wire.encodeValue(gpa, chat2_wire.FrameType.rows_done, done_hdr, "");
+    defer gpa.free(done_frame);
+
+    var rows_body_aw: std.Io.Writer.Allocating = .init(gpa);
+    defer rows_body_aw.deinit();
+    for ([_][]const u8{ state_frame, row1_frame, done_frame }) |fr| {
+        var len_le: [4]u8 = undefined;
+        std.mem.writeInt(u32, &len_le, @intCast(fr.len), .little);
+        try rows_body_aw.writer.writeAll(&len_le);
+        try rows_body_aw.writer.writeAll(fr);
+    }
+    const initial_rows_body = rows_body_aw.written();
+
+    // Also build caught-up (`?after=2`) empty rows response for post-push registry sync.
+    const caught_state_hdr = try json.parseFromSliceLeaky(json.Value, a, "{\"headSeq\":2,\"seqFloor\":1,\"checkpointSeq\":0,\"checkpointSize\":0}", .{});
+    const caught_state_frame = try chat2_wire.encodeValue(gpa, chat2_wire.FrameType.state, caught_state_hdr, "");
+    defer gpa.free(caught_state_frame);
+    var caught_aw: std.Io.Writer.Allocating = .init(gpa);
+    defer caught_aw.deinit();
+    {
+        var len_le: [4]u8 = undefined;
+        std.mem.writeInt(u32, &len_le, @intCast(caught_state_frame.len), .little);
+        try caught_aw.writer.writeAll(&len_le);
+        try caught_aw.writer.writeAll(caught_state_frame);
+    }
+
+    // 2. Spin up loopback Edge `chat2` + `registry` server capturing pushed binary Loro rows.
+    const bind_addr = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+    var edge_srv = try bind_addr.listen(io, .{ .reuse_address = true });
+    defer edge_srv.deinit(io);
+    const edge_port = edge_srv.socket.address.getPort();
+
+    var stop_edge = std.atomic.Value(bool).init(false);
+    var capture_mu: std.Io.Mutex = .init;
+    var pushed_loro_rows: std.ArrayList([]u8) = .empty;
+    defer {
+        for (pushed_loro_rows.items) |r| gpa.free(r);
+        pushed_loro_rows.deinit(gpa);
+    }
+
+    const LoopEdgeCtx = struct {
+        srv: *std.Io.net.Server,
+        tio: std.Io,
+        alloc: Allocator,
+        stop: *std.atomic.Value(bool),
+        mu: *std.Io.Mutex,
+        cp: []const u8,
+        rows0: []const u8,
+        rows_done: []const u8,
+        pushed: *std.ArrayList([]u8),
+
+        fn run(ctx: @This()) void {
+            while (!ctx.stop.load(.acquire)) {
+                var stream = ctx.srv.accept(ctx.tio) catch return;
+                defer stream.close(ctx.tio);
+                if (ctx.stop.load(.acquire)) return;
+                var rbuf: [8192]u8 = undefined;
+                var wbuf: [8192]u8 = undefined;
+                var reader = stream.reader(ctx.tio, &rbuf);
+                var writer = stream.writer(ctx.tio, &wbuf);
+
+                const req_line = reader.interface.takeDelimiterInclusive('\n') catch continue;
+                var content_len: usize = 0;
+                while (true) {
+                    const line = reader.interface.takeDelimiterInclusive('\n') catch break;
+                    const trimmed = std.mem.trimEnd(u8, line, "\r\n");
+                    if (trimmed.len == 0) break;
+                    if (std.ascii.startsWithIgnoreCase(trimmed, "content-length:")) {
+                        const val = std.mem.trim(u8, trimmed["content-length:".len..], " \t");
+                        content_len = std.fmt.parseInt(usize, val, 10) catch 0;
+                    }
+                }
+                const req_body = ctx.alloc.alloc(u8, content_len) catch continue;
+                defer ctx.alloc.free(req_body);
+                if (content_len > 0) {
+                    reader.interface.readSliceAll(req_body) catch continue;
+                }
+
+                if (std.mem.startsWith(u8, req_line, "GET /chat2/chat-rank-1/checkpoint ")) {
+                    writer.interface.print(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: {d}\r\nconnection: close\r\n\r\n",
+                        .{ctx.cp.len},
+                    ) catch continue;
+                    writer.interface.writeAll(ctx.cp) catch continue;
+                    writer.interface.flush() catch continue;
+                    continue;
+                }
+                if (std.mem.startsWith(u8, req_line, "GET ") and std.mem.indexOf(u8, req_line, "/chat2/chat-rank-1/rows?after=0") != null) {
+                    writer.interface.print(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: {d}\r\nconnection: close\r\n\r\n",
+                        .{ctx.rows0.len},
+                    ) catch continue;
+                    writer.interface.writeAll(ctx.rows0) catch continue;
+                    writer.interface.flush() catch continue;
+                    continue;
+                }
+                if (std.mem.startsWith(u8, req_line, "GET ") and std.mem.indexOf(u8, req_line, "/chat2/chat-rank-1/rows?") != null) {
+                    writer.interface.print(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: {d}\r\nconnection: close\r\n\r\n",
+                        .{ctx.rows_done.len},
+                    ) catch continue;
+                    writer.interface.writeAll(ctx.rows_done) catch continue;
+                    writer.interface.flush() catch continue;
+                    continue;
+                }
+                if (std.mem.startsWith(u8, req_line, "POST ") and std.mem.indexOf(u8, req_line, "/chat2/chat-rank-1/rows?") != null) {
+                    ctx.mu.lockUncancelable(ctx.tio);
+                    if (ctx.alloc.dupe(u8, req_body)) |copy| {
+                        ctx.pushed.append(ctx.alloc, copy) catch ctx.alloc.free(copy);
+                    } else |_| {}
+                    ctx.mu.unlock(ctx.tio);
+                    const ack = "{\"batchId\":\"b1\",\"seq\":2}";
+                    writer.interface.print(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {d}\r\nconnection: close\r\n\r\n{s}",
+                        .{ ack.len, ack },
+                    ) catch continue;
+                    writer.interface.flush() catch continue;
+                    continue;
+                }
+
+                const ok_json = if (std.mem.indexOf(u8, req_line, "/registry/") != null and std.mem.startsWith(u8, req_line, "GET "))
+                    "{\"seq\":1,\"rows\":[]}"
+                else
+                    "{\"ok\":true,\"seq\":1}";
+                writer.interface.print(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {d}\r\nconnection: close\r\n\r\n{s}",
+                    .{ ok_json.len, ok_json },
+                ) catch continue;
+                writer.interface.flush() catch continue;
+            }
+        }
+    };
+
+    const edge_th = try std.Thread.spawn(.{}, LoopEdgeCtx.run, .{LoopEdgeCtx{
+        .srv = &edge_srv,
+        .tio = io,
+        .alloc = gpa,
+        .stop = &stop_edge,
+        .mu = &capture_mu,
+        .cp = cp_bytes,
+        .rows0 = initial_rows_body,
+        .rows_done = caught_aw.written(),
+        .pushed = &pushed_loro_rows,
+    }});
+    defer {
+        stop_edge.store(true, .release);
+        if (std.Io.net.IpAddress.parse("127.0.0.1", edge_port)) |wake_addr| {
+            if (wake_addr.connect(io, .{ .mode = .stream })) |ws_wake| ws_wake.close(io) else |_| {}
+        } else |_| {}
+        edge_th.join();
+    }
+
+    // 3. Create synthetic local checkout dir + executable mock `graff` script.
+    const synth_worktree = "/tmp/harness-synth-rank-worktree";
+    const synth_data_dir = "/tmp/harness-synth-rank-data";
+    std.Io.Dir.cwd().deleteTree(io, synth_data_dir) catch {};
+    std.Io.Dir.cwd().createDirPath(io, synth_worktree) catch {};
+    std.Io.Dir.cwd().createDirPath(io, synth_data_dir) catch {};
+    const mock_graff_path = "/tmp/harness-synth-rank-data/mock-graff.sh";
+    const mock_graff_script =
+        \\#!/bin/sh
+        \\cur_dir="$PWD"
+        \\while IFS= read -r line; do
+        \\  case "$line" in
+        \\    *'"method":"session/load"'*)
+        \\      printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32001,"message":"remote session missing locally"}}'
+        \\      ;;
+        \\    *'"method":"session/new"'*)
+        \\      printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"sessionId":"sess-nano-local-42"}}'
+        \\      ;;
+        \\    *'"method":"session/prompt"'*)
+        \\      case "$line" in
+        \\        *'<earlier-conversation>'*'Current ranking score is 0.74'*'Also check recall@10'*) seed_tag="SEED_OK" ;;
+        \\        *) seed_tag="SEED_MISSING" ;;
+        \\      esac
+        \\      printf '%s\n' "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"sess-nano-local-42\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"$seed_tag cwd=$cur_dir\"}}}}"
+        \\      printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{"stopReason":"end_turn"}}'
+        \\      exit 0
+        \\      ;;
+        \\  esac
+        \\done
+        \\
+    ;
+    EngineHost.writePrivateCacheFile(io, mock_graff_path, mock_graff_script);
+    {
+        const chmod_argv = [_][]const u8{ "/bin/chmod", "+x", mock_graff_path };
+        var ch = try std.process.spawn(io, .{ .argv = &chmod_argv, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore });
+        _ = try ch.wait(io);
+    }
+
+    // 4. Configure Nano `EngineHost` signed into loopback Edge with Desktop's synced chat + local matching checkout!
+    var host = try EngineHost.init(gpa, "dev-nano-mac", "Nano Mac");
+    defer host.deinit();
+    host.io = io;
+    host.graff_exe = mock_graff_path;
+    try host.setDataDir(synth_data_dir);
+
+    const edge_url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}", .{edge_port});
+    try host.auth.configureCodegraff(edge_url, "cg_test", "https://codegraff.example", synth_data_dir);
+    host.auth.signed_in = true;
+    host.auth.access_token = try gpa.dupe(u8, "e30.eyJzdWIiOiJ1c2VyXzEiLCJpYXQiOjEwMDAsImV4cCI6OTk5OTk5OTk5OSwib3JnX2lkIjoib3JnX3N5bnRoIn0.sig");
+    host.auth.access_expires_at_ms = 9_999_999_999_000;
+    host.auth.org_id = try gpa.dupe(u8, "org_synth");
+
+    const reg_json =
+        \\{"seq":1,"rows":[
+        \\  {"kind":"spaces","id":"sp-nano-local","deleted":false,"fields":{"id":"sp-nano-local","deviceId":"dev-nano-mac","path":"/tmp/harness-synth-rank-worktree","name":"feat/codegraff-rank","gitDetected":true,"checkoutId":"co-rank-shared","createdAt":900}},
+        \\  {"kind":"chats","id":"chat-rank-1","deleted":false,"fields":{"id":"chat-rank-1","deviceId":"dev-desktop-pro","spaceId":"sp-remote-desktop","title":"Improve ranking","archived":false,"roomGen":2,"cwd":"/nonexistent/synthetic-desktop-checkout","checkoutId":"co-rank-shared","harnessSessionId":"sess-remote-desktop-1","createdAt":1000,"lastMessageAt":1050,"config":{"harness":"graff","model":"synthetic/test-model","reasoning":"high","chatMode":false}}}
+        \\]}
+    ;
+    try testing.expect(host.applyRegistryResponseJson("org_synth", reg_json, false));
+
+    // 5. Open chat via `WatchDocMessages` -> pulls Loro checkpoint + row 1 (`cursor == 1`, 3 messages)!
+    {
+        const watch_p = try json.parseFromSliceLeaky(json.Value, a, "{\"chatId\":\"chat-rank-1\"}", .{});
+        var watch_out = try host.handleWithId(77, "WatchDocMessages", watch_p);
+        defer watch_out.stream_items_json.deinit(gpa);
+        const initial_frame = watch_out.stream_items_json.items[0];
+        try testing.expect(std.mem.indexOf(u8, initial_frame, "Benchmark our current ranking baseline") != null);
+        try testing.expect(std.mem.indexOf(u8, initial_frame, "Current ranking score is 0.74") != null);
+        try testing.expect(std.mem.indexOf(u8, initial_frame, "Also check recall@10") != null);
+        try testing.expectEqual(@as(?u64, 1), host.store.snapshotCursor("chat-rank-1"));
+    }
+
+    // 6. Send follow-up prompt from Nano with missing/fallback `"cwd":"~"`!
+    {
+        const run_p = try json.parseFromSliceLeaky(
+            json.Value,
+            a,
+            "{\"chatId\":\"chat-rank-1\",\"command\":{\"kind\":\"run\",\"messageId\":\"msg-n4\",\"request\":{\"prompt\":\"Compare ranking strategies using the synthetic sample dataset.\",\"cwd\":\"~\"}}}",
+            .{},
+        );
+        const run_out = try host.handle("QueueCommand", run_p);
+        defer gpa.free(run_out.unary_json);
+    }
+
+    // 7. Verify ALL 5 messages remain intact, `cwd` resolved to `synth_worktree`, `<earlier-conversation>` was seeded,
+    //    and Desktop's `deviceId` + `harnessSessionId` were preserved!
+    const nano_doc = try host.getOrCreateDoc("chat-rank-1");
+    try testing.expectEqual(@as(usize, 5), nano_doc.messages.items.len);
+    try testing.expectEqualStrings("msg-d1", nano_doc.messages.items[0].id);
+    try testing.expectEqualStrings("msg-d2", nano_doc.messages.items[1].id);
+    try testing.expectEqualStrings("msg-d3", nano_doc.messages.items[2].id);
+    try testing.expectEqualStrings("msg-n4", nano_doc.messages.items[3].id);
+    const asst_reply = nano_doc.messages.items[4].parts.items[0].text.items;
+    try testing.expect(std.mem.indexOf(u8, asst_reply, "SEED_OK") != null);
+    try testing.expect(std.mem.indexOf(u8, asst_reply, "harness-synth-rank-worktree") != null);
+
+    var found_chat = false;
+    for (host.chats.items) |c| {
+        if (std.mem.eql(u8, c.id, "chat-rank-1")) {
+            found_chat = true;
+            try testing.expectEqualStrings("dev-desktop-pro", c.device_id);
+            try testing.expectEqualStrings("sess-remote-desktop-1", c.harness_session_id.?);
+            try testing.expectEqualStrings("sess-nano-local-42", c.local_graff_session_id.?);
+        }
+    }
+    try testing.expect(found_chat);
+
+    // 8. Push outbound `chat2` Loro delta to loopback Edge and verify Desktop's `LoroDoc` imports all 5 messages!
+    _ = host.syncFromEdgeRegistry(io);
+    try testing.expect(!host.store.hasPendingChatUpdates("chat-rank-1"));
+    try testing.expectEqual(@as(?u64, 2), host.store.snapshotCursor("chat-rank-1"));
+
+    capture_mu.lockUncancelable(io);
+    try testing.expect(pushed_loro_rows.items.len >= 1);
+    for (pushed_loro_rows.items) |pushed_bytes| {
+        const import_out = try desktop_doc.importLoroBytes(pushed_bytes);
+        try testing.expectEqual(loro_ffi.ImportOutcome.applied, import_out);
+    }
+    capture_mu.unlock(io);
+
+    try testing.expectEqual(@as(usize, 5), desktop_doc.messages.items.len);
+    try testing.expectEqualStrings("Compare ranking strategies using the synthetic sample dataset.", desktop_doc.messages.items[3].parts.items[0].text.items);
+    try testing.expect(std.mem.indexOf(u8, desktop_doc.messages.items[4].parts.items[0].text.items, "SEED_OK") != null);
 }

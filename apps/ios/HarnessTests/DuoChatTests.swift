@@ -162,4 +162,59 @@ final class DuoChatTests: XCTestCase {
         XCTAssertEqual(narrow.legendColumns, 1)
         XCTAssertEqual(narrow.segmentWidth, ContextCardLayout.minimumSegmentWidth, accuracy: 0.001)
     }
+
+    func testFlatDuoPrewarmsSidebarAndReplacesChatWithoutNavigationPush() {
+        XCTAssertTrue(DuoChat.prewarmsFlatSidebar(flat: true, sessionOpen: true, inspectOpen: false))
+        XCTAssertFalse(DuoChat.prewarmsFlatSidebar(flat: true, sessionOpen: true, inspectOpen: true))
+        XCTAssertFalse(DuoChat.prewarmsFlatSidebar(flat: true, sessionOpen: false, inspectOpen: false))
+        XCTAssertFalse(DuoChat.prewarmsFlatSidebar(flat: false, sessionOpen: true, inspectOpen: false))
+
+        XCTAssertTrue(DuoChat.replacesSessionWithoutPush(splitLayout: false, flatSidebar: true,
+                                                         currentIsChat: true, nextIsChat: true))
+        XCTAssertTrue(DuoChat.replacesSessionWithoutPush(splitLayout: true, flatSidebar: false,
+                                                         currentIsChat: true, nextIsChat: true))
+        XCTAssertFalse(DuoChat.replacesSessionWithoutPush(splitLayout: false, flatSidebar: false,
+                                                          currentIsChat: true, nextIsChat: true))
+        XCTAssertFalse(DuoChat.replacesSessionWithoutPush(splitLayout: false, flatSidebar: true,
+                                                          currentIsChat: false, nextIsChat: true))
+
+        XCTAssertTrue(TranscriptTableView.needsWidthRelayout(previousWidth: 574, nextWidth: 372))
+        XCTAssertFalse(TranscriptTableView.needsWidthRelayout(previousWidth: 0, nextWidth: 372))
+        XCTAssertFalse(TranscriptTableView.needsWidthRelayout(previousWidth: 372, nextWidth: 372.2))
+    }
+
+    @MainActor
+    func testFlatSidebarStateTogglesRepeatedlyEvenWhenArgumentDomainForcesKeyTrue() {
+        let defaults = UserDefaults.standard
+        let priorArgDomain = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
+        defer {
+            defaults.removeVolatileDomain(forName: UserDefaults.argumentDomain)
+            if !priorArgDomain.isEmpty {
+                defaults.setVolatileDomain(priorArgDomain, forName: UserDefaults.argumentDomain)
+            }
+            defaults.removeObject(forKey: DuoChat.flatListKey)
+        }
+
+        // Exact reproduction of `-duoFlatListShown YES` on the command line:
+        // NSArgumentDomain shadows NSApplicationDomain so `defaults.bool(forKey:)` stays `true` after `set(false)`.
+        var injected = priorArgDomain
+        injected[DuoChat.flatListKey] = true
+        defaults.setVolatileDomain(injected, forName: UserDefaults.argumentDomain)
+        defaults.set(false, forKey: DuoChat.flatListKey)
+        XCTAssertTrue(defaults.bool(forKey: DuoChat.flatListKey))
+
+        let state = FlatSidebarState(defaults: defaults)
+        XCTAssertTrue(state.shown)
+
+        // Repeated taps must alternate false -> true -> false -> true without locking up after the first close.
+        XCTAssertEqual(state.toggle().shown, false)
+        XCTAssertEqual(state.toggle().shown, true)
+        XCTAssertEqual(state.toggle().shown, false)
+        XCTAssertEqual(state.toggle().shown, true)
+
+        // When Inspect is open, tapping the sidebar button closes Inspect and reveals the list.
+        let fromInspect = state.toggle(inspectOpen: true)
+        XCTAssertEqual(fromInspect.shown, true)
+        XCTAssertEqual(fromInspect.inspectOpen, false)
+    }
 }

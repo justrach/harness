@@ -1853,21 +1853,33 @@ pub const App = struct {
         var harness: ?[]const u8 = null;
         var model: ?[]const u8 = null;
         var reasoning: ?[]const u8 = null;
-        var cwd: []const u8 = "~";
+        var cwd: []const u8 = "";
         var worktree: ?requests.WorktreeSpec = null;
         const chat_id = if (a.selected) |id| blk: {
             if (a.findChat(id)) |c| {
                 harness = c.harness;
                 model = c.model;
                 reasoning = c.reasoning;
-                if (c.cwd) |d| cwd = d;
+                if (c.cwd) |d| {
+                    if (d.len > 0) cwd = d;
+                }
+                if (cwd.len == 0) {
+                    if (c.source) |src| {
+                        if (src.cwd.len > 0) cwd = src.cwd;
+                    }
+                }
+                if (cwd.len == 0) {
+                    if (a.findSpace(c.space_id)) |s| {
+                        if (s.path.len > 0) cwd = s.path;
+                    }
+                }
             }
             break :blk id;
         } else blk: {
             const id = uuid(a.io, &chat_buf);
             const agent_mod = @import("app_agent.zig");
             const space = agent_mod.newChatSpace(a);
-            if (space) |s| cwd = s.path;
+            if (space) |s| cwd = s.path else cwd = "~";
             // A git project's new chat runs in a fresh worktree unless its
             // own checkout was picked (`CheckoutPlan::NewWorktree`); cwd
             // stays the repo, where an older host runs it.

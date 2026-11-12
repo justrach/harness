@@ -61,6 +61,8 @@ pub const State = struct {
     filter: HomeFilter = .all,
     group_by: mp.GroupBy = .project,
     split_mode: ios_scroll.SplitMode = .auto,
+    flat_list_shown: bool = false,
+    flat_list_overridden: bool = false,
     zen_mode: bool = false,
     search_query: ui.TextBuffer = .{},
     search_focus: bool = false,
@@ -171,7 +173,11 @@ pub fn view(a: *App, c: *ui.Context) void {
     a.reap();
 
     const rt = c.access.reduce_transparency;
-    const split = ios_scroll.shouldSplitPhone(c.size.w, a.mobile.split_mode, c.size.w >= 660.0);
+    const base_split = ios_scroll.shouldSplitPhone(c.size.w, a.mobile.split_mode, c.size.w >= 660.0);
+    const split = if (c.size.w >= 600.0 and a.selected != null and a.mobile.flat_list_overridden)
+        a.mobile.flat_list_shown
+    else
+        base_split;
 
     {
         const root = ui.div(c).row().sizeFull().bg(k.background);
@@ -254,6 +260,8 @@ fn renderHomePane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_split: 
     const now_ms = nowEpochMs(a);
     const top_inset = c.safe_area.top;
     const bot_inset = c.safe_area.bottom;
+    const left_inset = c.safe_area.left;
+    const right_inset = if (in_split) @as(f32, 0) else c.safe_area.right;
     const top_chrome_h: f32 = 56;
     const bot_chrome_h: f32 = 64;
 
@@ -270,8 +278,8 @@ fn renderHomePane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_split: 
         .padding = .{
             .top = top_inset + top_chrome_h + 12,
             .bottom = ios_scroll.underlapBottomPadding(bot_inset, bot_chrome_h),
-            .left = 14,
-            .right = 14,
+            .left = 14 + left_inset,
+            .right = 14 + right_inset,
         },
         .gap = 12,
     };
@@ -347,7 +355,7 @@ fn renderHomePane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_split: 
     // PASS 2 (`layer = 1`): Floating top & bottom Liquid Glass chrome
     // -----------------------------------------------------------------------
     {
-        const top_bar = ui.div(c).row().wFull().px(14).gap(8).itemsCenter().absolute().offset(0, top_inset + 8).layer(1);
+        const top_bar = ui.div(c).row().wFull().pl(14 + left_inset).pr(14 + right_inset).gap(8).itemsCenter().absolute().offset(0, top_inset + 8).layer(1);
         defer top_bar.end();
 
         if (mg.circleButton(c, "ios-home-settings-btn", .home_customize_circle, .@"settings-minimalistic", k.text, rt, null).clicked) {
@@ -422,7 +430,7 @@ fn renderHomePane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_split: 
     // Bottom floating Liquid Glass search bar + 44x44 `+` New Session circle
     {
         const bot_y = c.size.h - @max(bot_inset, 12) - 48;
-        const bot_bar = ui.div(c).row().wFull().px(14).gap(10).itemsCenter().absolute().offset(0, @max(0, bot_y)).layer(1);
+        const bot_bar = ui.div(c).row().wFull().pl(14 + left_inset).pr(14 + right_inset).gap(10).itemsCenter().absolute().offset(0, @max(0, bot_y)).layer(1);
         defer bot_bar.end();
 
         {
@@ -532,7 +540,8 @@ fn renderHomeChatRow(a: *App, c: *ui.Context, k: theme.Colors, ch: workspace.Cha
     c.node(card.index).style.scale = if (c.reduced_motion) 1.0 else ui.spring(c, it.id, 0x726f_7773, target_scale, mg.tactile_spring);
 
     const pane_w = if (in_split) ios_scroll.phoneSplitListWidth(c.size.w) else c.size.w;
-    const inner_w = @max(120, pane_w - 28 - 28);
+    const h_safe = c.safe_area.left + (if (in_split) @as(f32, 0) else c.safe_area.right);
+    const inner_w = @max(120, pane_w - h_safe - 28 - 28);
 
     {
         const top_line = ui.div(c).row().wFull().itemsCenter().gap(8);
@@ -652,6 +661,8 @@ fn renderSessionPane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_spli
 
     const top_inset = c.safe_area.top;
     const bot_inset = c.safe_area.bottom;
+    const left_inset = if (in_split) @as(f32, 0) else c.safe_area.left;
+    const right_inset = c.safe_area.right;
     const top_chrome_h: f32 = 54;
     var bot_chrome_h: f32 = 112; // 40pt chip bar + 8pt gap + 56pt composer + margins
     if (queue_count > 0) bot_chrome_h += @min(@as(f32, @floatFromInt(queue_count)) * 34.0 + 8.0, 110.0);
@@ -673,8 +684,8 @@ fn renderSessionPane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_spli
         .padding = .{
             .top = top_inset + top_chrome_h + 14,
             .bottom = ios_scroll.underlapBottomPadding(bot_inset, bot_chrome_h),
-            .left = 14,
-            .right = 14,
+            .left = 14 + left_inset,
+            .right = 14 + right_inset,
         },
     };
     {
@@ -742,19 +753,31 @@ fn renderSessionPane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_spli
     // PASS 2 (`layer = 1`): Floating top bar, Jump-to-Latest, & Bottom Composer
     // -----------------------------------------------------------------------
     {
-        const top_bar = ui.div(c).row().wFull().px(14).gap(8).itemsCenter().justifyBetween().absolute().offset(0, top_inset + 8).layer(1);
+        const top_bar = ui.div(c).row().wFull().pl(14 + left_inset).pr(14 + right_inset).gap(8).itemsCenter().justifyBetween().absolute().offset(0, top_inset + 8).layer(1);
         defer top_bar.end();
 
-        if (!in_split) {
-            if (mg.circleButton(c, "ios-session-back-btn", .session_back_circle, .@"alt-arrow-left", k.text, rt, null).clicked) {
-                a.select(null, a.space);
+        {
+            const lead = ui.div(c).row().itemsCenter().gap(6);
+            defer lead.end();
+            if (!in_split or c.size.w >= 600.0) {
+                if (mg.circleButton(c, "ios-session-back-btn", .session_back_circle, .@"alt-arrow-left", k.text, rt, null).clicked) {
+                    a.select(null, a.space);
+                }
+            } else {
+                _ = ui.div(c).size(36, 36).end();
             }
-        } else {
-            _ = ui.div(c).size(36, 36).end();
+            if (c.size.w >= 600.0) {
+                if (mg.circleButton(c, "ios-duo-flat-toggle-list", .session_back_circle, .@"sidebar-minimalistic-left", k.text, rt, if (in_split) k.accent else null).clicked) {
+                    a.mobile.flat_list_shown = !in_split;
+                    a.mobile.flat_list_overridden = true;
+                    nanoui.haptics.selection();
+                }
+            }
         }
 
         const raw_title = if (ch_opt) |ch| (ch.title orelse "Session") else "Session";
-        const pill_max_w = @max(96, (if (in_split) c.size.w - ios_scroll.phoneSplitListWidth(c.size.w) else c.size.w) - 168);
+        const avail_pane_w = (if (in_split) c.size.w - ios_scroll.phoneSplitListWidth(c.size.w) else c.size.w) - left_inset - right_inset;
+        const pill_max_w = @max(96, avail_pane_w - (if (c.size.w >= 600.0) @as(f32, 210) else @as(f32, 168)));
         const title_str = if (c.text.width(raw_title, .{ .size = 13.5, .weight = .medium }) <= pill_max_w)
             raw_title
         else blk: {
@@ -788,9 +811,10 @@ fn renderSessionPane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_spli
 
     // Floating 40x40 Jump-to-Latest Liquid Glass circle (`140pt` / `70pt` hysteresis)
     if (a.mobile.jump_shown) {
+        const pane_w = if (in_split) c.size.w - ios_scroll.phoneSplitListWidth(c.size.w) - 1 else c.size.w;
         const jump_y = c.size.h - @max(bot_inset, 10) - bot_chrome_h - 48;
-        const jump_x = c.size.w - 54;
-        const jwrap = ui.div(c).row().absolute().offset(@max(12, jump_x), @max(top_inset + 64, jump_y)).layer(1);
+        const jump_x = pane_w - right_inset - 54;
+        const jwrap = ui.div(c).row().absolute().offset(@max(12 + left_inset, jump_x), @max(top_inset + 64, jump_y)).layer(1);
         defer jwrap.end();
         if (mg.circleButton(c, "ios-jump-latest-btn", .session_jump_latest_circle, .@"alt-arrow-down", k.text, rt, null).clicked) {
             a.mobile.stick_to_bottom = true;
@@ -801,7 +825,7 @@ fn renderSessionPane(a: *App, c: *ui.Context, k: theme.Colors, rt: bool, in_spli
     // Bottom floating stack: Question card + Queued tray + `.scrollX()` chips + Concentric Composer
     {
         const stack_y = c.size.h - @max(bot_inset, 10) - bot_chrome_h + 6;
-        const bot_outer = ui.div(c).column().wFull().px(12).itemsCenter().absolute().offset(0, @max(top_inset + 60, stack_y)).layer(1);
+        const bot_outer = ui.div(c).column().wFull().pl(12 + left_inset).pr(12 + right_inset).itemsCenter().absolute().offset(0, @max(top_inset + 60, stack_y)).layer(1);
         defer bot_outer.end();
 
         const stack = ui.div(c).column().wFull().maxW(ios_scroll.max_content_width).gap(8);

@@ -1,8 +1,39 @@
 const std = @import("std");
 
+fn rustTargetTriple(t: std.Target) []const u8 {
+    return switch (t.os.tag) {
+        .macos => if (t.cpu.arch == .x86_64) "x86_64-apple-darwin" else "aarch64-apple-darwin",
+        .ios => switch (t.abi) {
+            .simulator => if (t.cpu.arch == .x86_64) "x86_64-apple-ios" else "aarch64-apple-ios-sim",
+            else => "aarch64-apple-ios",
+        },
+        .linux => if (t.cpu.arch == .aarch64) "aarch64-unknown-linux-gnu" else "x86_64-unknown-linux-gnu",
+        .windows => "x86_64-pc-windows-msvc",
+        else => "aarch64-apple-darwin",
+    };
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const rust_triple = rustTargetTriple(target.result);
+    const loro_manifest = b.root.joinString(b.allocator, "loro-bridge/Cargo.toml") catch @panic("OOM");
+    const loro_target_dir = b.root.joinString(b.allocator, "loro-bridge/target") catch @panic("OOM");
+    const loro_lib_path = b.root.joinString(
+        b.allocator,
+        b.fmt("loro-bridge/target/{s}/release/libloro_bridge.a", .{rust_triple}),
+    ) catch @panic("OOM");
+    const cargo_loro = b.addSystemCommand(&.{
+        "/bin/sh",
+        "-c",
+        "cargo build --release --manifest-path \"$1\" --target-dir \"$2\" --target \"$3\" && cp \"$4\" \"$5\"",
+        "build-loro",
+        loro_manifest,
+        loro_target_dir,
+        rust_triple,
+        loro_lib_path,
+    });
+    const loro_archive = cargo_loro.addOutputFileArg("libloro_bridge.a");
     const lib_optimize: std.builtin.Optimize = if (optimize == .debug) .debug else .small;
     const nanoui = b.dependency("nanoui", .{ .target = target, .optimize = optimize }).module("nanoui");
     // HTTPS with ALPN h2 for what the app asks the network itself (releases,
@@ -109,6 +140,8 @@ pub fn build(b: *std.Build) void {
 
     if (target.result.os.tag == .ios) {
         exe.use_llvm = true;
+        exe.step.dependOn(&cargo_loro.step);
+        exe.root_module.addObjectFile(loro_archive);
         exe.root_module.linkSystemLibrary("sqlite3", .{});
         const ios = @import("nanoui").ios;
         const app_bundle = ios.app(b, exe, .{
@@ -219,6 +252,8 @@ pub fn build(b: *std.Build) void {
     // Large UI artifacts must never use Zig's self-hosted backend.
     inline for (.{ exe, tests, snap, profile, vectors, engine_exe }) |artifact| {
         artifact.use_llvm = true;
+        artifact.step.dependOn(&cargo_loro.step);
+        artifact.root_module.addObjectFile(loro_archive);
         artifact.root_module.linkSystemLibrary("sqlite3", .{});
     }
 }

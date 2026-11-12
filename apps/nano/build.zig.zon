@@ -13,5 +13,5 @@
             .hash = "http_zig-0.1.0-2CB7E00SAwAnwnBkJDgCDm3zLwrCmZZkHNSw5t7X9Vbf",
         },
     },
-    .paths = .{ "build.zig", "build.zig.zon", "file_icons_build.zig", "themes.json", "ios_themes.json", "src", "assets" },
+    .paths = .{ "build.zig", "build.zig.zon", "file_icons_build.zig", "themes.json", "ios_themes.json", "src", "assets", "loro-bridge/Cargo.toml", "loro-bridge/Cargo.lock", "loro-bridge/src" },
 }

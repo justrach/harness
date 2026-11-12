@@ -144,6 +144,7 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
     private var lastGeometry = TranscriptGeometry(contentHeight: 0, viewportHeight: 0, offset: 0, bottom: 0)
     private let runway = UIView()
     private var resizeScheduled = false
+    private var resizeReconfigurePending = false
     /// Measured row heights by row id. UITableView forgets every height on
     /// `reloadData`/`endUpdates` and falls back to the estimate, so without
     /// this the content size collapses to `rows × 140` and re-expands as rows
@@ -206,6 +207,7 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
             || abs(frame.width - nextFrame.width) > 0.01
             || abs(frame.height - nextFrame.height) > 0.01
             || abs(contentInset.top - topInset) > 0.01 else { return }
+        let widthRelayout = Self.needsWidthRelayout(previousWidth: measuredWidth, nextWidth: size.width)
         if abs(measuredWidth - size.width) > 0.5 {
             measuredHeights.removeAll(keepingCapacity: true)
             measuredWidth = size.width
@@ -227,6 +229,9 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
             if let anchor { restore(anchor) }
         }
         updating = false
+        if widthRelayout {
+            scheduleResize(reconfigureVisible: true)
+        }
         setNeedsLayout()
     }
 
@@ -599,17 +604,36 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
         }
     }
 
-    private func scheduleResize() {
+    /// Pure width-change rule: when an already-measured table changes width (for example, opening or closing the
+    /// flat Duo sidebar), realized UIHostingConfiguration cells must reconfigure and re-measure once.
+    nonisolated static func needsWidthRelayout(previousWidth: CGFloat, nextWidth: CGFloat) -> Bool {
+        previousWidth > 0 && nextWidth > 0 && abs(previousWidth - nextWidth) > 0.5
+    }
+
+    private func scheduleResize(reconfigureVisible: Bool = false) {
+        if reconfigureVisible { resizeReconfigurePending = true }
         guard !resizeScheduled else { return }
         resizeScheduled = true
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            let shouldReconfigure = self.resizeReconfigurePending
+            self.resizeReconfigurePending = false
             self.resizeScheduled = false
             guard self.window != nil else { return }
             self.reconcileGesture()
+            let anchor = self.followsBottom ? nil : self.visibleAnchor()
             self.updating = true
             UIView.performWithoutAnimation {
                 if self.numberOfSections > 0, self.numberOfRows(inSection: 0) == self.rows.count {
+                    if shouldReconfigure {
+                        let visible = (self.indexPathsForVisibleRows ?? []).filter { self.canIndexRow($0.row) }
+                        if !visible.isEmpty { self.reconfigureRows(at: visible) }
+                        for cell in self.visibleCells {
+                            cell.contentView.invalidateIntrinsicContentSize()
+                            cell.invalidateIntrinsicContentSize()
+                            cell.setNeedsLayout()
+                        }
+                    }
                     self.beginUpdates()
                     self.endUpdates()
                 } else {
@@ -617,6 +641,7 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
                 }
                 self.layoutIfNeeded()
                 self.updateRunway()
+                if let anchor { self.restore(anchor) }
             }
             self.updating = false
             if self.follow.pinned, !self.userOwnsScroll, !self.animatingFollow {

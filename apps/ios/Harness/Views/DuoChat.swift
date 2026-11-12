@@ -7,7 +7,9 @@
 // Only on a device that has reported a fold or its inner display (`DuoChat.foldableKey`); every other
 // iPhone keeps the chat exactly as it was.
 
+import Observation
 import SwiftUI
+import UIKit
 
 enum DuoChat {
     /// UserDefaults: this device has reported a fold or its inner display, so it is an iPhone Duo.
@@ -32,6 +34,27 @@ enum DuoChat {
     /// chat was left a cramped column of the 669pt display.
     static func listBesideSession(flat: Bool, listShown: Bool, sessionOpen: Bool, inspectOpen: Bool) -> Bool {
         flat && listShown && sessionOpen && !inspectOpen
+    }
+
+    /// Pure state step for the flat Duo's sidebar button (`duo-flat-toggle-list`).
+    /// If Inspect is open, tapping the sidebar button closes Inspect and reveals the session list;
+    /// otherwise it flips `shown` (`true -> false -> true`).
+    static func toggledFlatList(shown: Bool, inspectOpen: Bool) -> (shown: Bool, inspectOpen: Bool) {
+        if inspectOpen { return (true, false) }
+        return (!shown, false)
+    }
+
+    /// Keep the flat Duo's sidebar NavigationStack mounted while a session is open (and Inspect is closed) so
+    /// tapping the sidebar toggle slides an already-warm list instead of cold-mounting UIKit controllers on frame 0.
+    static func prewarmsFlatSidebar(flat: Bool, sessionOpen: Bool, inspectOpen: Bool) -> Bool {
+        flat && sessionOpen && !inspectOpen
+    }
+
+    /// Selecting another session from a visible split sidebar swaps the detail route in place without a 350ms
+    /// UINavigationController push slide.
+    static func replacesSessionWithoutPush(splitLayout: Bool, flatSidebar: Bool,
+                                           currentIsChat: Bool, nextIsChat: Bool) -> Bool {
+        (splitLayout || flatSidebar) && currentIsChat && nextIsChat
     }
 
     /// Room the session bar keeps before its title. Folded on the cover display the back button is in the
@@ -120,6 +143,141 @@ extension EnvironmentValues {
     @Entry var duoChat: Bool = false
     /// Flat Duo: show or hide the session list beside the open session (HomeView's `flatListShown`).
     @Entry var toggleFlatList: (() -> Void)? = nil
+}
+
+/// Observable reference state for the flat Duo's session list (`duo-flat-toggle-list`).
+/// Seeds initial visibility from `UserDefaults` once and mutates `shown` in memory on every tap so neither
+/// `NSArgumentDomain` launch arguments (`-duoFlatListShown YES`) nor cached `UINavigationBar` button closures
+/// can prevent repeated `open <-> closed <-> open` toggling.
+@MainActor
+@Observable
+final class FlatSidebarState {
+    var shown: Bool
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        self.shown = defaults.bool(forKey: DuoChat.flatListKey)
+    }
+
+    @discardableResult
+    func toggle(inspectOpen: Bool = false) -> (shown: Bool, inspectOpen: Bool) {
+        let next = DuoChat.toggledFlatList(shown: shown, inspectOpen: inspectOpen)
+        shown = next.shown
+        defaults.set(next.shown, forKey: DuoChat.flatListKey)
+        return next
+    }
+}
+
+/// UIKit clipping container that keeps the flat Duo's 296pt `NavigationStack` warm in memory at constant width
+/// while guaranteeing `hitTest` and `point(inside:)` return `nil`/`false` whenever `shown == false`.
+final class FlatSidebarClipView: UIView {
+    var shown: Bool = false {
+        didSet {
+            isUserInteractionEnabled = shown
+            borderView.isHidden = !shown
+            setNeedsLayout()
+        }
+    }
+    var sidebarWidth: CGFloat = 296 {
+        didSet {
+            if oldValue != sidebarWidth { setNeedsLayout() }
+        }
+    }
+    weak var hostedView: UIView?
+    private let borderView = UIView()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        clipsToBounds = true
+        backgroundColor = .clear
+        isUserInteractionEnabled = false
+        borderView.backgroundColor = UIColor(Theme.border)
+        borderView.isHidden = true
+        borderView.isUserInteractionEnabled = false
+        addSubview(borderView)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        guard shown, bounds.width > 1 else { return false }
+        return bounds.contains(point)
+    }
+
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        guard shown, bounds.width > 1 else { return nil }
+        return super.hitTest(point, with: event)
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let fullWidth = sidebarWidth + 1
+        let leadX = bounds.width - fullWidth
+        hostedView?.frame = CGRect(x: leadX, y: 0, width: sidebarWidth, height: bounds.height)
+        borderView.frame = CGRect(x: leadX + sidebarWidth, y: 0, width: 1, height: bounds.height)
+    }
+}
+
+private final class FlatSidebarViewController<Content: View>: UIViewController {
+    let clipView = FlatSidebarClipView()
+    let hosting: UIHostingController<Content>
+
+    init(rootView: Content, shown: Bool, width: CGFloat) {
+        self.hosting = UIHostingController(rootView: rootView)
+        super.init(nibName: nil, bundle: nil)
+        clipView.sidebarWidth = width
+        clipView.shown = shown
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func loadView() {
+        view = clipView
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        addChild(hosting)
+        hosting.view.backgroundColor = .clear
+        clipView.insertSubview(hosting.view, at: 0)
+        clipView.hostedView = hosting.view
+        hosting.didMove(toParent: self)
+    }
+}
+
+private struct FlatSidebarHost<Content: View>: UIViewControllerRepresentable {
+    let shown: Bool
+    let width: CGFloat
+    let content: Content
+
+    func makeUIViewController(context: Context) -> FlatSidebarViewController<Content> {
+        FlatSidebarViewController(rootView: content, shown: shown, width: width)
+    }
+
+    func updateUIViewController(_ controller: FlatSidebarViewController<Content>, context: Context) {
+        controller.hosting.rootView = content
+        controller.clipView.sidebarWidth = width
+        controller.clipView.shown = shown
+    }
+}
+
+/// Keeps the flat Duo's 296pt sidebar warm in memory while a session is open, revealing it by sliding a
+/// fixed-width column inside a UIKit-clipped container instead of cold-instantiating NavigationStack + List on tap.
+struct PrewarmedFlatSidebar<Content: View>: View {
+    let shown: Bool
+    let width: CGFloat
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        FlatSidebarHost(shown: shown, width: width, content: content().accessibilityIdentifier("wide-sidebar"))
+            .frame(width: shown ? width + 1 : 0)
+            .layoutPriority(1)
+            .ignoresSafeArea(edges: .vertical)
+            .accessibilityHidden(!shown)
+    }
 }
 
 /// The folded chat's type scale: two sizes plus mono, two weights.

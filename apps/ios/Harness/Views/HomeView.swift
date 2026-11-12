@@ -136,15 +136,34 @@ struct HomeView: View {
     /// Flat Duo: the session list beside an open session, off until the session's sidebar button asks for it.
     /// The inner display is about 669pt wide, so a 296pt list left the chat a cramped column; alone, the
     /// session has the whole display and its back button returns to the list.
-    @AppStorage(DuoChat.flatListKey) private var flatListShown = false
+    @State private var flatSidebarState = FlatSidebarState()
 
     private var splitLayout: Bool { listBesideSession || phoneArrangement != nil }
 
     /// Wide Duo with a session open, Inspect closed and the list asked for: the session list stands beside it.
     private var flatSidebar: Bool {
         guard case .chat(let id) = path.last else { return false }
-        return DuoChat.listBesideSession(flat: flatDuo, listShown: flatListShown, sessionOpen: true,
+        return DuoChat.listBesideSession(flat: flatDuo, listShown: flatSidebarState.shown, sessionOpen: true,
                                          inspectOpen: InspectState.of(id).open)
+    }
+
+    private func toggleFlatSidebar() {
+        let activeId: String? = if case .chat(let id) = path.last { id } else { nil }
+        let inspectOpen = activeId.map { InspectState.of($0).open } ?? false
+        withAnimation(Motion.collapse) {
+            let next = flatSidebarState.toggle(inspectOpen: inspectOpen)
+            if let activeId, InspectState.of(activeId).open != next.inspectOpen {
+                InspectState.of(activeId).open = next.inspectOpen
+            }
+        }
+    }
+
+    /// Pre-mount the wide Duo sidebar while a session is open (Inspect closed) so the sidebar button toggles at
+    /// 120Hz without cold-creating UIKit controllers on frame 0.
+    private var prewarmsFlatSidebar: Bool {
+        guard case .chat(let id) = path.last else { return false }
+        return DuoChat.prewarmsFlatSidebar(flat: flatDuo, sessionOpen: true,
+                                           inspectOpen: InspectState.of(id).open)
     }
 
     /// Remembered once this device shows a fold or its inner display: the session uses the Duo chat.
@@ -368,18 +387,16 @@ struct HomeView: View {
                 // One stack in every pose, so folding keeps the session (draft, scroll) in place. Wide (an iPhone
                 // Duo lying flat), the list stands beside an open session until Inspect takes its place.
                 HStack(spacing: 0) {
-                    if flatSidebar {
-                        NavigationStack {
-                            // A switcher beside the chat: new, settings and profile stay on the full list, and in
-                            // a column this narrow the bar's buttons stood in a rail over the rows.
-                            sidebar.toolbar(.hidden, for: .navigationBar)
-                        }
+                    if prewarmsFlatSidebar {
+                        PrewarmedFlatSidebar(shown: flatSidebar, width: DuoV3.sidebarWidth) {
+                            NavigationStack {
+                                // A switcher beside the chat: new, settings and profile stay on the full list, and in
+                                // a column this narrow the bar's buttons stood in a rail over the rows.
+                                sidebar.toolbar(.hidden, for: .navigationBar)
+                            }
                             // The narrow column lays the list out as a phone's.
                             .environment(\.horizontalSizeClass, .compact)
-                            .frame(width: DuoV3.sidebarWidth)
-                            .transition(.move(edge: .leading).combined(with: .opacity))
-                            .accessibilityIdentifier("wide-sidebar")
-                        Rectangle().fill(Theme.border).frame(width: 1).ignoresSafeArea()
+                        }
                     }
                     NavigationStack(path: $path) {
                         sidebar
@@ -387,9 +404,7 @@ struct HomeView: View {
                                 // iPhone Duo lying flat: the session beside the list, or chat and Inspect.
                                 destination($0)
                                 .environment(\.duoFlat, flatDuo)
-                                .environment(\.toggleFlatList, flatDuo ? {
-                                    withAnimation(Motion.collapse) { flatListShown.toggle() }
-                                } : nil)
+                                .environment(\.toggleFlatList, flatDuo ? { toggleFlatSidebar() } : nil)
                             }
                     }
                 }
@@ -466,21 +481,40 @@ struct HomeView: View {
     /// what the detail shows instead of stacking behind it.
     private func open(_ route: Route) {
         // Only opening a chat is timed, the same journey the desktop reports as conversation_load_ms.
-        if case .chat = route {
+        let isNextChat: Bool
+        if case .chat = route { isNextChat = true } else { isNextChat = false }
+        if isNextChat {
             Perf.shared.startInteraction(PerfSpan.navigationOpen)
-            splitSuggestion.recordOpen(at: Date().timeIntervalSince1970)
-            splitSuggestion.save()
-            refreshSplitOffer()
         }
+        let currentIsChat: Bool
+        if case .chat = path.last { currentIsChat = true } else { currentIsChat = false }
+
         if splitScreenAvailable, case .chat(let id) = route {
             // From the list: replaces the first pane; if it is already the second the two swap.
             var next = panes
             next.openFromList(id)
             apply(next)
+        } else if DuoChat.replacesSessionWithoutPush(splitLayout: splitLayout, flatSidebar: flatSidebar,
+                                                     currentIsChat: currentIsChat, nextIsChat: isNextChat) {
+            if path.last != route {
+                var tx = Transaction()
+                tx.disablesAnimations = true
+                withTransaction(tx) { path = [route] }
+            }
         } else if splitLayout || flatSidebar {
             path = [route]
         } else {
             path.append(route)
+        }
+
+        if isNextChat {
+            // Defer UserDefaults persistence and offer check off the synchronous tap frame.
+            let openedAt = Date().timeIntervalSince1970
+            Task { @MainActor in
+                splitSuggestion.recordOpen(at: openedAt)
+                splitSuggestion.save()
+                refreshSplitOffer()
+            }
         }
     }
 
@@ -509,10 +543,10 @@ struct HomeView: View {
                 // scoped by the same space filter and search.
                 ArchivedSection(spaceId: shelfScope, query: searchText, path: sidebarPath)
             }
-            // In a split the list shrinks as the session opens below it, and the opened row was left cut in
-            // half at the divider. Once the panes settle, bring the whole row into view.
+            // In laptop pose the list shrinks vertically as the session opens above it, and the opened row was
+            // left cut in half at the fold. Side-by-side splits keep their full list height and must not jerk.
             .task(id: selectedChatId) {
-                guard let id = selectedChatId else { return }
+                guard laptopPose, let id = selectedChatId else { return }
                 try? await Task.sleep(for: .milliseconds(400))
                 withAnimation(Motion.collapse) { proxy.scrollTo(id) }
             }

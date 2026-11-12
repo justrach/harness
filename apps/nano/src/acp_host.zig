@@ -35,6 +35,14 @@ pub fn encodeSessionNew(gpa: Allocator, id: u64, cwd: []const u8) ![]u8 {
     );
 }
 
+pub fn encodeSessionLoad(gpa: Allocator, id: u64, session_id: []const u8, cwd: []const u8) ![]u8 {
+    return std.fmt.allocPrint(
+        gpa,
+        "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"method\":\"session/load\",\"params\":{{\"sessionId\":{f},\"cwd\":{f},\"mcpServers\":[]}}}}\n",
+        .{ id, json.fmt(session_id, .{}), json.fmt(cwd, .{}) },
+    );
+}
+
 pub fn encodeGraffModels(gpa: Allocator, id: u64) ![]u8 {
     return std.fmt.allocPrint(
         gpa,
@@ -291,19 +299,31 @@ pub fn applyAcpLineLeaky(
     return .ignored;
 }
 
-/// Spawn an ACP agent subprocess (e.g. `graff acp`), stream a prompt turn over
-/// stdin/stdout pipes, and fold all `session/update` notifications into `doc`.
-pub fn runSubprocessTurn(
+pub const TurnSessionOptions = struct {
+    /// Existing `graff` session ID to resume via `session/load` when continuing on the same checkout.
+    resume_session_id: ?[]const u8 = null,
+    /// `<earlier-conversation>`-seeded prompt sent ONLY if `session/load` is skipped or fails and
+    /// `session/new` starts a fresh session (`crates/engine/src/external_history/mod.rs`).
+    fallback_seeded_prompt: ?[]const u8 = null,
+    /// Receives a heap-duped slice (`gpa`) of the active `sessionId` established for this turn.
+    out_session_id: ?*?[]u8 = null,
+};
+
+/// Spawn an ACP agent subprocess (e.g. `graff acp`), resume an existing session via
+/// `session/load` when `opts.resume_session_id` is set (draining any replayed history updates
+/// until the `session/load` RPC response arrives, and falling back to `session/new` +
+/// `opts.fallback_seeded_prompt` on error), and invoke `on_line(ctx, scratch, line)` for each
+/// live turn line without holding any external lock across pipe I/O.
+pub fn runSubprocessTurnResumable(
     gpa: Allocator,
     io: std.Io,
     argv: []const []const u8,
     cwd: []const u8,
-    doc: *session_doc.SessionDoc,
-    assistant_msg_id: []const u8,
     session_id: []const u8,
     prompt_text: []const u8,
-    on_update_ctx: ?*anyopaque,
-    on_update: ?*const fn (ctx: *anyopaque, ev: AcpEvent) void,
+    opts: TurnSessionOptions,
+    ctx: *anyopaque,
+    on_line: *const fn (ctx: *anyopaque, scratch: Allocator, line: []const u8) bool,
 ) !void {
     if (comptime !std.process.can_spawn) return error.UnsupportedPlatform;
     var child = try std.process.spawn(io, .{
@@ -324,43 +344,91 @@ pub fn runSubprocessTurn(
 
     const init_line = try encodeInitialize(gpa, 1);
     defer gpa.free(init_line);
-    const new_line = try encodeSessionNew(gpa, 2, cwd);
-    defer gpa.free(new_line);
-
     try w.writeAll(init_line);
-    try w.writeAll(new_line);
-    try w.flush();
 
     var resolved_sid: ?[]u8 = null;
     defer if (resolved_sid) |s| gpa.free(s);
+    var resumed_ok = false;
+    var next_rpc_id: u64 = 2;
 
-    var handshake_lines: usize = 0;
-    while (handshake_lines < 32) : (handshake_lines += 1) {
-        const line = (r.takeDelimiter('\n') catch break) orelse break;
-        const trimmed = std.mem.trim(u8, line, " \t\r\n");
-        if (trimmed.len == 0) continue;
-        var parsed = json.parseFromSlice(json.Value, gpa, trimmed, .{}) catch continue;
-        defer parsed.deinit();
-        if (parsed.value != .object) continue;
-        const root = parsed.value.object;
-        if (root.get("id")) |id_v| {
-            if (id_v == .integer and id_v.integer == 2) {
-                if (root.get("result")) |res| {
-                    if (res == .object) {
-                        if (res.object.get("sessionId")) |sid_v| {
-                            if (sid_v == .string and sid_v.string.len > 0) {
-                                resolved_sid = try gpa.dupe(u8, sid_v.string);
+    if (opts.resume_session_id) |resume_sid| {
+        if (resume_sid.len > 0) {
+            const load_id = next_rpc_id;
+            next_rpc_id += 1;
+            const load_line = try encodeSessionLoad(gpa, load_id, resume_sid, cwd);
+            defer gpa.free(load_line);
+            try w.writeAll(load_line);
+            try w.flush();
+
+            var drain_lines: usize = 0;
+            while (drain_lines < 100_000) : (drain_lines += 1) {
+                const line = (r.takeDelimiter('\n') catch break) orelse break;
+                const trimmed = std.mem.trim(u8, line, " \t\r\n");
+                if (trimmed.len == 0) continue;
+                var parsed = json.parseFromSlice(json.Value, gpa, trimmed, .{}) catch continue;
+                defer parsed.deinit();
+                if (parsed.value != .object) continue;
+                const root = parsed.value.object;
+                const id_v = root.get("id") orelse continue;
+                if (id_v == .integer and id_v.integer == @as(i64, @intCast(load_id))) {
+                    if (root.get("error") == null and root.get("result") != null) {
+                        resolved_sid = try gpa.dupe(u8, resume_sid);
+                        resumed_ok = true;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    if (!resumed_ok) {
+        const new_id = next_rpc_id;
+        next_rpc_id += 1;
+        const new_line = try encodeSessionNew(gpa, new_id, cwd);
+        defer gpa.free(new_line);
+        try w.writeAll(new_line);
+        try w.flush();
+
+        var handshake_lines: usize = 0;
+        while (handshake_lines < 1_024) : (handshake_lines += 1) {
+            const line = (r.takeDelimiter('\n') catch break) orelse break;
+            const trimmed = std.mem.trim(u8, line, " \t\r\n");
+            if (trimmed.len == 0) continue;
+            var parsed = json.parseFromSlice(json.Value, gpa, trimmed, .{}) catch continue;
+            defer parsed.deinit();
+            if (parsed.value != .object) continue;
+            const root = parsed.value.object;
+            if (root.get("id")) |id_v| {
+                if (id_v == .integer and id_v.integer == @as(i64, @intCast(new_id))) {
+                    if (root.get("result")) |res| {
+                        if (res == .object) {
+                            if (res.object.get("sessionId")) |sid_v| {
+                                if (sid_v == .string and sid_v.string.len > 0) {
+                                    resolved_sid = try gpa.dupe(u8, sid_v.string);
+                                }
                             }
                         }
                     }
+                    break;
                 }
-                break;
             }
         }
     }
 
     const active_sid = resolved_sid orelse session_id;
-    const prompt_line = try encodeSessionPrompt(gpa, 3, active_sid, prompt_text);
+    if (opts.out_session_id) |out_ptr| {
+        if (active_sid.len > 0) {
+            out_ptr.* = try gpa.dupe(u8, active_sid);
+        }
+    }
+
+    const effective_prompt = if (resumed_ok)
+        prompt_text
+    else
+        (opts.fallback_seeded_prompt orelse prompt_text);
+
+    const prompt_id = next_rpc_id;
+    const prompt_line = try encodeSessionPrompt(gpa, prompt_id, active_sid, effective_prompt);
     defer gpa.free(prompt_line);
     try w.writeAll(prompt_line);
     try w.flush();
@@ -371,12 +439,73 @@ pub fn runSubprocessTurn(
     while (true) {
         defer _ = line_arena.reset(.{ .retain_with_limit = 64 * 1024 });
         const line = (r.takeDelimiter('\n') catch break) orelse break;
-        const ev = try applyAcpLineLeaky(line_arena.allocator(), doc, assistant_msg_id, line);
-        if (ev != .ignored) {
-            if (on_update) |cb| cb(on_update_ctx.?, ev);
-        }
-        if (ev == .turn_complete) break;
+        if (!on_line(ctx, line_arena.allocator(), line)) break;
     }
+}
+
+/// Spawn an ACP agent subprocess (e.g. `graff acp`), stream a prompt turn over
+/// stdin/stdout pipes, and invoke `on_line(ctx, scratch, line)` for each stdout line
+/// without holding any external lock while blocked on subprocess pipe I/O.
+/// Returning `false` from `on_line` terminates the subprocess early (e.g. on `interrupt`).
+pub fn runSubprocessTurnLines(
+    gpa: Allocator,
+    io: std.Io,
+    argv: []const []const u8,
+    cwd: []const u8,
+    session_id: []const u8,
+    prompt_text: []const u8,
+    ctx: *anyopaque,
+    on_line: *const fn (ctx: *anyopaque, scratch: Allocator, line: []const u8) bool,
+) !void {
+    return runSubprocessTurnResumable(
+        gpa,
+        io,
+        argv,
+        cwd,
+        session_id,
+        prompt_text,
+        .{},
+        ctx,
+        on_line,
+    );
+}
+
+/// Spawn an ACP agent subprocess (e.g. `graff acp`), stream a prompt turn over
+/// stdin/stdout pipes, and fold all `session/update` notifications into `doc`.
+pub fn runSubprocessTurn(
+    gpa: Allocator,
+    io: std.Io,
+    argv: []const []const u8,
+    cwd: []const u8,
+    doc: *session_doc.SessionDoc,
+    assistant_msg_id: []const u8,
+    session_id: []const u8,
+    prompt_text: []const u8,
+    on_update_ctx: ?*anyopaque,
+    on_update: ?*const fn (ctx: *anyopaque, ev: AcpEvent) void,
+) !void {
+    const SyncLineCtx = struct {
+        doc: *session_doc.SessionDoc,
+        assistant_msg_id: []const u8,
+        on_update_ctx: ?*anyopaque,
+        on_update: ?*const fn (ctx: *anyopaque, ev: AcpEvent) void,
+
+        fn handle(raw: *anyopaque, scratch: Allocator, line: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const ev = applyAcpLineLeaky(scratch, self.doc, self.assistant_msg_id, line) catch return false;
+            if (ev != .ignored) {
+                if (self.on_update) |cb| cb(self.on_update_ctx.?, ev);
+            }
+            return ev != .turn_complete;
+        }
+    };
+    var lctx = SyncLineCtx{
+        .doc = doc,
+        .assistant_msg_id = assistant_msg_id,
+        .on_update_ctx = on_update_ctx,
+        .on_update = on_update,
+    };
+    return runSubprocessTurnLines(gpa, io, argv, cwd, session_id, prompt_text, &lctx, SyncLineCtx.handle);
 }
 
 test "ACP JSON-RPC stream normalizes chunks and stopReason into SessionDoc" {
@@ -408,4 +537,125 @@ test "ACP JSON-RPC stream normalizes chunks and stopReason into SessionDoc" {
     try testing.expectEqualStrings("Thinking...", doc.messages.items[0].parts.items[0].text.items);
     try testing.expectEqualStrings("Hello from Zig ACP!", doc.messages.items[0].parts.items[1].text.items);
     try testing.expectEqualStrings("complete", doc.messages.items[0].status.?);
+}
+
+test "runSubprocessTurnResumable drains session/load replay and falls back to seeded session/new" {
+    if (comptime !std.process.can_spawn) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const io = testing.io;
+
+    const LineFold = struct {
+        doc: *session_doc.SessionDoc,
+        asst_id: []const u8,
+        fn onLine(raw: *anyopaque, scratch: Allocator, line: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const ev = applyAcpLineLeaky(scratch, self.doc, self.asst_id, line) catch return false;
+            return ev != .turn_complete;
+        }
+    };
+
+    // Case A: `session/load` succeeds -> drains replayed `session/update` notifications before `id:2`
+    // and sends the clean unseeded `prompt_text`!
+    {
+        var doc = try session_doc.SessionDoc.init(gpa, "chat-resume-ok", "dev-1");
+        defer doc.deinit();
+        try doc.beginAssistantMessage("msg-a-ok", 3000);
+
+        const script_ok =
+            \\while IFS= read -r line; do
+            \\  case "$line" in
+            \\    *'"method":"session/load"'*)
+            \\      printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-desktop-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"STALE_REPLAY_SHOULD_DRAIN"}}}}'
+            \\      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"sess-desktop-1"}}'
+            \\      ;;
+            \\    *'"method":"session/prompt"'*)
+            \\      case "$line" in
+            \\        *'SEEDED_FALLBACK_UNUSED'*) reply="BAD_SEEDED" ;;
+            \\        *'How do we improve our ranking?'*) reply="RESUMED_CLEAN_OK" ;;
+            \\        *) reply="UNEXPECTED" ;;
+            \\      esac
+            \\      printf '%s\n' "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"sess-desktop-1\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"$reply\"}}}}"
+            \\      printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}'
+            \\      exit 0
+            \\      ;;
+            \\  esac
+            \\done
+        ;
+        const argv = [_][]const u8{ "/bin/sh", "-c", script_ok };
+        var established: ?[]u8 = null;
+        defer if (established) |s| gpa.free(s);
+        var fold = LineFold{ .doc = &doc, .asst_id = "msg-a-ok" };
+
+        try runSubprocessTurnResumable(
+            gpa,
+            io,
+            &argv,
+            "/tmp",
+            "chat-resume-ok",
+            "How do we improve our ranking?",
+            .{
+                .resume_session_id = "sess-desktop-1",
+                .fallback_seeded_prompt = "SEEDED_FALLBACK_UNUSED",
+                .out_session_id = &established,
+            },
+            &fold,
+            LineFold.onLine,
+        );
+        try testing.expectEqualStrings("sess-desktop-1", established.?);
+        try testing.expectEqual(@as(usize, 1), doc.messages.items[0].parts.items.len);
+        try testing.expectEqualStrings("RESUMED_CLEAN_OK", doc.messages.items[0].parts.items[0].text.items);
+    }
+
+    // Case B: `session/load` returns JSON-RPC error -> falls back to `session/new` (`id:3`)
+    // and sends `<earlier-conversation>` `fallback_seeded_prompt` (`id:4`)!
+    {
+        var doc = try session_doc.SessionDoc.init(gpa, "chat-resume-fb", "dev-1");
+        defer doc.deinit();
+        try doc.beginAssistantMessage("msg-a-fb", 4000);
+
+        const script_fb =
+            \\while IFS= read -r line; do
+            \\  case "$line" in
+            \\    *'"method":"session/load"'*)
+            \\      printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32001,"message":"session not found"}}'
+            \\      ;;
+            \\    *'"method":"session/new"'*)
+            \\      printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"sessionId":"sess-minted-local-7"}}'
+            \\      ;;
+            \\    *'"method":"session/prompt"'*)
+            \\      case "$line" in
+            \\        *'<earlier-conversation>'*'Prior baseline 0.74'*'How do we improve our ranking?'*) reply="FALLBACK_SEEDED_OK" ;;
+            \\        *) reply="MISSING_SEED" ;;
+            \\      esac
+            \\      printf '%s\n' "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"sess-minted-local-7\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"$reply\"}}}}"
+            \\      printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{"stopReason":"end_turn"}}'
+            \\      exit 0
+            \\      ;;
+            \\  esac
+            \\done
+        ;
+        const argv = [_][]const u8{ "/bin/sh", "-c", script_fb };
+        var established: ?[]u8 = null;
+        defer if (established) |s| gpa.free(s);
+        var fold = LineFold{ .doc = &doc, .asst_id = "msg-a-fb" };
+
+        try runSubprocessTurnResumable(
+            gpa,
+            io,
+            &argv,
+            "/tmp",
+            "chat-resume-fb",
+            "How do we improve our ranking?",
+            .{
+                .resume_session_id = "sess-remote-missing",
+                .fallback_seeded_prompt = "<earlier-conversation>\nAssistant: Prior baseline 0.74\n</earlier-conversation>\n\nHow do we improve our ranking?",
+                .out_session_id = &established,
+            },
+            &fold,
+            LineFold.onLine,
+        );
+        try testing.expectEqualStrings("sess-minted-local-7", established.?);
+        try testing.expectEqual(@as(usize, 1), doc.messages.items[0].parts.items.len);
+        try testing.expectEqualStrings("FALLBACK_SEEDED_OK", doc.messages.items[0].parts.items[0].text.items);
+    }
 }

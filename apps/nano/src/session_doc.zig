@@ -15,6 +15,7 @@ const json = std.json;
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const transcript = @import("transcript.zig");
+const loro_ffi = @import("loro_ffi.zig");
 
 // 1:1 constants from `crates/doc/src/constants.rs` and `crates/engine/src/doc_host.rs`
 // (Lean `HarnessProofs.PerformanceAndQueueParity`).
@@ -44,13 +45,15 @@ pub const PartItem = struct {
     text: std.ArrayList(u8) = .empty,
     call_json: ?[]u8 = null,
     output: ?[]u8 = null,
+    extra_fields_json: ?[]u8 = null,
     is_error: bool = false,
     resolved: bool = false,
 
     pub fn byteWeight(self: PartItem) usize {
         const c_len = if (self.call_json) |c| c.len else 0;
         const o_len = if (self.output) |o| o.len else 0;
-        return self.id.len + self.kind.len + self.text.items.len + c_len + o_len + 32;
+        const ef_len = if (self.extra_fields_json) |ef| ef.len else 0;
+        return self.id.len + self.kind.len + self.text.items.len + c_len + o_len + ef_len + 32;
     }
 
     pub fn deinit(self: *PartItem, gpa: Allocator) void {
@@ -59,6 +62,7 @@ pub const PartItem = struct {
         self.text.deinit(gpa);
         if (self.call_json) |c| gpa.free(c);
         if (self.output) |o| gpa.free(o);
+        if (self.extra_fields_json) |ef| gpa.free(ef);
     }
 };
 
@@ -68,6 +72,7 @@ pub const MessageEntry = struct {
     created_at: i64,
     device_id: []u8,
     status: ?[]u8 = null, // "streaming", "complete", "aborted"
+    duration_ms: ?i64 = null,
     parts: std.ArrayList(PartItem) = .empty,
 
     pub fn headerByteWeight(self: MessageEntry) usize {
@@ -238,6 +243,8 @@ pub const SessionDoc = struct {
     messages: std.ArrayList(MessageEntry) = .empty,
     commands: std.ArrayList(CommandEntry) = .empty,
     queue: std.ArrayList(QueuedItem) = .empty,
+    /// Lazy Loro 1.13 CRDT backing document for byte-exact `chat2` interop with Rust peers.
+    loro_handle: ?*loro_ffi.LoroSession = null,
 
     /// O(1) active-work check (streaming message or pending command).
     pub fn hasActiveWork(self: *const SessionDoc) bool {
@@ -281,6 +288,10 @@ pub const SessionDoc = struct {
     }
 
     pub fn deinit(self: *SessionDoc) void {
+        if (self.loro_handle) |lh| {
+            loro_ffi.destroySession(lh);
+            self.loro_handle = null;
+        }
         self.msg_index.deinit(self.gpa);
         self.gpa.free(self.chat_id);
         self.gpa.free(self.device_id);
@@ -733,10 +744,14 @@ pub const SessionDoc = struct {
         try json.Stringify.encodeJsonString(m.id, .{}, w);
         try w.writeAll(",\"role\":");
         try json.Stringify.encodeJsonString(m.role, .{}, w);
-        try w.print(",\"createdAt\":{d}", .{m.created_at});
+        try w.print(",\"createdAt\":{d},\"deviceId\":", .{m.created_at});
+        try json.Stringify.encodeJsonString(m.device_id, .{}, w);
         if (m.status) |st| {
             try w.writeAll(",\"status\":");
             try json.Stringify.encodeJsonString(st, .{}, w);
+        }
+        if (m.duration_ms) |dms| {
+            try w.print(",\"durationMs\":{d}", .{dms});
         }
         try w.writeAll(",\"parts\":[");
         for (m.parts.items, 0..) |p, pi| {
@@ -764,9 +779,15 @@ pub const SessionDoc = struct {
                     try w.writeAll(",\"output\":");
                     try json.Stringify.encodeJsonString(out_s, .{}, w);
                 }
+            } else if (std.mem.eql(u8, p.kind, "error")) {
+                try w.writeAll(",\"message\":");
+                try json.Stringify.encodeJsonString(p.text.items, .{}, w);
             } else {
                 try w.writeAll(",\"text\":");
                 try json.Stringify.encodeJsonString(p.text.items, .{}, w);
+            }
+            if (p.extra_fields_json) |ef| {
+                try w.writeAll(ef);
             }
             try w.writeByte('}');
         }
@@ -973,13 +994,400 @@ pub const SessionDoc = struct {
         return aw.toOwnedSlice();
     }
 
-    /// True if every `(peer, seq)` in `frontier_bytes` is `<= self.vv[peer]`.
+    /// Ensure the backing `LoroSession` exists for `chat2` CRDT import/export.
+    pub fn ensureLoroHandle(self: *SessionDoc) !*loro_ffi.LoroSession {
+        if (self.loro_handle) |lh| return lh;
+        const lh = try loro_ffi.createSession();
+        self.loro_handle = lh;
+        return lh;
+    }
+
+    /// Import a raw Loro 1.13 binary snapshot or row delta (`GET /checkpoint`, `GET /rows`),
+    /// materialize its joined `messages` into `self.messages`, and return the causal status.
+    pub fn importLoroBytes(self: *SessionDoc, bytes: []const u8) !loro_ffi.ImportOutcome {
+        if (bytes.len == 0) return .applied;
+        const lh = try self.ensureLoroHandle();
+        const outcome = try loro_ffi.importBytes(lh, bytes);
+        if (outcome == .applied) {
+            const msgs_json = try loro_ffi.readMessagesJson(lh, self.gpa);
+            defer self.gpa.free(msgs_json);
+            _ = try self.mergeMessagesArrayJson(msgs_json);
+        }
+        return outcome;
+    }
+
+    /// Sync one `msg_id` (or all messages when `msg_id == null` or `loro_handle == null`)
+    /// into the backing `LoroDoc` and return the incremental `ExportMode::updates(&before)`
+    /// binary delta for `POST /chat2/{chatId}/rows`.
+    pub fn syncEntryToLoroDelta(self: *SessionDoc, gpa: Allocator, msg_id: ?[]const u8) ![]u8 {
+        const had_handle = self.loro_handle != null;
+        const lh = try self.ensureLoroHandle();
+        if (had_handle) {
+            if (msg_id) |mid| {
+                const idx = self.findMessageIdx(mid) orelse return gpa.alloc(u8, 0);
+                var aw: std.Io.Writer.Allocating = .init(gpa);
+                defer aw.deinit();
+                try writeEntryJson(&aw.writer, self.messages.items[idx]);
+                return loro_ffi.syncMessagesJson(lh, self.chat_id, aw.written(), gpa);
+            }
+        }
+        var aw: std.Io.Writer.Allocating = .init(gpa);
+        defer aw.deinit();
+        try aw.writer.writeByte('[');
+        for (self.messages.items, 0..) |m, mi| {
+            if (mi > 0) try aw.writer.writeByte(',');
+            try writeEntryJson(&aw.writer, m);
+        }
+        try aw.writer.writeByte(']');
+        return loro_ffi.syncMessagesJson(lh, self.chat_id, aw.written(), gpa);
+    }
+
+    /// Export full `ExportMode::Snapshot` Loro binary bytes for `POST /chat2/{chatId}/checkpoint`.
+    pub fn exportLoroSnapshot(self: *SessionDoc, gpa: Allocator) ![]u8 {
+        const delta = try self.syncEntryToLoroDelta(gpa, null);
+        gpa.free(delta);
+        return loro_ffi.exportSnapshot(self.loro_handle.?, gpa);
+    }
+
+    /// Export `oplog_vv().encode()` binary frontier bytes for `x-chat2-frontier`.
+    pub fn exportLoroFrontier(self: *const SessionDoc, gpa: Allocator) ![]u8 {
+        if (self.loro_handle) |lh| return loro_ffi.exportFrontier(lh, gpa);
+        return gpa.alloc(u8, 0);
+    }
+
+    /// Build a `<earlier-conversation>` seeded prompt matching `crates/engine/src/external_history/mod.rs`
+    /// (`SEED_CONVERSATION_BYTES = 60_000`) when continuing a synced conversation in a fresh `graff` session.
+    /// Returns `null` when there are no prior messages to seed.
+    pub fn buildEarlierConversationSeedAlloc(
+        self: *const SessionDoc,
+        gpa: Allocator,
+        exclude_msg_id: ?[]const u8,
+        prompt: []const u8,
+        checkout_changed: bool,
+    ) !?[]u8 {
+        const seed_max_bytes: usize = 60_000;
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        var lines: std.ArrayList([]const u8) = .empty;
+        for (self.messages.items) |m| {
+            if (exclude_msg_id) |ex| {
+                if (std.mem.eql(u8, m.id, ex)) continue;
+            }
+            const role_label: []const u8 = if (std.mem.eql(u8, m.role, "user"))
+                "User"
+            else if (std.mem.eql(u8, m.role, "assistant"))
+                "Assistant"
+            else
+                continue;
+
+            for (m.parts.items) |p| {
+                if (std.mem.eql(u8, p.kind, "text")) {
+                    const trimmed = std.mem.trim(u8, p.text.items, " \t\r\n");
+                    if (trimmed.len > 0) {
+                        try lines.append(a, try std.fmt.allocPrint(a, "{s}: {s}", .{ role_label, trimmed }));
+                    }
+                } else if (std.mem.eql(u8, p.kind, "tool")) {
+                    var tool_kind: []const u8 = "call";
+                    if (p.call_json) |cj| {
+                        if (json.parseFromSliceLeaky(json.Value, a, cj, .{})) |cv| {
+                            if (cv == .object) {
+                                if (cv.object.get("kind")) |kv| {
+                                    if (kv == .string and kv.string.len > 0) tool_kind = kv.string;
+                                }
+                            }
+                        } else |_| {}
+                    }
+                    var result_line: []const u8 = "…";
+                    if (p.output) |out_s| {
+                        const trimmed = std.mem.trim(u8, out_s, " \t\r\n");
+                        if (trimmed.len > 0) {
+                            const nl = std.mem.indexOfAny(u8, trimmed, "\r\n") orelse trimmed.len;
+                            const single = std.mem.trim(u8, trimmed[0..nl], " \t");
+                            if (single.len > 0) result_line = utf8PrefixSlice(single, 120);
+                        }
+                    }
+                    try lines.append(a, try std.fmt.allocPrint(a, "Tool: {s} — {s}", .{ tool_kind, result_line }));
+                }
+            }
+        }
+
+        if (lines.items.len == 0) return null;
+
+        var kept_start: usize = lines.items.len;
+        var total_bytes: usize = 0;
+        while (kept_start > 0) {
+            const candidate = lines.items[kept_start - 1];
+            if (total_bytes + candidate.len > seed_max_bytes and kept_start < lines.items.len) break;
+            total_bytes += candidate.len;
+            kept_start -= 1;
+        }
+        const omitted = kept_start;
+        const intro = if (checkout_changed)
+            "This conversation is continuing in a different checkout. Earlier messages are read-only context, not evidence that their files or uncommitted edits exist here. Inspect this checkout before continuing; don't redo finished work."
+        else
+            "This conversation started in an earlier session and continues here in graff. The earlier conversation is below as read-only context; don't redo work it shows as finished.";
+
+        var aw: std.Io.Writer.Allocating = .init(gpa);
+        errdefer aw.deinit();
+        const w = &aw.writer;
+        try w.writeAll(intro);
+        try w.writeAll("\n\n<earlier-conversation>\n");
+        if (omitted > 0) {
+            try w.print("[{d} earlier messages omitted]\n", .{omitted});
+        }
+        for (lines.items[kept_start..], 0..) |line, li| {
+            if (li > 0) try w.writeByte('\n');
+            try w.writeAll(line);
+        }
+        try w.writeAll("\n</earlier-conversation>\n\n");
+        try w.writeAll(prompt);
+        return try aw.toOwnedSlice();
+    }
+
+    fn optStrEql(a: ?[]const u8, b: ?[]const u8) bool {
+        if (a == null and b == null) return true;
+        if (a == null or b == null) return false;
+        return std.mem.eql(u8, a.?, b.?);
+    }
+
+    fn partItemEqual(a: PartItem, b: PartItem) bool {
+        if (!std.mem.eql(u8, a.id, b.id)) return false;
+        if (!std.mem.eql(u8, a.kind, b.kind)) return false;
+        if (!std.mem.eql(u8, a.text.items, b.text.items)) return false;
+        if (!optStrEql(a.call_json, b.call_json)) return false;
+        if (!optStrEql(a.output, b.output)) return false;
+        if (!optStrEql(a.extra_fields_json, b.extra_fields_json)) return false;
+        return a.is_error == b.is_error and a.resolved == b.resolved;
+    }
+
+    fn messageEntryEqual(a: MessageEntry, b: MessageEntry) bool {
+        if (!std.mem.eql(u8, a.id, b.id)) return false;
+        if (!std.mem.eql(u8, a.role, b.role)) return false;
+        if (a.created_at != b.created_at) return false;
+        if (!std.mem.eql(u8, a.device_id, b.device_id)) return false;
+        if (!optStrEql(a.status, b.status)) return false;
+        if (a.duration_ms != b.duration_ms) return false;
+        if (a.parts.items.len != b.parts.items.len) return false;
+        for (a.parts.items, b.parts.items) |pa, pb| {
+            if (!partItemEqual(pa, pb)) return false;
+        }
+        return true;
+    }
+
+    fn isCorePartField(k: []const u8) bool {
+        const core = [_][]const u8{
+            "id", "kind", "text", "reasoning", "call", "resolved", "isError", "output", "message",
+        };
+        for (core) |ck| {
+            if (std.mem.eql(u8, k, ck)) return true;
+        }
+        return false;
+    }
+
+    fn parseMessageEntryFromJsonObject(self: *const SessionDoc, mo: json.ObjectMap) !?MessageEntry {
+        const id_s = if (mo.get("id")) |v| (if (v == .string and v.string.len > 0) v.string else return null) else return null;
+        const role_s = if (mo.get("role")) |v| (if (v == .string) v.string else "assistant") else "assistant";
+        const created_at: i64 = if (mo.get("createdAt")) |v| (if (v == .integer) v.integer else 0) else 0;
+        const dev_s = if (mo.get("deviceId")) |v| (if (v == .string) v.string else self.device_id) else self.device_id;
+        const status_s: ?[]const u8 = if (mo.get("status")) |v| (if (v == .string) v.string else null) else null;
+        const duration_ms: ?i64 = if (mo.get("durationMs")) |v| (if (v == .integer) v.integer else null) else null;
+
+        const mid = try self.gpa.dupe(u8, id_s);
+        var msg_transferred = false;
+        errdefer if (!msg_transferred) self.gpa.free(mid);
+        const mrole = try self.gpa.dupe(u8, role_s);
+        errdefer if (!msg_transferred) self.gpa.free(mrole);
+        const mdev = try self.gpa.dupe(u8, dev_s);
+        errdefer if (!msg_transferred) self.gpa.free(mdev);
+        const mstatus = if (status_s) |st| try self.gpa.dupe(u8, st) else null;
+        errdefer if (!msg_transferred) if (mstatus) |st| self.gpa.free(st);
+
+        var msg = MessageEntry{
+            .id = mid,
+            .role = mrole,
+            .created_at = created_at,
+            .device_id = mdev,
+            .status = mstatus,
+            .duration_ms = duration_ms,
+        };
+        msg_transferred = true;
+        errdefer msg.deinit(self.gpa);
+
+        if (mo.get("parts")) |parts_arr| if (parts_arr == .array) {
+            for (parts_arr.array.items) |p_val| {
+                if (p_val != .object) continue;
+                const po = p_val.object;
+                const pid = if (po.get("id")) |v| (if (v == .string) v.string else "p") else "p";
+                const pkind = if (po.get("kind")) |v| (if (v == .string) v.string else "text") else "text";
+                const ptext = if (po.get("text")) |v|
+                    (if (v == .string) v.string else "")
+                else if (po.get("reasoning")) |v|
+                    (if (v == .string) v.string else "")
+                else if (po.get("message")) |v|
+                    (if (v == .string) v.string else "")
+                else
+                    "";
+
+                const has_is_err = if (po.get("isError")) |ev| ev == .bool else false;
+                const is_err_val = if (po.get("isError")) |ev| (ev == .bool and ev.bool) else false;
+                const resolved_val = if (po.get("resolved")) |rv|
+                    (rv == .bool and rv.bool)
+                else
+                    has_is_err;
+
+                var part = PartItem{
+                    .id = try self.gpa.dupe(u8, pid),
+                    .kind = try self.gpa.dupe(u8, pkind),
+                    .resolved = resolved_val,
+                    .is_error = is_err_val,
+                };
+                errdefer part.deinit(self.gpa);
+                if (ptext.len > 0) try part.text.appendSlice(self.gpa, ptext);
+                if (po.get("call")) |call_v| {
+                    if (call_v == .object) {
+                        part.call_json = try json.Stringify.valueAlloc(self.gpa, call_v, .{});
+                    }
+                }
+                if (po.get("output")) |out_v| if (out_v == .string) {
+                    part.output = try self.gpa.dupe(u8, out_v.string);
+                };
+
+                var extra_aw: std.Io.Writer.Allocating = .init(self.gpa);
+                errdefer extra_aw.deinit();
+                var has_extra = false;
+                var pit = po.iterator();
+                while (pit.next()) |pe| {
+                    if (pe.value_ptr.* == .null) continue;
+                    if (isCorePartField(pe.key_ptr.*)) continue;
+                    has_extra = true;
+                    try extra_aw.writer.writeByte(',');
+                    try json.Stringify.encodeJsonString(pe.key_ptr.*, .{}, &extra_aw.writer);
+                    try extra_aw.writer.writeByte(':');
+                    const encoded_v = try json.Stringify.valueAlloc(self.gpa, pe.value_ptr.*, .{});
+                    defer self.gpa.free(encoded_v);
+                    try extra_aw.writer.writeAll(encoded_v);
+                }
+                if (has_extra) {
+                    part.extra_fields_json = try extra_aw.toOwnedSlice();
+                } else {
+                    extra_aw.deinit();
+                }
+
+                try msg.parts.append(self.gpa, part);
+            }
+        };
+        return msg;
+    }
+
+    /// Upsert or update a `MessageEntry` parsed from JSON, maintaining exact `live_payload_bytes`,
+    /// `streaming_msg_count`, `msg_index`, and chronological order on historical backfills.
+    pub fn upsertMessageFromJsonObject(self: *SessionDoc, mo: json.ObjectMap) !bool {
+        var new_msg = (try self.parseMessageEntryFromJsonObject(mo)) orelse return false;
+        errdefer new_msg.deinit(self.gpa);
+
+        if (self.findMessageIdx(new_msg.id)) |existing_idx| {
+            var old_msg = self.messages.items[existing_idx];
+            if (messageEntryEqual(old_msg, new_msg)) {
+                new_msg.deinit(self.gpa);
+                return false;
+            }
+            // Never regress an actively locally-streaming message with a shorter stale tail.
+            if (old_msg.isStreaming() and std.mem.eql(u8, old_msg.device_id, self.device_id) and
+                new_msg.isStreaming() and new_msg.totalByteWeight() < old_msg.totalByteWeight())
+            {
+                new_msg.deinit(self.gpa);
+                return false;
+            }
+            const old_w = old_msg.totalByteWeight();
+            const new_w = new_msg.totalByteWeight();
+            const was_streaming = old_msg.isStreaming();
+            const now_streaming = new_msg.isStreaming();
+
+            try self.msg_index.ensureUnusedCapacity(self.gpa, 1);
+            _ = self.msg_index.remove(old_msg.id);
+            self.msg_index.putAssumeCapacity(new_msg.id, existing_idx);
+            old_msg.deinit(self.gpa);
+            self.messages.items[existing_idx] = new_msg;
+            self.live_payload_bytes = self.live_payload_bytes - old_w + new_w;
+            if (was_streaming and !now_streaming) {
+                self.streaming_msg_count -|= 1;
+            } else if (!was_streaming and now_streaming) {
+                self.streaming_msg_count += 1;
+            }
+            return true;
+        }
+
+        // Fast path: empty list or chronological append at tail.
+        if (self.messages.items.len == 0 or new_msg.created_at == 0 or
+            self.messages.items[self.messages.items.len - 1].created_at <= new_msg.created_at)
+        {
+            try self.appendIndexedMessage(new_msg);
+            return true;
+        }
+
+        // Historical backfill arrived after a newer local message: insert in chronological order
+        // and refresh `msg_index` from `ins_idx` onward.
+        var ins_idx: usize = 0;
+        while (ins_idx < self.messages.items.len) : (ins_idx += 1) {
+            const cur_ts = self.messages.items[ins_idx].created_at;
+            if (cur_ts > 0 and cur_ts > new_msg.created_at) break;
+        }
+        try self.messages.ensureUnusedCapacity(self.gpa, 1);
+        try self.msg_index.ensureUnusedCapacity(self.gpa, 1);
+        const w = new_msg.totalByteWeight();
+        const is_str = new_msg.isStreaming();
+        self.messages.insertAssumeCapacity(ins_idx, new_msg);
+        for (self.messages.items[ins_idx..], ins_idx..) |m, idx| {
+            try self.msg_index.put(self.gpa, m.id, idx);
+        }
+        self.live_payload_bytes += w;
+        if (is_str) self.streaming_msg_count += 1;
+        return true;
+    }
+
+    /// Merge a JSON array `[...]` of `SessionMessageEntry` objects (or a `SessionTail` `{ "messages": [...] }`)
+    /// into `self`, returning `true` if any entry was inserted or updated.
+    pub fn mergeMessagesArrayJson(self: *SessionDoc, raw_json: []const u8) !bool {
+        if (raw_json.len == 0) return false;
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const parsed = try json.parseFromSliceLeaky(json.Value, arena.allocator(), raw_json, .{});
+        const items: []const json.Value = switch (parsed) {
+            .array => |arr| arr.items,
+            .object => |obj| blk: {
+                if (obj.get("messages")) |mv| if (mv == .array) break :blk mv.array.items;
+                if (obj.get("reset")) |rv| if (rv == .array) break :blk rv.array.items;
+                return false;
+            },
+            else => return false,
+        };
+        var changed = false;
+        for (items) |m_val| {
+            if (m_val != .object) continue;
+            if (try self.upsertMessageFromJsonObject(m_val.object)) {
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    /// True if `frontier_bytes` is contained in this document's causal history.
+    /// Per `crates/engine/src/chat2_host.rs:194-227`, an empty or undecodable frontier on a
+    /// present checkpoint returns `false` so the caller fetches the checkpoint safely.
     pub fn frontierContained(self: *const SessionDoc, gpa: Allocator, frontier_bytes: []const u8) bool {
-        if (frontier_bytes.len == 0) return true;
-        if (isRustLoroBlob(frontier_bytes)) return false;
+        if (frontier_bytes.len == 0) return false;
+        if (frontier_bytes[0] != '{') {
+            if (self.loro_handle) |lh| {
+                return loro_ffi.containsFrontier(lh, frontier_bytes);
+            }
+            return false;
+        }
         var parsed = json.parseFromSlice(json.Value, gpa, frontier_bytes, .{}) catch return false;
         defer parsed.deinit();
         if (parsed.value != .object) return false;
+        if (parsed.value.object.count() == 0) return false;
         var it = parsed.value.object.iterator();
         while (it.next()) |e| {
             if (e.value_ptr.* != .integer) return false;
@@ -990,10 +1398,25 @@ pub const SessionDoc = struct {
         return true;
     }
 
-    /// Single-pass pre-sized snapshot export (`HZD1` header + JSON state) for `DocsStore` and `chat2`
-    /// checkpoints (Lean Theorem `single_pass_export_fewer_allocs_and_copies`: 1 allocation, 1 byte pass).
+    /// Single-pass pre-sized snapshot export (`HZD1` header + JSON state, plus embedded Loro
+    /// binary snapshot when `loro_handle` is active so causal oplog history survives restarts).
     pub fn exportSnapshot(self: *const SessionDoc, gpa: Allocator) ![]u8 {
-        const est_cap = self.live_payload_bytes + self.vv.count() * 48 + 256;
+        var loro_b64: ?[]u8 = null;
+        defer if (loro_b64) |b| gpa.free(b);
+        if (self.loro_handle) |lh| {
+            if (loro_ffi.exportSnapshot(lh, gpa)) |loro_raw| {
+                defer gpa.free(loro_raw);
+                if (loro_raw.len > 0) {
+                    const enc_len = std.base64.standard.Encoder.calcSize(loro_raw.len);
+                    const buf = try gpa.alloc(u8, enc_len);
+                    _ = std.base64.standard.Encoder.encode(buf, loro_raw);
+                    loro_b64 = buf;
+                }
+            } else |_| {}
+        }
+
+        const extra_loro = if (loro_b64) |b| b.len + 16 else 0;
+        const est_cap = self.live_payload_bytes + self.vv.count() * 48 + extra_loro + 256;
         var aw: std.Io.Writer.Allocating = try .initCapacity(gpa, est_cap);
         errdefer aw.deinit();
         const w = &aw.writer;
@@ -1006,15 +1429,22 @@ pub const SessionDoc = struct {
         try self.writeResetFrame(w);
         try w.writeAll(",\"queue\":");
         try self.writeQueueFrame(w);
+        if (loro_b64) |b| {
+            try w.writeAll(",\"loro\":");
+            try json.Stringify.encodeJsonString(b, .{}, w);
+        }
         try w.writeByte('}');
         return aw.toOwnedSlice();
     }
 
-    /// Import a snapshot or CRDT update (`HZD1` envelope) into `self`, merging
-    /// version vector entries and hydrating missing messages, tool calls, and queue items in O(M + Q).
+    /// Import a snapshot or CRDT update (`loro` binary blob OR `HZD1` envelope) into `self`,
+    /// merging Loro causal history, version vector entries, messages, tool calls, and queue items.
     pub fn importSnapshot(self: *SessionDoc, bytes: []const u8) !void {
         if (bytes.len == 0) return;
-        if (isRustLoroBlob(bytes)) return error.UnsupportedLegacyLoroBlob;
+        if (isRustLoroBlob(bytes)) {
+            _ = try self.importLoroBytes(bytes);
+            return;
+        }
         const payload = if (std.mem.startsWith(u8, bytes, zig_doc_magic))
             bytes[zig_doc_magic.len..]
         else
@@ -1022,9 +1452,26 @@ pub const SessionDoc = struct {
 
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
-        const parsed = try json.parseFromSliceLeaky(json.Value, arena.allocator(), payload, .{});
+        const parsed = json.parseFromSliceLeaky(json.Value, arena.allocator(), payload, .{}) catch |err| {
+            // Non-JSON binary Loro delta that didn't start with `"loro"` snapshot magic.
+            if (bytes.len > 0 and bytes[0] != '{' and !std.mem.startsWith(u8, bytes, zig_doc_magic)) {
+                _ = try self.importLoroBytes(bytes);
+                return;
+            }
+            return err;
+        };
         if (parsed != .object) return error.InvalidSnapshot;
         const root = parsed.object;
+
+        if (root.get("loro")) |loro_v| if (loro_v == .string and loro_v.string.len > 0) {
+            const dec = std.base64.standard.Decoder;
+            if (dec.calcSizeForSlice(loro_v.string)) |dec_len| {
+                const raw = try arena.allocator().alloc(u8, dec_len);
+                if (dec.decode(raw, loro_v.string)) |_| {
+                    _ = self.importLoroBytes(raw) catch {};
+                } else |_| {}
+            } else |_| {}
+        };
 
         if (root.get("vv")) |vv_val| if (vv_val == .object) {
             var it = vv_val.object.iterator();
@@ -1049,64 +1496,7 @@ pub const SessionDoc = struct {
             if (tr_val.object.get("reset")) |reset_arr| if (reset_arr == .array) {
                 for (reset_arr.array.items) |m_val| {
                     if (m_val != .object) continue;
-                    const mo = m_val.object;
-                    const id_s = if (mo.get("id")) |v| (if (v == .string) v.string else continue) else continue;
-                    // O(1) hash index deduplication (Lean Theorem `om_snapshot_import_strictly_faster`)
-                    if (self.findMessageIdx(id_s) != null) continue;
-
-                    const role_s = if (mo.get("role")) |v| (if (v == .string) v.string else "assistant") else "assistant";
-                    const created_at: i64 = if (mo.get("createdAt")) |v| (if (v == .integer) v.integer else 0) else 0;
-                    const status_s: ?[]const u8 = if (mo.get("status")) |v| (if (v == .string) v.string else null) else null;
-
-                    const mid = try self.gpa.dupe(u8, id_s);
-                    var msg_transferred = false;
-                    errdefer if (!msg_transferred) self.gpa.free(mid);
-                    const mrole = try self.gpa.dupe(u8, role_s);
-                    errdefer if (!msg_transferred) self.gpa.free(mrole);
-                    const mdev = try self.gpa.dupe(u8, self.device_id);
-                    errdefer if (!msg_transferred) self.gpa.free(mdev);
-                    const mstatus = if (status_s) |st| try self.gpa.dupe(u8, st) else null;
-                    errdefer if (!msg_transferred) if (mstatus) |st| self.gpa.free(st);
-
-                    var msg = MessageEntry{
-                        .id = mid,
-                        .role = mrole,
-                        .created_at = created_at,
-                        .device_id = mdev,
-                        .status = mstatus,
-                    };
-                    msg_transferred = true;
-                    errdefer msg.deinit(self.gpa);
-
-                    if (mo.get("parts")) |parts_arr| if (parts_arr == .array) {
-                        for (parts_arr.array.items) |p_val| {
-                            if (p_val != .object) continue;
-                            const po = p_val.object;
-                            const pid = if (po.get("id")) |v| (if (v == .string) v.string else "p") else "p";
-                            const pkind = if (po.get("kind")) |v| (if (v == .string) v.string else "text") else "text";
-                            const ptext = if (po.get("text")) |v| (if (v == .string) v.string else "") else if (po.get("reasoning")) |v| (if (v == .string) v.string else "") else "";
-
-                            var part = PartItem{
-                                .id = try self.gpa.dupe(u8, pid),
-                                .kind = try self.gpa.dupe(u8, pkind),
-                                .resolved = if (po.get("resolved")) |rv| (rv == .bool and rv.bool) else false,
-                                .is_error = if (po.get("isError")) |ev| (ev == .bool and ev.bool) else false,
-                            };
-                            errdefer part.deinit(self.gpa);
-                            if (ptext.len > 0) try part.text.appendSlice(self.gpa, ptext);
-                            if (po.get("call")) |call_v| {
-                                if (call_v == .object) {
-                                    part.call_json = try json.Stringify.valueAlloc(self.gpa, call_v, .{});
-                                }
-                            }
-                            if (po.get("output")) |out_v| if (out_v == .string) {
-                                part.output = try self.gpa.dupe(u8, out_v.string);
-                            };
-
-                            try msg.parts.append(self.gpa, part);
-                        }
-                    };
-                    try self.appendIndexedMessage(msg);
+                    _ = try self.upsertMessageFromJsonObject(m_val.object);
                 }
             };
         };
@@ -1316,4 +1706,97 @@ test "Performance shape: O(1) indexed SessionDoc streaming + resident accounting
     try testing.expectEqual(sink_slow, sink_fast);
     // AGENTS.md shape test: O(1) path must be at least 5x faster than the O(M*P) scan!
     try testing.expect(fast_ns * 5 <= slow_ns);
+}
+
+test "SessionDoc Loro 1.13 binary CRDT snapshot + incremental RLE delta + earlier-conversation seed parity" {
+    const gpa = testing.allocator;
+
+    // 1. Desktop peer writes Turn 1 (user + reasoning + unresolved tool -> resolved tool + assistant text)
+    var desktop_doc = try SessionDoc.init(gpa, "chat-loro-1", "dev-desktop");
+    defer desktop_doc.deinit();
+
+    // Empty or undecodable frontier on a present checkpoint must return false (fetch checkpoint).
+    try testing.expect(!desktop_doc.frontierContained(gpa, ""));
+
+    try desktop_doc.appendUserMessage("m-u1", "p-u1", "How does ranking work in dark mode?", 1_000);
+    try desktop_doc.beginAssistantMessage("m-a1", 1_005);
+    _ = try desktop_doc.appendPartDelta("m-a1", "p-r1", "reasoning", "Checking ranking weights...");
+    try desktop_doc.upsertToolPart("m-a1", "tc-1", "{\"kind\":\"readFile\",\"path\":\"src/rank.rs\"}", null, false, false);
+
+    const delta_1 = try desktop_doc.syncEntryToLoroDelta(gpa, null);
+    defer gpa.free(delta_1);
+    try testing.expect(delta_1.len > 0);
+
+    // 2. Nano peer imports binary Loro delta_1: sees user message, reasoning, and unresolved tool part!
+    var nano_doc = try SessionDoc.init(gpa, "chat-loro-1", "dev-nano");
+    defer nano_doc.deinit();
+
+    const out1 = try nano_doc.importLoroBytes(delta_1);
+    try testing.expectEqual(loro_ffi.ImportOutcome.applied, out1);
+    try testing.expectEqual(@as(usize, 2), nano_doc.messages.items.len);
+    try testing.expectEqualStrings("dev-desktop", nano_doc.messages.items[0].device_id);
+    try testing.expectEqualStrings("Checking ranking weights...", nano_doc.messages.items[1].parts.items[0].text.items);
+    try testing.expect(!nano_doc.messages.items[1].parts.items[1].resolved);
+    try testing.expectEqual(nano_doc.computePayloadBytesLinear(), nano_doc.approxPayloadBytes());
+
+    // 3. Desktop peer resolves tool, streams assistant reply, and marks complete -> exports incremental delta_2
+    try desktop_doc.upsertToolPart("m-a1", "tc-1", "{\"kind\":\"readFile\",\"path\":\"src/rank.rs\"}", "fn score() -> f64 { 0.8 }", true, false);
+    _ = try desktop_doc.appendPartDelta("m-a1", "p-t1", "text", "Ranking uses BM25 ");
+    _ = try desktop_doc.appendPartDelta("m-a1", "p-t1", "text", "plus recency decay.");
+    try desktop_doc.setMessageStatus("m-a1", "complete");
+
+    const delta_2 = try desktop_doc.syncEntryToLoroDelta(gpa, "m-a1");
+    defer gpa.free(delta_2);
+    try testing.expect(delta_2.len > 0);
+
+    // Nano applies delta_2 in place without losing m-u1 or m-a1!
+    const out2 = try nano_doc.importLoroBytes(delta_2);
+    try testing.expectEqual(loro_ffi.ImportOutcome.applied, out2);
+    try testing.expectEqual(@as(usize, 2), nano_doc.messages.items.len);
+    try testing.expectEqualStrings("complete", nano_doc.messages.items[1].status.?);
+    try testing.expect(nano_doc.messages.items[1].parts.items[1].resolved);
+    try testing.expect(!nano_doc.messages.items[1].parts.items[1].is_error);
+    try testing.expectEqualStrings("Ranking uses BM25 plus recency decay.", nano_doc.messages.items[1].parts.items[2].text.items);
+    try testing.expectEqual(nano_doc.computePayloadBytesLinear(), nano_doc.approxPayloadBytes());
+
+    // Frontier from desktop is now contained in nano_doc!
+    const desktop_frontier = try desktop_doc.exportLoroFrontier(gpa);
+    defer gpa.free(desktop_frontier);
+    try testing.expect(nano_doc.frontierContained(gpa, desktop_frontier));
+
+    // 4. Nano appends Turn 2 follow-up: builds `<earlier-conversation>` seed AND exports delta_3 back to Desktop!
+    try nano_doc.appendUserMessage("m-u2", "p-u2", "Compare ranking strategies using the synthetic sample dataset.", 2_000);
+    const seeded = (try nano_doc.buildEarlierConversationSeedAlloc(
+        gpa,
+        "m-u2",
+        "Compare ranking strategies using the synthetic sample dataset.",
+        false,
+    )).?;
+    defer gpa.free(seeded);
+    try testing.expect(std.mem.indexOf(u8, seeded, "<earlier-conversation>") != null);
+    try testing.expect(std.mem.indexOf(u8, seeded, "User: How does ranking work in dark mode?") != null);
+    try testing.expect(std.mem.indexOf(u8, seeded, "Tool: readFile — fn score() -> f64 { 0.8 }") != null);
+    try testing.expect(std.mem.indexOf(u8, seeded, "Assistant: Ranking uses BM25 plus recency decay.") != null);
+
+    const delta_3 = try nano_doc.syncEntryToLoroDelta(gpa, "m-u2");
+    defer gpa.free(delta_3);
+    try testing.expect(delta_3.len > 0);
+
+    // Desktop imports delta_3 and sees all 3 messages!
+    const out3 = try desktop_doc.importLoroBytes(delta_3);
+    try testing.expectEqual(loro_ffi.ImportOutcome.applied, out3);
+    try testing.expectEqual(@as(usize, 3), desktop_doc.messages.items.len);
+    try testing.expectEqualStrings("Compare ranking strategies using the synthetic sample dataset.", desktop_doc.messages.items[2].parts.items[0].text.items);
+    try testing.expectEqualStrings("dev-nano", desktop_doc.messages.items[2].device_id);
+    try testing.expectEqual(desktop_doc.computePayloadBytesLinear(), desktop_doc.approxPayloadBytes());
+
+    // 5. HZD1 snapshot preserves embedded Loro oplog state across engine restarts!
+    const hzd_snap = try nano_doc.exportSnapshot(gpa);
+    defer gpa.free(hzd_snap);
+    var restarted_nano = try SessionDoc.init(gpa, "chat-loro-1", "dev-nano");
+    defer restarted_nano.deinit();
+    try restarted_nano.importSnapshot(hzd_snap);
+    try testing.expect(restarted_nano.frontierContained(gpa, desktop_frontier));
+    try testing.expectEqual(@as(usize, 3), restarted_nano.messages.items.len);
+    try testing.expectEqual(restarted_nano.computePayloadBytesLinear(), restarted_nano.approxPayloadBytes());
 }
