@@ -20,7 +20,7 @@ test "restore navigation numbered jump preserves the current conversation (#349)
     defer h.deinit();
     const slot = try visibleTarget(&h, "b");
     try testing.expect(slot < 9);
-    h.press(.{ .key = @as(u21, '1') + @as(u21, @intCast(slot)), .cmd = true });
+    h.press((ui.Shortcut{ .key = @as(u21, '1') + @as(u21, @intCast(slot)), .cmd = true }).native());
     try testing.expectEqualStrings("b", h.a.selected.?);
     try testing.expect(h.a.tabs.find("a") != null);
     try testing.expect(h.a.tabs.find("b") != null);

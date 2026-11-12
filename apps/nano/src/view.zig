@@ -586,11 +586,13 @@ fn keys(c: *ui.Context, a: *App) void {
         }
     }
     if (@import("view_composer_completion.zig").keys(c, a)) return;
-    if (strip.navigationKeys(c, a)) return;
+    // Configured commands win over fixed aliases: on Linux/Windows both
+    // mod-1 (session jump) and Ctrl+1 (tab focus) use the native Control key.
     if (sessionNavigationKeys(c, a)) {
         strip.finishNavigation(c, a);
         return;
     }
+    if (strip.navigationKeys(c, a)) return;
     if (boundShortcut(c, a, "reopenClosedTab")) {
         strip.finishNavigation(c, a);
         a.reopenClosedTab();
@@ -849,10 +851,8 @@ fn closeChoice(c: *ui.Context, a: *App, k: theme.Colors) void {
 pub fn boundShortcut(c: *ui.Context, a: *App, key: []const u8) bool {
     const sc = @import("shortcuts.zig");
     const pressed = c.input.shortcut orelse return false;
-    var buf: [64]u8 = undefined;
-    const combo = sc.fromShortcut(&buf, pressed) orelse return false;
     for (sc.all) |entry| if (entry.slot == null and std.mem.eql(u8, entry.key, key)) {
-        if (!std.mem.eql(u8, combo, a.settings.combo(entry))) return false;
+        if (!sc.matches(a.settings.combo(entry), pressed)) return false;
         return c.shortcut(pressed);
     };
     return false;
@@ -861,10 +861,8 @@ pub fn boundShortcut(c: *ui.Context, a: *App, key: []const u8) bool {
 pub fn boundShortcutSlot(c: *ui.Context, a: *App, key: []const u8, slot: u8) bool {
     const sc = @import("shortcuts.zig");
     const pressed = c.input.shortcut orelse return false;
-    var buf: [64]u8 = undefined;
-    const combo = sc.fromShortcut(&buf, pressed) orelse return false;
     for (sc.all) |entry| if (entry.slot == slot and std.mem.eql(u8, entry.key, key)) {
-        if (!std.mem.eql(u8, combo, a.settings.combo(entry))) return false;
+        if (!sc.matches(a.settings.combo(entry), pressed)) return false;
         return c.shortcut(pressed);
     };
     return false;
@@ -874,10 +872,8 @@ pub fn boundShortcutSlot(c: *ui.Context, a: *App, key: []const u8, slot: u8) boo
 fn closeOnlyPressed(c: *ui.Context, a: *App) bool {
     const sc = @import("shortcuts.zig");
     const s = c.input.shortcut orelse return false;
-    var buf: [32]u8 = undefined;
-    const pressed = sc.fromShortcut(&buf, s) orelse return false;
     for (sc.all) |entry| if (std.mem.eql(u8, entry.key, "closeTabWithoutArchiving")) {
-        if (!std.mem.eql(u8, pressed, a.settings.combo(entry))) return false;
+        if (!sc.matches(a.settings.combo(entry), s)) return false;
         return c.shortcut(s);
     };
     return false;

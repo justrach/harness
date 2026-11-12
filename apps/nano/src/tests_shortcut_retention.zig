@@ -129,7 +129,7 @@ test "deep shortcuts numbered session jump leaves Settings without replacing the
     try testing.expect(slot != null and slot.? < 9);
     h.press(.{ .key = ',', .cmd = true });
     try testing.expect(h.a.view.settings_open);
-    h.press(.{ .key = @as(u21, '1') + @as(u21, @intCast(slot.?)), .cmd = true });
+    h.press((ui.Shortcut{ .key = @as(u21, '1') + @as(u21, @intCast(slot.?)), .cmd = true }).native());
     try testing.expect(!h.a.view.settings_open);
     try testing.expectEqualStrings("b", h.a.selected.?);
     try testing.expect(h.a.tabs.find("a") != null);
