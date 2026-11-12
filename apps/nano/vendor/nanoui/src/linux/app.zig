@@ -136,7 +136,7 @@ pub const App = struct {
     }
 
     pub fn destroyImpl(self: *App) void {
-        while (self.windows.items.len > 0) self.windows.items[self.windows.items.len - 1].close();
+        while (self.windows.items.len > 0) self.windows.items[self.windows.items.len - 1].destroyNow();
         self.windows.deinit(self.gpa);
         if (self.main_menu) |m| m.destroy();
         self.services.deinit(self.gpa);

@@ -44,6 +44,12 @@ native delegate and imperative Quit share the gate; the native veto test
 also checks exactly-once termination callbacks. AppOptions changed, so
 rebuild the native runtime through the normal package graph after updating.
 
+The Linux native window also retains `Options.should_close` and honors it
+for GTK 3 delete events, GTK 4 close requests and imperative close. Final App
+teardown uses `destroyNow` after close decisions have been resolved, matching
+Windows' forced-disposal path and avoiding a vetoed-close teardown loop.
+This supplies the same dirty-document veto contract to all desktop windows.
+
 These changes live in this checked-in package, not an ignored download cache.
 
 To update: start with the pinned upstream distribution, retain the notices,
