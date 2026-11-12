@@ -163,20 +163,10 @@ pub fn settle(a: *App) void {
             if (a.tabs.layout()) |s| if (at.pane < s.panes.items.len) {
                 const group = &s.groups[at.pane];
                 if (at.tab < group.items.items.len and at.tab != group.active) {
-                    var removed = group.items.orderedRemove(at.tab);
-                    if (group.active > at.tab) group.active -= 1;
-                    const closed_id = removed.chat;
-                    removed.chat = null;
-                    if (removed.draft) |*d| d.deinit(a.gpa);
+                    const closed_id = if (group.items.items[at.tab].chat) |id| a.gpa.dupe(u8, id) catch null else null;
                     defer if (closed_id) |x| a.gpa.free(x);
-                    if (s.panes.items.len == 1 and group.count() == 1) {
-                        if (a.tabs.drafts.items[a.tabs.active]) |*d| d.deinit(a.gpa);
-                        a.tabs.drafts.items[a.tabs.active] = s.drafts.items[0];
-                        s.drafts.items[0] = null;
-                        s.deinit(a.gpa);
-                        a.tabs.splits.items[a.tabs.active] = null;
-                    }
-                    if (closed_id) |x| a.tabs.rememberClosed(x);
+                    // Capture before removal, including inactive draft and position.
+                    if (!a.tabs.closeBackgroundPaneTab(at.pane, at.tab)) return;
                     a.rememberTabs();
                     if (closed_id) |x| a.archiveClosed(x, a.settings.get(.archive_sessions_on_close));
                     a.redraw();
@@ -367,12 +357,18 @@ pub fn navigationKeys(c: *ui.Context, a: *App) bool {
         };
     }
     if (!handled) return false;
-    state.menu = null;
-    state.pending_folder = null;
+    finishNavigation(c, a);
+    return true;
+}
+
+/// A menu's field must release keyboard ownership before another workspace
+/// destination is shown, including navigation through a saved custom chord.
+pub fn finishNavigation(c: *ui.Context, a: *App) void {
+    a.view.strip.menu = null;
+    a.view.strip.pending_folder = null;
     c.changed = false;
     a.view.focus_composer = true;
     a.redraw();
-    return true;
 }
 
 pub fn keys(c: *ui.Context, a: *App) void {
@@ -383,7 +379,7 @@ pub fn keys(c: *ui.Context, a: *App) void {
         state.menu = null;
         a.view.focus_composer = true;
         a.redraw();
-    } else if (view_mod.boundShortcut(c, a, "newSession") or c.shortcut(.{ .key = 't', .cmd = true }) or c.shortcut(.{ .key = 'n', .cmd = true })) {
+    } else if (view_mod.boundShortcut(c, a, "newSession") or c.shortcut(.{ .key = 'n', .cmd = true })) {
         state.menu = null;
         state.pending_folder = null;
         a.newTab();
@@ -391,13 +387,19 @@ pub fn keys(c: *ui.Context, a: *App) void {
         state.menu = null;
         state.pending_folder = null;
         a.closeByShortcut();
-    } else if (view_mod.boundShortcut(c, a, "splitTerminal") or c.shortcut(.{ .key = 'd', .cmd = true })) {
+    } else if (view_mod.boundShortcut(c, a, "splitTerminal")) {
         state.menu = null;
         splitChoosingFolder(a, .horizontal);
-    } else if (view_mod.boundShortcut(c, a, "splitTerminalDown") or c.shortcut(.{ .key = 'd', .cmd = true, .shift = true })) {
+    } else if (view_mod.boundShortcut(c, a, "splitTerminalDown")) {
         state.menu = null;
         splitChoosingFolder(a, .vertical);
     } else if (state.rows > 0) {
+        // Both current project-picker layouts pin two actions after the
+        // projects. Shift+Down jumps to that first action, not the next row.
+        if (state.menu == .folder and c.shortcut(.{ .key = ui.Shortcut.down, .shift = true })) {
+            state.cursor = state.rows -| 2;
+            state.reveal = true;
+        }
         if (c.shortcut(.{ .key = ui.Shortcut.down })) {
             state.cursor = (state.cursor + 1) % state.rows;
             state.reveal = true;

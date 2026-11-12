@@ -284,7 +284,7 @@ test "mouse and keyboard close search together and restore composer focus" {
         @import("view_sidebar_search.zig").toggle(&h.a);
         h.t.settle(1);
         try testing.expect(h.a.view.search.field_focused);
-        if (mouse) h.t.click(100, 21) else h.toggle();
+        if (mouse) h.t.click(@import("window_chrome.zig").leading + 12, 21) else h.toggle();
         h.t.frame();
         try testing.expect(!h.a.view.sidebar_open);
         try testing.expect(!h.a.view.search.open);

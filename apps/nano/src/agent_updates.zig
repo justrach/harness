@@ -173,6 +173,10 @@ pub const State = struct {
     height_tween: ?Tween = null,
     card_rect: ?ui.Rect = null,
     last_action: ?LastAction = null,
+    /// `visibleSignature` of the notices the person dismissed. The island stays
+    /// hidden while the visible set is unchanged; any new update, phase change
+    /// or version brings it back.
+    dismissed_signature: ?u64 = null,
 
     pub fn init(gpa: Allocator) State {
         return .{ .gpa = gpa };
@@ -326,7 +330,7 @@ pub const VisibleRow = struct {
     status: Status,
 };
 
-pub fn visibleCount(a: *const App) usize {
+fn noticeCount(a: *const App) usize {
     var n: usize = 0;
     for (a.agent_updates.devices.items) |w| {
         for (w.statuses) |st| if (st.phase.showUpdateNotice()) {
@@ -336,12 +340,53 @@ pub fn visibleCount(a: *const App) usize {
     return n;
 }
 
+/// Identity of everything the island would show right now: which agents on
+/// which devices, in which phase, at which target version.
+pub fn visibleSignature(a: *const App) u64 {
+    var h = std.hash.Wyhash.init(0);
+    for (a.agent_updates.devices.items) |w| {
+        for (w.statuses) |st| if (st.phase.showUpdateNotice()) {
+            h.update(w.device_id);
+            h.update(&.{0});
+            h.update(st.harness);
+            h.update(&.{ 0, @intFromEnum(st.phase), 0 });
+            h.update(st.latest_version orelse "");
+            h.update(&.{0});
+        };
+    }
+    return h.final();
+}
+
+fn isDismissed(a: *const App) bool {
+    const sig = a.agent_updates.dismissed_signature orelse return false;
+    return noticeCount(a) > 0 and sig == visibleSignature(a);
+}
+
+/// Hide the island until the visible updates change.
+pub fn dismiss(a: *App) void {
+    const s = &a.agent_updates;
+    if (noticeCount(a) == 0) return;
+    s.dismissed_signature = visibleSignature(a);
+    s.expanded = false;
+    s.reveal_tween = null;
+    s.width_tween = null;
+    s.height_tween = null;
+    s.card_rect = null;
+    a.redraw();
+}
+
+pub fn visibleCount(a: *const App) usize {
+    if (isDismissed(a)) return 0;
+    return noticeCount(a);
+}
+
 pub fn hasVisible(a: *const App) bool {
     return visibleCount(a) > 0;
 }
 
 pub fn collectVisible(a: *const App, alloc: Allocator) []const VisibleRow {
     var out: std.ArrayList(VisibleRow) = .empty;
+    if (isDismissed(a)) return out.items;
     for (a.agent_updates.devices.items) |w| {
         const name = resolveDeviceName(a, w.device_id);
         for (w.statuses) |st| {

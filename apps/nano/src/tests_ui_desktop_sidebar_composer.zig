@@ -12,6 +12,10 @@ const write = @import("view_write.zig");
 const settings = @import("settings.zig");
 const testing = std.testing;
 
+test {
+    _ = @import("tests_ui_sidebar_fade.zig");
+}
+
 const Harness = struct {
     a: App,
     t: ui.Tester,
@@ -53,6 +57,48 @@ const Harness = struct {
         h.t.screenshot(path) catch {};
     }
 };
+
+test "retention 194 open workspace rows use each chat harness mark" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    const chats = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[ {"id":"claude","title":"Claude pane","archived":false,"config":{"harness":"claude-code"}},
+        \\  {"id":"codex","title":"Codex pane","archived":false,"config":{"harness":"codex"}},
+        \\  {"id":"unknown","title":"Future pane","archived":false,"config":{"harness":"future-agent"}} ]
+    , .{});
+    defer chats.deinit();
+    try h.a.chats.replace(chats.value);
+    h.a.openChat("claude", null);
+    try h.a.tabs.isolateWorkspace();
+    h.a.addChatTab(false);
+    h.a.openChat("codex", null);
+    h.a.addChatTab(false);
+    h.a.openChat("unknown", null);
+    h.t.settle(1);
+    h.snap("retention-194-mixed-harness");
+    inline for (.{ .{ "Claude pane", "claude-mark" }, .{ "Codex pane", "openai-mark" }, .{ "Future pane", "graff-mark" } }) |pair| {
+        var found = false;
+        for (h.t.ctx.nodes.items) |node| switch (node.content) {
+            .text => |text| if (std.mem.eql(u8, text.str, pair[0]) and node.rect.x < sidebar.widthOf(&h.a) and node.rect.y < 210) {
+                for (h.t.ctx.nodes.items) |mark| switch (mark.content) {
+                    .image => |image| if (@abs(mark.rect.y + mark.rect.h / 2 - node.rect.y - node.rect.h / 2) < 3 and mark.rect.x < node.rect.x) {
+                        if (image.source == .encoded and std.mem.eql(u8, image.source.encoded, @import("icons_svg").get(pair[1]))) found = true;
+                    },
+                    else => {},
+                };
+            },
+            else => {},
+        };
+        try testing.expect(found);
+    }
+    // Harness identity does not replace the ordinary list's independent dot.
+    var status_dot = false;
+    for (h.t.ctx.nodes.items) |node| {
+        if (node.rect.w == 6 and node.rect.h == 6 and node.rect.x < 30 and node.rect.y > 220 and node.style.background != null) status_dot = true;
+    }
+    try testing.expect(status_dot);
+}
 
 fn textNode(t: *ui.Tester, label: []const u8) ?u32 {
     for (t.ctx.nodes.items, 0..) |node, i| switch (node.content) {
@@ -433,6 +479,46 @@ test "desktop parity project navigation reuses its workspace and keeps peer conv
     try testing.expectEqualStrings("first", h.a.selected.?);
 }
 
+test "retention 794 New workspace remains distinct from the pane New tab action" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.openChat("synthetic-chat", "synthetic-project");
+    try h.a.tabs.isolateWorkspace();
+    h.t.settle(1);
+    const workspaces = h.a.tabs.items.items.len;
+    const old_layout = h.a.tabs.layout().?;
+    const old_tabs = old_layout.groups[0].items.items.ptr;
+    const old_panes = old_layout.panes.items.len;
+    // The pane menu's New tab asks for a destination in the existing panel.
+    const strip = @import("view_tab_strip.zig");
+    strip.newTab(&h.a, .{ .chat = old_layout.focus });
+    h.t.settle(1);
+    try testing.expect(h.a.view.open_chooser.open);
+    try testing.expectEqual(@import("app_open_chooser.zig").Intent.new_tab, h.a.view.open_chooser.intent);
+    try testing.expectEqual(workspaces, h.a.tabs.items.items.len);
+    @import("app_open_chooser.zig").close(&h.a);
+    h.t.settle(1);
+    var create: ?ui.Rect = null;
+    for (h.t.ctx.nodes.items) |node| {
+        const r = node.rect;
+        if (r.w == 26 and r.h == 26 and r.y >= 736 and r.x < sidebar.widthOf(&h.a)) {
+            if (create == null or r.x > create.?.x) create = r;
+        }
+    }
+    const button = create orelse return error.NoWorkspaceCreate;
+    h.t.moveTo(button.x + 13, button.y + 13);
+    h.t.advance(0.4);
+    try testing.expectEqualStrings("New workspace", h.t.tooltipText() orelse return error.NoWorkspaceTooltip);
+    h.snap("retention-794-new-workspace-label");
+    h.t.click(button.x + 13, button.y + 13);
+    h.t.settle(1);
+    try testing.expectEqual(workspaces + 1, h.a.tabs.items.items.len);
+    try testing.expectEqual(old_panes, h.a.tabs.splits.items[0].?.panes.items.len);
+    try testing.expect(h.a.tabs.splits.items[0].?.groups[0].items.items.ptr == old_tabs);
+    try testing.expect(!h.a.view.open_chooser.open);
+}
+
 test "desktop parity sidebar exposes independent drafts and restores their prompts" {
     var h: Harness = undefined;
     try h.init(true);
@@ -551,6 +637,10 @@ test "draft footer controls end inside the composer in split panes" {
     try testing.expectEqual(@as(usize, 5), (try footerControls(&h, &buf)).len);
 
     h.a.splitPane(.horizontal);
+    // A fresh sibling intentionally resets Git picks. Choose its own base
+    // before checking the full footer's responsive geometry.
+    try testing.expect(h.a.new_ref == null);
+    h.a.new_ref = try h.a.gpa.dupe(u8, "main");
     h.t.settle(1);
     for ([_]f32{ 1440, 1200, 1000, 900 }) |window_w| {
         h.t.resize(window_w, 780);
@@ -774,6 +864,56 @@ test "zeron Home agent-update island morphs between pill and expandable card and
     const last = h.a.agent_updates.last_action orelse return error.MissingDispatchedUpdateAction;
     try testing.expectEqualStrings("ApplyHarnessUpdate", last.method);
     try testing.expectEqualStrings("claude-code", last.harness);
+}
+
+test "Home agent-update island dismisses with its close button and returns only when the updates change" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    const devs = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"synthetic-device","name":"Synthetic Mac Studio","online":true}]
+    , .{});
+    defer devs.deinit();
+    try h.a.devices.replace(devs.value);
+    if (h.a.device_id) |old| h.a.gpa.free(old);
+    h.a.device_id = try h.a.gpa.dupe(u8, "synthetic-device");
+
+    const updates = @import("agent_updates.zig");
+    const updated =
+        \\[{"harness":"claude-code","installedVersion":"2.1.322","latestVersion":"2.1.322","phase":"updated"},
+        \\ {"harness":"pi","installedVersion":"1.5.2","latestVersion":"1.5.2","phase":"updated"},
+        \\ {"harness":"opencode","installedVersion":"1.4.15","latestVersion":"1.4.15","phase":"updated"}]
+    ;
+    try updates.setTestStatuses(&h.a, "synthetic-device", true, updated);
+    h.t.settle(1);
+    h.t.frame();
+    try testing.expect(h.t.hasText("3 agents updated \u{00b7} Synthetic Mac Studio"));
+    const pill = h.a.agent_updates.card_rect orelse return error.MissingUpdatePill;
+    h.snap("desktop-agent-updates-dismiss-before");
+
+    // The close button sits at the pill's right edge (1px border, 8px trailing, 24px button).
+    h.t.click(pill.x + pill.w - 1 - 8 - 12, pill.y + pill.h / 2);
+    h.t.settle(1);
+    h.t.frame();
+    try testing.expect(!h.t.hasText("3 agents updated \u{00b7} Synthetic Mac Studio"));
+    try testing.expect(!h.a.agent_updates.expanded);
+    try testing.expect(!updates.hasVisible(&h.a));
+    h.snap("desktop-agent-updates-dismiss-after");
+
+    // The same statuses arriving again (the engine re-sends its snapshot) stay dismissed.
+    try updates.setTestStatuses(&h.a, "synthetic-device", true, updated);
+    h.t.settle(1);
+    h.t.frame();
+    try testing.expect(!updates.hasVisible(&h.a));
+
+    // A new update changes what is visible, so the island comes back.
+    try updates.setTestStatuses(&h.a, "synthetic-device", true,
+        \\[{"harness":"claude-code","installedVersion":"2.1.322","latestVersion":"2.1.330","phase":"available","canApply":true}]
+    );
+    h.t.settle(1);
+    h.t.frame();
+    try testing.expect(updates.hasVisible(&h.a));
+    try testing.expect(h.t.hasText("Claude Code 2.1.330 available \u{00b7} Synthetic Mac Studio"));
 }
 
 test "desktop 3-pane horizontal split contains tool rows, question chips, and session footer within each pane" {

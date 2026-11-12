@@ -1,0 +1,28 @@
+.{
+    .name = .nanoui,
+    .version = "0.13.0",
+    .fingerprint = 0xd93ac916310aedc1,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        // HTTP where the system has no client nanoui uses (Linux, Windows):
+        // fetched only for those targets.
+        .http_zig = .{
+            .lazy = true,
+            .url = "git+https://github.com/justrach/http-zig#1f798e762f52ff81cc6c370b4f322c9e65064462",
+            .hash = "http_zig-0.1.0-2CB7E00SAwAnwnBkJDgCDm3zLwrCmZZkHNSw5t7X9Vbf",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "LICENSE",
+        "PROVENANCE.md",
+        "THIRD_PARTY_NOTICES.md",
+        "third_party/licenses",
+        // build.zig imports tools/ios/bundle.zig; apps run sim.sh and zig-lib.sh.
+        "tools/ios",
+        // build.zig imports tools/android/apk.zig (and pack.zig); apps run run.sh.
+        "tools/android",
+    },
+}

@@ -67,7 +67,7 @@ pub const Check = struct {
         } else |e| {
             std.log.info("harness-nano: no release manifest: {t}", .{e});
         }
-        nanoui.App.after(0, c, delivered);
+        _ = nanoui.App.onMain(c, delivered);
     }
 
     fn delivered(ctx: ?*anyopaque) callconv(.c) void {

@@ -82,8 +82,20 @@ test "finished MCP agents use their frozen transcript and the original Harness b
     try h.t.clickText("Review synthetic icons");
     h.t.settle(0.1);
     try testing.expect(h.t.hasText("Synthetic frozen findings"));
-    try testing.expectEqual(@as(usize, 1), h.a.engine.sent.items.len);
-    try testing.expect(std.mem.indexOf(u8, h.a.engine.sent.items[0], "synthetic-parent/synthetic-parent--sub--frozen") != null);
+    var fetches: usize = 0;
+    for (h.a.engine.sent.items) |frame| {
+        const request = try std.json.parseFromSlice(std.json.Value, testing.allocator, frame, .{});
+        defer request.deinit();
+        const method = request.value.object.get("method").?.string;
+        if (std.mem.eql(u8, method, "FetchToolBlob")) {
+            fetches += 1;
+            try testing.expect(std.mem.indexOf(u8, frame, "synthetic-parent/synthetic-parent--sub--frozen") != null);
+        }
+        // The parent can watch live progress, but a finished child must
+        // never be reattached as a live transcript stream.
+        if (std.mem.eql(u8, method, "WatchDocMessages")) try testing.expect(std.mem.indexOf(u8, frame, "synthetic-parent--sub--frozen") == null);
+    }
+    try testing.expectEqual(@as(usize, 1), fetches);
     try testing.expect(h.a.panels.tabs.items[0].agent.?.loaded);
 }
 

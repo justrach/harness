@@ -5,6 +5,7 @@ test {
     _ = @import("workspace.zig");
     _ = @import("transcript.zig");
     _ = @import("engine.zig");
+    _ = @import("window_chrome.zig");
     _ = @import("app.zig");
     _ = @import("rules.zig");
     _ = @import("motion_rules.zig");
@@ -15,6 +16,8 @@ test {
     _ = @import("prompt_history.zig");
     _ = @import("engine_start.zig");
     _ = @import("diff.zig");
+    _ = @import("tests_diff_availability.zig");
+    _ = @import("tests_link_actions.zig");
     _ = @import("wizard.zig");
     _ = @import("termlog.zig");
     _ = @import("parity.zig");
@@ -107,11 +110,14 @@ test {
     _ = @import("profile.zig");
     _ = @import("tests_ui_input.zig");
     _ = @import("tests_attachments.zig");
+    _ = @import("tests_reply_images.zig");
     _ = @import("tests_ui_feedback.zig");
     _ = @import("tests_ui_glass.zig");
     _ = @import("surface_palette.zig");
     _ = @import("tests_ui_surfaces.zig");
     _ = @import("tests_browser_native.zig");
+    _ = @import("tests_browser_ownership_deep.zig");
+    _ = @import("window_lifecycle.zig");
     _ = @import("theme.zig");
     _ = @import("view_newchat.zig");
     _ = @import("turn_work.zig");
@@ -123,6 +129,12 @@ test {
     _ = @import("tests_ui_actions_toolbar.zig");
     _ = @import("tests_ui_sessions.zig");
     _ = @import("tests_desktop_regressions.zig");
+    _ = @import("tests_restore_navigation.zig");
+    _ = @import("tests_shortcut_retention.zig");
+    _ = @import("tests_composer_completion.zig");
+    _ = @import("tests_project_folder_retention.zig");
+    _ = @import("tests_pending_progress_retention.zig");
+    _ = @import("tests_pending_feedback_lifecycle.zig");
     _ = @import("view_attachment_drop.zig");
     _ = @import("tests_ui_project_setup.zig");
     _ = @import("tests_ui_open_chooser.zig");
