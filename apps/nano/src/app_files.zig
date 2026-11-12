@@ -187,20 +187,30 @@ pub fn openFile(a: *App, path: []const u8) void {
     p.selected = p.arena.allocator().dupe(u8, path) catch null;
     a.view.strip.focused = .host;
     if (a.view.strip.expanded != null) a.view.strip.expanded = .host;
-    for (p.tabs.items, 0..) |t, i| if (t.kind == .file and std.mem.eql(u8, t.path, path)) {
+    for (p.tabs.items, 0..) |t, i| if (t.kind == .file and std.mem.eql(u8, t.path, path) and (if (t.editor) |e| e.matchesCurrent(a) else false)) {
         p.host_open = true;
         return panels.showTab(a, i);
     };
-    const copy = p.gpa.dupe(u8, path) catch return;
-    p.tabs.append(p.gpa, .{ .kind = .file, .path = copy }) catch return p.gpa.free(copy);
+    const editor = @import("app_file_editor.zig").Editor.create(a, path) catch return a.setNotice("This file has no available workspace owner or valid relative path.");
+    const copy = p.gpa.dupe(u8, path) catch return editor.destroy();
+    p.tabs.append(p.gpa, .{ .kind = .file, .path = copy, .editor = editor }) catch {
+        p.gpa.free(copy);
+        return editor.destroy();
+    };
     p.host_open = true;
     panels.showTab(a, p.tabs.items.len - 1);
 }
 
 pub fn read(a: *App, path: []const u8) void {
-    const chat = a.selected orelse return;
-    a.panels.file = .{};
-    a.request(requests.readFile(chat, path, host(a)), .of(App, a, onRead));
+    const p = &a.panels;
+    if (p.active >= p.tabs.items.len) return;
+    const tab = &p.tabs.items[p.active];
+    if (tab.kind != .file or !std.mem.eql(u8, tab.path, path)) return;
+    if (tab.editor == null) tab.editor = @import("app_file_editor.zig").Editor.create(a, path) catch return;
+    const editor = tab.editor.?;
+    if (!editor.belongsTo(a.selected)) return;
+    // A retained editor is not re-read (and never reset) on chat/tab focus.
+    if (editor.loading and editor.read_id == null) editor.read();
 }
 
 fn onRead(a: *App, _: u64, r: rpc.Reply) void {

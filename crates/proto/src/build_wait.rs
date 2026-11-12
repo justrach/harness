@@ -27,6 +27,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn desktop_build_wait_vectors() {
+        #[derive(serde::Deserialize)]
+        struct Case {
+            name: String,
+            items: Vec<crate::ToolProgressItem>,
+            expected: Option<i64>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Vectors {
+            cases: Vec<Case>,
+        }
+        let vectors: Vectors =
+            serde_json::from_str(include_str!("../../../protocol/desktop/build-wait.json"))
+                .expect("valid shared build-wait vectors");
+        for case in vectors.cases {
+            assert_eq!(
+                build_wait_since(&case.items),
+                case.expected,
+                "{}",
+                case.name
+            );
+        }
+    }
+
+    #[test]
     fn build_wait_contract_selects_only_valid_reserved_waits() {
         let valid = build_wait_item(123);
         assert_eq!(valid.tool_id, BUILD_WAIT_TOOL_ID);

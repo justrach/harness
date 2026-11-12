@@ -33,6 +33,7 @@ pub const Tab = struct {
     path: []u8 = &.{},
     agent: ?*@import("app_subagents.zig").Agent = null,
     browser: ?*@import("app_browser.zig").Browser = null,
+    editor: ?*@import("app_file_editor.zig").Editor = null,
     /// When this tab was last on screen (`showTab`); 0 until shown.
     shown: u64 = 0,
 };
@@ -93,6 +94,7 @@ pub const Panels = struct {
     git: std.StringHashMapUnmanaged(GitKind) = .empty,
     w_git: ?u64 = null,
     file: FileText = .{},
+    file_close: @import("app_file_editor.zig").CloseState = .{},
     /// Folder listings asked for, by call id.
     pending_lists: std.AutoHashMapUnmanaged(u64, []const u8) = .empty,
     /// The chat these are for: a change clears them.
@@ -131,6 +133,7 @@ pub const Panels = struct {
         const t = if (p.active < p.tabs.items.len) p.tabs.items[p.active] else return null;
         if (t.agent) |s| if (!s.belongsTo(p.chat)) return null;
         if (t.browser) |b| if (!b.belongsTo(p.chat)) return null;
+        if (t.editor) |e| if (!e.belongsTo(p.chat)) return null;
         return t;
     }
 };
@@ -139,6 +142,7 @@ pub fn destroyTab(p: *Panels, t: Tab) void {
     p.gpa.free(t.path);
     if (t.agent) |s| s.destroy();
     if (t.browser) |b| b.destroy();
+    if (t.editor) |e| e.destroy();
 }
 
 pub const GitKind = enum { added, modified, renamed, deleted };
@@ -183,7 +187,18 @@ pub fn chatChanged(a: *App) void {
     p.chat = if (a.selected) |s| p.gpa.dupe(u8, s) catch null else null;
     if (a.selected == null) return;
     @import("app_actions.zig").refresh(a);
-    if (p.host_open) showTab(a, p.active);
+    // Files retain their editor under their original conversation. Restore
+    // that owner's last file instead of re-reading another owner's path.
+    if (p.active < p.tabs.items.len) if (p.tabs.items[p.active].editor) |previous| {
+        if (!previous.belongsTo(a.selected)) {
+            var best: ?usize = null;
+            for (p.tabs.items, 0..) |tab, ix| if (tab.editor) |e| {
+                if (e.belongsTo(a.selected) and (best == null or tab.shown > p.tabs.items[best.?].shown)) best = ix;
+            };
+            if (best) |ix| p.active = ix;
+        }
+    };
+    if (p.host_open and p.activeTab() != null) showTab(a, p.active);
     if (p.files_open) openFiles(a);
 }
 
@@ -222,6 +237,7 @@ pub fn addDiffsTab(a: *App) void {
 pub fn closeTab(a: *App, i: usize) void {
     const p = &a.panels;
     if (i >= p.tabs.items.len) return;
+    if (p.tabs.items[i].editor) |e| if (!@import("app_file_editor.zig").requestTabClose(a, e)) return;
     p.retired.ensureUnusedCapacity(p.gpa, 1) catch return;
     const was_active = p.active;
     const t = p.tabs.orderedRemove(i);
@@ -253,7 +269,10 @@ pub fn showTab(a: *App, i: usize) void {
     const t = p.tabs.items[i];
     switch (t.kind) {
         .diffs => openDiffs(a),
-        .file => readFile(a, t.path),
+        .file => if (t.editor) |e| {
+            e.focus = true;
+            if (!e.belongsTo(a.selected)) @import("app_file_editor.zig").reveal(a, e) else readFile(a, t.path);
+        } else readFile(a, t.path),
         .subagent, .browser, .tool_access => {},
     }
     a.redraw();

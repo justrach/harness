@@ -10,11 +10,13 @@ without a test failing.
 | `transcript.json` | how `WatchDocMessages` frames apply (reset, upsert after an anchor, append with its length, remove, count), and which ones must be refused | `crates/doc/tests/desktop_transcript_vectors.rs` | `apps/nano/src/parity.zig` |
 | `theme.json` | the Codegraff Dark and Light roles (surfaces, text, accent and its glyph tones, status, borders, hover, diff, terminal colours) | `crates/theme/tests/desktop_theme_vectors.rs` | `apps/nano/src/parity.zig` |
 | `requests.json` | every request harness-nano sends the engine, as exact JSON | `crates/engine/tests/desktop_requests.rs` | `apps/nano/src/parity.zig` |
+| `build-wait.json` | the reserved live-only build-slot waiting record and timestamp validation | `crates/proto/src/build_wait.rs` | `apps/nano/src/app_progress.zig` |
 
 Run them:
 
 ```sh
 cargo test -p harness-proto --test desktop_vectors
+cargo test -p harness-proto --lib build_wait
 cargo test -p harness-doc --test desktop_transcript_vectors
 cargo test -p harness-theme --test desktop_theme_vectors
 cargo test -p harness-engine --test desktop_requests

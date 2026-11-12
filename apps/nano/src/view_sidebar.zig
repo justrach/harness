@@ -105,7 +105,7 @@ const OpenSession = struct {
 
 /// Open workspace sessions (`⊞`) and all of their corresponding tabs nested
 /// underneath each session at the top of the ⌘B sidebar.
-fn openWorkspaces(c: *ui.Context, a: *App, k: theme.Colors) void {
+pub fn openWorkspaces(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (!a.settings.hierarchyProfile().shows_open_workspaces_tree) return;
     var sessions: std.ArrayList(OpenSession) = .empty;
     for (a.tabs.items.items, 0..) |id, ws| {
@@ -167,6 +167,7 @@ fn openWorkspaces(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (sessions.items.len == 0) return;
     ui.key(c, "sidebar-open-workspaces");
     const list = ui.div(c).column().wFull().maxH(260).px(8).pt(6).gap(2).scrollY();
+    c.node(list.index).style.scroll_edge_fade = 12;
     defer list.end();
     for (sessions.items, 0..) |sess, idx| {
         const title = if (sess.title_chat_id) |chat_id| (if (a.findChat(chat_id)) |chat| chatLabel(chat) else "New session") else "New session";
@@ -201,7 +202,7 @@ fn openWorkspaces(c: *ui.Context, a: *App, k: theme.Colors) void {
                     }
                     icons.icon(c, .close, 12, k.muted, 0);
                 } else {
-                    icons.icon(c, .widget, 14, if (sess.active) k.text else k.muted, 0);
+                    openChatMark(c, a, k, sess.title_chat_id, sess.active, 14);
                 }
             }
             const badge_room: f32 = if (multi_tabs) 28 else 0;
@@ -265,7 +266,7 @@ fn openWorkspaces(c: *ui.Context, a: *App, k: theme.Colors) void {
                         }
                         icons.icon(c, .close, 11, k.muted, 0);
                     } else {
-                        icons.icon(c, .@"chat-round-line", 13, if (t.active) k.text else k.muted, 0);
+                        openChatMark(c, a, k, t.chat_id, t.active, 13);
                     }
                 }
                 kit.ellipsisText(c, tab_title, .{ .size = 12.5, .line_height = kit.measured(12.5 * 1.5), .color = if (t.active) k.text else k.muted }, @max(0, widthOf(a) - 16 - 16 - 10 - 14 - 18 - 6 - 18));
@@ -284,6 +285,14 @@ fn openWorkspaces(c: *ui.Context, a: *App, k: theme.Colors) void {
             }
         }
     }
+}
+
+/// Open panes identify the agent that owns the chat, not a generic chat or
+/// workspace glyph. Keep the ordinary conversation list's status slot separate.
+fn openChatMark(c: *ui.Context, a: *const App, k: theme.Colors, chat_id: ?[]const u8, active: bool, size: f32) void {
+    const chat = if (chat_id) |id| a.findChat(id) else null;
+    const mark = icons.harnessMark(if (chat) |ch| ch.harness orelse "graff" else a.new_harness);
+    icons.icon(c, mark.name, size, mark.brand orelse if (active) k.text else k.muted, 0);
 }
 
 fn filterRow(c: *ui.Context, a: *App, k: theme.Colors) void {
@@ -1432,6 +1441,7 @@ fn footer(c: *ui.Context, a: *App, k: theme.Colors) void {
     else
         @import("view_sandbox_strip.zig").strip(c, a, k, 0);
     @import("view_updates.zig").sidebarFooterRows(c, a, k);
+    @import("view_account_notice.zig").strip(c, a, k);
     const f = ui.div(c).row().wFull().h(44).px(10).itemsCenter();
     defer f.end();
     {

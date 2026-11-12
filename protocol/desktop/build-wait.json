@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "cases": [
+    {"name": "empty", "items": [], "expected": null},
+    {"name": "explicit reserved wait", "items": [{"toolId":"harness:build-wait","output":"123","state":"waiting"}], "expected":123},
+    {"name": "earliest valid wait", "items": [{"toolId":"harness:build-wait","output":"123","state":"waiting"},{"toolId":"harness:build-wait","output":"99","state":"waiting"}], "expected":99},
+    {"name": "ordinary tool is not a build wait", "items": [{"toolId":"shell","output":"123","state":"waiting"}], "expected":null},
+    {"name": "state is required", "items": [{"toolId":"harness:build-wait","output":"123"}], "expected":null},
+    {"name": "acquired is not waiting", "items": [{"toolId":"harness:build-wait","output":"123","state":"acquired"}], "expected":null},
+    {"name": "nonpositive timestamps", "items": [{"toolId":"harness:build-wait","output":"0","state":"waiting"},{"toolId":"harness:build-wait","output":"-1","state":"waiting"}], "expected":null},
+    {"name": "decimal is not an integer", "items": [{"toolId":"harness:build-wait","output":"1.5","state":"waiting"}], "expected":null},
+    {"name": "leading whitespace rejected", "items": [{"toolId":"harness:build-wait","output":" 123","state":"waiting"}], "expected":null},
+    {"name": "trailing whitespace rejected", "items": [{"toolId":"harness:build-wait","output":"123 ","state":"waiting"}], "expected":null},
+    {"name": "underscores rejected", "items": [{"toolId":"harness:build-wait","output":"1_000","state":"waiting"}], "expected":null},
+    {"name": "overflow rejected", "items": [{"toolId":"harness:build-wait","output":"9223372036854775808","state":"waiting"}], "expected":null},
+    {"name": "signed positive integer", "items": [{"toolId":"harness:build-wait","output":"+123","state":"waiting"}], "expected":123},
+    {"name": "invalid records do not hide valid waits", "items": [{"toolId":"harness:build-wait","output":"abc","state":"waiting"},{"toolId":"harness:build-wait","output":"55","state":"waiting"}], "expected":55}
+  ]
+}

@@ -59,6 +59,103 @@ const Harness = struct {
     }
 };
 
+fn snap(h: *Harness, name: []const u8) void {
+    const dir = std.c.getenv("NANO_SNAP_DIR") orelse return;
+    var buf: [1024]u8 = undefined;
+    const path = std.fmt.bufPrint(&buf, "{s}/{s}.png", .{ std.mem.span(dir), name }) catch return;
+    h.t.screenshot(path) catch {};
+}
+
+test "retention 309 header-only invocation has no duplicate expandable body" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    const doc = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"reply","role":"assistant","status":"complete","parts":[{"id":"brief","kind":"tool","call":{"kind":"exec","command":"echo synthetic"},"resolved":true}]}]}
+    , .{});
+    defer doc.deinit();
+    try h.a.transcript.apply(doc.value);
+    h.t.settle(1);
+    try h.click("Ran 1 command");
+    try testing.expect(h.t.hasText("echo synthetic"));
+    try h.click("Run");
+    snap(&h, "retention-309-header-only");
+    try testing.expect(!h.t.containsText("\"command\""));
+    try testing.expect(!h.a.view.groupOpen("detail/synthetic/reply/brief", false));
+    // INPUT in AccessMap still has the original structured arguments.
+    try h.click("Tool access");
+    try h.click("Terminal");
+    try testing.expect(h.t.containsText("echo synthetic"));
+    const preserved = h.a.transcript.entries.items[0].parts.items[0].invocation;
+    try testing.expect(std.mem.indexOf(u8, preserved, "\"command\"") != null);
+    try testing.expect(std.mem.indexOf(u8, preserved, "echo synthetic") != null);
+    snap(&h, "retention-309-access-map-input");
+}
+
+test "retention 309 a clipped header retains its invocation until the pane has room" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    const doc = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"reply","role":"assistant","status":"complete","parts":[{"id":"brief","kind":"tool","call":{"kind":"exec","command":"echo synthetic"},"resolved":true}]}]}
+    , .{});
+    defer doc.deinit();
+    try h.a.transcript.apply(doc.value);
+    h.t.settle(1);
+    try h.click("Ran 1 command");
+    h.t.resize(420, 1000);
+    h.t.settle(1);
+    try h.click("Run");
+    try testing.expect(h.t.containsText("\"command\""));
+    h.t.resize(1440, 1000);
+    h.t.settle(1);
+    try testing.expect(!h.t.containsText("\"command\""));
+}
+
+test "retention 309 useful bodies preserve long and multiline arguments sidecars and literal output" {
+    const docs = [_][]const u8{
+        \\{"reset":[{"id":"reply","role":"assistant","status":"complete","parts":[{"id":"body","kind":"tool","call":{"kind":"exec","command":"echo synthetic\nsecond line"},"resolved":true}]}]}
+        ,
+        \\{"reset":[{"id":"reply","role":"assistant","status":"complete","parts":[{"id":"body","kind":"tool","call":{"kind":"exec","command":"echo synthetic arguments with enough detail to overflow a short command header while remaining useful in its original invocation body for inspection"},"resolved":true}]}]}
+        ,
+        \\{"reset":[{"id":"reply","role":"assistant","status":"complete","parts":[{"id":"body","kind":"tool","call":{"kind":"exec","command":"echo synthetic"},"resolved":true,"output":"<script>synthetic()</script> https://example.invalid/synthetic"}]}]}
+        ,
+        \\{"reset":[{"id":"reply","role":"assistant","status":"complete","parts":[{"id":"body","kind":"tool","call":{"kind":"exec","command":"echo synthetic"},"resolved":true,"outputRef":"synthetic-sidecar"}]}]}
+        ,
+        \\{"reset":[{"id":"reply","role":"assistant","status":"complete","parts":[{"id":"body","kind":"tool","call":{"kind":"exec","command":"echo https://example.invalid/synthetic"},"resolved":true}]}]}
+        ,
+    };
+    for (docs, 0..) |doc, i| {
+        var h: Harness = undefined;
+        try h.init();
+        defer h.deinit();
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, doc, .{});
+        defer parsed.deinit();
+        try h.a.transcript.apply(parsed.value);
+        h.t.settle(1);
+        try h.click("Ran 1 command");
+        try h.click("Run");
+        try testing.expect(h.t.containsText("\"command\""));
+        try testing.expect(h.a.view.groupOpen("detail/synthetic/reply/body", false));
+        if (i == 2) {
+            // Text stays native, including HTML-looking text. URL spans retain
+            // their existing browser routing rather than executing any markup.
+            try testing.expect(h.t.containsText("<script>synthetic()</script>"));
+            var linked = false;
+            for (h.t.ctx.nodes.items) |node| switch (node.content) {
+                .text => |text| if (std.mem.indexOf(u8, text.str, "https://example.invalid/synthetic") != null and text.spans.len > 0) {
+                    for (text.spans) |span| if (span.underline) {
+                        linked = true;
+                    };
+                },
+                else => {},
+            };
+            try testing.expect(linked);
+        }
+        if (i == 3) try testing.expect(h.t.hasText("Show full output"));
+    }
+}
+
 fn textRect(t: *ui.Tester, text: []const u8) !ui.Rect {
     for (t.ctx.nodes.items) |n| switch (n.content) {
         .text => |value| if (std.mem.eql(u8, value.str, text)) return n.rect,

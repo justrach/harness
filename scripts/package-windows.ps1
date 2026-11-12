@@ -55,7 +55,7 @@ try {
     }
     Push-Location (Join-Path $root 'apps/nano')
     try {
-        zig build -Dtarget=x86_64-windows-gnu -Doptimize=ReleaseSafe "-Dwebview2-loader=$loader"
+        zig build -Dtarget=x86_64-windows-msvc -Doptimize=ReleaseSafe "-Dwebview2-loader=$loader"
         if ($LASTEXITCODE -ne 0) { throw 'harness-nano Windows build failed' }
     } finally { Pop-Location }
     Copy-Item -LiteralPath './apps/nano/zig-out/bin/harness-nano.exe' -Destination (Join-Path $stage 'harness-nano.exe')

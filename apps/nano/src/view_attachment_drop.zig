@@ -8,12 +8,18 @@ const Allocator = std.mem.Allocator;
 
 pub const State = struct {
     pending: ?Pending = null,
+    // Native surfaces own the payload/window. Keep destination ownership here
+    // across hover frames; rebuilding a mounted box must not retarget a drag.
+    mounted: [@import("tabs.zig").max_panes]?Mounted = @splat(null),
+    hover: ?struct { id: u64, destination: u64, cancelled: bool = false } = null,
 
     pub fn deinit(s: *State, gpa: Allocator) void {
         if (s.pending) |p| p.deinit(gpa);
         s.* = .{};
     }
 };
+
+const Mounted = struct { id: u64, destination: u64 };
 
 const Pending = struct {
     urls: [][]u8,
@@ -65,21 +71,54 @@ fn destination(a: *const App, pane: ?usize) ?u64 {
         hash.update(if (draft) |d| d.device orelse "" else a.new_device orelse "");
     }
     if (a.queue_edit) |edit| hash.update(edit.row);
+    // A resized/rearranged target is an obsolete mount, just as a replaced
+    // chat is. Metadata/model updates intentionally do not affect ownership.
+    if (a.tabs.layout()) |split| {
+        hash.update(std.mem.asBytes(&split.axis));
+        hash.update(std.mem.sliceAsBytes(split.shares.items));
+        hash.update(std.mem.asBytes(&split.zoomed));
+    }
+    inline for (.{ "x", "y", "height", "chat_width" }) |field|
+        hash.update(std.mem.asBytes(&@field(a.view.chrome, field)));
     return hash.final();
 }
 
 pub fn target(c: *ui.Context, a: *App, index: u32, pane: ?usize) void {
-    if (blocked(a)) return;
-    c.acceptDrop(index);
-    const drop = c.dropAt(index) orelse return;
-    // The native payload is borrowed for this frame only. Consume it once,
-    // and own a copy until the pre-tree boundary can safely focus its pane.
-    c.input.drop = null;
-    if (drop.urls.len == 0) {
-        a.setNotice("Drop a file or image from Finder, or use Attach files.");
+    if (c.input.drag_over == null and c.input.drop == null) a.file_drop.hover = null;
+    if (blocked(a)) {
+        if (a.file_drop.hover) |*hover| hover.cancelled = true;
         return;
     }
     const signature = destination(a, pane) orelse return;
+    const id = c.node(index).id;
+    const slot = pane orelse 0;
+    if (slot >= a.file_drop.mounted.len) return;
+    const previous = a.file_drop.mounted[slot];
+    a.file_drop.mounted[slot] = .{ .id = id, .destination = signature };
+    c.acceptDrop(index);
+    if (c.input.drag_over) |point| if (c.rects.get(id)) |rect| if (rect.contains(point)) {
+        if (a.file_drop.hover == null or a.file_drop.hover.?.id != id)
+            a.file_drop.hover = .{ .id = id, .destination = signature };
+        const hover = &a.file_drop.hover.?;
+        if (hover.destination != signature) hover.cancelled = true;
+        const unchanged_mount = if (previous) |mounted| mounted.id == id and mounted.destination == signature else false;
+        if (!unchanged_mount) hover.cancelled = true;
+    };
+    const drop = c.dropAt(index) orelse return;
+    // Text is not an attachment payload. Leave it available to a text drop
+    // consumer, without swallowing it or displaying an attachment error.
+    if (drop.urls.len == 0) return;
+    // The native payload is borrowed for this frame only. Consume it once,
+    // and own a copy until the pre-tree boundary can safely focus its pane.
+    c.input.drop = null;
+    const stale_mount = if (previous) |mounted| mounted.id != id or mounted.destination != signature else true;
+    const stale_hover = if (a.file_drop.hover) |hover| hover.id != id or hover.cancelled or hover.destination != signature else false;
+    if (stale_mount or stale_hover) {
+        a.file_drop.hover = null;
+        a.setNotice("The drop destination changed. Drop the files into the intended chat again.");
+        return;
+    }
+    a.file_drop.hover = null;
     const urls = a.gpa.alloc([]u8, drop.urls.len) catch return a.setNotice("Couldn't prepare the dropped files. Try Attach files.");
     var n: usize = 0;
     for (drop.urls) |url| {
@@ -90,7 +129,7 @@ pub fn target(c: *ui.Context, a: *App, index: u32, pane: ?usize) void {
         };
         n += 1;
     }
-    a.file_drop.deinit(a.gpa);
+    if (a.file_drop.pending) |pending| pending.deinit(a.gpa);
     a.file_drop.pending = .{ .urls = urls, .tab = a.tabs.active, .pane = pane, .destination = signature };
     c.frameIn(0);
     a.redraw();
@@ -104,13 +143,7 @@ pub fn prepare(a: *App) void {
         a.setNotice("The drop destination changed. Drop the files into the intended chat again.");
         return;
     }
-    if (pending.pane) |ix| {
-        a.focusPane(ix);
-        if ((a.tabs.layout() orelse return).focus != ix) {
-            a.setNotice("Couldn't focus the drop destination. Try again.");
-            return;
-        }
-    }
+    var focused = false;
     for (pending.urls) |url| {
         if (url.len == 0) continue;
         const path = filePath(a.gpa, url) catch {
@@ -118,7 +151,24 @@ pub fn prepare(a: *App) void {
             continue;
         };
         defer a.gpa.free(path);
-        attachments.stageFile(a, path) catch {
+        // Reject bad/empty/oversize files before activating a different pane
+        // or disturbing its draft/queue edit. Valid siblings still attach.
+        const bytes = attachments.readFile(a, path) catch {
+            a.setNotice("Couldn't attach the dropped file. Choose a readable, non-empty file up to 24 MB.");
+            continue;
+        };
+        defer a.gpa.free(bytes);
+        if (!focused) {
+            if (pending.pane) |ix| {
+                a.focusPane(ix);
+                if ((a.tabs.layout() orelse return).focus != ix) {
+                    a.setNotice("Couldn't focus the drop destination. Try again.");
+                    return;
+                }
+            }
+            focused = true;
+        }
+        attachments.stage(a, std.fs.path.basename(path), bytes) catch {
             a.setNotice("Couldn't attach the dropped file. Choose a readable, non-empty file up to 24 MB.");
         };
     }
@@ -127,6 +177,7 @@ pub fn prepare(a: *App) void {
 /// AppKit supplies file URLs (percent-encoded UTF-8), Windows also supplies
 /// absolute paths. Never treat a remote URL/authority as a local filename.
 pub fn filePath(gpa: Allocator, url: []const u8) ![]u8 {
+    if (std.mem.indexOfScalar(u8, url, 0) != null) return error.InvalidFileUrl;
     if (std.fs.path.isAbsolute(url)) return gpa.dupe(u8, url);
     if (!std.mem.startsWith(u8, url, "file://")) return error.NotLocalFile;
     const rest = url[7..];

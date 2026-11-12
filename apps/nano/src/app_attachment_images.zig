@@ -28,6 +28,9 @@ pub const Image = struct {
     request: ?u64 = null,
     offset: u64 = 0,
     chunks: usize = 0,
+    /// Computed once on completion; reply render keys must distinguish new
+    /// content after eviction/reload without hashing megabytes every frame.
+    content_hash: u64 = 0,
     used: u64 = 0,
 
     fn destroy(image: *Image) void {
@@ -95,6 +98,7 @@ pub const Image = struct {
                 return image.fail();
             };
             image.encoded.clearAndFree(image.app.gpa);
+            image.content_hash = std.hash.Wyhash.hash(0, image.bytes.items);
             image.status = .ready;
             image.shrink();
             image.app.redraw();

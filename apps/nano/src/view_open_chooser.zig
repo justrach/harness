@@ -72,6 +72,8 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
     });
     const card = kit.shadowLg(ui.div(c).w(@min(480, @max(0, c.size.w - 32))).maxH(@max(0, c.size.h - 32)).p(20).column().gap(12).rounded(16).bg(k.overlay).border(k.border).borderW(1)).motion(reveal);
     defer card.end();
+    // Keep harmless title/padding clicks on the sheet, not its scrim.
+    _ = card.interaction();
     if (scrim.clicked() and !card.hovered()) {
         flow.close(a);
         return;

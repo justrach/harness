@@ -131,6 +131,7 @@ pub const View = struct {
     /// A session row's menu and the dialogs it leads to.
     chat_menu: @import("view_chat_menu.zig").Menu = .{},
     chat_menu_h: ?f32 = null,
+    link_menu: @import("view_link_menu.zig").Menu = .{},
     dialogs: @import("view_chat_menu.zig").Dialogs = .{},
     shortcut_notice: std.ArrayList(u8) = .empty,
     space_anchor: ?nanoui.ui.Rect = null,
@@ -251,6 +252,7 @@ pub const View = struct {
         v.refs.deinit(gpa);
         v.drag.deinit(gpa);
         v.chat_menu.id.deinit(gpa);
+        v.link_menu.deinit(gpa);
         v.dialogs.deinit(gpa);
         v.menus.deinit(gpa);
         if (v.filter) |f| gpa.free(f);
@@ -341,6 +343,8 @@ pub const App = struct {
     window: ?*nanoui.Window = null,
     spaces: workspace.Spaces,
     chats: workspace.Chats,
+    /// A missing owner revokes callbacks only after an authoritative snapshot.
+    chats_synced: bool = false,
     sessions: workspace.Sessions,
     /// Last status seen per chat, so a finish chimes once (`sound.zig`).
     sound_seen: std.StringHashMapUnmanaged(struct { status: workspace.Status, seen: bool = false }) = .empty,
@@ -374,6 +378,8 @@ pub const App = struct {
     /// Dictation through the device's Codex voice.
     dictation: @import("app_dictation.zig").State = .{},
     composer: nanoui.ui.TextBuffer = .{},
+    completion: @import("composer_completion.zig").State = .{},
+    external_navigation: @import("app_external_navigation.zig").State = .{},
     /// ↑/↓ through the open chat's earlier prompts.
     prompt_nav: @import("prompt_history.zig").Nav = .{},
     attachments: @import("app_attachments.zig").State = .{},
@@ -421,14 +427,16 @@ pub const App = struct {
     /// freed at the next tick.
     retired_wizard: ?@import("wizard.zig").Wizard = null,
     draft_stash: std.ArrayList(u8) = .empty,
-    answered: ?[]u8 = null,
+    question_drafts: @import("question_drafts.zig").State = .{},
     /// The open chat's queue, what the engine can do with it, and a row
     /// being edited in the composer (or asked for).
     queue: @import("queue.zig").Rows,
     w_queue: Watch = .{},
+    live_progress: @import("app_progress.zig").State = .{},
     caps: queue_mod.Caps = .{},
     queue_edit: ?queue_mod.Edit = null,
     queue_begin: ?[]u8 = null,
+    queue_begin_call: ?u64 = null,
     /// Steers queued and waiting for their row's id, to promote it.
     steers: std.ArrayList(queue_mod.PendingSteer) = .empty,
     /// This window's editor id for queue edit leases.
@@ -524,8 +532,12 @@ pub const App = struct {
         a.markdown_cache.deinit();
         @import("text_buffer.zig").deinit(&a.composer);
         @import("app_surface.zig").deinit(a);
+        // Live callbacks must be cancelled before their engine is destroyed.
+        @import("app_progress.zig").deinit(a);
         // An engine started from here stays up: others may be on it now.
         a.engine.deinit();
+        a.completion.deinit(a.gpa);
+        a.external_navigation.deinit(a.gpa);
         a.reap();
         a.attachments.deinit(a.gpa);
         a.file_drop.deinit(a.gpa);
@@ -611,7 +623,11 @@ pub const App = struct {
     pub const applyLiveModelAndReasoning = agent.applyLiveModelAndReasoning;
     pub const ensureModels = agent.ensureModels;
     pub const newChatSpace = agent.newChatSpace;
-    pub const setArchived = agent.setArchived;
+    pub fn setArchived(a: *App, id: []const u8, archived: bool) void {
+        // Explicit archival is not an undoable side effect of closing a tab.
+        if (archived) a.tabs.clearAutoArchived(id);
+        agent.setArchived(a, id, archived);
+    }
     pub const nowMs = agent.nowMs;
     pub const pendingInput = question.pendingInput;
     pub const wizardPick = question.pick;
@@ -660,6 +676,7 @@ pub const App = struct {
         const a: *App = @ptrCast(@alignCast(ctx.?));
         switch (s) {
             .connected => {
+                @import("composer_completion.zig").reconnected(a);
                 a.request(requests.none("EngineInfo"), .of(App, a, onEngineInfo));
                 a.loadAgents();
                 a.request(requests.none("EngineReady"), .of(App, a, onNotice));
@@ -744,9 +761,11 @@ pub const App = struct {
         a.now = now;
         // A scene's answers, a frame after their calls.
         if (a.engine.pump()) a.redraw();
+        a.external_navigation.settle(a);
         question.syncWizard(a);
         var next: ?f64 = question.tick(a, now);
         if (queue_mod.tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
+        if (@import("app_progress.zig").tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (account.tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (@import("app_reauth.zig").tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (@import("app_sandboxes.zig").tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
@@ -881,8 +900,7 @@ pub const App = struct {
         // chat and stays empty.
         if (a.settings.open_tabs.items.len == 0) {
             const only = active orelse return;
-            const ch = a.findChat(only) orelse return;
-            if (ch.archived) return;
+            _ = a.findChat(only) orelse return;
             a.tabs.setCurrent(only);
             a.tabs.clearShown();
             a.select(only, null);
@@ -891,8 +909,8 @@ pub const App = struct {
         var wanted: usize = 0;
         var active_ix: ?usize = null;
         for (a.settings.open_tabs.items) |id| {
-            const ch = a.findChat(id) orelse continue;
-            if (ch.archived or a.tabs.find(id) != null) continue;
+            _ = a.findChat(id) orelse continue;
+            if (a.tabs.find(id) != null) continue;
             if (wanted == 0) a.tabs.setCurrent(id) else {
                 a.tabs.newTab();
                 a.tabs.setCurrent(id);
@@ -1000,6 +1018,9 @@ pub const App = struct {
     /// `/resume`'s choice: `chat_id` in the current tab (or pane), wherever
     /// else it's open (`open_chat`).
     pub fn replaceCurrent(a: *App, chat_id: ?[]const u8) void {
+        // Choosing even an empty canvas is explicit intent, not a window
+        // waiting for initial-sync restoration to pick its first chat.
+        a.tabs_ready = true;
         a.view.settings_open = false;
         a.tabs.setCurrent(chat_id);
         a.select(chat_id, null);
@@ -1087,6 +1108,7 @@ pub const App = struct {
     pub fn showPaneTab(a: *App, ix: usize) void {
         var outgoing = drafts.canvas(a) catch return;
         const back = a.tabs.selectPaneTab(ix, outgoing) catch return outgoing.deinit(a.gpa);
+        @import("app_navigation.zig").validateCurrent(a);
         a.select(a.tabs.current(), null);
         if (back) |d| drafts.adopt(a, d);
         a.redraw();
@@ -1099,6 +1121,7 @@ pub const App = struct {
         a.park();
         a.tabs.active = i;
         a.tabs.noteShown();
+        @import("app_navigation.zig").validateCurrent(a);
         a.view.split_reveal = null;
         a.view.strip.expanded = null;
         a.view.strip.menu = null;
@@ -1134,7 +1157,9 @@ pub const App = struct {
         }
         if (a.isOnlyNewChat()) return a.redraw();
         const was_chat = a.selected != null;
+        @import("app_navigation.zig").parkActive(a);
         a.tabs.close(i);
+        @import("app_navigation.zig").validateCurrent(a);
         a.view.split_reveal = null;
         a.view.strip.expanded = null;
         a.view.strip.menu = null;
@@ -1160,23 +1185,7 @@ pub const App = struct {
 
     /// Reopen the most recently closed chat tab (⌘⇧T).
     pub fn reopenClosedTab(a: *App) void {
-        while (a.tabs.popClosed()) |id| {
-            defer a.gpa.free(id);
-            if (a.tabs.find(id) != null) continue;
-            const ch = a.findChat(id) orelse continue;
-            if (ch.archived) continue;
-            if (a.selected == null and a.composer.text().len == 0 and @import("app_attachments.zig").count(a) == 0) {
-                a.tabs.setCurrent(id);
-                a.select(id, ch.space_id);
-            } else {
-                a.newTab();
-                a.tabs.setCurrent(id);
-                a.select(id, ch.space_id);
-            }
-            a.rememberTabs();
-            a.redraw();
-            return;
-        }
+        @import("app_navigation.zig").reopen(a);
     }
 
     /// ⌘D, ⌘⇧D: the focused pane split, focus in the new pane: a new chat
@@ -1223,6 +1232,7 @@ pub const App = struct {
         const d = drafts.canvas(a) catch return;
         a.tabs.focusPane(ix);
         a.tabs.park(a.tabs.active, from, d);
+        @import("app_navigation.zig").validateCurrent(a);
         const back = a.tabs.unpark(a.tabs.active, ix);
         a.select(a.tabs.current(), null);
         if (back) |b| {
@@ -1255,9 +1265,39 @@ pub const App = struct {
         if (s.toward(d)) |ix| a.focusPane(ix);
     }
 
-    /// ⌘= / ⌘+ / ⌘-: steps the interface text size through the supported
-    /// sizes (`UiFontSize::stepped`) and schedules 120Hz reflow.
+    /// The visible, conversation-owned browser wins only when its panel or
+    /// native content has focus. WebKit mouse focus does not pass through the
+    /// immediate-mode view, so consult its real responder chain as well.
+    fn zoomBrowser(a: *App) ?*@import("app_browser.zig").Browser {
+        if (comptime @import("builtin").os.tag != .macos) return null;
+        if (!a.panels.host_open) return null;
+        if (a.view.strip.expanded) |panel| if (panel != .host) return null;
+        const tab = a.panels.activeTab() orelse return null;
+        const browser = tab.browser orelse return null;
+        if (!browser.belongsTo(a.selected)) return null;
+        const native = browser.native orelse return null;
+        if (!native.visible) return null;
+        const objc = nanoui.objc;
+        if (objc.msg(?objc.Object, native.view, "window", .{})) |window| {
+            if (objc.msg(?objc.Object, window, "firstResponder", .{})) |responder| {
+                if (objc.msg(objc.BOOL, responder, "isKindOfClass:", .{objc.class("NSView")})) {
+                    if (objc.msg(objc.BOOL, responder, "isDescendantOf:", .{native.view})) return browser;
+                }
+            }
+        }
+        return if (@import("view_tab_strip.zig").active(a) == .host) browser else null;
+    }
+
+    /// ⌘= / ⌘+ / ⌘-: zoom the focused web page, otherwise step interface
+    /// text size (`UiFontSize::stepped`) and schedule 120Hz reflow.
     pub fn stepZoom(a: *App, step: i32) void {
+        if (a.zoomBrowser()) |browser| {
+            // 100 steps already saturate either browser zoom bound.
+            for (0..@min(@abs(step), 100)) |_| {
+                if (step > 0) browser.applyZoom(.in) else browser.applyZoom(.out);
+            }
+            return;
+        }
         const settings_mod = @import("settings.zig");
         const cur = a.settings.uiFontSize();
         const next = settings_mod.stepUiFontSize(cur, step);
@@ -1267,8 +1307,9 @@ pub const App = struct {
         a.redraw();
     }
 
-    /// ⌘0: resets the interface text size to the 16 px baseline.
+    /// ⌘0: reset the focused web page, otherwise interface text to 16 px.
     pub fn resetZoom(a: *App) void {
+        if (a.zoomBrowser()) |browser| return browser.applyZoom(.reset);
         const settings_mod = @import("settings.zig");
         if (a.settings.uiFontSize() == settings_mod.ui_font_size_default) return;
         a.settings.setUiFontSize(settings_mod.ui_font_size_default);
@@ -1340,8 +1381,11 @@ pub const App = struct {
         a.view.close_choice = false;
         const id = if (a.selected) |s| a.gpa.dupe(u8, s) catch null else null;
         defer if (id) |x| a.gpa.free(x);
+        // Navigation releases the selected queue watch and editor. Preserve
+        // its authoritative safety evidence before closeFocused clears it.
+        const queued = if (id) |x| a.queuedForClose(x) else false;
         a.closeFocused();
-        if (id) |x| a.archiveClosed(x, may_archive);
+        if (id) |x| a.archiveClosedAfter(x, may_archive, queued);
     }
 
     /// A tab's ✕: archives per the setting, and never asks.
@@ -1349,19 +1393,36 @@ pub const App = struct {
         const tab_chat = if (i < a.tabs.items.items.len) a.tabs.items.items[i] else null;
         const id = if (tab_chat) |s| a.gpa.dupe(u8, s) catch null else null;
         defer if (id) |x| a.gpa.free(x);
+        const queued = if (id) |x| a.queuedForClose(x) else false;
         a.closeTab(i);
-        if (id) |x| a.archiveClosed(x, a.settings.get(.archive_sessions_on_close));
+        if (id) |x| a.archiveClosedAfter(x, a.settings.get(.archive_sessions_on_close), queued);
+    }
+
+    fn queuedForClose(a: *const App, id: []const u8) bool {
+        const selected = a.selected orelse return false;
+        return std.mem.eql(u8, selected, id) and (a.queue.items.len > 0 or a.queue_edit != null or a.queue_begin != null);
     }
 
     pub fn archiveClosed(a: *App, id: []const u8, may_archive: bool) void {
+        a.archiveClosedAfter(id, may_archive, a.queuedForClose(id));
+    }
+
+    fn archiveClosedAfter(a: *App, id: []const u8, may_archive: bool, queued: bool) void {
         const ac = @import("archive_close.zig");
         const st = workspace.statusOf(a.sessions.items, id);
         var sending = false;
         for (a.pending_sends.items) |p| if (!p.rejected and std.mem.eql(u8, p.chat, id)) {
             sending = true;
         };
-        switch (ac.decide(may_archive, a.tabs.find(id) != null, sending or st == .working or st == .awaiting_input)) {
-            .archive => a.setArchived(id, true),
+        switch (ac.decide(may_archive, a.tabs.find(id) != null, queued or sending or st == .working or st == .awaiting_input)) {
+            .archive => {
+                // A pre-existing archival was not caused by this close and
+                // must never be undone by Reopen closed tab.
+                const chat = a.findChat(id) orelse return;
+                if (chat.archived) return;
+                a.setArchived(id, true);
+                a.tabs.markAutoArchived(id);
+            },
             .running => a.setSidebarNotice(ac.running_notice, ac.notice_s),
             .off, .still_open => {},
         }
@@ -1383,6 +1444,7 @@ pub const App = struct {
         a.view.strip.pending_folder = null;
         a.view.split_reveal = null;
         if (a.isOnlyNewChat()) return a.redraw();
+        @import("app_navigation.zig").parkActive(a);
         if (!a.tabs.closePaneTab()) return a.closePanel();
         a.restorePanelDraft();
     }
@@ -1394,12 +1456,14 @@ pub const App = struct {
         a.view.split_reveal = null;
         a.view.strip.expanded = null;
         if (a.isOnlyNewChat()) return a.redraw();
+        @import("app_navigation.zig").parkActive(a);
         if (!a.tabs.closePane()) return a.closeTab(a.tabs.active);
         a.view.strip.focused = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
         a.restorePanelDraft();
     }
 
     fn restorePanelDraft(a: *App) void {
+        @import("app_navigation.zig").validateCurrent(a);
         const back = a.tabs.unpark(a.tabs.active, if (a.tabs.layout()) |s| s.focus else null);
         a.select(a.tabs.current(), null);
         if (back) |b| {
@@ -1485,7 +1549,8 @@ pub const App = struct {
     fn onChats(a: *App, _: u64, r: rpc.Reply) void {
         switch (r) {
             .item => |v| {
-                a.chats.replace(v) catch {};
+                a.chats.replace(v) catch return;
+                a.chats_synced = true;
                 a.resort();
                 a.restoreTabs();
                 // The open chat's agent and folder are known now: list its
@@ -1617,6 +1682,12 @@ pub const App = struct {
 
     /// Opens `chat_id`, or (null) a new chat in `space_id`.
     pub fn select(a: *App, chat_id: ?[]const u8, space_id: ?[]const u8) void {
+        // Reselecting a live queue editor is a focus operation, not a new
+        // composer lease. Don't discard its unsaved text or attachments.
+        if (a.queue_edit != null and a.selected != null and chat_id != null and std.mem.eql(u8, a.selected.?, chat_id.?)) {
+            a.view.focus_composer = true;
+            return a.redraw();
+        }
         drafts.leave(a);
         defer drafts.enter(a);
         a.view.focus_composer = true;
@@ -1809,7 +1880,12 @@ pub const App = struct {
     pub fn sendFollowUp(a: *App, explicit: ?queue_mod.FollowUp) void {
         if (a.queue_edit != null) return queue_mod.finishEdit(a, .commit);
         const attachments = @import("app_attachments.zig");
-        const text = std.mem.trim(u8, a.composer.text(), " \n\t");
+        const completed = @import("composer_completion.zig").prompt(a) catch {
+            a.setNotice("Could not prepare selected command or skill. Your draft is preserved.");
+            return a.redraw();
+        };
+        defer if (completed) |p| a.gpa.free(p);
+        const text = std.mem.trim(u8, completed orelse a.composer.text(), " \n\t");
         const attached = attachments.prompt(a, text) catch {
             a.setNotice("Wait for the attachments to finish, or remove/retry the failed file.");
             return a.redraw();

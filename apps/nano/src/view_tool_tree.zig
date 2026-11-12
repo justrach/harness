@@ -101,8 +101,6 @@ fn rowImpl(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
     const linked = agent_linked or view_linked;
     const ordinary = p.kind == .tool and !p.agent and !view_linked;
     const detail_key = c.print("detail/{s}/{s}/{s}", .{ parent orelse "", e.id, p.id });
-    const has_detail = !linked and (p.kind == .reasoning or p.invocation.len > 0 or p.output.len > 0 or p.output_ref.len > 0 or p.diff_new != null or p.stats.len > 0);
-    const open = has_detail and a.view.groupOpen(detail_key, p.kind == .reasoning);
     // Older snapshots can omit resolved, but a finished turn cannot still
     // be running. Keep any real result without inventing a start time.
     var effective = p.*;
@@ -128,6 +126,13 @@ fn rowImpl(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
     _ = c.leaf(.{ .width = .{ .px = rules.gutter }, .height = .{ .px = rules.row_height } }, .none, null);
     const content = ui.div(c).column().grow().w(0).py(2).motion(.{ .opacity = rules.connectorParts(arrival.connector, arrival.predecessor).branch, .y = -2 * (1 - arrival.progress) });
     defer content.end();
+    // Use the actual text slot, after chip/result/disclosure columns have
+    // taken their room. A clipped command still needs its expandable body.
+    const header_text_id = std.hash.Wyhash.hash(c.node(content.index).id, "header-text");
+    const header_room = if (c.rects.get(header_text_id)) |rect| @max(0, rect.w) else 0;
+    const header_fits = c.text.width(p.text.items, kit.style(c, 12, 18, .{ .mono = true })) <= header_room;
+    const has_detail = !linked and rules.hasVisibleBody(c.alloc(), p, header_fits);
+    const open = has_detail and a.view.groupOpen(detail_key, p.kind == .reasoning);
     {
         var head = ui.div(c).row().wFull().h(rules.row_height - 4).px(6).gap(8).itemsCenter().rounded(if (running) 8 else 4).control();
         if (running) head = head.bg(k.ink(0.06));
@@ -139,6 +144,8 @@ fn rowImpl(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
         ui.text(c, if (p.kind == .reasoning) "Thought process" else p.chip, kit.style(c, 15, 20, .{ .weight = if (p.agent) .medium else .regular, .color = color }));
         {
             const detail = ui.div(c).row().grow().w(0).h(rules.row_height - 4).clip().itemsCenter();
+            c.node(detail.index).id = header_text_id;
+            c.node(detail.index).layout_dependent = true;
             defer detail.end();
             const rect = c.rects.get(c.node(detail.index).id);
             // The first frame only has an estimate. Schedule the measured
@@ -280,6 +287,7 @@ fn textLineWithLinks(c: *ui.Context, a: ?*App, parent: ?[]const u8, k: theme.Col
         );
         defer hit.end();
         const action = c.interact(hit.index, .{ .focusable = true });
+        if (a) |app| @import("view_link_menu.zig").track(c, app, parent, url, hit.index, action.right_clicked or action.secondary_clicked);
         const activate = action.clicked or (action.focused and (c.shortcut(.{ .key = ui.Shortcut.enter }) or c.shortcut(.{ .key = ' ' })));
         if (activate) {
             if (a) |app| {
