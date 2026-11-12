@@ -25,6 +25,7 @@ pub fn available() bool {
 }
 
 pub fn soundAvailable(name: [:0]const u8) bool {
+    if (builtin.os.tag != .macos) return false;
     if (!available()) return false;
     const bundle = objc.msg(objc.Object, objc.class("NSBundle"), "mainBundle", .{});
     return objc.msg(?objc.Object, bundle, "pathForResource:ofType:", .{ objc.nsString(name), @as(?objc.Object, null) }) != null;

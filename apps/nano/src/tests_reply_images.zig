@@ -104,7 +104,11 @@ test "reply images completed native and Markdown pictures render all four quadra
         tester.settle(3);
         try expectPicture(&tester);
         try expectOwner(&a);
-        try tester.screenshot(if (markdown) "../../.graff/retention-audit/deep/reply-images-markdown.png" else "../../.graff/retention-audit/deep/reply-images-native.png");
+        if (std.c.getenv("NANO_SNAP_DIR")) |dir| {
+            var buffer: [1024]u8 = undefined;
+            const output = try std.fmt.bufPrint(&buffer, "{s}/reply-images-{s}.png", .{ std.mem.span(dir), if (markdown) "markdown" else "native" });
+            try tester.screenshot(output);
+        }
         // More than the shared cache's 64 refs: evict inactive/pending refs,
         // never the image still borrowed by the visible reply's next frame.
         const retained = a.attachments.images.items.items[0];

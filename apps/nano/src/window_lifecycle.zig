@@ -100,7 +100,11 @@ pub const Lifecycle = struct {
         }
         if (!deferred_scheduled) {
             deferred_scheduled = true;
-            nanoui.App.soon(null, drainExits);
+            if (comptime builtin.os.tag == .macos) {
+                nanoui.App.soon(null, drainExits);
+            } else if (!nanoui.App.onMain(null, drainExits)) {
+                deferred_scheduled = false;
+            }
         }
     }
 
