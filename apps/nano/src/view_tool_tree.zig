@@ -96,12 +96,18 @@ pub fn row(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
 }
 
 fn rowImpl(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *const tr.Part, parent: ?[]const u8, arrival: Arrival) void {
+    const aw = @import("agent_work.zig");
+    const vaw = @import("view_agent_work.zig");
     const agent_linked = p.agent and p.subagent_ref.len > 0 and p.subagent_title.len > 0 and parent != null;
     const view_linked = p.saved_view != null and parent != null;
     const linked = agent_linked or view_linked;
     const ordinary = p.kind == .tool and !p.agent and !view_linked;
+    const is_todo_list = p.tool == .todo and p.todo_items.len > 0;
+    const live_prog = if (parent != null and a.selected != null and std.mem.eql(u8, parent.?, a.selected.?)) a.tool_progress.find(p.id) else null;
+    const ag_state = if (p.agent) aw.resolveAgentState(if (live_prog) |lp| lp.state else null, p.subagent_status, p.resolved, p.is_error, e.status == .streaming) else .completed;
+    const ag_running = p.agent and ag_state == .running;
     const detail_key = c.print("detail/{s}/{s}/{s}", .{ parent orelse "", e.id, p.id });
-    const has_detail = !linked and (p.kind == .reasoning or p.invocation.len > 0 or p.output.len > 0 or p.output_ref.len > 0 or p.diff_new != null or p.stats.len > 0);
+    const has_detail = !linked and (p.kind == .reasoning or is_todo_list or p.invocation.len > 0 or p.output.len > 0 or p.output_ref.len > 0 or p.diff_new != null or p.stats.len > 0);
     const open = has_detail and a.view.groupOpen(detail_key, p.kind == .reasoning);
     // Older snapshots can omit resolved, but a finished turn cannot still
     // be running. Keep any real result without inventing a start time.
@@ -123,22 +129,22 @@ fn rowImpl(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
     {
         const rail = ui.div(c).column().absolute();
         defer rail.end();
-        chrome.rail(c, k, toolIcon(p), p.is_error, height, arrival.connector, arrival.next, arrival.predecessor);
+        chrome.rail(c, k, toolIcon(p), p.is_error or (p.agent and ag_state == .failed), height, arrival.connector, arrival.next, arrival.predecessor);
     }
     _ = c.leaf(.{ .width = .{ .px = rules.gutter }, .height = .{ .px = rules.row_height } }, .none, null);
     const content = ui.div(c).column().grow().w(0).py(2).motion(.{ .opacity = rules.connectorParts(arrival.connector, arrival.predecessor).branch, .y = -2 * (1 - arrival.progress) });
     defer content.end();
     {
-        var head = ui.div(c).row().wFull().h(rules.row_height - 4).px(6).gap(8).itemsCenter().rounded(if (running) 8 else 4).control();
-        if (running) head = head.bg(k.ink(0.06));
+        var head = ui.div(c).row().wFull().h(rules.row_height - 4).px(6).gap(8).itemsCenter().rounded(if (running or ag_running) 8 else 4).control();
+        if (running or ag_running) head = head.bg(k.ink(0.06));
         if (has_detail) head = kit.pressFeedback(head.hover(k.ink(0.04)));
         defer head.end();
         if (has_detail and head.clicked()) a.view.toggleGroup(a.gpa, detail_key, p.kind == .reasoning);
         if (c.rects.get(c.node(head.index).id)) |rect| chrome.wash(c, k, result, rect.w, rules.row_height - 4, arrival.row.wash(c.time, c.reduced_motion));
-        const color = if (p.is_error) k.danger else if (has_detail and head.hovered()) k.text else k.muted;
-        ui.text(c, if (p.kind == .reasoning) "Thought process" else p.chip, kit.style(c, 15, 18, .{ .weight = if (p.agent) .medium else .regular, .color = color }));
+        const color = if (p.is_error or (p.agent and ag_state == .failed)) k.danger else if (has_detail and head.hovered()) k.text else k.muted;
+        ui.text(c, if (p.kind == .reasoning) "Thought process" else p.chip, kit.style(c, 15, 20, .{ .weight = if (p.agent) .medium else .regular, .color = color }));
         {
-            const detail = ui.div(c).row().grow().w(0).clip().itemsCenter();
+            const detail = ui.div(c).row().grow().w(0).h(rules.row_height - 4).clip().itemsCenter();
             defer detail.end();
             const rect = c.rects.get(c.node(detail.index).id);
             const room = if (rect) |b| b.w else 160;
@@ -146,19 +152,31 @@ fn rowImpl(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
             if (p.path.len > 0) {
                 const name = file_icons.basename(p.path);
                 fileBadge(c, a, k, p.path, name, room, parent);
-            } else kit.fadeText(c, raw, kit.style(c, if (ordinary) 12 else 15, 18, .{ .mono = ordinary, .color = k.muted }), @max(room, 0));
-            if (running and !c.reduced_motion) kit.loaderFrame(c, 0.080);
+            } else kit.fadeText(c, raw, kit.style(c, if (ordinary) 12 else 15, if (ordinary) 18 else 20, .{ .mono = ordinary, .color = if (p.agent) k.text else k.muted }), @max(room, 0));
+            if ((running or ag_running) and !c.reduced_motion) kit.loaderFrame(c, 0.080);
         }
         // Reserving a real end column prevents a long command/path from
         // painting under either a result wash or the disclosure chevron.
-        if (ordinary) chrome.trail(c, k, result, if (result.washed()) arrival.row.wash(c.time, c.reduced_motion) else 1);
+        if (is_todo_list) {
+            if (p.todo_step.len > 0) {
+                kit.fadeText(c, p.todo_step, kit.style(c, 11.5, 18, .{ .color = k.muted }), 180);
+            }
+        } else if (ordinary) {
+            chrome.trail(c, k, result, if (result.washed()) arrival.row.wash(c.time, c.reduced_motion) else 1);
+        } else if (p.agent) {
+            agentRowTrail(c, k, p, live_prog, ag_state, vaw);
+        }
         const slot = ui.div(c).row().size(18, 18).center();
         defer slot.end();
         if (linked) icons.icon(c, .@"arrow-up-right", 11, k.muted.alpha(0.8), 0) else if (has_detail) chrome.chevron(c, k, open, 12);
     }
     if (!has_detail) return;
     const fold_id = state.key(parent, detail_key, "detail-fold");
-    const initial_height = 8 + @as(f32, @floatFromInt(@min(24, std.mem.count(u8, p.invocation, "\n") + @intFromBool(p.invocation.len > 0)) + @min(24, std.mem.count(u8, p.output, "\n") + @intFromBool(p.output.len > 0)) + p.stats.len)) * 18;
+    const est_lines: usize = if (is_todo_list)
+        p.todo_items.len
+    else
+        @min(24, std.mem.count(u8, p.invocation, "\n") + @intFromBool(p.invocation.len > 0)) + @min(24, std.mem.count(u8, p.output, "\n") + @intFromBool(p.output.len > 0)) + p.stats.len;
+    const initial_height = 8 + @as(f32, @floatFromInt(est_lines)) * 20;
     const fold = a.view.tool_ui.fold(a.gpa, fold_id, open, if (a.view.tool_ui.folds.contains(fold_id)) 0 else initial_height, c.time, c.reduced_motion);
     const is_animating = fold.animating(c.time, c.reduced_motion);
     if (!open and !is_animating) return;
@@ -170,6 +188,11 @@ fn rowImpl(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
     rememberHeight(c, a, fold_id, body.index);
     if (is_animating) c.frameIn(1.0 / 30.0);
     if (p.kind == .reasoning) return transcript_view.streamMarkdown(c, a, k, e, p, parent);
+    if (is_todo_list) {
+        const checklist_w = if (c.rects.get(c.node(content.index).id)) |cr| @max(180, cr.w - 32) else 520;
+        return todoChecklist(c, k, p.todo_items, e.status == .streaming, checklist_w);
+    }
+    if (p.agent) return agentInlineDetail(c, a, parent, k, p, live_prog);
     if (p.invocation.len > 0) textDetailLinked(c, a, parent, k, p.invocation, false, 24);
     if (p.diff_new) |new| return transcript_view.editDiff(c, k, p, new);
     if (p.stats.len > 0) return transcript_view.statRows(c, k, p.stats);
@@ -183,6 +206,100 @@ fn rowImpl(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
         ui.text(c, if (loading) "Loading full output…" else if (blob != null and blob.?.status == .failed) "Retry full output" else "Show full output", .{ .size = 12, .color = k.muted });
         if (!loading and action.clicked()) a.fetchToolBlob(p.output_ref);
     }
+}
+
+fn agentRowTrail(
+    c: *ui.Context,
+    k: theme.Colors,
+    p: *const tr.Part,
+    live_prog: ?@import("app_tool_progress.zig").Item,
+    ag_state: @import("agent_work.zig").AgentState,
+    vaw: anytype,
+) void {
+    const aw = @import("agent_work.zig");
+    const trail = ui.div(c).row().gap(6).itemsCenter();
+    defer trail.end();
+
+    const model = aw.invocationModel(c.alloc(), p.invocation);
+    if (ag_state == .running) {
+        if (if (live_prog) |lp| aw.lastProgressLine(lp.output) else aw.lastProgressLine(p.subagent_tail)) |tail_line| {
+            kit.fadeText(c, tail_line, kit.style(c, 11.5, 16, .{ .color = k.muted }), 160);
+        } else if (model.len > 0) {
+            kit.fadeText(c, model, kit.style(c, 11, 16, .{ .color = k.faint }), 110);
+        }
+        vaw.paintSpinner(c, 12, 1.4, k.accent, k.accent.alpha(0.2));
+        ui.text(c, "Running", kit.style(c, 11.5, 16, .{ .weight = .medium, .color = k.accent }));
+    } else if (ag_state == .failed) {
+        ui.text(c, "Failed", kit.style(c, 11.5, 16, .{ .weight = .medium, .color = k.danger }));
+    } else if (ag_state == .cancelled) {
+        ui.text(c, "Stopped", kit.style(c, 11.5, 16, .{ .color = k.muted }));
+    } else {
+        if (model.len > 0) kit.fadeText(c, model, kit.style(c, 11, 16, .{ .color = k.faint }), 110);
+        ui.text(c, "Done", kit.style(c, 11.5, 16, .{ .color = k.muted }));
+    }
+}
+
+fn todoChecklist(c: *ui.Context, k: theme.Colors, items: []const tr.TodoItem, turn_live: bool, row_w: f32) void {
+    const vaw = @import("view_agent_work.zig");
+    const aw = @import("agent_work.zig");
+    const box = ui.div(c).column().wFull().py(4).gap(5);
+    defer box.end();
+    var seen_active = false;
+    for (items) |it| {
+        const st: aw.StepState = if (it.done)
+            .done
+        else if (turn_live and !seen_active) blk: {
+            seen_active = true;
+            break :blk .active;
+        } else .pending;
+        const item_row = ui.div(c).row().wFull().gap(8).itemsStart();
+        defer item_row.end();
+        const glyph_pad = ui.div(c).pt(2);
+        vaw.statusGlyph(c, k, st, false, 13);
+        glyph_pad.end();
+        const col = switch (st) {
+            .active => k.text,
+            .done => k.muted,
+            .pending => k.faint,
+        };
+        const label_box = ui.div(c).column().w(row_w);
+        ui.text(c, it.text, kit.style(c, 12.5, 18, .{
+            .wrap = true,
+            .weight = if (st == .active) .medium else .regular,
+            .color = col,
+        }));
+        label_box.end();
+    }
+}
+
+fn agentInlineDetail(
+    c: *ui.Context,
+    a: *App,
+    parent: ?[]const u8,
+    k: theme.Colors,
+    p: *const tr.Part,
+    live_prog: ?@import("app_tool_progress.zig").Item,
+) void {
+    const aw = @import("agent_work.zig");
+    const box = ui.div(c).column().wFull().py(4).gap(6);
+    defer box.end();
+
+    const model = aw.invocationModel(c.alloc(), p.invocation);
+    if (model.len > 0) {
+        const meta = ui.div(c).row().gap(6).itemsCenter();
+        ui.text(c, "Model", kit.style(c, 11, 16, .{ .weight = .medium, .color = k.faint }));
+        ui.text(c, model, kit.style(c, 11.5, 16, .{ .mono = true, .color = k.muted }));
+        meta.end();
+    }
+
+    const stream_out = if (live_prog) |lp| lp.output else p.subagent_tail;
+    if (stream_out.len > 0) {
+        textDetailLinked(c, a, parent, k, stream_out, false, 16);
+    }
+
+    const blob = a.tool_blobs.get(p.output_ref);
+    const text = if (blob) |b| (if (b.status == .ready) b.text else p.output) else p.output;
+    if (text.len > 0) textDetailLinked(c, a, parent, k, text, p.is_error, if (blob != null and blob.?.status == .ready) 400 else 24);
 }
 
 pub fn rememberHeight(c: *ui.Context, a: *App, id: u64, index: u32) void {

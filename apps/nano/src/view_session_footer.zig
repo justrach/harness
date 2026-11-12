@@ -69,6 +69,7 @@ pub fn footer(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
         const slot_w = if (c.rects.get(c.node(slot.index).id)) |sr| sr.w else @max(0, w - 20 - model_w - 64);
         session(c, a, k, slot_w);
     }
+    @import("view_agent_work.zig").indicator(c, a, k);
     @import("view_context.zig").indicator(c, a, k);
 }
 
