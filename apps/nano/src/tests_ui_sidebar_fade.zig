@@ -56,13 +56,6 @@ test "retention 427 native workspace fade masks complete rows over a two-tone un
         var t: ui.Tester = undefined;
         try t.init(testing.allocator, .init(&scene, Scene.view), .{ .width = 224, .height = 260, .scale = scale, .dark = true, .theme = theme.ui(true) });
         defer t.deinit();
-        if (@import("builtin").os.tag == .windows) {
-            // Transparent groups correctly use grayscale, never ClearType.
-            // Compare the same glyph coverage on both sides of this alpha
-            // oracle; native LCD-versus-grayscale rasterization is separate.
-            t.text.atlas.native.cleartype = false;
-            t.text.atlas.reset();
-        }
         t.settle(1);
         var scroller: ?u64 = null;
         for (t.ctx.nodes.items) |node| if (node.style.scroll and node.style.max_height == 260) {
@@ -89,6 +82,7 @@ test "retention 427 native workspace fade masks complete rows over a two-tone un
             defer reference.deinit(testing.allocator);
             if (scale == 2 and position == 0) snapshot(&t, "retention-427-two-tone-unmasked");
             var max_error: f32 = 0;
+            var max_sample: [8]f32 = @splat(0);
             var foreground_pixels: usize = 0;
             for (0..masked.height) |y| {
                 const py = (@as(f32, @floatFromInt(y)) + 0.5) / scale;
@@ -105,12 +99,17 @@ test "retention 427 native workspace fade masks complete rows over a two-tone un
                         const original: f32 = @floatFromInt(pixel(reference.bytes, reference.width, x, y, channel));
                         const actual: f32 = @floatFromInt(pixel(masked.bytes, masked.width, x, y, channel));
                         const expected = original * alpha + base * (1 - alpha);
-                        max_error = @max(max_error, @abs(actual - expected));
+                        const pixel_error = @abs(actual - expected);
+                        if (pixel_error > max_error) {
+                            max_error = pixel_error;
+                            max_sample = .{ px, py, @floatFromInt(channel), alpha, original, actual, expected, base };
+                        }
                         if (alpha < 0.95 and original > base + 60) foreground_pixels += 1;
                     }
                 }
             }
             std.debug.print("#427 scale={d} position={d} composited pixel error={d:.2}, faded foreground samples={d}\n", .{ scale, position, max_error, foreground_pixels });
+            if (max_error > 4) std.debug.print("#427 worst sample x/y/channel/alpha/reference/actual/expected/base={any}\n", .{max_sample});
             try testing.expect(foreground_pixels > 0); // text/marks, not just a bare rectangle
             try testing.expect(max_error <= 4);
         }
