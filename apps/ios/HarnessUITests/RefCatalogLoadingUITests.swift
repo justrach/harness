@@ -10,7 +10,11 @@ final class RefCatalogLoadingUITests: XCTestCase {
     }
 
     private func launch(_ arguments: [String]) {
-        app.launchArguments = ["-demo", "-route", "space:space-harness", "-sheet", "newsession"] + arguments
+        // Ref/checkout chrome is deliberately hidden by the default Zen preset.
+        // Exercise the preserved developer workflow, independent of saved UI preferences.
+        app.launchArguments = ["-demo", "-route", "space:space-harness", "-sheet", "newsession",
+                               "-phoneSplit", "off", "-homeUiMode", "developer",
+                               "-homeUiPartOverrides", ""] + arguments
         app.launch()
         let ref = app.buttons["session-ref"]
         XCTAssertTrue(ref.waitForExistence(timeout: 5))

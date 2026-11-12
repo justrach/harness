@@ -51,7 +51,9 @@ final class SessionHeaderEdgeUITests: XCTestCase {
         let previous = app.buttons["session-page-previous"]
         let next = app.buttons["session-page-next"]
         XCTAssertEqual(next.frame.width, 28, accuracy: 1)
-        XCTAssertGreaterThanOrEqual(next.frame.height, 44)
+        // Accessibility converts screen coordinates through floating-point transforms;
+        // a 44pt hit target may be reported as 43.99999999999999pt.
+        XCTAssertGreaterThanOrEqual(next.frame.height, 44 - 0.01)
         XCTAssertLessThanOrEqual(title.frame.maxX, previous.frame.minX)
         next.tap()
         XCTAssertEqual(element("session-page-position").label, "Session 2 of 7")
