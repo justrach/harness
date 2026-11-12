@@ -255,3 +255,17 @@ test "agent rows use task labels and leave room for descenders in narrow panes" 
         try testing.expect(elided);
     }
 }
+
+test "a newly mounted agent title settles to its actual available width" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"wide-answer","role":"assistant","status":"complete","parts":[
+        \\ {"id":"wide-worker","kind":"tool","resolved":true,"subagentRef":"synthetic-wide-child","subagentStatus":"done","call":{"kind":"mcp","server":"synthetic","tool":"Agent","input":{"description":"Review synthetic glyph clipping"}}}]}]}
+    , .{});
+    defer parsed.deinit();
+    try h.a.transcript.apply(parsed.value);
+    h.t.settle(0.3);
+    try testing.expect(h.t.hasText("Review synthetic glyph clipping"));
+}

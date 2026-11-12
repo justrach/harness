@@ -141,6 +141,9 @@ fn rowImpl(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
             const detail = ui.div(c).row().grow().w(0).h(rules.row_height - 4).clip().itemsCenter();
             defer detail.end();
             const rect = c.rects.get(c.node(detail.index).id);
+            // The first frame only has an estimate. Schedule the measured
+            // frame even for settled rows, or a wide pane keeps a 160pt title.
+            if (rect == null) c.animationFrame();
             const room = if (rect) |b| b.w else 160;
             const raw = if (p.agent) (if (p.subagent_title.len > 0) p.subagent_title else "subagent") else firstLine(p.text.items);
             if (p.path.len > 0) {
