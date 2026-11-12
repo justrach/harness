@@ -14,10 +14,10 @@
         },
     },
     .paths = .{
-        "build.zig",               "build.zig.zon",                        "src",                                "assets",                      "native_math",
+        "build.zig",                            "build.zig.zon",                      "src",                         "assets",                  "native_math",                 "math_archive.zig",
         // Keep the local dependency's declared source/license footprint, not
         // its build output or lazily downloaded platform dependencies.
-        "vendor/nanoui/build.zig", "vendor/nanoui/build.zig.zon",          "vendor/nanoui/src",                  "vendor/nanoui/tools/ios",     "vendor/nanoui/tools/android",
-        "vendor/nanoui/LICENSE",   "vendor/nanoui/THIRD_PARTY_NOTICES.md", "vendor/nanoui/third_party/licenses", "vendor/nanoui/PROVENANCE.md",
+        "vendor/nanoui/build.zig",              "vendor/nanoui/build.zig.zon",        "vendor/nanoui/src",           "vendor/nanoui/tools/ios", "vendor/nanoui/tools/android", "vendor/nanoui/LICENSE",
+        "vendor/nanoui/THIRD_PARTY_NOTICES.md", "vendor/nanoui/third_party/licenses", "vendor/nanoui/PROVENANCE.md",
     },
 }

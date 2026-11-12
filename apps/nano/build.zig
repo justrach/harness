@@ -1,7 +1,9 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
+    // Match Windows' installed Rust/SDK toolchain by default. An explicit
+    // GNU target still selects the matching Rust target below, never MSVC.
+    const target = b.standardTargetOptions(.{ .default_target = if (b.graph.host.result.os.tag == .windows) .{ .abi = .msvc } else .{} });
     const optimize = b.standardOptimizeOption(.{});
     const nanoui = b.dependency("nanoui", .{ .target = target, .optimize = optimize }).module("nanoui");
     // HTTPS with ALPN h2 for what the app asks the network itself (releases,
@@ -17,7 +19,22 @@ pub fn build(b: *std.Build) void {
     math.addFileInput(b.path("native_math/Cargo.lock"));
     math.addFileInput(b.path("native_math/src/lib.rs"));
     const math_target = math.addPrefixedOutputDirectoryArg("--target-dir=", "native-math");
-    const math_library = math_target.path(b, b.fmt("{s}/release/{s}", .{ rust_target, if (target.result.os.tag == .windows) "harness_native_math.lib" else "libharness_native_math.a" }));
+    const math_library = math_target.path(b, b.fmt("{s}/release/{s}", .{ rust_target, if (target.result.os.tag == .windows and target.result.abi == .msvc) "harness_native_math.lib" else "libharness_native_math.a" }));
+    var linked_math = math_library;
+    var math_index: ?*std.Build.Step.Run = null;
+    if (target.result.os.tag == .windows) {
+        const archive_tool = b.addExecutable(.{ .name = "math-archive", .root_module = b.createModule(.{
+            .root_source_file = b.path("math_archive.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+        }) });
+        const normalize = b.addRunArtifact(archive_tool);
+        normalize.addFileArg(math_library);
+        linked_math = normalize.addOutputFileArg("native-math.lib");
+        const index = b.addSystemCommand(&.{ b.graph.zig_exe, "ar", "s" });
+        index.addFileArg(linked_math);
+        math_index = index;
+    }
     // Harness's bundled fonts (assets/fonts), in a module that embeds them:
     // Geist isn't installed on most Macs.
     const font_files = b.addWriteFiles();
@@ -175,7 +192,15 @@ pub fn build(b: *std.Build) void {
     // Large UI artifacts must never use Zig's self-hosted backend.
     inline for (.{ exe, tests, snap, profile, vectors }) |artifact| {
         artifact.use_llvm = true;
-        artifact.root_module.addObjectFile(math_library);
+        artifact.root_module.addObjectFile(linked_math);
+        if (math_index) |index| artifact.step.dependOn(&index.step);
+        // Rust's catch_unwind boundary needs the platform unwinder. Zig
+        // supplies libunwind on Linux; libc alone does not export _Unwind_*.
+        if (target.result.os.tag == .linux) artifact.root_module.linkSystemLibrary("unwind", .{});
+        if (target.result.os.tag == .windows) {
+            // Rust's native-static-libs, in addition to the matching CRT.
+            for ([_][]const u8{ "kernel32", "ntdll", "userenv", "ws2_32", "dbghelp" }) |library| artifact.root_module.linkSystemLibrary(library, .{});
+        }
     }
 }
 
@@ -183,7 +208,10 @@ fn rustTarget(target: std.Target) []const u8 {
     return switch (target.os.tag) {
         .macos => if (target.cpu.arch == .aarch64) "aarch64-apple-darwin" else "x86_64-apple-darwin",
         .linux => if (target.cpu.arch == .aarch64) "aarch64-unknown-linux-gnu" else "x86_64-unknown-linux-gnu",
-        .windows => if (target.cpu.arch == .aarch64) "aarch64-pc-windows-msvc" else "x86_64-pc-windows-msvc",
+        .windows => if (target.abi == .msvc)
+            (if (target.cpu.arch == .aarch64) "aarch64-pc-windows-msvc" else "x86_64-pc-windows-msvc")
+        else
+            (if (target.cpu.arch == .aarch64) "aarch64-pc-windows-gnullvm" else "x86_64-pc-windows-gnu"),
         else => @panic("native math needs a supported desktop Rust target"),
     };
 }
