@@ -1836,6 +1836,53 @@ test "opening a chat marks it seen here at once: its Done gives way to its time 
     try testing.expect(!ws.unseen(h.a.findChat("b").?));
 }
 
+test "visible chat completion clears Done without reopening the chat" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    const ws = @import("workspace.zig");
+    // A WatchChats update carries a new reply after this chat was opened.
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, chats, .{});
+    defer parsed.deinit();
+    try h.a.chats.replace(parsed.value);
+    try testing.expectEqual(ws.Mark.completed, ws.markOf(h.a.findChat("a").?, null, h.a.nowMs()));
+    h.t.ctx.input.window_active = true;
+    h.t.settle(1);
+    h.snap("active-chat-done");
+    try testing.expect(!ws.unseen(h.a.findChat("a").?));
+    try testing.expectEqual(ws.Mark.idle, ws.markOf(h.a.findChat("a").?, null, h.a.nowMs()));
+    // Other chats keep their unread badge; Cmd+B must not resurrect this one.
+    try testing.expect(ws.unseen(h.a.findChat("b").?));
+    h.press(.{ .key = 'b', .cmd = true });
+    h.press(.{ .key = 'b', .cmd = true });
+    try testing.expect(!ws.unseen(h.a.findChat("a").?));
+}
+
+test "visible chat completion stays unread while inactive or hidden" {
+    for (0..5) |hidden| {
+        var h: Harness = undefined;
+        try h.init();
+        defer h.deinit();
+        var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, chats, .{});
+        defer parsed.deinit();
+        try h.a.chats.replace(parsed.value);
+        h.t.ctx.input.window_active = hidden != 0;
+        h.a.view.settings_open = hidden == 1;
+        h.a.view.write_open = hidden == 2;
+        if (hidden == 3) h.a.bots.page = .inbox;
+        if (hidden == 4) h.a.view.strip.expanded = .host;
+        h.t.settle(1);
+        try testing.expect(@import("workspace.zig").unseen(h.a.findChat("a").?));
+        h.t.ctx.input.window_active = true;
+        h.a.view.settings_open = false;
+        h.a.view.write_open = false;
+        h.a.bots.page = .none;
+        h.a.view.strip.expanded = null;
+        h.t.settle(1);
+        try testing.expect(!@import("workspace.zig").unseen(h.a.findChat("a").?));
+    }
+}
+
 test "a live snapshot asking for Settings draws it in that frame alone: the window is left as it was" {
     if (comptime !@hasField(ui.Context, "snapshot_request")) return error.SkipZigTest;
     var h: Harness = undefined;

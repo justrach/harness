@@ -115,6 +115,11 @@ pub fn view(a: *App, c: *ui.Context) void {
     c.setZoom(a.settings.uiFontSize() / 16.0);
     if (!a.offscreen and c.time < a.view.resize_until) c.frameIn(1.0 / 120.0);
     a.syncPeers();
+    // Replies can arrive after select() marked the chat seen. Clear their
+    // Done check before drawing the sidebar, including on window activation.
+    if (c.input.window_active and selectedChatVisible(a)) {
+        if (a.selected) |id| a.markSeen(id);
+    }
     a.view.in_pre_tree = false;
     {
         const root = ui.div(c).row().sizeFull().bg(k.shell);
@@ -323,6 +328,12 @@ fn chatPanel(c: *ui.Context, a: *App, k: theme.Colors) void {
     const content = ui.div(c).column().grow().wFull().h(0).rounded(9).clip();
     defer content.end();
     focused(c, a, k);
+}
+
+fn selectedChatVisible(a: *const App) bool {
+    return !a.view.settings_open and !a.view.write_open and
+        a.bots.page == .none and a.view.setup == null and
+        (a.view.strip.expanded == null or a.view.strip.expanded.? == .chat);
 }
 
 fn focused(c: *ui.Context, a: *App, k: theme.Colors) void {
