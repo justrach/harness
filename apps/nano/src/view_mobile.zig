@@ -1,6 +1,7 @@
 //! 1:1 Pure-Zig iOS (`UIKit` + Metal + Liquid Glass) mobile shell for `nanoui`.
 //!
-//! Replaces `apps/ios` + `crates/mobile` + `loro-swift` with zero Swift or Rust:
+//! The mobile UI and embedded engine are Zig; binary CRDT interoperability
+//! uses the Rust Loro static library through `loro_ffi.zig`:
 //! - Preserves all 22 `GlassSurfaceId` Liquid Glass surfaces (`mobile_glass.zig`)
 //!   with zero interior `.bg(...)` wash and zero unfocused `.border(...)` when
 //!   Reduce Transparency is off.
@@ -11,7 +12,7 @@
 //! - 120 Hz ProMotion tail virtualization (`tailWindow`), `140pt`/`70pt` hysteresis
 //!   Jump-to-Latest pill (`updateJumpShown`), `1500ms` question-close Stop guard
 //!   (`mobile_parity.isStopAllowed`), `.scrollX()` momentum chip bars, responsive
-//!   `PhoneSplit` (`>= 600pt`), 19-family / 31-variant iOS theme picker, and live
+//!   `PhoneSplit` (`>= 600pt`), 20-family / 33-variant iOS theme picker, and live
 //!   240-sample `ScrollTelemetry`.
 const std = @import("std");
 const builtin = @import("builtin");

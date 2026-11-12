@@ -2,10 +2,12 @@
 
 Harness's desktop app on [nanoui](https://github.com/justrach/nanoui), in Zig.
 
-It's a new window over the same engine the GPUI app runs. The engine (the
-Harness daemon, or `harness headless`) keeps the workspaces, sessions and
-agents; harness-nano talks to it over the engine's local WebSocket RPC
-(`crates/rpc`). Both apps can be open on one engine at once.
+This branch ports the UI and engine to Zig. Desktop builds prefer the sibling
+`harness-engine` daemon and retain `harness headless` as a compatibility
+fallback over the same local WebSocket RPC. iOS embeds the Zig engine instead
+of spawning a subprocess. Binary CRDT synchronization still links the Rust
+Loro static library through `loro-bridge`; this is not yet an entirely
+Rust-free build. Cargo and the Rust target matching the Zig target are required.
 
 HTTPS goes through [http-zig](https://github.com/justrach/http-zig), the HTTP/2
 client codegraff uses. For now it fetches the newest release's manifest.

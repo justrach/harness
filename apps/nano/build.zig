@@ -90,7 +90,7 @@ pub fn build(b: *std.Build) void {
     );
     const themes_json = b.createModule(.{ .root_source_file = themes_root });
     const ios_themes_root = theme_files.add("ios_themes_json.zig",
-        \\//! The mobile 19-family theme catalog (crates/theme/src/registry.rs), as JSON.
+        \\//! The mobile 20-family theme catalog (crates/theme/src/registry.rs), as JSON.
         \\pub const json = @embedFile("ios_themes.json");
         \\
     );
@@ -147,7 +147,7 @@ pub fn build(b: *std.Build) void {
         const app_bundle = ios.app(b, exe, .{
             .name = "Harness",
             .id = "harness.codegraff.ios",
-            .version = "0.2.186",
+            .version = "0.2.189",
             .multiple_windows = true,
             .assets = b.path("assets/ios/Assets.xcassets"),
             .info =

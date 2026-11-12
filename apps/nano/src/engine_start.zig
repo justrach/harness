@@ -76,41 +76,60 @@ pub fn next(f: Facts) Step {
     return .start;
 }
 
-/// Where `harness` may be, in order: `HARNESS_NANO_ENGINE_BIN`, the app's own
-/// executable directory (the Windows portable layout), /Applications and
-/// ~/Applications, then each directory on `PATH`.
+/// Prefer the Zig daemon while retaining the Rust launcher as a fallback.
+/// Search the explicit override, sibling executables, application locations,
+/// then PATH. Updater lookup is restricted to the update-capable Rust CLI.
+const Purpose = enum { engine, cli };
+
 pub fn candidates(gpa: Allocator, io: std.Io, env: *const Map) ![][]u8 {
-    const self_exe = std.process.executablePathAlloc(io, gpa) catch null;
-    defer if (self_exe) |path| gpa.free(path);
-    return candidatesFor(gpa, env, self_exe, builtin.os.tag);
+    return candidateList(gpa, io, env, .engine);
 }
 
-fn candidatesFor(gpa: Allocator, env: *const Map, self_exe: ?[]const u8, os: @TypeOf(builtin.os.tag)) ![][]u8 {
-    const engine_name = if (os == .windows) "harness.exe" else "harness";
+fn candidateList(gpa: Allocator, io: std.Io, env: *const Map, purpose: Purpose) ![][]u8 {
+    const self_exe = std.process.executablePathAlloc(io, gpa) catch null;
+    defer if (self_exe) |path| gpa.free(path);
+    return candidatesFor(gpa, env, self_exe, builtin.os.tag, purpose);
+}
+
+fn candidatesFor(gpa: Allocator, env: *const Map, self_exe: ?[]const u8, os: @TypeOf(builtin.os.tag), purpose: Purpose) ![][]u8 {
+    const cli_name = if (os == .windows) "harness.exe" else "harness";
+    const daemon_name = if (os == .windows) "harness-engine.exe" else "harness-engine";
+    const names: []const []const u8 = if (purpose == .engine) &.{ daemon_name, cli_name } else &.{cli_name};
     var out: std.ArrayList([]u8) = .empty;
     errdefer {
         for (out.items) |p| gpa.free(p);
         out.deinit(gpa);
     }
-    if (env.get("HARNESS_NANO_ENGINE_BIN")) |p| if (p.len > 0) try out.append(gpa, try gpa.dupe(u8, p));
-    // The Windows zip has harness.exe and harness-nano.exe side by side. Nano
-    // must find its engine even when it, rather than the Rust launcher, opens.
+    if (purpose == .engine) {
+        if (env.get("HARNESS_NANO_ENGINE_BIN")) |p| if (p.len > 0) try out.append(gpa, try gpa.dupe(u8, p));
+    }
     if (self_exe) |exe| if (std.fs.path.dirname(exe)) |dir| {
-        try out.append(gpa, try std.fs.path.join(gpa, &.{ dir, engine_name }));
+        for (names) |name| try out.append(gpa, try std.fs.path.join(gpa, &.{ dir, name }));
     };
-    const in_app = "Applications/Harness.app/Contents/MacOS/harness";
-    try out.append(gpa, try gpa.dupe(u8, "/" ++ in_app));
-    if (env.get("HOME")) |home| if (home.len > 0) try out.append(gpa, try std.fs.path.join(gpa, &.{ home, in_app }));
+    const in_app = "Applications/Harness.app/Contents/MacOS";
+    for (names) |name| try out.append(gpa, try std.fs.path.join(gpa, &.{ "/" ++ in_app, name }));
+    if (env.get("HOME")) |home| if (home.len > 0) {
+        for (names) |name| try out.append(gpa, try std.fs.path.join(gpa, &.{ home, in_app, name }));
+    };
     if (env.get("PATH")) |path| {
         var dirs = std.mem.tokenizeScalar(u8, path, if (os == .windows) ';' else ':');
-        while (dirs.next()) |dir| try out.append(gpa, try std.fs.path.join(gpa, &.{ dir, engine_name }));
+        while (dirs.next()) |dir| for (names) |name| try out.append(gpa, try std.fs.path.join(gpa, &.{ dir, name }));
     }
     return out.toOwnedSlice(gpa);
 }
 
-/// The first candidate this user can run (owned), or null.
+/// The first engine candidate this user can run (owned), or null.
 pub fn find(gpa: Allocator, io: std.Io, env: *const Map) ?[]u8 {
-    const list = candidates(gpa, io, env) catch return null;
+    return findFor(gpa, io, env, .engine);
+}
+
+/// Never send `update` to a Zig daemon selected by an engine override.
+pub fn findCli(gpa: Allocator, io: std.Io, env: *const Map) ?[]u8 {
+    return findFor(gpa, io, env, .cli);
+}
+
+fn findFor(gpa: Allocator, io: std.Io, env: *const Map, purpose: Purpose) ?[]u8 {
+    const list = candidateList(gpa, io, env, purpose) catch return null;
     defer gpa.free(list);
     var found: ?[]u8 = null;
     for (list) |p| {
@@ -392,7 +411,7 @@ test "harness is looked for in the override, the app, ~/Applications, then PATH"
     try env.put("HOME", "/Users/synthetic");
     try env.put("PATH", "/opt/a::/usr/local/bin");
     try env.put("HARNESS_NANO_ENGINE_BIN", "/tmp/fake-harness");
-    const got = try candidatesFor(testing.allocator, &env, null, .macos);
+    const got = try candidatesFor(testing.allocator, &env, null, .macos, .cli);
     defer {
         for (got) |p| testing.allocator.free(p);
         testing.allocator.free(got);
@@ -413,7 +432,7 @@ test "Windows portable Nano finds its sibling and PATH harness executables" {
     defer env.deinit();
     try env.put("HOME", "/synthetic-home");
     try env.put("PATH", "C:\\tools;D:\\Harness");
-    const got = try candidatesFor(testing.allocator, &env, "/portable/harness-nano.exe", .windows);
+    const got = try candidatesFor(testing.allocator, &env, "/portable/harness-nano.exe", .windows, .cli);
     defer {
         for (got) |p| testing.allocator.free(p);
         testing.allocator.free(got);
@@ -646,4 +665,41 @@ test "replaces an older background engine session with the updated engine instea
     defer new_info.deinit();
     a.onEngineInfo(2, .{ .ok = new_info.value });
     try testing.expectEqual(@as(usize, 0), a.view.sidebar_notice_len);
+}
+
+test "Zig port discovery prefers its sibling daemon before the Rust launcher" {
+    var env = Map.init(testing.allocator);
+    defer env.deinit();
+    inline for (.{ .macos, .windows }) |os| {
+        const got = try candidatesFor(testing.allocator, &env, "/portable/harness-nano", os, .engine);
+        defer {
+            for (got) |p| testing.allocator.free(p);
+            testing.allocator.free(got);
+        }
+        const name = if (os == .windows) "harness-engine.exe" else "harness-engine";
+        const expected = try std.fs.path.join(testing.allocator, &.{ "/portable", name });
+        defer testing.allocator.free(expected);
+        try testing.expectEqualStrings(expected, got[0]);
+    }
+}
+
+test "Zig engine override is excluded from updater CLI discovery" {
+    var env = Map.init(testing.allocator);
+    defer env.deinit();
+    try env.put("HARNESS_NANO_ENGINE_BIN", "/explicit/harness-engine");
+    try env.put("PATH", "/synthetic/bin");
+    const engine = try candidatesFor(testing.allocator, &env, null, .macos, .engine);
+    defer {
+        for (engine) |path| testing.allocator.free(path);
+        testing.allocator.free(engine);
+    }
+    try testing.expectEqualStrings("/explicit/harness-engine", engine[0]);
+    const cli = try candidatesFor(testing.allocator, &env, null, .macos, .cli);
+    defer {
+        for (cli) |path| testing.allocator.free(path);
+        testing.allocator.free(cli);
+    }
+    try testing.expectEqual(@as(usize, 2), cli.len);
+    try testing.expectEqualStrings("/Applications/Harness.app/Contents/MacOS/harness", cli[0]);
+    try testing.expectEqualStrings("/synthetic/bin/harness", cli[1]);
 }

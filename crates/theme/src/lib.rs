@@ -861,7 +861,9 @@ mod tests {
     #[test]
     fn builtins_have_complete_provenance_and_no_validation_errors() {
         let registry = ThemeRegistry::builtin();
-        assert_eq!(registry.families.len(), 19);
+        assert_eq!(registry.families.len(), 20);
+        assert!(registry.variant("opencodex-light").is_some());
+        assert!(registry.variant("opencodex-dark").is_some());
         assert!(registry.variant("harnesser-light").is_some());
         assert!(registry.variant("harnesser-dark").is_some());
         assert!(registry.variant("codegraff-light").is_some());
@@ -880,8 +882,8 @@ mod tests {
         let shared = ThemeRegistry::builtin();
         let desktop = ThemeRegistry::desktop_builtin();
         assert_eq!(builtin_catalog_json().unwrap(), mobile_before);
-        assert_eq!(shared.families.len(), 19);
-        assert_eq!(desktop.families.len(), 21);
+        assert_eq!(shared.families.len(), 20);
+        assert_eq!(desktop.families.len(), 22);
         assert!(shared.variant("harp-light").is_none());
         assert!(shared.variant("warm-harp-dark").is_none());
         for family in &shared.families {
@@ -965,7 +967,7 @@ mod tests {
             .iter()
             .map(|family| family.variants.len())
             .sum::<usize>();
-        assert_eq!(variants, 31);
-        assert_eq!(variants * VisualFixture::ALL.len(), 310);
+        assert_eq!(variants, 33);
+        assert_eq!(variants * VisualFixture::ALL.len(), 330);
     }
 }

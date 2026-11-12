@@ -440,7 +440,7 @@ fn findHarnessCli(gpa: std.mem.Allocator, io: std.Io, env: ?*const std.process.E
     if (std.Io.Dir.cwd().access(io, app_bin, .{})) |_| {
         return gpa.dupe(u8, app_bin) catch null;
     } else |_| {}
-    if (env) |e| return @import("engine_start.zig").find(gpa, e);
+    if (env) |e| return @import("engine_start.zig").findCli(gpa, io, e);
     return null;
 }
 

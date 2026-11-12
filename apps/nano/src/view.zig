@@ -24,6 +24,7 @@ const cluster_x: f32 = 88;
 const cluster_w: f32 = 24 * 3 + 8 + 2;
 
 pub fn view(a: *App, c: *ui.Context) void {
+    a.markdown_cache.beginFrame();
     if (comptime @import("builtin").os.tag == .ios) {
         return @import("view_mobile.zig").view(a, c);
     }

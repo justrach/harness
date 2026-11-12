@@ -349,9 +349,11 @@ test "a custom theme from the library joins the built-ins, its words made readab
     try testing.expect(find("custom-dim-dark") == null);
 }
 
-test "mobile catalog has all 19 iOS families and 31 variants" {
+test "mobile catalog has all 20 iOS families and 33 variants" {
     const m = mobileAll();
-    try testing.expectEqual(@as(usize, 31), m.len);
+    try testing.expectEqual(@as(usize, 33), m.len);
+    try testing.expectEqualStrings("OpenCodex Light", findMobile("opencodex-light").?.name);
+    try testing.expectEqualStrings("OpenCodex Dark", findMobile("opencodex-dark").?.name);
     try testing.expectEqualStrings("Codegraff Dark", findMobile("codegraff-dark").?.name);
     try testing.expectEqualStrings("Rosé Pine Moon", findMobile("rose-pine-moon").?.name);
 }

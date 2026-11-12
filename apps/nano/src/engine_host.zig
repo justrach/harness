@@ -9165,12 +9165,13 @@ test "synced Desktop chat2 room hydrates Loro history, resolves usable cwd, seed
         \\#!/bin/sh
         \\cur_dir="$PWD"
         \\while IFS= read -r line; do
+        \\  rpc_id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
         \\  case "$line" in
         \\    *'"method":"session/load"'*)
-        \\      printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32001,"message":"remote session missing locally"}}'
+        \\      printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32001,"message":"remote session missing locally"}}\n' "$rpc_id"
         \\      ;;
         \\    *'"method":"session/new"'*)
-        \\      printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"sessionId":"sess-nano-local-42"}}'
+        \\      printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"sess-nano-local-42"}}\n' "$rpc_id"
         \\      ;;
         \\    *'"method":"session/prompt"'*)
         \\      case "$line" in
@@ -9178,7 +9179,7 @@ test "synced Desktop chat2 room hydrates Loro history, resolves usable cwd, seed
         \\        *) seed_tag="SEED_MISSING" ;;
         \\      esac
         \\      printf '%s\n' "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"sess-nano-local-42\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"$seed_tag cwd=$cur_dir\"}}}}"
-        \\      printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{"stopReason":"end_turn"}}'
+        \\      printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn"}}\n' "$rpc_id"
         \\      exit 0
         \\      ;;
         \\  esac
@@ -9266,13 +9267,15 @@ test "synced Desktop chat2 room hydrates Loro history, resolves usable cwd, seed
     try testing.expect(!host.store.hasPendingChatUpdates("chat-rank-1"));
     try testing.expectEqual(@as(?u64, 2), host.store.snapshotCursor("chat-rank-1"));
 
-    capture_mu.lockUncancelable(io);
-    try testing.expect(pushed_loro_rows.items.len >= 1);
-    for (pushed_loro_rows.items) |pushed_bytes| {
-        const import_out = try desktop_doc.importLoroBytes(pushed_bytes);
-        try testing.expectEqual(loro_ffi.ImportOutcome.applied, import_out);
+    {
+        capture_mu.lockUncancelable(io);
+        defer capture_mu.unlock(io);
+        try testing.expect(pushed_loro_rows.items.len >= 1);
+        for (pushed_loro_rows.items) |pushed_bytes| {
+            const import_out = try desktop_doc.importLoroBytes(pushed_bytes);
+            try testing.expectEqual(loro_ffi.ImportOutcome.applied, import_out);
+        }
     }
-    capture_mu.unlock(io);
 
     try testing.expectEqual(@as(usize, 5), desktop_doc.messages.items.len);
     try testing.expectEqualStrings("Compare ranking strategies using the synthetic sample dataset.", desktop_doc.messages.items[3].parts.items[0].text.items);
