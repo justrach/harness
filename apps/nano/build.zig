@@ -3,7 +3,15 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const nanoui = b.dependency("nanoui", .{ .target = target, .optimize = optimize }).module("nanoui");
+    const loader = b.option([]const u8, "webview2-loader", "Path to the target's WebView2Loader.dll");
+    const nanoui_dep = if (target.result.os.tag == .windows)
+        b.dependency("nanoui", .{ .target = target, .optimize = optimize, .webview2 = if (loader != null) "none" else "sdk" })
+    else
+        b.dependency("nanoui", .{ .target = target, .optimize = optimize });
+    const nanoui = nanoui_dep.module("nanoui");
+    if (target.result.os.tag == .windows) {
+        if (loader) |path| b.getInstallStep().dependOn(&b.addInstallBinFile(.{ .cwd_relative = path }, "WebView2Loader.dll").step);
+    }
     // HTTPS with ALPN h2 for what the app asks the network itself (releases,
     // the edge); the engine's own socket is a local WebSocket (src/ws.zig).
     const http_zig = b.dependency("http_zig", .{ .target = target, .optimize = optimize }).module("http_zig");
@@ -97,6 +105,7 @@ pub fn build(b: *std.Build) void {
         .strip = optimize != .debug,
         .imports = imports,
     }) });
+    if (target.result.os.tag == .windows) exe.subsystem = .windows;
     b.installArtifact(exe);
     const run = b.addRunArtifact(exe);
     run.addPassthruArgs();
@@ -107,16 +116,19 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
+        .strip = optimize != .debug,
         .imports = imports,
     }) });
     // The vectors the Rust side runs too (protocol/desktop, at the repo root).
-    const protocol = b.root.joinString(b.allocator, "../../protocol/desktop") catch @panic("OOM");
+    const test_data = b.option([]const u8, "test-data-root", "Repository fixture root on a separate test runner");
+    const protocol = if (test_data) |root| b.pathJoin(&.{ root, "protocol/desktop" }) else b.root.joinString(b.allocator, "../../protocol/desktop") catch @panic("OOM");
     const opts = b.addOptions();
     opts.addOption([]const u8, "protocol_dir", protocol);
     // And the app rules the phones share (apps/parity/vectors).
-    opts.addOption([]const u8, "vectors_dir", b.root.joinString(b.allocator, "../parity/vectors") catch @panic("OOM"));
+    opts.addOption([]const u8, "vectors_dir", if (test_data) |root| b.pathJoin(&.{ root, "apps/parity/vectors" }) else b.root.joinString(b.allocator, "../parity/vectors") catch @panic("OOM"));
     tests.root_module.addOptions("parity_options", opts);
     b.step("test", "Run harness-nano tests").dependOn(&b.addRunArtifact(tests).step);
+    b.step("test-build", "Build tests for a separate Windows or native runner").dependOn(&b.addInstallArtifact(tests, .{}).step);
 
     // `zig build snap -- scene.json out-dir`: the window drawn offscreen
     // from a made-up scene, a PNG per step asked for (src/snap.zig).

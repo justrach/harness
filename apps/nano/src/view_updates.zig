@@ -447,7 +447,7 @@ fn appUpdateWorker(a: *App) void {
         a.updates.setAppFailed("Harness CLI not found in /Applications/Harness.app");
         a.updates.dirty = true;
         a.updates.release();
-        nanoui.App.after(0, a, appUpdateDelivered);
+        _ = nanoui.App.onMain(a, appUpdateDelivered);
         return;
     };
     defer a.gpa.free(bin);
@@ -462,7 +462,7 @@ fn appUpdateWorker(a: *App) void {
         a.updates.setAppFailed(std.fmt.bufPrint(&ebuf, "{t}", .{err}) catch "update command failed");
         a.updates.dirty = true;
         a.updates.release();
-        nanoui.App.after(0, a, appUpdateDelivered);
+        _ = nanoui.App.onMain(a, appUpdateDelivered);
         return;
     };
     defer a.gpa.free(res.stdout);
@@ -489,7 +489,7 @@ fn appUpdateWorker(a: *App) void {
     }
     a.updates.dirty = true;
     a.updates.release();
-    nanoui.App.after(0, a, appUpdateDelivered);
+    _ = nanoui.App.onMain(a, appUpdateDelivered);
 }
 
 pub const UpdateCommandOutcome = union(enum) {

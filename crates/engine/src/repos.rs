@@ -1153,6 +1153,24 @@ impl Repos {
     /// worktrees (detached ones included). Filesystem resolution happens on a
     /// disposable thread because user-selected paths may be dead mounts.
     pub async fn workspace_checkout(&self, repo_path: &Path, candidate: &Path) -> Option<PathBuf> {
+        self.resolve_workspace_path(repo_path, candidate, false)
+            .await
+    }
+
+    /// A chat can run in a subfolder of a checkout (or a plain workspace).
+    /// Keep that folder as the file RPC root rather than widening it to the
+    /// repository root. Canonicalization prevents symlinks escaping the space.
+    pub async fn workspace_folder(&self, repo_path: &Path, candidate: &Path) -> Option<PathBuf> {
+        self.resolve_workspace_path(repo_path, candidate, true)
+            .await
+    }
+
+    async fn resolve_workspace_path(
+        &self,
+        repo_path: &Path,
+        candidate: &Path,
+        allow_subfolder: bool,
+    ) -> Option<PathBuf> {
         let repo_path = repo_path.to_path_buf();
         let candidate = candidate.to_path_buf();
         // One `git worktree list` rather than `refs()`, which runs several
@@ -1163,7 +1181,16 @@ impl Repos {
             std::iter::once(repo_path)
                 .chain(worktrees)
                 .filter_map(|path| std::fs::canonicalize(path).ok())
-                .any(|path| path == candidate)
+                .any(|path| {
+                    path == candidate
+                        || (allow_subfolder
+                            && candidate.is_dir()
+                            && candidate.strip_prefix(&path).is_ok_and(|relative| {
+                                !relative
+                                    .components()
+                                    .any(|part| part.as_os_str().eq_ignore_ascii_case(".git"))
+                            }))
+                })
                 .then_some(candidate)
         })
         .await

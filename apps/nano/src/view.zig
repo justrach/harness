@@ -19,7 +19,7 @@ const strip = @import("view_tab_strip.zig");
 const panel_chrome = @import("view_panel_chrome.zig");
 
 /// Where the title bar's buttons start: right of the traffic lights.
-const cluster_x: f32 = 88;
+const cluster_x: f32 = @import("window_chrome.zig").leading;
 /// Three 24-point buttons, 8 then 2 points apart.
 const cluster_w: f32 = 24 * 3 + 8 + 2;
 
@@ -229,6 +229,7 @@ pub fn view(a: *App, c: *ui.Context) void {
     }
     strip.draw(c, a, k);
     titlebar(c, a, k);
+    @import("window_chrome.zig").draw(c, a, k);
     if (c.input.released) a.view.sidebar_press_focus = false;
     const popup = surfaces.popup(k);
     trailing(c, a, popup);
@@ -866,7 +867,7 @@ fn trailing(c: *ui.Context, a: *App, k: theme.Colors) void {
     // apart (`PANEL_TOGGLE_GAP`), 6 from the edge
     // (`TITLEBAR_ACTION_EDGE_INSET`).
     const w: f32 = 28 * 2 + 4 + (if (actions_w > 0) actions_w + 8 else 0);
-    const bar = ui.div(c).fixed().offset(c.size.w - 6 - w, 4 + (34 - 28) / 2).row().itemsCenter().layer(3);
+    const bar = ui.div(c).fixed().offset(c.size.w - @import("window_chrome.zig").trailing - 6 - w, 4 + (34 - 28) / 2).row().itemsCenter().layer(3);
     defer bar.end();
     if (actions_w > 0) {
         va.control(c, a, k);

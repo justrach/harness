@@ -5,6 +5,7 @@ test {
     _ = @import("workspace.zig");
     _ = @import("transcript.zig");
     _ = @import("engine.zig");
+    _ = @import("window_chrome.zig");
     _ = @import("app.zig");
     _ = @import("rules.zig");
     _ = @import("motion_rules.zig");

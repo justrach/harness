@@ -39,6 +39,7 @@ fn fileUrl(tmp: *std.testing.TmpDir, gpa: std.mem.Allocator) ![]u8 {
     defer gpa.free(relative);
     const base = try std.Io.Dir.cwd().realPathFileAlloc(testing.io, relative, gpa);
     defer gpa.free(base);
+    if (@import("builtin").os.tag == .windows) return std.fs.path.join(gpa, &.{ base, "synthetic image.png" });
     return std.fmt.allocPrint(gpa, "file://{s}/synthetic%20image.png", .{base});
 }
 

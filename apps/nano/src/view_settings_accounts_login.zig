@@ -104,12 +104,15 @@ fn stopRelay(a: *App) void {
     s.relay = null;
 }
 
-/// How a landing reaches the UI thread (`nanoui.App.after`); tests hold
+/// How a landing reaches the UI thread (`nanoui.App.onMain`); tests hold
 /// it and run it themselves.
 pub var hop: *const fn (ctx: ?*anyopaque, func: *const fn (?*anyopaque) callconv(.c) void) void = afterNow;
 
 fn afterNow(ctx: ?*anyopaque, func: *const fn (?*anyopaque) callconv(.c) void) void {
-    nanoui.App.after(0, ctx, func);
+    if (!nanoui.App.onMain(ctx, func)) {
+        const cap: *relay_cb.Capture = @ptrCast(@alignCast(ctx.?));
+        cap.release();
+    }
 }
 
 /// `spawn_relay_capture`: catch the browser's loopback redirect for a
