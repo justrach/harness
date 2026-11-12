@@ -411,16 +411,20 @@ test "harness is looked for in the override, the app, ~/Applications, then PATH"
     try env.put("HOME", "/Users/synthetic");
     try env.put("PATH", "/opt/a::/usr/local/bin");
     try env.put("HARNESS_NANO_ENGINE_BIN", "/tmp/fake-harness");
-    const got = try candidatesFor(testing.allocator, &env, null, .macos, .cli);
+    const got = try candidatesFor(testing.allocator, &env, null, .macos, .engine);
     defer {
         for (got) |p| testing.allocator.free(p);
         testing.allocator.free(got);
     }
     const want = [_][]const u8{
         "/tmp/fake-harness",
+        "/Applications/Harness.app/Contents/MacOS/harness-engine",
         "/Applications/Harness.app/Contents/MacOS/harness",
+        "/Users/synthetic" ++ std.fs.path.sep_str ++ "Applications/Harness.app/Contents/MacOS/harness-engine",
         "/Users/synthetic" ++ std.fs.path.sep_str ++ "Applications/Harness.app/Contents/MacOS/harness",
+        "/opt/a" ++ std.fs.path.sep_str ++ "harness-engine",
         "/opt/a" ++ std.fs.path.sep_str ++ "harness",
+        "/usr/local/bin" ++ std.fs.path.sep_str ++ "harness-engine",
         "/usr/local/bin" ++ std.fs.path.sep_str ++ "harness",
     };
     try testing.expectEqual(want.len, got.len);

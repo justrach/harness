@@ -9,6 +9,18 @@ of spawning a subprocess. Binary CRDT synchronization still links the Rust
 Loro static library through `loro-bridge`; this is not yet an entirely
 Rust-free build. Cargo and the Rust target matching the Zig target are required.
 
+On Zig 0.17.0, use nanoui's scoped standard-library workaround for iOS
+(the installed Zig library is not modified). After fetching dependencies,
+from this directory:
+
+```sh
+zig build $(sh zig-pkg/nanoui-0.14.0-*/tools/ios/zig-lib.sh) \
+  -Dtarget=aarch64-ios-simulator -Doptimize=small
+```
+
+Use `-Dtarget=aarch64-ios` for device builds. Install the matching Rust target
+with `rustup target add aarch64-apple-ios-sim` or `aarch64-apple-ios`.
+
 HTTPS goes through [http-zig](https://github.com/justrach/http-zig), the HTTP/2
 client codegraff uses. For now it fetches the newest release's manifest.
 

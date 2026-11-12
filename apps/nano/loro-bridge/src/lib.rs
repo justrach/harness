@@ -59,8 +59,12 @@ pub extern "C" fn loro_bytes_free(ptr: *mut u8, len: usize) {
 
 #[no_mangle]
 pub extern "C" fn loro_session_new() -> *mut LoroSession {
-    catch_unwind(|| Box::into_raw(Box::new(LoroSession { doc: LoroDoc::new() })))
-        .unwrap_or(std::ptr::null_mut())
+    catch_unwind(|| {
+        Box::into_raw(Box::new(LoroSession {
+            doc: LoroDoc::new(),
+        }))
+    })
+    .unwrap_or(std::ptr::null_mut())
 }
 
 #[no_mangle]
@@ -184,20 +188,17 @@ fn normalize_doc_part_for_app(raw_part: &Value, entry_id: &str, ix: usize) -> Op
         .and_then(Value::as_str)
         .map(str::to_owned)
         .unwrap_or_else(|| format!("{entry_id}#part-{ix}"));
-    let kind = obj
-        .get("kind")
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| {
-            if obj.contains_key("reasoning") {
-                "reasoning"
-            } else if obj.contains_key("call") {
-                "tool"
-            } else if obj.contains_key("message") {
-                "error"
-            } else {
-                "text"
-            }
-        });
+    let kind = obj.get("kind").and_then(Value::as_str).unwrap_or_else(|| {
+        if obj.contains_key("reasoning") {
+            "reasoning"
+        } else if obj.contains_key("call") {
+            "tool"
+        } else if obj.contains_key("message") {
+            "error"
+        } else {
+            "text"
+        }
+    });
 
     let mut out = Map::new();
     out.insert("id".into(), Value::String(id));
@@ -222,7 +223,10 @@ fn normalize_doc_part_for_app(raw_part: &Value, entry_id: &str, ix: usize) -> Op
             // In Loro `DocPartJson`, `isError` presence IS the resolution marker (`schema.rs:276`).
             let is_err_opt = obj.get("isError").and_then(Value::as_bool);
             let resolved = is_err_opt.is_some()
-                || obj.get("resolved").and_then(Value::as_bool).unwrap_or(false);
+                || obj
+                    .get("resolved")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
             out.insert("resolved".into(), Value::Bool(resolved));
             out.insert("isError".into(), Value::Bool(is_err_opt.unwrap_or(false)));
             for k in [
@@ -277,7 +281,11 @@ fn normalize_doc_part_for_app(raw_part: &Value, entry_id: &str, ix: usize) -> Op
             }
             out.insert(
                 "resolved".into(),
-                Value::Bool(obj.get("resolved").and_then(Value::as_bool).unwrap_or(false)),
+                Value::Bool(
+                    obj.get("resolved")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                ),
             );
         }
         _ => {
@@ -355,7 +363,8 @@ pub extern "C" fn loro_session_read_messages_json(
                         existing_parts.extend(norm_parts);
                     }
                     if let Some(dms) = duration_ms {
-                        out_entries[root_pos].insert("durationMs".into(), Value::Number(dms.into()));
+                        out_entries[root_pos]
+                            .insert("durationMs".into(), Value::Number(dms.into()));
                     }
                     if let Some(st) = status {
                         out_entries[root_pos].insert("status".into(), Value::String(st));
@@ -592,7 +601,10 @@ fn update_part_in_loro(map: &LoroMap, part: &Map<String, Value>) -> Result<bool,
     Ok(dirty)
 }
 
-fn sync_one_entry(messages: &LoroList, entry: &Map<String, Value>) -> Result<bool, loro::LoroError> {
+fn sync_one_entry(
+    messages: &LoroList,
+    entry: &Map<String, Value>,
+) -> Result<bool, loro::LoroError> {
     let Some(entry_id) = entry.get("id").and_then(Value::as_str) else {
         return Ok(false);
     };

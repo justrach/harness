@@ -151,20 +151,20 @@ pub fn build(b: *std.Build) void {
             .multiple_windows = true,
             .assets = b.path("assets/ios/Assets.xcassets"),
             .info =
-                \\    <key>CFBundleURLTypes</key>
-                \\    <array>
-                \\        <dict>
-                \\            <key>CFBundleURLName</key>
-                \\            <string>harness.codegraff.ios</string>
-                \\            <key>CFBundleURLSchemes</key>
-                \\            <array><string>harness</string></array>
-                \\        </dict>
-                \\    </array>
-                \\    <key>NSAppTransportSecurity</key>
-                \\    <dict>
-                \\        <key>NSAllowsLocalNetworking</key>
-                \\        <true/>
-                \\    </dict>
+            \\    <key>CFBundleURLTypes</key>
+            \\    <array>
+            \\        <dict>
+            \\            <key>CFBundleURLName</key>
+            \\            <string>harness.codegraff.ios</string>
+            \\            <key>CFBundleURLSchemes</key>
+            \\            <array><string>harness</string></array>
+            \\        </dict>
+            \\    </array>
+            \\    <key>NSAppTransportSecurity</key>
+            \\    <dict>
+            \\        <key>NSAllowsLocalNetworking</key>
+            \\        <true/>
+            \\    </dict>
             ,
         });
         b.getInstallStep().dependOn(&b.addInstallDirectory(.{

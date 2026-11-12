@@ -349,7 +349,7 @@ pub fn visibleSignature(a: *const App) u64 {
             h.update(w.device_id);
             h.update(&.{0});
             h.update(st.harness);
-            h.update(&.{ 0, @intFromEnum(st.phase), 0 });
+            h.update(&.{ 0, @backingInt(st.phase), 0 });
             h.update(st.latest_version orelse "");
             h.update(&.{0});
         };
