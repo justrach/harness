@@ -226,6 +226,23 @@ fn drainExits(_: ?*anyopaque) callconv(.c) void {
     }
 }
 
+test "file editor Linux native window close can be vetoed before disposal" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const Probe = struct {
+        calls: usize = 0,
+        fn veto(ctx: *anyopaque, _: *nanoui.Window) bool {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            return false;
+        }
+    };
+    var probe: Probe = .{};
+    var window: nanoui.Window = .{ .app = undefined, .gtkwindow = null, .should_close = .{ .ctx = &probe, .func = Probe.veto } };
+    window.close();
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expect(!window.closed);
+}
+
 test "external navigation lifecycle registers native URL delivery" {
     var state: App = .init(std.testing.allocator, std.testing.io, 1);
     defer state.deinit();

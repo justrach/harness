@@ -164,6 +164,7 @@ pub fn display(buf: []u8, combo: []const u8) []const u8 {
 pub fn fromShortcut(buf: []u8, s: ui.Shortcut) ?[]const u8 {
     if (!s.cmd and !s.ctrl and !s.alt) return null;
     const S = ui.Shortcut;
+    var ascii: [1]u8 = undefined;
     const key: []const u8 = switch (s.key) {
         ' ' => "space",
         S.tab => "tab",
@@ -175,7 +176,8 @@ pub fn fromShortcut(buf: []u8, s: ui.Shortcut) ?[]const u8 {
         S.right => "right",
         else => blk: {
             if (s.key > 127) return null;
-            break :blk &[_]u8{std.ascii.toLower(@intCast(s.key))};
+            ascii[0] = std.ascii.toLower(@intCast(s.key));
+            break :blk &ascii;
         },
     };
     var w: std.Io.Writer = .fixed(buf);
