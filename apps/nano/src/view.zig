@@ -898,9 +898,9 @@ fn titlebar(c: *ui.Context, a: *App, k: theme.Colors) void {
         ui.div(c).w(4).end();
         ui.key(c, "titlebar-chat-history");
         const history = ui.div(c).row().size(24, 24).center().rounded(6).hover(k.hover).control();
-        defer history.end();
         icons.icon(c, .@"clock-circle", 16, k.muted, 0);
         if (history.clicked()) strip.open(a, .history, strip.active(a), c.rects.get(c.node(history.index).id));
+        history.end();
         ui.div(c).w(4).end();
         const dev = a.settings.uiMode() == .developer;
         ui.key(c, "titlebar-ui-mode-pill");
