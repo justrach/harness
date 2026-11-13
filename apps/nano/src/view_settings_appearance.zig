@@ -70,6 +70,8 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
     themeCard(c, a, k);
     caption(c, k, "Window and background");
     windowCard(c, a, k);
+    caption(c, k, "New-chat wallpaper");
+    @import("view_wallpaper_settings.zig").card(c, a, k);
     caption(c, k, "Conversation");
     {
         const cd = card(c, k);

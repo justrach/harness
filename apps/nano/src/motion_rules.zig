@@ -207,13 +207,13 @@ pub fn slotTextRoom(slot_w: f32, hovered: bool, menu_count: usize) f32 {
 
 /// Left inset of the top instrument strip (`Nano.StripMenu.stripLeftInset`).
 /// Accounts for traffic lights (`88px`), sidebar toggle (`24px`), collapsed history
-/// button (`28px`), optional titlebar update button (`26px`), and `14px` clearance.
+/// and mode controls (`28px` each), optional update (`26px`), and `14px` clearance.
 pub fn stripLeftInset(sidebar_w: f32, side_max: f32, settings_open: bool, has_update: bool) f32 {
     const side = @max(1, side_max);
     const collapsed = 1 - std.math.clamp(sidebar_w / side, 0, 1);
-    const history: f32 = if (settings_open) 28 else 28 * collapsed;
+    const history_and_mode: f32 = if (settings_open) 56 else 56 * collapsed;
     const updates: f32 = if (!settings_open and has_update) 26 else 0;
-    return @max(0, @import("window_chrome.zig").leading + 24 + history + updates + 14 - sidebar_w);
+    return @max(0, @import("window_chrome.zig").leading + 24 + history_and_mode + updates + 14 - sidebar_w);
 }
 
 pub const CloseSurface = enum { chat, host, files };
@@ -670,8 +670,8 @@ test "lean ScrollFollow and Tween kernels: stickEndScroll quiescence and C0 reta
     try std.testing.expectEqual(@as(f32, 43), chips.dev_text_max);
     try std.testing.expectEqual(@as(f32, 40), chips.pick_text_max);
 
-    // Update button (`🔄`, x <= 166) never overlaps the first slot (`x = 180`).
-    try std.testing.expectEqual(@as(f32, @import("window_chrome.zig").leading + 92), stripLeftInset(0, 224, false, true));
+    // History + mode + update fit before the first slot's 14px clearance.
+    try std.testing.expectEqual(@as(f32, @import("window_chrome.zig").leading + 120), stripLeftInset(0, 224, false, true));
 
     // Cmd+W hierarchy & single-pass coalescing.
     try std.testing.expectEqual(@as(usize, 1), closeRedrawPasses(true, true));

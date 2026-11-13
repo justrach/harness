@@ -56,8 +56,9 @@ pub fn canvas(c: *ui.Context, a: *App, k: theme.Colors) void {
     const pane_w = transcript_view.paneWidth(c, a);
     const pane_h = transcript_view.paneHeight(c, a) orelse c.size.h;
     const w = composer.dockedWidth(pane_w, transcript_view.column_w);
-    const area = ui.div(c).column().wFull().grow().h(0).itemsCenter();
+    const area = ui.div(c).column().wFull().grow().h(0).itemsCenter().clip();
     defer area.end();
+    @import("wallpaper.zig").background(c, &a.settings, area, pane_w, pane_h, k.dark);
     // Center the hero and starter chips optically in spacious canvases while
     // keeping bottom-aligned flow in short or expanded panes so chips never
     // overlap the composer dock.
