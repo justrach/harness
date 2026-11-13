@@ -113,6 +113,8 @@ pub const Part = struct {
     /// An error's typed sign-in route (`MessagePart::Error.reauth`), only
     /// when it's one of the allowlisted ones.
     reauth: ?@import("reauth_recovery.zig").Provider = null,
+    /// A visual part's bounded Luau source script.
+    script: []u8 = &.{},
     /// An input part's request and its questions, in `arena`.
     request_id: []const u8 = "",
     questions: []const Question = &.{},
@@ -131,6 +133,7 @@ pub const Part = struct {
         gpa.free(p.stats);
         if (p.diff_old) |s| gpa.free(s);
         if (p.diff_new) |s| gpa.free(s);
+        gpa.free(p.script);
         p.text.deinit(gpa);
         if (p.arena) |a| {
             a.deinit();
@@ -409,7 +412,10 @@ fn parsePart(gpa: Allocator, o: json.ObjectMap) !Part {
             try p.text.appendSlice(gpa, string(o.get("name")) orelse "");
             p.path = try gpa.dupe(u8, string(o.get("path")) orelse "");
         },
-        .visual => try p.text.appendSlice(gpa, string(o.get("title")) orelse ""),
+        .visual => {
+            try p.text.appendSlice(gpa, string(o.get("title")) orelse "");
+            if (string(o.get("script"))) |sc| p.script = try gpa.dupe(u8, sc);
+        },
         .delegation, .other => {},
     }
     return p;

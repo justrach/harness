@@ -44,6 +44,8 @@ pub fn withAccent(k: theme.Colors, a: *const App) theme.Colors {
     const p = presetNamed(a.settings.accent() orelse return k) orelse return k;
     var out = k;
     out.accent = Color.hex(if (k.dark) p.dark else p.light);
+    out.accent_strong = out.accent;
+    out.on_accent = out.onAccent();
     out.accent_wash = out.accent.alpha(if (k.dark) 0.22 else 0.12);
     return out;
 }

@@ -150,4 +150,5 @@ test {
     _ = @import("graff_update.zig");
     _ = @import("view_updates.zig");
     _ = @import("sound.zig");
+    _ = @import("visual_luau.zig");
 }
