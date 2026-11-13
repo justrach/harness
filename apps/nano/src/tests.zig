@@ -18,6 +18,7 @@ test {
     _ = @import("diff.zig");
     _ = @import("tests_diff_availability.zig");
     _ = @import("tests_git.zig");
+    _ = @import("tests_git_workflow.zig");
     _ = @import("tests_scroll_performance.zig");
     _ = @import("tests_link_actions.zig");
     _ = @import("wizard.zig");

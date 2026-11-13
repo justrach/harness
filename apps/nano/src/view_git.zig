@@ -13,6 +13,7 @@ const prs = @import("app_change_requests.zig");
 const cr = @import("change_requests.zig");
 
 pub fn history(c: *ui.Context, a: *App, k: theme.Colors) void {
+    if (a.panels.git_workflow.open) return @import("view_git_workflow.zig").view(c, a, k);
     const s = &a.panels.history;
     {
         const bar = ui.div(c).row().wFull().h(40).px(12).gap(8).itemsCenter();
@@ -21,6 +22,7 @@ pub fn history(c: *ui.Context, a: *App, k: theme.Colors) void {
         const chat = if (a.selected) |id| a.findChat(id) else null;
         kit.ellipsisText(c, if (chat) |ch| ch.branch orelse "Checkout history" else "Git history", .{ .size = 12, .mono = true, .color = k.text }, 200);
         ui.spacer(c);
+        if (button(c, k, "Staging", true)) @import("app_git_workflow.zig").show(a);
         if (button(c, k, "Changes", true)) panels.addDiffsTab(a);
         if (button(c, k, "Refresh", s.pending == null)) git.load(a, 0);
     }

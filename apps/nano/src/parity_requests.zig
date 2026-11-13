@@ -78,6 +78,12 @@ pub fn cases(gpa: std.mem.Allocator) ![]Case {
         try case(gpa, "watch git", r.watchGit(space, dir, null), true),
         try case(gpa, "page local git history", r.gitHistory(dir, 0, null), false),
         try case(gpa, "page remote git history", r.gitHistory(dir, 50, "host-parity"), false),
+        try case(gpa, "inspect checkout Git state", r.gitState(chat, null), false),
+        // Impossible checkout/checksum fences: parity must never write or push.
+        try case(gpa, "stage with stale checkout fences", r.gitAction(chat, "checkout-parity-stale", "hash-parity-stale", .{ .kind = .stage, .path = "README.md" }, null), false),
+        try case(gpa, "unstage with stale checkout fences", r.gitAction(chat, "checkout-parity-stale", "hash-parity-stale", .{ .kind = .unstage, .path = "README.md" }, null), false),
+        try case(gpa, "commit with stale checkout fences", r.gitAction(chat, "checkout-parity-stale", "hash-parity-stale", .{ .kind = .commit, .message = "Synthetic staged changes" }, null), false),
+        try case(gpa, "push with stale checkout fences", r.gitAction(chat, "checkout-parity-stale", "hash-parity-stale", .{ .kind = .push }, null), false),
         try case(gpa, "list project actions", r.listActions(space, null), false),
         // Before the action exists: a real run would leave a terminal open.
         try case(gpa, "run a project action", r.runAction(space, chat, "test", null), false),
