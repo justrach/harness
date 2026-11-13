@@ -34,6 +34,10 @@ pub const ring = display.ring;
 pub const separator = display.separator;
 pub const empty = display.empty;
 
+const timeline = @import("timeline.zig");
+pub const timelineItem = timeline.timelineItem;
+pub const TimelineItemOptions = timeline.Options;
+
 const overlay = @import("overlay.zig");
 pub const Placement = overlay.Placement;
 pub const tooltip = overlay.tooltip;

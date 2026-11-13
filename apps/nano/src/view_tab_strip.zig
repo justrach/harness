@@ -479,7 +479,7 @@ pub fn title(a: *const App, panel: Panel) []const u8 {
     };
 }
 pub fn hostTitle(a: *const App, tab: panels.Tab) []const u8 {
-    return if (tab.kind == .tool_access) "Tool access" else if (tab.agent) |agent| agent.title else if (tab.browser) |browser| browser.title.text() else if (tab.kind == .diffs) a.panels.scope.label() else std.fs.path.basename(tab.path);
+    return if (tab.kind == .git) "Git history" else if (tab.kind == .github) "GitHub" else if (tab.kind == .tool_access) "Tool access" else if (tab.agent) |agent| agent.title else if (tab.browser) |browser| browser.title.text() else if (tab.kind == .diffs) a.panels.scope.label() else std.fs.path.basename(tab.path);
 }
 pub fn glyph(a: *const App, panel: Panel) icons.Name {
     return switch (panel) {
@@ -489,6 +489,8 @@ pub fn glyph(a: *const App, panel: Panel) icons.Name {
             .browser => .globe,
             .file => .document,
             .diffs => .list,
+            .git => .@"git-branch",
+            .github => .@"pull-request",
             .subagent => .bot,
             .tool_access => .widget,
         } else .plus,

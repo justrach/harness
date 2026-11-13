@@ -98,6 +98,36 @@ pub fn listDrives(host: ?[]const u8) Request(struct { targetDeviceId: ?[]const u
     return .{ .method = "ListDrives", .params = .{ .targetDeviceId = host } };
 }
 
+pub fn gitHistory(cwd: []const u8, cursor: usize, host: ?[]const u8) Request(struct { cwd: []const u8, cursor: usize, limit: usize, targetDeviceId: ?[]const u8 }) {
+    return .{ .method = "ListGitHistory", .params = .{ .cwd = cwd, .cursor = cursor, .limit = 50, .targetDeviceId = host } };
+}
+
+pub const GitActionKind = enum { stage, unstage, commit, push };
+pub const GitAction = struct { kind: GitActionKind, path: ?[]const u8 = null, message: ?[]const u8 = null };
+
+pub fn gitState(chat_id: []const u8, host: ?[]const u8) Request(struct { chatId: []const u8, targetDeviceId: ?[]const u8 }) {
+    return .{ .method = "GetCheckoutGitState", .params = .{ .chatId = chat_id, .targetDeviceId = host } };
+}
+
+pub fn gitAction(chat_id: []const u8, checkout_id: []const u8, checksum: []const u8, action: GitAction, host: ?[]const u8) Request(struct { chatId: []const u8, checkoutId: []const u8, expectedChecksum: []const u8, action: GitAction, targetDeviceId: ?[]const u8 }) {
+    return .{ .method = "ApplyCheckoutGitAction", .params = .{ .chatId = chat_id, .checkoutId = checkout_id, .expectedChecksum = checksum, .action = action, .targetDeviceId = host } };
+}
+
+pub const GitHubKind = enum { pulls, issues, pull, issue, files, activity };
+pub const GitHubFilter = enum { open, closed, all };
+pub const GitHubBrowse = struct {
+    chatId: []const u8,
+    kind: GitHubKind,
+    state: ?GitHubFilter = null,
+    number: ?u64 = null,
+    page: usize = 1,
+    expectedRepository: ?[]const u8 = null,
+    targetDeviceId: ?[]const u8 = null,
+};
+pub fn githubBrowse(params: GitHubBrowse) Request(GitHubBrowse) {
+    return .{ .method = "BrowseCheckoutGitHub", .params = params };
+}
+
 pub fn listRefs(repo_path: []const u8, host: ?[]const u8) Request(struct { repoPath: []const u8, targetDeviceId: ?[]const u8 }) {
     return .{ .method = "ListRefs", .params = .{ .repoPath = repo_path, .targetDeviceId = host } };
 }

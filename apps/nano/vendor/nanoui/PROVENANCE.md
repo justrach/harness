@@ -50,6 +50,14 @@ teardown uses `destroyNow` after close decisions have been resolved, matching
 Windows' forced-disposal path and avoiding a vetoed-close teardown loop.
 This supplies the same dirty-document veto contract to all desktop windows.
 
+The native timeline row is cherry-picked from upstream proposal
+https://github.com/justrach/nanoui/pull/177, commit
+`b641cf30f360d40f41248478fea3aed0597a14ed`: `src/kit/timeline.zig`
+and its two public exports in `src/kit/kit.zig`. The upstream base/pin is
+unchanged. The proposal carries the domain-neutral component tests and
+cross-platform checks; Harness's native history tests exercise the consumer.
+No Luau module or runtime is included.
+
 These changes live in this checked-in package, not an ignored download cache.
 
 To update: start with the pinned upstream distribution, retain the notices,
