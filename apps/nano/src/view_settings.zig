@@ -28,6 +28,7 @@ pub fn st(c: *ui.Context, size: f32, base: ui.TextStyle) ui.TextStyle {
 }
 
 pub fn open(a: *App) void {
+    if (!a.view.settings_open) a.view.settings_search_focus = true;
     a.view.settings_open = true;
     a.view.account_menu = false;
     a.redraw();
@@ -35,7 +36,9 @@ pub fn open(a: *App) void {
 
 pub fn close(a: *App) void {
     a.view.settings_open = false;
+    a.view.settings_search_focus = false;
     a.view.settings_search.clear();
+    a.view.focus_composer = true;
     a.redraw();
 }
 
@@ -71,15 +74,23 @@ pub fn space(c: *ui.Context, h: f32) void {
 /// In the sidebar's place: "Settings", the search, the sections under their
 /// groups, and Back at the foot.
 pub fn nav(c: *ui.Context, a: *App, k: theme.Colors) void {
-    const side = ui.div(c).column().w(sidebar.width).hFull().bg(k.sidebar).pt(sidebar.titlebar_h);
+    const side = ui.div(c).column().w(sidebar.widthOf(a)).hFull().bg(k.sidebar).pt(sidebar.titlebar_h);
     defer side.end();
     {
         const list = ui.div(c).column().wFull().grow().h(0).px(8).clip();
         defer list.end();
         {
-            const h = ui.div(c).row().px(8).pt(12).pb(8);
+            const h = ui.div(c).row().wFull().px(4).pt(10).pb(8).itemsCenter();
             defer h.end();
-            ui.text(c, "Settings", st(c, 11, .{ .weight = .medium, .color = k.muted.alpha(0.6) }));
+            ui.key(c, "settings-top-back");
+            const top_back = kit.pressFeedback(ui.div(c).row().h(28).px(8).gap(6).itemsCenter().rounded(7).bg(k.ink(if (k.dark) 0.05 else 0.035)).border(k.border).borderW(1).hover(k.hover).control());
+            const top_hot = top_back.hovered();
+            icons.icon(c, .@"arrow-left", 13, if (top_hot) k.text else k.text.alpha(0.9), 0);
+            ui.text(c, "Back", st(c, 12.5, .{ .weight = .medium, .color = if (top_hot) k.text else k.text.alpha(0.9) }));
+            if (top_back.clicked()) close(a);
+            top_back.end();
+            ui.spacer(c);
+            ui.text(c, "Settings", st(c, 11, .{ .weight = .medium, .color = k.muted.alpha(0.75) }));
         }
         {
             // 33 tall: GPUI's search is a composer input, 5 above and below.
@@ -88,6 +99,17 @@ pub fn nav(c: *ui.Context, a: *App, k: theme.Colors) void {
             icons.icon(c, .magnifer, 14, k.muted, 0);
             const f = ui.div(c).row().grow().w(0);
             defer f.end();
+            ui.key(c, "settings-search-field");
+            const field_id = c.peekId(null);
+            if (a.view.settings_search_focus) {
+                c.focus = field_id;
+                c.changed = true;
+                a.view.settings_search_focus = false;
+            }
+            var anim_h = std.hash.Wyhash.init(field_id);
+            const salt: u32 = 0;
+            anim_h.update(std.mem.asBytes(&salt));
+            _ = c.anims.remove(anim_h.final());
             _ = ui.textField(c, &a.view.settings_search, .{ .placeholder = "Search settings", .placeholder_color = k.faint, .width = .fill, .bare = true, .size = 14, .line_height = 22.75 });
         }
         const rows = ui.div(c).column().wFull().gap(2);
@@ -102,35 +124,42 @@ pub fn nav(c: *ui.Context, a: *App, k: theme.Colors) void {
                 ui.text(c, "No matching settings", st(c, 12, .{ .color = k.muted }));
             }
             for (found, 0..) |s, i| if (navRow(c, k, s, i == 0)) show(a, s);
-            return;
-        }
-        var group: []const u8 = "";
-        for (Section.all) |s| {
-            if (!std.mem.eql(u8, group, s.group())) {
-                group = s.group();
-                const h = ui.div(c).row().px(8).pt(12).pb(4);
-                defer h.end();
-                ui.text(c, group, st(c, 11, .{ .weight = .medium, .color = k.muted.alpha(0.6) }));
+        } else {
+            var group: []const u8 = "";
+            for (Section.all) |s| {
+                if (!std.mem.eql(u8, group, s.group())) {
+                    group = s.group();
+                    const h = ui.div(c).row().px(8).pt(12).pb(4);
+                    defer h.end();
+                    ui.text(c, group, st(c, 11, .{ .weight = .medium, .color = k.muted.alpha(0.6) }));
+                }
+                if (navRow(c, k, s, s == a.settings.section)) show(a, s);
             }
-            if (navRow(c, k, s, s == a.settings.section)) show(a, s);
         }
     }
     // A running cloud sandbox stays in view on every settings page too.
-    @import("view_sandbox_strip.zig").strip(c, a, k, 4);
+    if (!a.offscreen) @import("view_sandbox_strip.zig").strip(c, a, k, 4);
     const foot = ui.div(c).column().wFull().px(8).pb(12);
     defer foot.end();
-    const back = ui.div(c).row().wFull().px(8).py(6).gap(6).itemsCenter().rounded(8).hover(k.hover);
+    ui.key(c, "settings-back");
+    const back = kit.pressFeedback(ui.div(c).row().wFull().h(34).px(10).gap(7).itemsCenter().rounded(8).bg(k.ink(if (k.dark) 0.05 else 0.035)).border(k.border).borderW(1).hover(k.hover).control());
     defer back.end();
     const hot = back.hovered();
-    icons.icon(c, .@"alt-arrow-left", 16, k.muted, 0);
-    ui.text(c, "Back", st(c, 13, .{ .color = if (hot) k.text else k.muted }));
+    icons.icon(c, .@"arrow-left", 14, if (hot) k.text else k.text.alpha(0.9), 0);
+    ui.text(c, "Back", st(c, 13, .{ .weight = .medium, .color = if (hot) k.text else k.text.alpha(0.9) }));
+    ui.spacer(c);
+    kit.kbdHint(c, k, "esc");
     if (back.clicked()) close(a);
 }
 
 fn navRow(c: *ui.Context, k: theme.Colors, s: Section, selected: bool) bool {
     ui.key(c, s.key());
     var r = ui.div(c).row().wFull().px(8).py(6).gap(8).itemsCenter().rounded(8);
-    r = if (selected) r.bg(k.selected) else r.hover(k.hover);
+    if (selected) {
+        r = r.bg(k.selected);
+    } else {
+        r = r.hover(k.hover);
+    }
     defer r.end();
     const hot = r.hovered();
     icons.icon(c, s.icon(), 16, k.muted, 0);
@@ -140,43 +169,62 @@ fn navRow(c: *ui.Context, k: theme.Colors, s: Section, selected: bool) bool {
 
 /// The open section's page.
 pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
-    // GPUI's settings rail: shown while the page scrolls (`popover::rail`),
-    // with a nanoui that has overlay bars (justrach/nanoui#21).
-    var page_style: ui.Style = .{ .grow = 1, .width = .fill, .align_items = .center };
-    if (@hasField(ui.Style, "scrollbar")) page_style.scrollbar = .{ .overlay = k.faint.alpha(0.5) };
-    ui.scroll(c, page_style);
-    defer ui.end(c);
-    // `page_column`: 768 wide at most, centred, 24 either side, 32 above.
-    const col = ui.div(c).column().wFull().maxW(768).px(24).pt(32).pb(64);
-    defer col.end();
-    // The column's inside: wrapped text needs its width up front.
-    const main_w = c.size.w - sidebar.width;
-    inner_w = @min(main_w, 768) - 2 * 24;
-    // Appearance's theme menu doesn't outlive its page.
-    if (a.settings.section != .appearance) a.view.theme_menu = null;
+    // Prevent retain.store from caching a viewport-culled partial scene for
+    // Settings pages, so every 120Hz scroll event paints newly revealed cards
+    // immediately without torn borders or pop-in.
+    if (comptime @hasField(ui.Context, "retain")) {
+        c.retain.virtual_list = true;
+    } else if (comptime @hasField(ui.Context, "virtual_list")) {
+        c.virtual_list = true;
+    }
+    {
+        // GPUI's settings rail: shown while the page scrolls (`popover::rail`),
+        // with a nanoui that has overlay bars (justrach/nanoui#21).
+        var page_style: ui.Style = .{ .grow = 1, .width = .fill, .align_items = .center };
+        if (@hasField(ui.Style, "scrollbar")) page_style.scrollbar = .{ .overlay = k.faint.alpha(0.5) };
+        ui.scroll(c, page_style);
+        defer ui.end(c);
+        // `page_column`: 768 wide at most, centred, 24 either side, 32 above.
+        ui.key(c, c.print("settings-page-{s}", .{@tagName(a.settings.section)}));
+        const enter = ui.motion.frame(c, .{
+            .initial = .{ .opacity = 0 },
+            .target = .{ .opacity = 1 },
+            .transition = .{ .tween = .{ .duration = 0.14, .ease = .linear } },
+        });
+        const col = ui.div(c).column().wFull().maxW(768).px(24).pt(32).pb(64).motion(enter);
+        defer col.end();
+        // The column's inside: wrapped text needs its width up front.
+        const main_w = c.size.w - sidebar.width;
+        inner_w = @min(main_w, 768) - 2 * 24;
+        // Appearance's theme menu doesn't outlive its page.
+        if (a.settings.section != .appearance) a.view.theme_menu = null;
+        switch (a.settings.section) {
+            .notifications => notifications(c, a, k),
+            .files => files(c, a, k),
+            .archived => @import("view_settings_archived.zig").page(c, a, k),
+            .devices => @import("view_settings_devices.zig").page(c, a, k),
+            .shortcuts => @import("view_settings_shortcuts.zig").page(c, a, k),
+            .appearance => @import("view_settings_appearance.zig").page(c, a, k),
+            .mcp => @import("view_settings_mcp.zig").page(c, a, k),
+            .appshots => @import("view_settings_appshots.zig").page(c, a, k),
+            .github_ci => @import("view_settings_github_ci.zig").page(c, a, k),
+            .harnesses => @import("view_settings_agents.zig").page(c, a, k),
+            .agents => @import("view_settings_accounts.zig").page(c, a, k),
+        }
+    }
     switch (a.settings.section) {
-        .notifications => notifications(c, a, k),
-        .files => files(c, a, k),
-        .archived => {
-            const archived = @import("view_settings_archived.zig");
-            archived.page(c, a, k);
-            archived.dialog(c, a, k);
-        },
-        .devices => @import("view_settings_devices.zig").page(c, a, k),
-        .shortcuts => @import("view_settings_shortcuts.zig").page(c, a, k),
+        .archived => @import("view_settings_archived.zig").dialog(c, a, k),
+        .devices => @import("view_settings_devices.zig").dialog(c, a, k),
         .appearance => {
-            const look = @import("view_settings_appearance.zig");
-            look.page(c, a, k);
-            look.themeMenu(c, a, k);
+            @import("view_settings_appearance.zig").themeMenu(c, a, k);
             const library = @import("view_settings_theme_import.zig");
             library.dialog(c, a, k);
             library.reviewDialog(c, a, k);
         },
-        .mcp => @import("view_settings_mcp.zig").page(c, a, k),
-        .appshots => @import("view_settings_appshots.zig").page(c, a, k),
-        .github_ci => @import("view_settings_github_ci.zig").page(c, a, k),
-        .harnesses => @import("view_settings_agents.zig").page(c, a, k),
-        .agents => @import("view_settings_accounts.zig").page(c, a, k),
+        .github_ci => @import("view_settings_github_ci.zig").overlays(c, a, k),
+        .harnesses => @import("view_settings_agents.zig").overlays(c, a, k),
+        .agents => @import("view_settings_accounts.zig").overlays(c, a, k),
+        else => {},
     }
 }
 
@@ -215,13 +263,13 @@ pub fn fieldLabel(c: *ui.Context, k: theme.Colors, label: []const u8) void {
 /// box pads by its width.
 pub fn card(c: *ui.Context, k: theme.Colors) ui.Div {
     space(c, 24);
-    return ui.div(c).column().wFull().p(1).rounded(12).border(k.border).borderW(1).bg(if (k.frosted) k.card else k.shell).clip();
+    return ui.div(c).column().wFull().p(1).rounded(12).border(k.border).borderW(1).bg(if (k.frosted) k.card else k.shell);
 }
 
 /// `card_row`: 20 by 14 inside, a line above all but the first.
 pub fn row(c: *ui.Context, k: theme.Colors, first: bool, dim: bool) ui.Div {
     if (!first) _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
-    var r = ui.div(c).row().wFull().px(20).py(14).gap(14).itemsCenter().hover(k.ink(0.015));
+    var r = ui.div(c).row().wFull().px(20).py(14).gap(14).itemsCenter().hover(k.hover);
     if (dim) r = r.opacity(0.55);
     return r;
 }
@@ -304,6 +352,8 @@ fn notifications(c: *ui.Context, a: *App, k: theme.Colors) void {
         switchRow(c, a, k, .sound_completion_enabled, .check, "Task completed", "Play a sound when an agent finishes a run.", false, sound);
         switchRow(c, a, k, .sound_input_enabled, .@"chat-round-line", "Input required", "Play a sound when an agent needs your response.", false, sound);
         switchRow(c, a, k, .sound_attention_enabled, .@"danger-triangle", "Errors and disconnections", "Play a sound when a run fails or the connection remains unavailable.", false, sound);
+        // Its own switch, not under Session sounds (`attach_sound_enabled`).
+        switchRow(c, a, k, .attach_sound_enabled, .paperclip, "Attaching files", "Play a soft sound when you paste, drop or pick a file or image.", false, true);
         switchRow(c, a, k, .notifications_enabled, .bell, "Desktop notifications", "Show a system banner on the same events, so pings reach you while Harness is in the background.", false, true);
         switchRow(c, a, k, .notifications_background_only, .monitor, "Only when in the background", "Skip the banner while a Harness window is focused.", false, desktop);
     }
@@ -325,8 +375,11 @@ fn files(c: *ui.Context, a: *App, k: theme.Colors) void {
     defer r.end();
     tile(c, k, .folder);
     // Edit's own width: 12 a side and its words.
-    words(c, k, "New project starting folder", c.print("Automatic · {s}", .{startingFolder(a) orelse "Home"}), 24 + @ceil(c.text.width("Edit", .{ .size = 13 })));
-    if (ghost(c, k, "Edit")) a.setNotice("Choosing a starting folder isn't in Harness Nano yet: use Harness.");
+    const device = a.device_id orelse a.draftDevice();
+    const override = if (device) |id| a.settings.projectFolderOverride(id) else null;
+    const inferred = if (device) |id| @import("project_paths.zig").starting(c.alloc(), a.settings.doc.get("projectFoldersByDevice"), id, a.spaces.items) catch null else null;
+    words(c, k, "New project starting folder", c.print("{s} · {s}", .{ if (override != null) "Custom" else "Automatic", override orelse inferred orelse "Home" }), 24 + @ceil(c.text.width("Edit", .{ .size = 13 })));
+    if (ghost(c, k, "Edit")) @import("app_project_setup.zig").openStartingFolder(a);
 }
 
 /// The folder new projects start in, with none chosen: the folder most of

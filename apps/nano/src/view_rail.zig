@@ -76,6 +76,33 @@ pub fn bucketOf(bs: []const Bucket, ix: usize) ?usize {
     return null;
 }
 
+fn promptsInView(c: *ui.Context, ticks: []const Tick, box: u64) bool {
+    const view = c.rects.get(box) orelse return false;
+    var first_top: ?f32 = null;
+    for (ticks) |tick| if (tick.top) |top| {
+        if (first_top == null or top < first_top.?) first_top = top;
+        if (top + 28 >= view.y and top <= view.y + view.h) return true;
+    };
+    const top = first_top orelse return false;
+    // The reader may be inside a long assistant reply below the prompt whose
+    // turn opened it; as long as the first prompt isn't below the viewport
+    // and the scroll offset hasn't drifted past `scroll_max`, the turn is in view.
+    if (top > view.y + view.h) return false;
+    if (c.scroll_max.get(box)) |max| {
+        const at = c.scroll.get(box) orelse 0;
+        if (at <= max + 1) return true;
+    }
+    return false;
+}
+
+fn placed(ticks: []const Tick) usize {
+    var n: usize = 0;
+    for (ticks) |tick| if (tick.top != null) {
+        n += 1;
+    };
+    return n;
+}
+
 /// `active_tick` as the rail reads it: glued to the end, the last prompt
 /// (the list's top then is past its rows); else the last whose row starts
 /// at or above the reading line, the first before any does.
@@ -166,8 +193,11 @@ pub fn step(c: *ui.Context, st: *State) void {
 /// prompts are `ticks`, in the box now open: the column the transcript
 /// fills (`render_rail`'s absolute overlay, `left(16)`, its full height).
 pub fn rail(c: *ui.Context, k: theme.Colors, st: *State, t: *const tr.Transcript, ticks: []const Tick, box: u64, container_w: f32) void {
-    // A minimap of one exchange is noise (`marks.length < 2`).
-    if (!visible(container_w) or ticks.len < 2) {
+    // A minimap of one exchange is noise (`marks.length < 2`). Ticks also
+    // belong beside prompts the reader can see. A stale scroll offset can
+    // leave this column empty; drawing the rail there is a row of dashes
+    // in blank space.
+    if (!visible(container_w) or placed(ticks) < 2 or !promptsInView(c, ticks, box)) {
         st.hover = null;
         return;
     }

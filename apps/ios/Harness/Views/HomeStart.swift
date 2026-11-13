@@ -46,17 +46,32 @@ struct HomeStartHeader: View {
     static let subtitle = "Ask for anything. Your chats are below."
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Theme.spaceMD) {
-            VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .center, spacing: Theme.spaceMD) {
+            VStack(alignment: .center, spacing: 6) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Theme.surface)
+                        .frame(width: 40, height: 40)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .strokeBorder(Theme.border, lineWidth: 1)
+                        )
+                    HarnessMark()
+                        .frame(width: 20, height: 20)
+                }
+                .padding(.bottom, 2)
                 Text(Self.title)
                     .font(Theme.sans(Theme.titleSize, weight: .semibold, relativeTo: .largeTitle))
                     .foregroundStyle(Theme.text)
+                    .multilineTextAlignment(.center)
                     .accessibilityAddTraits(.isHeader)
                     .accessibilityIdentifier("home-title")
                 Text(Self.subtitle)
                     .font(Theme.sans(14))
                     .foregroundStyle(Theme.textMuted)
+                    .multilineTextAlignment(.center)
             }
+            .frame(maxWidth: .infinity)
             Button(action: compose) {
                 HStack(spacing: Theme.spaceSM) {
                     Text("Message Graff")

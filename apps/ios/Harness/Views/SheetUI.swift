@@ -164,21 +164,41 @@ struct SheetPrimaryButton: View {
 /// Pressed-state wash for tappable rows and chips — the desktop's
 /// `element_hover` (white 6%) translated to touch. Fades out on release.
 struct PressWashButtonStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var cornerRadius: CGFloat = 8
+    var scale: CGFloat = 1
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .background(configuration.isPressed ? Theme.elementHover : Color.clear,
-                        in: RoundedRectangle(cornerRadius: cornerRadius))
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+                        in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .scaleEffect(configuration.isPressed && !reduceMotion ? scale : 1)
+            .animation(reduceMotion ? nil : Motion.press, value: configuration.isPressed)
     }
 }
 
-/// Capsule variant for chips: deepens the existing fill while pressed.
+/// Tactile press scale for floating glass controls and circular action buttons.
+/// Respects `accessibilityReduceMotion` (`FrameSchedule.lean`: `press_scale_respects_reduced_motion`).
+struct PressScaleButtonStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var scale: CGFloat = 0.96
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed && !reduceMotion ? scale : 1)
+            .opacity(configuration.isPressed ? 0.88 : 1)
+            .animation(reduceMotion ? nil : Motion.press, value: configuration.isPressed)
+    }
+}
+
+/// Capsule variant for chips: deepens the existing fill and subtly contracts while pressed.
 struct ChipPressButtonStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .overlay(Capsule().fill(configuration.isPressed ? ink(0.06) : .clear))
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.96 : 1)
+            .animation(reduceMotion ? nil : Motion.press, value: configuration.isPressed)
     }
 }

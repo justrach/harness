@@ -19,11 +19,17 @@ const Harness = struct {
     fn init(h: *Harness) !void {
         @import("theme.zig").registerFonts();
         h.a = .init(testing.allocator, testing.io, 1);
+        // Each step as its own row: these tests are about the detailed transcript.
+        h.a.settings.set(.transcript_compact_mode, false);
         h.a.dark = true;
         var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, chats, .{});
         defer parsed.deinit();
         try h.a.chats.replace(parsed.value);
         h.a.openChat("a", null);
+        // These tests drive the one-list sidebar (its Sessions disclosure,
+        // pins dragged to and from it), as GPUI's sidebar tests pick their
+        // organization; "By status", the default, has its own test.
+        h.a.settings.setText("sidebarOrganization", "inOneList");
         try h.t.init(testing.allocator, .init(&h.a, @import("view.zig").view), .{ .width = 1200, .height = 780, .dark = true });
         h.t.settle(1);
     }
@@ -51,6 +57,20 @@ const Harness = struct {
         h.t.screenshot(path) catch {};
     }
 };
+
+test "the new-chat canvas keeps the project sidebar and its sessions" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.a.settings.setText("sidebarOrganization", "byProject");
+    h.a.offscreen = true;
+    h.a.select(null, null);
+    h.t.settle(1);
+    h.snap("new-chat-sidebar");
+    try testing.expect(h.t.hasText("All projects"));
+    try testing.expect(h.t.hasText("Alpha"));
+    try testing.expect(h.t.hasText("Beta"));
+}
 
 fn sidebarChats(h: *Harness, count: usize) !void {
     try sidebarRows(h, count, false, false);
@@ -97,19 +117,77 @@ test "a live ACP thought remains visible before the empty answer receives text" 
     defer parsed.deinit();
     try h.a.transcript.apply(parsed.value);
     h.t.settle(1);
+    try testing.expect(h.t.hasText("Thought process"));
+    // macOS deliberately keeps live work behind its disclosure.
+    if (@import("builtin").os.tag == .macos) {
+        try h.t.clickText("Thought process");
+        h.t.settle(1);
+    }
     try testing.expect(h.t.hasText("A synthetic live thought"));
 }
 
 test "an empty sidebar matches GPUI without a Sessions disclosure" {
+    for ([_][]const u8{ "inOneList", "byStatus" }) |organization| {
+        var h: Harness = undefined;
+        try h.init();
+        defer h.deinit();
+        h.a.settings.setText("sidebarOrganization", organization);
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, "[]", .{});
+        defer parsed.deinit();
+        try h.a.chats.replace(parsed.value);
+        h.t.settle(1);
+        try testing.expect(h.t.hasText("No sessions yet"));
+        try testing.expect(!h.t.hasText("Sessions"));
+    }
+}
+
+test "By status, the default: Needs you above Today above Earlier, under the project filter alone" {
     var h: Harness = undefined;
     try h.init();
     defer h.deinit();
-    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, "[]", .{});
+    h.a.settings.setText("sidebarOrganization", "byStatus");
+    const now = h.a.nowMs();
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const iso = struct {
+        fn of(a: std.mem.Allocator, ms: i64) ![]const u8 {
+            const es: std.time.epoch.EpochSeconds = .{ .secs = @intCast(@divFloor(ms, 1000)) };
+            const day = es.getEpochDay().calculateYearDay();
+            const md = day.calculateMonthDay();
+            const ds = es.getDaySeconds();
+            return std.fmt.allocPrint(a, "{d}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{ day.year, md.month.numeric(), md.day_index + 1, ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute() });
+        }
+    }.of;
+    const text = try std.fmt.allocPrint(arena.allocator(),
+        \\[{{"id":"old","deviceId":"d","title":"Last week's","archived":false,"lastMessageAt":"2026-01-02T00:00:00Z"}},
+        \\ {{"id":"new","deviceId":"d","title":"Fresh one","archived":false,"lastMessageAt":"{s}"}},
+        \\ {{"id":"ask","deviceId":"d","title":"Has a question","archived":false,"lastMessageAt":"2026-01-01T00:00:00Z"}}]
+    , .{try iso(arena.allocator(), now)});
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, text, .{});
     defer parsed.deinit();
     try h.a.chats.replace(parsed.value);
+    const sessions = try std.json.parseFromSlice(std.json.Value, testing.allocator, try std.fmt.allocPrint(arena.allocator(),
+        \\[{{"chatId":"ask","status":"awaitingInput","updatedAt":"{s}"}}]
+    , .{try iso(arena.allocator(), now)}), .{});
+    defer sessions.deinit();
+    try h.a.sessions.replace(sessions.value);
+    h.a.resort();
     h.t.settle(1);
-    try testing.expect(h.t.hasText("No sessions yet"));
-    try testing.expect(!h.t.hasText("Sessions"));
+    h.snap("by-status");
+    const needs = h.t.findText("Needs you") orelse return error.NoNeedsYou;
+    const today = h.t.findText("Today") orelse return error.NoToday;
+    const earlier = h.t.findText("Earlier") orelse return error.NoEarlier;
+    try testing.expect(needs.y < today.y and today.y < earlier.y);
+    try testing.expect(needs.y < (h.t.findText("Has a question") orelse return error.NoRow).y);
+    try testing.expect(today.y < (h.t.findText("Fresh one") orelse return error.NoRow).y);
+    try testing.expect(earlier.y < (h.t.findText("Last week's") orelse return error.NoRow).y);
+    // GPUI dropped the full-width New chat and Search chats rows (shell.rs,
+    // 78e69e483): the title bar's + and the filter row's search cover both,
+    // and the filter sits right under the tabs.
+    try testing.expect(!h.t.hasText("New chat"));
+    try testing.expect(!h.t.hasText("Search chats"));
+    const filter = h.t.findText("All projects") orelse return error.NoFilter;
+    try testing.expect(filter.y < needs.y and filter.y < 38 + 26 + 10 + 40);
 }
 
 test "file tool badges preserve Harness identity colors and reuse their cached SVGs" {
@@ -190,6 +268,61 @@ test "a working chat shows a trailer even before the agent publishes any parts" 
     try testing.expect(!h.t.hasText(label));
 }
 
+test "a quiet active turn says it is waiting for the model" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"u","role":"user","parts":[{"id":"p","kind":"text","text":"Synthetic slow request"}]}]}
+    , .{});
+    defer parsed.deinit();
+    try h.a.transcript.apply(parsed.value);
+    var sessions = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"chatId":"a","status":"working","startedAt":"2026-10-26T00:00:00Z","updatedAt":"2026-10-26T00:00:00Z"}]
+    , .{});
+    defer sessions.deinit();
+    try h.a.sessions.replace(sessions.value);
+    h.a.sessions.items[0].started_ms = h.a.nowMs() - 90_000;
+    h.a.sessions.items[0].updated_ms = h.a.nowMs() - 90_000;
+    h.t.settle(1);
+    try testing.expect(h.t.containsText("Waiting for the model"));
+    try testing.expect(h.t.containsText("no update for 1m 30s"));
+
+    // A stale row after a finished reply is not a running turn.
+    var finished = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"a","role":"assistant","status":"complete","parts":[{"id":"p","kind":"text","text":"Synthetic answer"}]}]}
+    , .{});
+    defer finished.deinit();
+    try h.a.transcript.apply(finished.value);
+    h.t.settle(1);
+    try testing.expect(!h.t.containsText("Waiting for the model"));
+}
+
+test "a working trailer names the current plan step and action" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"live","role":"assistant","status":"streaming","parts":[
+        \\ {"id":"plan","kind":"tool","resolved":true,"call":{"kind":"todo","items":[
+        \\   {"text":"Inspect the saved choice","done":true},
+        \\   {"text":"Verify the project grouping","done":false}]}},
+        \\ {"id":"run","kind":"tool","resolved":false,"call":{"kind":"exec","command":"zig build test"}}]}]}
+    , .{});
+    defer parsed.deinit();
+    try h.a.transcript.apply(parsed.value);
+    var sessions = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"chatId":"a","status":"working","startedAt":"2026-10-26T00:00:00Z","updatedAt":"2026-10-26T00:00:00Z"}]
+    , .{});
+    defer sessions.deinit();
+    try h.a.sessions.replace(sessions.value);
+    h.a.sessions.items[0].started_ms = h.a.nowMs();
+    h.a.sessions.items[0].updated_ms = h.a.nowMs();
+    h.t.settle(1);
+    try testing.expect(h.t.hasText("Verify the project grouping"));
+    try testing.expect(h.t.hasText("Run · zig build test"));
+}
+
 test "an ACP reply with more than 256 runs does not lose its final answer" {
     var h: Harness = undefined;
     try h.init();
@@ -267,17 +400,19 @@ test "sidebar culls whole offscreen groups without changing their extent" {
     var h: Harness = undefined;
     try h.init();
     defer h.deinit();
+    // Keep four-digit fixture titles complete; row lookup is not testing fade.
+    h.a.settings.setNumber("sidebarWidth", 360);
     h.a.settings.setText("sidebarOrganization", "byDevice");
     try sidebarRows(&h, 50, false, true);
     const small_nodes = h.t.ctx.stats.nodes;
     try sidebarRows(&h, 2000, false, true);
     try testing.expect(h.t.ctx.stats.nodes <= small_nodes * 2);
     const first = h.t.findText("Synthetic session 0") orelse return error.FirstGroupMissing;
-    // Each group: 12 above, 28 header, 4 body inset, 29 row, 2 gap.
-    h.t.scroll(100, 300, -75 * 1000);
+    // Each group:14 above,28 header,4 body inset,38 row,2 gap.
+    h.t.scroll(100, 300, -86 * 1000);
     const middle = h.t.findText("Synthetic session 1000") orelse return error.JumpGroupMissing;
     try testing.expectApproxEqAbs(first.y, middle.y, 1);
-    h.t.scroll(100, 300, -75 * 2000);
+    h.t.scroll(100, 300, -86 * 2000);
     const last = h.t.findText("Synthetic session 1999") orelse return error.LastGroupMissing;
     try testing.expect(last.y >= 0 and last.y < 780);
     try testing.expect(h.t.ctx.stats.nodes <= small_nodes * 2);
@@ -288,8 +423,15 @@ test "sidebar large wheel jumps and resizes retain mixed-height rows and exact s
         var h: Harness = undefined;
         try h.init();
         defer h.deinit();
+        // Isolate row virtualization from grouping and title fading.
+        h.a.settings.setNumber("sidebarWidth", 360);
+        h.a.settings.setText("sidebarOrganization", "inOneList");
         h.a.settings.set(.sidebar_compact, mode == 0);
-        h.a.settings.set(.sidebar_show_project_label, mode != 2);
+        h.a.settings.set(.sidebar_show_project_label, mode == 1);
+        h.a.settings.set(.sidebar_show_updated, mode != 2);
+        h.a.settings.set(.sidebar_show_harness, mode != 2);
+        h.a.settings.set(.sidebar_show_project_icon, false);
+        h.a.settings.set(.sidebar_show_branch, true);
         try sidebarRows(&h, 2000, true, false);
         const first = h.t.findText("Synthetic session 0") orelse return error.FirstRowMissing;
         try testing.expect(first.y >= 0 and first.y < 780);
@@ -298,15 +440,14 @@ test "sidebar large wheel jumps and resizes retain mixed-height rows and exact s
         var extent: f32 = 0;
         while (rects.next()) |entry| {
             const r = entry.value_ptr.*;
-            if (r.w == 240 and r.h > extent) {
+            if (r.w == @import("view_sidebar.zig").widthOf(&h.a) - 16 and r.h > extent) {
                 body = entry.key_ptr.*;
                 extent = r.h;
             }
         }
         const stride: f32 = switch (mode) {
-            0 => 31,
-            1 => 55, // Alternating 45- and 61-point rows, plus gaps.
-            else => 39, // Without the 16-point project labels.
+            0, 1 => 40, //38px navigation rows plus2px gaps.
+            else => 36, // Branch-only context alternates30/38px rows.
         };
         try testing.expectApproxEqAbs(stride * 2000 - 2, extent, 1);
         // No settle: the input frame itself must build the destination rows,
@@ -406,17 +547,20 @@ test "a new pane starts with an empty prompt; each pane and tab keeps its own" {
     // ⌘W: the left pane's prompt comes back with it.
     h.press(.{ .key = 'w', .cmd = true });
     try testing.expectEqualStrings("hey there", h.a.composer.text());
-    // Alpha's own tab, with its own prompt; the new chat's tab keeps its.
-    h.showTab(0);
+    // Choosing another top-level tab restores its draft.
+    h.a.showTab(0);
+    h.t.settle(1);
     try testing.expectEqualStrings("", h.a.composer.text());
     h.a.composer.set("about alpha");
-    h.showTab(1);
+    h.a.showTab(1);
+    h.t.settle(1);
     try testing.expectEqualStrings("hey there", h.a.composer.text());
-    h.showTab(0);
+    h.a.showTab(0);
+    h.t.settle(1);
     try testing.expectEqualStrings("about alpha", h.a.composer.text());
 }
 
-test "in a narrow pane the starter chips wrap inside it, each with its icon's room" {
+test "in a narrow pane the starter chips stay inside it above the dock, with room for their icons" {
     var h: Harness = undefined;
     try h.init();
     defer h.deinit();
@@ -429,13 +573,17 @@ test "in a narrow pane the starter chips wrap inside it, each with its icon's ro
     h.a.select(null, "s");
     for (0..3) |_| h.press(.{ .key = 'd', .cmd = true });
     h.snap("narrow-chips");
-    const titles = [_][]const u8{ "Build something new", "Research a topic", "Plan a launch", "Tour this project" };
-    const pane_left = 1100 - h.a.tabs.layout().?.shares.items[3] * @import("view_transcript.zig").mainWidth(&h.t.ctx, &h.a);
+    // Current starters are28px wrapped chips ABOVE the input. Their
+    // truncated titles must still leave11px padding,13px icon,6px gap.
+    const titles = [_][]const u8{ "B", "R", "P", "T" };
+    const pill = h.a.view.composer_anchor orelse return error.NoComposer;
     for (titles) |title| {
-        const r = h.t.findText(title) orelse return error.ChipMissing;
-        // 10 points of padding, the 13-point icon and 6 between, inside the pane.
-        try testing.expect(r.x - 29 >= pane_left);
-        try testing.expect(r.x + r.w + 10 <= 1100);
+        const r = for (h.t.ctx.nodes.items) |node| switch (node.content) {
+            .text => |t| if (std.mem.startsWith(u8, t.str, title) and node.rect.y + node.rect.h <= pill.y and node.rect.x > pill.x) break node.rect,
+            else => {},
+        } else return error.StarterChipMissing;
+        try testing.expect(r.x - 30 >= pill.x);
+        try testing.expect(r.x + r.w + 11 <= pill.x + pill.w);
     }
 }
 
@@ -463,7 +611,9 @@ test "the composer has the keys after ⌘D, ⌘[ and ⌘]: nothing typed is lost
     h.press(.{ .key = ']', .cmd = true });
     typeKeys(&h, "s");
     try testing.expectEqualStrings("rights", h.a.composer.text());
-    h.showTab(0);
+    h.press(.{ .key = '[', .cmd = true });
+    h.a.showTab(0);
+    h.t.settle(1);
     typeKeys(&h, "on alpha");
     try testing.expectEqualStrings("on alpha", h.a.composer.text());
 }
@@ -498,11 +648,16 @@ test "Settings › Shortcuts: a chip takes the next keys; a clash is refused, as
     try testing.expectEqualStrings("mod-alt-b", h.a.settings.combo(shortcuts.all[0]));
     try testing.expect(h.t.hasText("Cmd+Opt+B"));
     try testing.expect(h.t.hasText("Reset"));
+    // The follow-up card above the groups puts Browser under the fold.
+    h.t.scroll(700, 400, -400);
+    h.t.settle(1);
     try h.t.clickText("Cmd+Shift+R");
     h.t.settle(1);
     h.press(.{ .key = 'b', .cmd = true, .alt = true });
     try testing.expectEqualStrings("mod-shift-r", h.a.settings.combo(shortcuts.all[1]));
     try testing.expect(h.t.hasText("Cmd+Opt+B is already assigned to Save file."));
+    h.t.scroll(700, 400, 2000);
+    h.t.settle(1);
     try h.t.clickText("Restore defaults");
     h.t.settle(1);
     try testing.expectEqualStrings("mod-s", h.a.settings.combo(shortcuts.all[0]));
@@ -781,6 +936,7 @@ test "Copy › Harness conversation link copies the GPUI app's link; a press out
     try h.init();
     defer h.deinit();
     h.a.device_id = try testing.allocator.dupe(u8, "dev");
+    h.a.account.scope = .local; // Actual EngineInfo authority, not a guessed workspace.
     try openRowMenu(&h, "Beta");
     try h.t.clickText("Copy");
     h.t.settle(1);
@@ -881,7 +1037,9 @@ test "the project menu: All projects, then by name with the away device's last; 
     // The search takes the keys: "le" puts Ledger first.
     h.t.typeText("le");
     h.t.settle(1);
-    try testing.expect(!h.t.hasText("All projects") or h.t.findText("All projects").?.y < 120);
+    // Only the trigger's own label, not the menu's row.
+    const trigger = h.a.view.filter_anchor.?;
+    try testing.expect(!h.t.hasText("All projects") or h.t.findText("All projects").?.y < trigger.y + trigger.h);
     h.press(.{ .key = ui.Shortcut.enter });
     try testing.expect(!h.a.view.filter_menu);
     try testing.expectEqualStrings("s2", h.a.view.filter.?);
@@ -889,8 +1047,10 @@ test "the project menu: All projects, then by name with the away device's last; 
     try testing.expect(h.t.hasText("Beta"));
     try testing.expect(h.t.findText("Alpha").?.y < 80);
     try testing.expectEqualStrings("s2", h.a.settings.spaceFilter().?);
-    // Back to all, by the keys from the filter's own row.
-    try h.t.clickText("Ledger");
+    // The narrow sidebar fades the selected name beside its device label.
+    // Activate the actual trigger, not an assumed untruncated text node.
+    const selected_trigger = h.a.view.filter_anchor.?;
+    h.t.click(selected_trigger.x + selected_trigger.w / 2, selected_trigger.y + selected_trigger.h / 2);
     h.t.settle(1);
     try testing.expectEqual(@as(usize, 3), h.a.view.menus.active);
     h.press(.{ .key = ui.Shortcut.up });
@@ -918,7 +1078,7 @@ test "the project menu closes on Escape, and on a press outside; New project is 
     try testing.expect(h.t.findText("New project") == null);
 }
 
-test "the view menu: Sort › Created reorders the sessions; Show › Archived and Compact switch and are kept" {
+test "the view menu sorts sessions and keeps flat Archived and Compact display choices" {
     var h: Harness = undefined;
     try h.init();
     defer h.deinit();
@@ -942,17 +1102,19 @@ test "the view menu: Sort › Created reorders the sessions; Show › Archived a
     // Beta was made last: first now; the menu stays, its value updated.
     try testing.expect(h.a.view.more_menu);
     try testing.expectEqualStrings("b", h.a.chats.items[0].id);
-    const show = h.t.findText("Show").?;
-    h.t.moveTo(show.x + 4, show.y + show.h / 2);
-    h.t.settle(1);
+    try testing.expect(!h.t.hasText("Show"));
+    try testing.expect(!h.t.hasText("Project icon"));
     try h.t.clickText("Archived");
     h.t.settle(1);
     try testing.expect(!h.a.settings.get(.sidebar_show_archived));
-    // Show's menu stays open for the next switch.
-    try testing.expect(h.t.hasText("Project icon"));
+    // Display switches stay open, and expanded mode reveals detail choices.
+    try testing.expect(h.a.view.more_menu);
     try h.t.clickText("Compact");
     h.t.settle(1);
     try testing.expect(!h.a.settings.get(.sidebar_compact));
+    try testing.expect(h.t.hasText("Project icon"));
+    try testing.expect(h.t.hasText("Agent icon"));
+    try testing.expect(!h.a.settings.get(.sidebar_show_archived));
     h.press(.{ .key = ui.Shortcut.escape });
     h.press(.{ .key = ui.Shortcut.escape });
     try testing.expect(!h.a.view.more_menu);
@@ -1035,13 +1197,16 @@ test "Organize › By project heads each project's sessions; Compact off shows w
     try testing.expect(h.t.hasText("Studio"));
     h.a.settings.setText("sidebarOrganization", "inOneList");
     h.a.settings.set(.sidebar_compact, false);
+    // The current default hides project names independently of Compact.
+    h.a.settings.set(.sidebar_show_project_label, true);
     h.t.settle(1);
-    // (The open chat's header says "fieldnotes @ Studio" too.)
-    try testing.expect(h.t.hasText("Ledger @ Studio"));
+    try testing.expect(h.t.hasText("Ledger"));
+    // A local project's name no longer repeats the local device suffix.
+    try testing.expect(!h.t.hasText("Ledger @ Studio"));
     h.snap("expanded-rows");
     h.a.settings.set(.sidebar_show_project_label, false);
     h.t.settle(1);
-    try testing.expect(!h.t.hasText("Ledger @ Studio"));
+    try testing.expect(!h.t.hasText("Ledger"));
 }
 
 /// Settings › GitHub CI open, on no engine.
@@ -1686,4 +1851,551 @@ test "a live snapshot asking for Settings draws it in that frame alone: the wind
     try testing.expect(!h.a.view.settings_open);
     try testing.expectEqual(section, h.a.settings.section);
     try testing.expect(!h.t.hasText("Search settings"));
+}
+
+test "a finished turn keeps edit results in its tree while Changes retains review actions" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"u","role":"user","parts":[{"id":"t","kind":"text","text":"Tidy it"}]},
+        \\ {"id":"r","role":"assistant","parts":[
+        \\  {"id":"e1","kind":"tool","resolved":true,"call":{"kind":"editFile","path":"src/parser.rs"},"diffStats":[{"path":"src/parser.rs","additions":3,"deletions":1}]},
+        \\  {"id":"e2","kind":"tool","resolved":true,"call":{"kind":"writeFile","path":"notes/CHANGELOG.md"},"diff":{"path":"notes/CHANGELOG.md","newText":"a\nb\n"}},
+        \\  {"id":"x","kind":"tool","resolved":true,"call":{"kind":"exec","command":"ls"}},
+        \\  {"id":"d","kind":"text","text":"Done."}]}]}
+    , .{});
+    defer parsed.deinit();
+    try h.a.transcript.apply(parsed.value);
+    h.t.settle(1);
+    h.snap("turn-edit-summary");
+    try testing.expect(!h.t.hasText("2 files changed"));
+    try testing.expect(!h.t.hasText("Review"));
+    try h.t.clickText("Ran 1 command · edited 2 files");
+    h.t.settle(1);
+    try testing.expect(h.t.hasText("parser.rs"));
+    try testing.expect(h.t.hasText("CHANGELOG.md"));
+    try testing.expect(h.t.hasText("+3"));
+    try testing.expect(h.t.hasText("−1"));
+    // Changes is still independently available; the removed composer card
+    // must not be restored merely to reach its existing review actions.
+    @import("app_panels.zig").addDiffsTab(&h.a);
+    h.t.settle(1);
+    try testing.expect(h.a.panels.host_open);
+    try testing.expect(h.a.panels.activeTab().?.kind == .diffs);
+    try testing.expect(!h.t.hasText("Showing"));
+    // The working tree's diff ends on GPUI's review footer: Undo asks
+    // first, Keep changes closes the pane.
+    var d: @import("app_panels.zig").Diff = .{ .arena = .init(testing.allocator), .additions = 1, .deletions = 1 };
+    d.files = try @import("diff.zig").parse(d.arena.allocator(),
+        \\diff --git a/src/parser.rs b/src/parser.rs
+        \\--- a/src/parser.rs
+        \\+++ b/src/parser.rs
+        \\@@ -1,2 +1,2 @@
+        \\ fn parse() {
+        \\-    old();
+        \\+    new();
+        \\
+    );
+    if (h.a.panels.diff) |*old| old.arena.deinit();
+    h.a.panels.diff = d;
+    h.a.panels.diff_loading = false;
+    h.t.settle(1);
+    h.snap("changes-review-footer");
+    testing.expect(h.t.containsText("new();")) catch |err| {
+        std.debug.print("assertion at {s}:{d}\n", .{ @src().file, @src().line });
+        return err;
+    };
+    try testing.expect(h.t.hasText("Undo reverts every uncommitted file."));
+    try h.t.clickText("Undo all changes");
+    h.t.settle(1);
+    try testing.expect(h.a.panels.discard_confirm);
+    try testing.expect(h.t.hasText("Discard working tree changes?"));
+    try h.t.clickText("Cancel");
+    h.t.settle(1);
+    try testing.expect(!h.a.panels.discard_confirm);
+    try h.t.clickText("Keep changes");
+    h.t.settle(1);
+    try testing.expect(!h.a.panels.host_open);
+    try testing.expect(!h.t.hasText("Review"));
+    try testing.expect(h.t.hasText("Ran 1 command · edited 2 files"));
+}
+
+test "an opened edit step shows its code as a diff, and a thinned one its files" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"u","role":"user","parts":[{"id":"t","kind":"text","text":"Tidy it"}]},
+        \\ {"id":"r","role":"assistant","parts":[
+        \\  {"id":"e1","kind":"tool","resolved":true,"call":{"kind":"editFile","path":"src/lexer.rs"},"diff":{"path":"src/lexer.rs","oldText":"fn lex() {\n    old_token();\n}\n","newText":"fn lex() {\n    new_token();\n}\n"}},
+        \\  {"id":"e2","kind":"tool","resolved":true,"call":{"kind":"editFile","path":"src/parser.rs"},"diffStats":[{"path":"src/parser.rs","additions":3,"deletions":1}]},
+        \\  {"id":"d","kind":"text","text":"Done."}]}]}
+    , .{});
+    defer parsed.deinit();
+    try h.a.transcript.apply(parsed.value);
+    h.a.settings.set(.transcript_compact_mode, false);
+    // The run of steps open, the steps themselves closed: no code yet.
+    h.a.view.toggleGroup(h.a.gpa, "r/e1", false);
+    // Tool folds schedule bounded 30Hz frames rather than a continuous
+    // animation. Advance that clock before clicking the moving row.
+    h.t.advance(0.3);
+    h.t.settle(1);
+    try testing.expect(h.t.hasText("lexer.rs"));
+    testing.expect(!h.t.containsText("new_token();")) catch |err| {
+        std.debug.print("assertion at {s}:{d}\n", .{ @src().file, @src().line });
+        return err;
+    };
+    try h.t.clickText("lexer.rs");
+    h.t.settle(1);
+    h.snap("edit-step-diff");
+    try testing.expect(h.t.hasText("@@ -1,3 +1,3 @@"));
+    testing.expect(h.t.containsText("old_token();")) catch |err| {
+        std.debug.print("assertion at {s}:{d}\n", .{ @src().file, @src().line });
+        return err;
+    };
+    testing.expect(h.t.containsText("new_token();")) catch |err| {
+        std.debug.print("assertion at {s}:{d}\n", .{ @src().file, @src().line });
+        return err;
+    };
+    try h.t.clickText("parser.rs");
+    h.t.settle(1);
+    try testing.expect(h.t.hasText("src/parser.rs"));
+}
+
+test "the context ring sits at the footer's right; resting on it opens the card of what fills the context" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    try testing.expect(!h.t.hasText("23%"));
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"u","role":"user","parts":[{"id":"t","kind":"text","text":"Read the parser"}]},
+        \\ {"id":"r","role":"assistant","parts":[
+        \\  {"id":"f","kind":"tool","resolved":true,"call":{"kind":"readFile","path":"src/parser.rs"},"outputBytes":36000},
+        \\  {"id":"x","kind":"tool","resolved":true,"call":{"kind":"exec","command":"cargo test"},"outputBytes":8000},
+        \\  {"id":"d","kind":"text","text":"Done."}]}],
+        \\ "contextUsage":{"tokens":46200,"window":200000,"savings":{"handleBytes":96000,"compactedTokens":0,"cacheReadTokens":9000}}}
+    , .{});
+    defer parsed.deinit();
+    try h.a.transcript.apply(parsed.value);
+    h.t.settle(1);
+    const pct = h.t.findText("23%") orelse return error.NoRing;
+    const pill = h.a.view.composer_anchor.?;
+    try testing.expect(pct.x > pill.x + pill.w / 2 and pct.y > pill.y + pill.h);
+    try testing.expect(!h.t.hasText("Context"));
+    h.t.moveTo(pct.x + 2, pct.y + 4);
+    h.t.frame();
+    h.t.advance(0.3);
+    try testing.expect(!h.t.hasText("Context"));
+    h.t.advance(0.3);
+    h.snap("context-card");
+    // The counter rolls a character at a time, so each is its own text.
+    for ([_][]const u8{ "Context", "reading", "4", "6", "k", "of 200k", "Files", "9.0k", "Commands", "2.0k", "System & other", "153k free of 200k", "24k", "saved by graff", "46,200 / 200,000 tokens", "153,800 tokens remaining" }) |t|
+        if (!h.t.hasText(t)) {
+            std.debug.print("missing {s}\n", .{t});
+            return error.MissingText;
+        };
+    // It stays while the pointer crosses into it, and goes half a second
+    // after the pointer leaves both.
+    const card = h.a.view.context.card orelse return error.NoCard;
+    h.t.moveTo(card.x + card.w / 2, card.y + card.h / 2);
+    h.t.advance(0.7);
+    try testing.expect(h.t.hasText("saved by graff"));
+    h.t.moveTo(20, 400);
+    h.t.advance(0.2);
+    try testing.expect(h.t.hasText("saved by graff"));
+    h.t.advance(0.4);
+    try testing.expect(!h.t.hasText("saved by graff"));
+    // GPUI's footer hit area reaches 4 points past the pill's right edge.
+    h.t.moveTo(1068, 760);
+    h.t.advance(0.7);
+    try testing.expect(h.t.hasText("Context"));
+}
+
+test "answering a question keeps its text alive through the frame that drew it" {
+    // Submit and Cancel run mid-build, after the question and its options
+    // were handed to the frame; layout and paint read them next.
+    for ([_][]const u8{ "Cancel question", "Submit" }) |button| {
+        var h: Harness = undefined;
+        try h.init();
+        defer h.deinit();
+        // This lifetime probe exercises successful completion; failed requests
+        // intentionally restore their question and draft for retry (#479).
+        h.a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+            \\{"QueueCommand":{}}
+        , .{});
+        var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+            \\{"reset":[{"id":"ask","role":"assistant","status":"complete","parts":[{"kind":"input","id":"r1","requestId":"r1","resolved":false,
+            \\  "questions":[{"id":"q1","header":"Approach","question":"A synthetic question that wraps","options":["First option","Second option"],"multiSelect":true}]}]}]}
+        , .{});
+        defer parsed.deinit();
+        try h.a.transcript.apply(parsed.value);
+        h.t.settle(1);
+        if (std.mem.eql(u8, button, "Submit")) try h.t.clickText("First option");
+        h.t.settle(1);
+        const r = h.t.findText(button) orelse return error.TextNotFound;
+        h.t.moveTo(r.x + r.w / 2, r.y + r.h / 2);
+        h.t.ctx.input.click_count = 1;
+        h.t.ctx.pointerDown();
+        h.t.frame();
+        h.t.ctx.pointerUp();
+        h.t.frame();
+        try testing.expect(h.a.wizard == null);
+        // Debug fills freed memory with 0xaa; four in a row is never UTF-8.
+        for (h.t.ctx.nodes.items) |n| switch (n.content) {
+            .text => |tx| try testing.expect(std.mem.indexOf(u8, tx.str, "\xaa\xaa\xaa\xaa") == null),
+            else => {},
+        };
+        h.t.settle(1);
+        try testing.expect(!h.t.hasText("Cancel question"));
+    }
+}
+
+test "an agent's question shows its Markdown, not its markup" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"ask","role":"assistant","status":"complete","parts":[{"kind":"input","id":"r1","requestId":"r1","resolved":false,
+        \\  "questions":[{"id":"q1","header":"Plan","question":"**What happens now** (checked in code):\n\n- `stage.tsx:72` sets `original = active`.\n- The slide loads the **original**.","options":["Go"]}]}]}]}
+    , .{});
+    defer parsed.deinit();
+    try h.a.transcript.apply(parsed.value);
+    h.t.settle(1);
+    // The panel's paragraphs, without their markup (the transcript's chip
+    // keeps the question's first line as written, as GPUI's does).
+    try testing.expect(h.t.hasText("What happens now (checked in code):"));
+    try testing.expect(h.t.hasText("stage.tsx:72 sets original = active."));
+    try testing.expect(h.t.hasText("The slide loads the original."));
+}
+
+test "bottom-docked checkout and ref popovers open upward above the composer footer" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var ws_parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"ws-1","name":"demo","path":"/work/demo","gitDetected":true}]
+    , .{});
+    defer ws_parsed.deinit();
+    try h.a.spaces.replace(ws_parsed.value);
+    if (h.a.space) |old| h.a.gpa.free(old);
+    h.a.space = try h.a.gpa.dupe(u8, "ws-1");
+    h.a.select(null, null);
+    h.t.settle(1);
+
+    try h.t.clickText("New worktree");
+    h.t.settle(1);
+    const checkout_anchor = h.a.view.checkout_anchor orelse return error.MissingCheckoutAnchor;
+    const current_checkout = h.t.findText("Current checkout") orelse return error.MissingCheckoutMenu;
+    try testing.expect(current_checkout.y < checkout_anchor.y);
+
+    // Close checkout menu and open Select ref menu with synthetic branches.
+    h.a.view.checkout_menu = false;
+    try h.a.view.refs.append(h.a.gpa, try h.a.gpa.dupe(u8, "main"));
+    try h.a.view.refs.append(h.a.gpa, try h.a.gpa.dupe(u8, "feature/popover-upward"));
+    h.a.view.ref_space = try h.a.gpa.dupe(u8, "ws-1");
+    h.t.settle(1);
+    try h.t.clickText("Select ref");
+    h.t.settle(1);
+    const ref_anchor = h.a.view.ref_anchor orelse return error.MissingRefAnchor;
+    const branch_row = h.t.findText("feature/popover-upward") orelse return error.MissingBranchRow;
+    try testing.expect(branch_row.y < ref_anchor.y);
+    try h.t.clickText("feature/popover-upward");
+    h.t.settle(1);
+    try testing.expectEqualStrings("From feature/popover-upward", if (h.t.findText("From feature/popover-upward")) |_| "From feature/popover-upward" else "");
+    try testing.expectEqualStrings("feature/popover-upward", h.a.new_ref.?);
+}
+
+test "Settings Devices and the sidebar footer surface desktop app updates and auto-restart" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    const ver = "99.0.0";
+    @memcpy(h.a.release.latest[0..ver.len], ver);
+    h.a.release.latest_len = ver.len;
+    if (h.a.device_id) |old| h.a.gpa.free(old);
+    h.a.device_id = try h.a.gpa.dupe(u8, "dev-local");
+    var dev_parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"dev-remote","name":"Synthetic Linux Box","platform":"linux","version":"0.2.100","lastSeenAt":"2026-10-03T00:00:00Z"},
+        \\ {"id":"dev-local","name":"Synthetic Mac","platform":"macos","version":"0.2.176","lastSeenAt":"2026-10-03T00:00:00Z"}]
+    , .{});
+    defer dev_parsed.deinit();
+    try h.a.devices.replace(dev_parsed.value);
+    h.t.settle(1);
+
+    // Sidebar footer surfaces the update row immediately when a newer release is known.
+    try testing.expect(h.t.hasText("Update to v99.0.0"));
+
+    // Open Settings -> Devices and verify the update card, button, auto-restart toggle, and remote badge.
+    h.a.settings.setSection(.devices);
+    @import("view_settings.zig").open(&h.a);
+    h.t.settle(1);
+    h.snap("settings-devices-update-card");
+    try testing.expect(h.t.hasText("Harness v99.0.0 is available."));
+    try testing.expect(h.t.hasText("Update to v99.0.0"));
+    try testing.expect(h.t.hasText("Restart automatically to install updates"));
+    try testing.expect(h.t.hasText("Update available · Details"));
+    try testing.expect(h.a.settings.get(.restart_to_install_updates));
+    try h.t.clickText("Restart automatically to install updates");
+    h.t.settle(1);
+    try testing.expect(!h.a.settings.get(.restart_to_install_updates));
+}
+
+test "model picker row context badges stay valid through paint and clicking Models back button with reasoning slider never panics" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+
+    h.a.gpa.free(h.a.new_harness);
+    h.a.new_harness = try h.a.gpa.dupe(u8, "codex");
+    h.a.gpa.free(h.a.models_for);
+    h.a.models_for = try h.a.gpa.dupe(u8, "codex");
+    var models_parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"chatgpt-new/gpt-5.6-sol","label":"gpt-5.6-sol","context":200000,"maker":"openai","billing":"plan","reasoningLevels":["low","medium","high","xhigh"],"defaultReasoningLevel":"high"},
+        \\ {"id":"chatgpt-new/gpt-6.1-sol","label":"gpt-6.1-sol","context":1048576,"maker":"openai","billing":"plan","reasoningLevels":["low","medium","high"],"defaultReasoningLevel":"medium"}]
+    , .{});
+    defer models_parsed.deinit();
+    try h.a.models.replace(models_parsed.value);
+    h.a.select(null, null);
+    h.t.settle(1);
+    h.a.togglePicker();
+    h.t.settle(1);
+
+    // Context badges ("200k", "1M") are allocated in the frame arena `c.alloc()`,
+    // never on a stack buffer that corrupts into `?` before paint.
+    try testing.expect(h.t.hasText("200k"));
+    try testing.expect(h.t.hasText("1M"));
+    for (h.t.ctx.nodes.items) |n| switch (n.content) {
+        .text => |tx| {
+            try testing.expect(std.unicode.utf8ValidateSlice(tx.str));
+            try testing.expect(std.mem.indexOf(u8, tx.str, "\xaa") == null);
+        },
+        else => {},
+    };
+
+    // Click `gpt-6.1-sol` in the picker list to open the Reasoning page (`levels.len == 3 > 1`).
+    try h.t.clickText("gpt-6.1-sol");
+    h.t.frame();
+    const initial_page_h = h.a.view.model_picker.height;
+    h.t.settle(1);
+    try testing.expect(h.a.view.model_picker.stage != null);
+    // Page height opens at its exact natural height without a 2-frame bounce.
+    try testing.expect(@abs(h.a.view.model_picker.height - initial_page_h) <= 1.0);
+
+    // Click the slider track to move reasoning from `medium` (1) to `low` (0),
+    // release the mouse, and verify the thumb never snaps backward on release.
+    const track = h.a.view.model_picker.track orelse return error.MissingSliderTrack;
+    h.t.moveTo(track.x + 2, track.y + track.h / 2);
+    h.t.ctx.input.click_count = 1;
+    h.t.ctx.pointerDown();
+    h.t.frame();
+    try testing.expectEqual(@as(?usize, 0), h.a.view.model_picker.stage.?.level);
+    h.t.ctx.pointerUp();
+    h.t.frame();
+    h.t.settle(1);
+    try testing.expectEqual(@as(?usize, 0), h.a.view.model_picker.stage.?.level);
+
+    // Click `<- Models` (`model-page-back`): `back(c, a)` clears `p.stage = null`
+    // mid-frame before `slider()` runs; verify it never unwraps `p.stage.?` or
+    // leaves freed memory in any text node.
+    const back_btn = h.t.findText("Models") orelse return error.MissingBackButton;
+    h.t.moveTo(back_btn.x + back_btn.w / 2, back_btn.y + back_btn.h / 2);
+    h.t.ctx.input.click_count = 1;
+    h.t.ctx.pointerDown();
+    h.t.frame();
+    h.t.ctx.pointerUp();
+    h.t.frame();
+    try testing.expect(h.a.view.model_picker.stage == null);
+    try testing.expectEqual(@as(f32, 480), h.a.view.model_picker.height);
+    for (h.t.ctx.nodes.items) |n| switch (n.content) {
+        .text => |tx| try testing.expect(std.mem.indexOf(u8, tx.str, "\xaa\xaa\xaa\xaa") == null),
+        else => {},
+    };
+}
+
+test "Cmd+W closes an open file tab before closing a chat tab even when multiple chat tabs are open" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.a.settings.set(.archive_on_close_chosen, true);
+    h.a.settings.set(.archive_sessions_on_close, false);
+    // File access requires an authoritative owner, not only a selected ID.
+    const owners = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"c1","spaceId":"s1","deviceId":"dev"},{"id":"c2","spaceId":"s1","deviceId":"dev"}]
+    , .{});
+    defer owners.deinit();
+    try h.a.chats.replace(owners.value);
+    h.a.select("c1", "s1");
+    h.a.newTab();
+    h.a.select("c2", "s1");
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+
+    // Open a file tab in the workbench host pane, then click back into the chat
+    // composer so `.chat` is the focused surface while the file tab remains open.
+    @import("app_files.zig").openFile(&h.a, "src/main.rs");
+    try testing.expect(h.a.panels.host_open);
+    try testing.expectEqual(@as(usize, 1), h.a.panels.tabs.items.len);
+    h.a.view.strip.focused = .{ .chat = 0 };
+    h.t.settle(1);
+
+    // First Cmd+W closes the open file tab (`src/main.rs`), NOT the chat tab `c2`.
+    try testing.expect(h.t.shortcut(.{ .key = 'w', .cmd = true }));
+    try testing.expectEqual(@as(usize, 0), h.a.panels.tabs.items.len);
+    try testing.expect(!h.a.panels.host_open);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+    try testing.expectEqualStrings("c2", h.a.selected.?);
+}
+
+test "Cmd+=, Cmd+-, and Cmd+0 step and reset interface zoom at 120Hz" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.t.settle(1);
+    try testing.expectEqual(@as(f32, 16), h.a.settings.uiFontSize());
+    try testing.expectApproxEqAbs(@as(f32, 1.0), h.t.ctx.access.zoom, 0.001);
+
+    try testing.expect(h.t.shortcut(.{ .key = '=', .cmd = true }));
+    try testing.expectEqual(@as(f32, 18), h.a.settings.uiFontSize());
+    try testing.expectApproxEqAbs(@as(f32, 18.0 / 16.0), h.t.ctx.access.zoom, 0.001);
+
+    try testing.expect(h.t.shortcut(.{ .key = '=', .cmd = true, .shift = true }));
+    try testing.expectEqual(@as(f32, 20), h.a.settings.uiFontSize());
+    try testing.expectApproxEqAbs(@as(f32, 20.0 / 16.0), h.t.ctx.access.zoom, 0.001);
+
+    try testing.expect(h.t.shortcut(.{ .key = '-', .cmd = true }));
+    try testing.expectEqual(@as(f32, 18), h.a.settings.uiFontSize());
+    try testing.expectApproxEqAbs(@as(f32, 18.0 / 16.0), h.t.ctx.access.zoom, 0.001);
+
+    try testing.expect(h.t.shortcut(.{ .key = '0', .cmd = true }));
+    try testing.expectEqual(@as(f32, 16), h.a.settings.uiFontSize());
+    try testing.expectApproxEqAbs(@as(f32, 1.0), h.t.ctx.access.zoom, 0.001);
+}
+
+test "clicking the composer model chip opens the Zeron-style compact thinking tier panel and clicking the model subtitle expands upwards into the model list" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+
+    h.a.gpa.free(h.a.new_harness);
+    h.a.new_harness = try h.a.gpa.dupe(u8, "codex");
+    h.a.gpa.free(h.a.models_for);
+    h.a.models_for = try h.a.gpa.dupe(u8, "codex");
+    var models_parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"chatgpt-new/gpt-6.1-sol","label":"GPT-6.1-Sol","context":1048576,"maker":"openai","billing":"plan","reasoningLevels":["low","medium","high"],"defaultReasoningLevel":"high"},
+        \\ {"id":"chatgpt-new/gpt-5.6-sol","label":"GPT-5.6-Sol","context":200000,"maker":"openai","billing":"plan","reasoningLevels":["low","medium","high","xhigh"],"defaultReasoningLevel":"high"}]
+    , .{});
+    defer models_parsed.deinit();
+    try h.a.models.replace(models_parsed.value);
+    h.a.setModel("chatgpt-new/gpt-6.1-sol");
+    h.a.select(null, null);
+    h.t.settle(1);
+
+    // Open the compact thinking tier panel directly from the composer chip action.
+    h.a.togglePickerCompact();
+    h.t.settle(1);
+    try testing.expect(h.a.view.model_picker.stage != null);
+    try testing.expect(h.a.view.model_picker.stage.?.compact);
+    try testing.expectEqual(@as(?usize, 2), h.a.view.model_picker.stage.?.level);
+    try testing.expect(h.t.hasText("High"));
+    try testing.expect(h.t.hasText("GPT-6.1-Sol"));
+
+    // Drag/click the capsule slider to the first stop (`low`) and verify live update.
+    const track = h.a.view.model_picker.track orelse return error.MissingSliderTrack;
+    h.t.moveTo(track.x + 2, track.y + track.h / 2);
+    h.t.ctx.input.click_count = 1;
+    h.t.ctx.pointerDown();
+    h.t.frame();
+    h.t.ctx.pointerUp();
+    h.t.frame();
+    h.t.settle(1);
+    try testing.expectEqual(@as(?usize, 0), h.a.view.model_picker.stage.?.level);
+    try testing.expectEqualStrings("low", h.a.new_reasoning.?);
+
+    // Click the model subtitle (`GPT-6.1-Sol`) in the compact header (distinct from the composer chip)
+    // to expand upwards into the model list.
+    const chip = h.a.view.chip_anchor orelse return error.MissingChip;
+    var model_btn: ?ui.Rect = null;
+    for (h.t.ctx.nodes.items) |n| switch (n.content) {
+        .text => |t| if (std.mem.eql(u8, t.str, "GPT-6.1-Sol") and (n.rect.y + n.rect.h < chip.y or n.rect.y > chip.y + chip.h)) {
+            model_btn = n.rect;
+        },
+        else => {},
+    };
+    const btn_rect = model_btn orelse return error.MissingCompactModelButton;
+    h.t.click(btn_rect.x + 12, btn_rect.y + 4);
+    h.t.settle(1);
+    try testing.expect(h.a.view.model_picker.stage == null);
+    try testing.expect(h.a.view.model_picker.can_return_compact);
+    try testing.expect(h.t.hasText("GPT-5.6-Sol"));
+
+    // Pick `GPT-5.6-Sol` from the expanded list and verify it returns to the compact panel with the new model live.
+    try h.t.clickText("GPT-5.6-Sol");
+    h.t.settle(1);
+    try testing.expect(h.a.view.model_picker.stage != null);
+    try testing.expect(h.a.view.model_picker.stage.?.compact);
+    try testing.expectEqualStrings("chatgpt-new/gpt-5.6-sol", h.a.new_model.?);
+}
+
+test "Settings Back button and Escape key close Settings and return to the workspace even when search has focus" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+
+    @import("view_settings.zig").open(&h.a);
+    h.t.settle(1);
+    try testing.expect(h.a.view.settings_open);
+
+    // Pressing Escape while `settings-search-field` is focused closes Settings immediately.
+    try testing.expect(h.t.shortcut(.{ .key = @import("nanoui").ui.Shortcut.escape }));
+    h.t.settle(1);
+    try testing.expect(!h.a.view.settings_open);
+
+    // Re-open Settings and click the sidebar `← Back` button.
+    @import("view_settings.zig").open(&h.a);
+    h.t.settle(1);
+    try testing.expect(h.a.view.settings_open);
+    try h.t.clickText("Back");
+    h.t.settle(1);
+    try testing.expect(!h.a.view.settings_open);
+}
+
+test "older engine version triggers automatic daemon replacement and mid-frame catalog replacement retires arenas until next frame" {
+    const updates = @import("view_updates.zig");
+    try testing.expectEqual(updates.EngineVersionAction.replace_old_session, updates.decideEngineVersionAction("0.2.180", "0.2.178", true, false));
+    try testing.expectEqual(updates.EngineVersionAction.up_to_date, updates.decideEngineVersionAction("0.2.180", "0.2.180", true, false));
+    try testing.expectEqual(updates.EngineVersionAction.up_to_date, updates.decideEngineVersionAction("0.2.180", "0.2.181", true, false));
+
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var p1 = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"m1","label":"Model One"}]
+    , .{});
+    defer p1.deinit();
+    var p2 = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"m2","label":"Model Two"}]
+    , .{});
+    defer p2.deinit();
+    try h.a.models.replace(p1.value);
+    try h.a.models.replace(p2.value);
+    try testing.expect(h.a.models.retired.items.len >= 1);
+    h.t.frame();
+    try testing.expectEqual(@as(usize, 0), h.a.models.retired.items.len);
+
+    // Clicking the composer model chip when `models_for` is unsynced and the
+    // engine is connected triggers `ensureModels` -> `copyModels` mid-frame
+    // between `modelChip`'s pre-click width measurement and post-click `rollText`.
+    h.a.engine.state = .connected;
+    const cat = @import("model_picker.zig").ensureCatalog(&h.a, h.a.target().harness, false).?;
+    try cat.models.replace(p1.value);
+    cat.loaded = true;
+    h.a.retireSlice(h.a.models_for);
+    h.a.models_for = &.{};
+    h.t.frame();
+    const chip = h.a.view.chip_anchor.?;
+    h.t.click(chip.x + chip.w * 0.5, chip.y + chip.h * 0.5);
+    try testing.expect(h.a.picker == .model);
+    try testing.expectEqualStrings("Model One", h.a.modelLabel(h.a.target().model));
+    h.t.frame();
+    try testing.expectEqual(@as(usize, 0), h.a.models.retired.items.len);
 }

@@ -70,19 +70,21 @@ offered in drafts. Update them in the same change and run
 
 ## Commits and pull requests
 
-No agent or tool attribution anywhere: no `Co-Authored-By` trailers for an
-agent or bot, no "Generated with …" lines, and no session links, in commit
-messages, PR titles or bodies, or review comments. Commits carry only the
-user's git identity. This applies to every agent working here (Devin, Codex,
-Claude Code, graff and any other); turn off the tool's own attribution setting
-if it adds one. Before pushing, check:
+No Claude or Anthropic attribution anywhere: no `Co-Authored-By` trailers
+naming Claude or Anthropic, no "Generated with Claude Code" footers, no
+`claude.ai` / `claude.com` links, and no `noreply@anthropic.com` commit
+identities, in commit messages, PR titles or bodies, or review comments.
+Commits use the user's git identity as author; Codegraff / `blackfloofie`
+co-author trailers (such as `Co-Authored-By: Codegraff <blackfloofie@codegraff.com>`)
+are allowed. Turn off Claude Code's attribution setting when using it here.
+Before pushing, check:
 
 ```bash
-git log origin/main..HEAD --format=%B | grep -iE "co-authored-by|generated with" && echo "remove the attribution first"
+python3 scripts/check-attribution.py --range origin/main..HEAD
 ```
 
-If a pushed commit already has a trailer, reword it and force-push the branch
-before it is merged. Once it's on `main`, removing it means rewriting `main`.
+If a pushed commit fails the check, reword it and force-push the branch before
+it is merged. Once it's on `main`, removing it means rewriting `main`.
 
 ### Every pull request shows before and after
 

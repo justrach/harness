@@ -13,8 +13,17 @@ const kit = @import("view_kit.zig");
 const App = @import("app.zig").App;
 
 pub fn menus(c: *ui.Context, a: *App, k: theme.Colors) void {
+    const strip = @import("view_tab_strip.zig");
     const v = &a.view;
-    if (!v.account_menu and !v.space_menu) return;
+    // Footer triggers retain their own anchor, but use the same retained,
+    // keyboard-accessible project search rather than a second flat list.
+    if (v.space_menu) if (v.space_anchor) |anchor| {
+        v.space_menu = false;
+        strip.open(a, .folder, .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 }, anchor);
+        v.strip.footer_folder = true;
+    };
+    strip.menus(c, a, k);
+    if (!v.account_menu and !v.space_menu and !v.checkout_menu and !v.ref_menu) return;
     {
         // Behind the menu: a click anywhere else closes it.
         const back = ui.div(c).fixed().offset(0, 0).size(c.size.w, c.size.h).layer(4);
@@ -22,28 +31,111 @@ pub fn menus(c: *ui.Context, a: *App, k: theme.Colors) void {
         if (back.clicked()) {
             v.account_menu = false;
             v.space_menu = false;
+            v.checkout_menu = false;
+            v.ref_menu = false;
             return;
         }
     }
-    if (v.space_menu) if (v.space_anchor) |r| {
-        const m = panel(c, k, r.x, r.y + r.h + 4, 240);
+    // Where the new chat runs (`render_checkout_popover`): the project's
+    // own checkout, or a fresh worktree made off the base on send. Opens
+    // upward when the trigger is docked near the bottom of the window.
+    if (v.checkout_menu) if (v.checkout_anchor) |r| {
+        const w: f32 = 224;
+        const h: f32 = 2 * 32 + 10;
+        const x = rules.snapToWindow(r.x, w, c.size.w, 8);
+        const y = upwardOrBelow(r, h, c.size.h);
+        ui.key(c, "checkout-popover");
+        const m = panel(c, k, x, y, w);
         defer m.end();
-        const current = a.newChatSpace();
-        for (a.spaces.items) |s| {
-            ui.key(c, c.print("space-{s}", .{s.id}));
-            const on = current != null and std.mem.eql(u8, current.?.id, s.id);
-            if (item(c, k, .folder, s.name, on)) {
-                a.select(null, s.id);
-                v.space_menu = false;
+        const newchat = @import("view_newchat.zig");
+        inline for (.{ .{ true, icons.Name.folder }, .{ false, icons.Name.@"folder-with-files" } }) |opt| {
+            if (item(c, k, opt[1], newchat.checkoutLabel(opt[0]), a.new_checkout_local == opt[0])) {
+                a.new_checkout_local = opt[0];
+                v.checkout_menu = false;
             }
         }
-        divider(c, k);
-        if (item(c, k, .plus, "Add folder…", false)) {
-            v.space_menu = false;
-            a.addFolder();
-        }
+    };
+    if (v.ref_menu) if (v.ref_anchor) |r| {
+        refMenu(c, a, k, r);
     };
     if (v.account_menu) if (v.account_anchor) |r| accountMenu(c, a, k, r);
+}
+
+/// Place a compact popover above `anchor` when docked near the bottom edge
+/// (6pt gap), falling back below when the anchor is near the top.
+pub fn upwardOrBelow(anchor: ui.Rect, h: f32, win_h: f32) f32 {
+    const below = @max(0, win_h - (anchor.y + anchor.h) - 10);
+    if (below < h and anchor.y > h + 14) {
+        return @max(8, anchor.y - h - 6);
+    }
+    return rules.snapToWindow(anchor.y + anchor.h + 6, h, win_h, 8);
+}
+
+pub fn ensureRefs(a: *App, space: @import("workspace.zig").Space) void {
+    const v = &a.view;
+    if (v.ref_space) |prev| {
+        if (!std.mem.eql(u8, prev, space.id)) {
+            a.retireSlice(prev);
+            v.ref_space = null;
+            for (v.refs.items) |r| a.retireSlice(r);
+            v.refs.clearRetainingCapacity();
+        }
+    }
+    if (v.ref_space == null) {
+        v.ref_space = a.gpa.dupe(u8, space.id) catch null;
+    }
+    if (v.ref_loading or !a.engine.up()) return;
+    v.ref_loading = true;
+    const host: ?[]const u8 = if (space.device_id) |dev| (if (a.device_id) |me| (if (std.mem.eql(u8, me, dev)) null else dev) else dev) else null;
+    a.request(@import("requests.zig").listRefs(space.path, host), .of(App, a, onRefs));
+}
+
+fn onRefs(a: *App, _: u64, reply: @import("rpc.zig").Reply) void {
+    const v = &a.view;
+    v.ref_loading = false;
+    switch (reply) {
+        .ok => |val| if (val == .array) {
+            for (v.refs.items) |old| a.gpa.free(old);
+            v.refs.clearRetainingCapacity();
+            for (val.array.items) |entry| {
+                if (entry != .object) continue;
+                const name_val = entry.object.get("name") orelse continue;
+                if (name_val != .string or name_val.string.len == 0) continue;
+                const dup = a.gpa.dupe(u8, name_val.string) catch continue;
+                v.refs.append(a.gpa, dup) catch a.gpa.free(dup);
+            }
+        },
+        else => {},
+    }
+    a.redraw();
+}
+
+fn refMenu(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
+    const v = &a.view;
+    const w: f32 = 240;
+    const count: usize = 1 + @min(v.refs.items.len, 8);
+    const h: f32 = @as(f32, @floatFromInt(count)) * 32 + 12;
+    const x = rules.snapToWindow(r.x, w, c.size.w, 8);
+    const y = upwardOrBelow(r, h, c.size.h);
+    ui.key(c, "branch-popover");
+    const m = panel(c, k, x, y, w);
+    defer m.end();
+    if (item(c, k, .@"git-branch", "Default branch", a.new_ref == null)) {
+        if (a.new_ref) |old| a.gpa.free(old);
+        a.new_ref = null;
+        v.ref_menu = false;
+        a.redraw();
+    }
+    for (v.refs.items[0..@min(v.refs.items.len, 8)]) |branch| {
+        const selected = if (a.new_ref) |cur| std.mem.eql(u8, cur, branch) else false;
+        if (item(c, k, .@"git-branch", branch, selected)) {
+            const copy = a.gpa.dupe(u8, branch) catch return;
+            if (a.new_ref) |old| a.gpa.free(old);
+            a.new_ref = copy;
+            v.ref_menu = false;
+            a.redraw();
+        }
+    }
 }
 
 /// The account badge's menu (`render_user_menu`): who this is, the
@@ -63,14 +155,14 @@ fn accountMenu(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
     defer card.end();
     kit.rememberHeight(c, card, &a.view.account_h);
     {
-        const id = ui.div(c).row().wFull().px(8).pt(6).pb(4);
+        const id = ui.div(c).column().wFull().px(8).pt(6).pb(4).gap(2);
         defer id.end();
-        @import("view_kit.zig").ellipsisText(c, m.identity, .{ .size = 11, .line_height = 11 * phi, .color = k.muted }, w - 2 * card_inset - 16 - 2);
+        kit.ellipsisText(c, m.identity, .{ .size = 11, .line_height = 11 * phi, .color = k.muted }, w - 2 * card_inset - 16 - 2);
     }
     switch (m.codegraff) {
         .account => |who| if (menuRow(c, k, .global, k.accent, c.print("Codegraff · {s}", .{who}), 1)) {
-            a.view.account_menu = false;
-            a.setNotice("Settings aren't in Harness Nano yet: Codegraff is in Harness's Settings › Agents.");
+            a.settings.setSection(.agents);
+            @import("view_settings.zig").open(a);
         },
         .pending => if (menuRow(c, k, .global, k.muted, "Waiting for browser… (click to reopen)", 0.7)) account.signIn(a),
         .sign_in => if (menuRow(c, k, .global, k.muted, "Sign in with Codegraff", 1)) account.signIn(a),
@@ -82,11 +174,10 @@ fn accountMenu(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
             .sign_out => menuRow(c, k, .@"logout-2", k.muted, "Sign out", 1),
         };
         if (clicked) {
-            a.view.account_menu = false;
-            a.setNotice(switch (act) {
-                .enable_sync => "Turning on sync isn't in Harness Nano yet: use Harness.",
-                .sign_out => "Signing out isn't in Harness Nano yet: use Harness.",
-            });
+            switch (act) {
+                .enable_sync => account.enableSync(a),
+                .sign_out => account.signOut(a),
+            }
         }
         separator(c, a, w);
     }
@@ -102,7 +193,7 @@ const card_inset: f32 = 4;
 /// A menu row (`popover::menu_row`): a 16-point icon, 10 points, the label
 /// at 13 points; the selected-card wash under the pointer.
 fn menuRow(c: *ui.Context, k: theme.Colors, icon: icons.Name, tint: ui.Color, label: []const u8, opacity: f32) bool {
-    var row = ui.div(c).row().wFull().px(8).py(6).gap(10).itemsCenter().rounded(12 - 1 - card_inset).hover(k.selected);
+    var row = ui.div(c).row().wFull().px(8).py(5).gap(10).itemsCenter().rounded(12 - 1 - card_inset).hover(k.selected);
     if (opacity < 1) row = row.opacity(opacity);
     defer row.end();
     const hot = row.hovered();

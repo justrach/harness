@@ -48,7 +48,7 @@ test "Markdown: a heading's #s punctuation and its text the heading's; list mark
     var st: hl.State = .{};
     const spans = hl.line(arena.allocator(), "## Parser", "md", pal, &st);
     try testing.expectEqual(@as(usize, 2), spans.len);
-    try testing.expectEqual(nanoColor(0x9a9384), spans[0].color.?);
+    try testing.expectEqual(nanoColor(0xb9ae9d), spans[0].color.?);
     try testing.expectEqual(nanoColor(0x8f96ed), spans[1].color.?);
     try testing.expectEqual(@as(u32, 3), spans[1].start);
 }

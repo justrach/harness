@@ -37,6 +37,7 @@ final class AttachmentDraft {
                     failed += 1
                 }
             }
+            AttachSound.play(added: images.count - failed)
             reportFailures(failed)
         }
         return true
@@ -56,6 +57,7 @@ final class AttachmentDraft {
                 failed += 1
             }
         }
+        AttachSound.play(added: photos.count - failed)
         reportFailures(failed)
     }
 

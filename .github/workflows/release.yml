@@ -57,6 +57,9 @@ jobs:
             libvulkan-dev pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev
       - name: rust toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -141,6 +144,10 @@ jobs:
       - name: rust toolchain (rust-toolchain.toml)
         if: steps.signing.outputs.enabled == 'true'
         run: rustup show active-toolchain || rustup toolchain install
+      - uses: mlugg/setup-zig@v2
+        if: steps.signing.outputs.enabled == 'true'
+        with:
+          version: 0.17.0
       - uses: Swatinem/rust-cache@v2
         if: steps.signing.outputs.enabled == 'true'
         with:
@@ -209,12 +216,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: rust toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
-      - name: Locate Windows SDK shader compiler
-        run: |
-          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x64/fxc.exe" |
-            Sort-Object FullName -Descending | Select-Object -First 1
-          if (-not $fxc) { throw 'Windows SDK fxc.exe is required for GPUI release shaders' }
-          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -226,6 +230,17 @@ jobs:
           manifest-key: ${{ github.job }}-${{ strategy.job-index }}
       - name: Native visual sandbox regressions
         run: cargo test --locked -p harness-visual
+      - name: Windows workspace and portable-update regressions
+        run: |
+          cargo test --locked -p harness-update
+          if ($LASTEXITCODE -ne 0) { throw 'Windows updater tests failed' }
+          cargo test --locked -p harness-engine --test workspace_files
+          if ($LASTEXITCODE -ne 0) { throw 'Windows workspace-file tests failed' }
+      - name: Native Nano regressions
+        working-directory: apps/nano
+        run: |
+          zig build test
+          if ($LASTEXITCODE -ne 0) { throw 'Windows Nano tests failed' }
       - name: package portable app
         run: ./scripts/package-windows.ps1 -ReleasesUrl "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download"
       - uses: actions/upload-artifact@v4
@@ -286,6 +301,7 @@ jobs:
               '.files[$name] = {sha256: $sha}' <<<"$manifest")
           done
           printf '%s' "$manifest" > manifest.json
+          printf '%s' "$VERSION" > latest.txt
       - uses: softprops/action-gh-release@v2
         with:
           name: Harness v${{ env.VERSION }}
@@ -293,6 +309,7 @@ jobs:
           files: |
             dist/*
             manifest.json
+            latest.txt
       - name: upload to R2 (edge.codegraff.com/releases/*)
         if: env.CLOUDFLARE_API_TOKEN != ''
         run: |

@@ -151,9 +151,6 @@ fn spawn_malloc_trimmer() {
 }
 
 fn main() -> anyhow::Result<()> {
-    // Pin the launch clock first so `app_launch_ms` covers argument parsing,
-    // logging setup and pre-UI work too (the later call in `run_app` no-ops).
-    harness_ui::perf_stats::mark_process_start();
     #[cfg(windows)]
     attach_parent_console();
     let cli = Cli::parse();
@@ -285,8 +282,13 @@ fn main() -> anyhow::Result<()> {
         }
         #[cfg(target_os = "linux")]
         Some(Command::Appshot) => {
-            harness_ui::appshots::request_running_appshot(&engine_config_from_env().data_dir)
-                .map_err(anyhow::Error::msg)
+            let sock = engine_config_from_env().data_dir.join("appshot.sock");
+            let sender = std::os::unix::net::UnixDatagram::unbound()
+                .map_err(|e| anyhow::anyhow!("bind appshot sender: {e}"))?;
+            sender.send_to(b"capture", &sock).map_err(|e| {
+                anyhow::anyhow!("no running headed Harness at {}: {e}", sock.display())
+            })?;
+            Ok(())
         }
         Some(Command::Update { check }) => {
             let runtime = tokio::runtime::Runtime::new()?;
@@ -317,36 +319,104 @@ fn main() -> anyhow::Result<()> {
             // seeding runs it again. The copy lands by atomic rename and the
             // engine falls back to the bundled binary meanwhile; the shims
             // still follow the install, as before.
-            std::thread::spawn(|| {
-                bundled_graff::prepare();
-                launch::install_path_shims_and_auto_update_graff();
-            });
-            // codedb for the agents, kept like graff but for every build.
-            std::thread::spawn(|| {
-                if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    runtime.block_on(harness_adapters::codedb_bundle::keep_current());
+            // An explicitly isolated debug preview must not replace tools or
+            // terminal links used by the reference app. Release/default startup
+            // retains the normal maintenance paths.
+            let preview = std::env::var("HARNESS_RECONCILIATION_PREVIEW").ok();
+            if should_run_startup_maintenance(cfg!(debug_assertions), preview.as_deref()) {
+                std::thread::spawn(|| {
+                    bundled_graff::prepare();
+                    launch::install_path_shims_and_auto_update_graff();
+                });
+                // codedb for the agents, kept like graff but for every build.
+                std::thread::spawn(|| {
+                    if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        runtime.block_on(harness_adapters::codedb_bundle::keep_current());
+                    }
+                });
+            }
+            if let Some(nano_bin) = locate_nano_binary() {
+                let mut cmd = std::process::Command::new(nano_bin);
+                if let Ok(exe) = std::env::current_exe() {
+                    cmd.env("HARNESS_NANO_ENGINE_BIN", exe);
                 }
-            });
-            let edge_token = paths::var("HARNESS_EDGE_TOKEN").ok();
-            // Headed: the UI probes HARNESS_IPC_PORT and connects to a running
-            // daemon, or embeds the engine in-process (ARCHITECTURE §1).
-            harness_ui::run_app(harness_ui::UiConfig {
-                data_dir: paths::data_dir(),
-                ipc_port: paths::var("HARNESS_IPC_PORT")
-                    .ok()
-                    .and_then(|p| p.parse().ok())
-                    .unwrap_or(27664),
-                edge_url: edge_url_from_env(),
-                codegraff_client_id: codegraff_client_id_from_env(&edge_token),
-                edge_token,
-                org_id: paths::var("HARNESS_ORG_ID").ok(),
-                default_harness: harness_from_env(),
-                initial_url,
-            });
+                if let Some(url) = initial_url.as_deref() {
+                    cmd.env("HARNESS_OPEN_ROUTE", url);
+                }
+                let status = cmd.status()?;
+                if !status.success() {
+                    std::process::exit(status.code().unwrap_or(1));
+                }
+                return Ok(());
+            }
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(async {
+                let engine = harness_engine::Engine::new(engine_config_from_env());
+                engine.run().await
+            })?;
             Ok(())
+        }
+    }
+}
+
+fn locate_nano_binary() -> Option<std::path::PathBuf> {
+    if let Ok(explicit) = std::env::var("HARNESS_NANO_BIN")
+        && !explicit.trim().is_empty()
+    {
+        let p = std::path::PathBuf::from(explicit);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    let bin_name = if cfg!(windows) {
+        "harness-nano.exe"
+    } else {
+        "harness-nano"
+    };
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let sibling = dir.join(bin_name);
+        if sibling.is_file() {
+            return Some(sibling);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let bundle =
+            std::path::PathBuf::from("/Applications/Harness.app/Contents/MacOS/harness-nano");
+        if bundle.is_file() {
+            return Some(bundle);
+        }
+    }
+    let dev = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../nano/zig-out/bin")
+        .join(bin_name);
+    if dev.is_file() {
+        return Some(dev);
+    }
+    None
+}
+
+fn should_run_startup_maintenance(is_debug_build: bool, preview: Option<&str>) -> bool {
+    !(is_debug_build && preview == Some("1"))
+}
+
+#[cfg(test)]
+mod startup_maintenance_tests {
+    use super::should_run_startup_maintenance;
+
+    #[test]
+    fn isolated_preview_skips_host_maintenance_only_with_explicit_debug_opt_in() {
+        assert!(!should_run_startup_maintenance(true, Some("1")));
+        for flag in [None, Some(""), Some("0"), Some("true"), Some("1")] {
+            assert!(should_run_startup_maintenance(false, flag));
+            if flag != Some("1") {
+                assert!(should_run_startup_maintenance(true, flag));
+            }
         }
     }
 }

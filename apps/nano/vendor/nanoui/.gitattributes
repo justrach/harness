@@ -1,0 +1,7 @@
+# Preserve upstream binary dictionaries, license text and conformance data.
+src/ui/tt/data/*.bin binary
+LICENSE -whitespace
+third_party/licenses/* -whitespace
+src/ui/grapheme_break_test.txt -whitespace
+# Unmodified upstream fixture retains its terminal blank line.
+src/kit/tests.zig -whitespace

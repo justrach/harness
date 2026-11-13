@@ -1,0 +1,78 @@
+{
+  "width": 1200,
+  "height": 780,
+  "spaces": [
+    {
+      "id": "synthetic-project",
+      "deviceId": "scene-device",
+      "path": "/work/synthetic-notes",
+      "gitDetected": false,
+      "createdAt": "2026-11-05T12:00:00Z"
+    }
+  ],
+  "chats": [
+    {
+      "id": "synthetic-chat",
+      "deviceId": "scene-device",
+      "title": "Synthetic sidebar conversation",
+      "spaceId": "synthetic-project",
+      "archived": false,
+      "createdAt": "2026-11-05T12:00:00Z",
+      "lastMessageAt": "2026-11-05T12:00:00Z",
+      "config": {
+        "harness": "graff",
+        "model": "openai/synthetic-fast",
+        "reasoning": null,
+        "modelOptions": {},
+        "sandbox": "workspace-write"
+      },
+      "lastMessagePreview": null
+    }
+  ],
+  "replies": {
+    "ListHarnesses": [
+      {
+        "id": "graff",
+        "name": "graff",
+        "installed": true,
+        "enabled": true,
+        "reasoningLevels": [
+          "low",
+          "high"
+        ],
+        "canInstall": false,
+        "steeringMode": "step-boundary",
+        "supportsSteering": true
+      }
+    ],
+    "ListModels": [
+      {
+        "id": "openai/synthetic-fast",
+        "label": "Synthetic Fast",
+        "maker": "openai",
+        "reasoningLevels": [
+          "low",
+          "high"
+        ],
+        "description": "Synthetic release-parity fixture",
+        "billing": "credits"
+      }
+    ]
+  },
+  "name": "desktop-sidebar-composer-dark",
+  "appearance": "dark",
+  "steps": [
+    {
+      "do": "wait",
+      "ms": 300
+    },
+    {
+      "do": "type",
+      "text": "Synthetic draft that keeps the suggestion chips visible."
+    },
+    {
+      "do": "wait",
+      "ms": 300
+    }
+  ]
+}

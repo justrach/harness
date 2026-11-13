@@ -20,16 +20,17 @@ fn live(a: *const App) []const u8 {
 /// Before the selection changes: the prompt kept under the chat it was
 /// written in. A question or a queued edit in progress stays with it.
 pub fn leave(a: *App) void {
+    @import("composer_completion.zig").park(a, live(a));
     put(a, a.selected orelse canvas_key, live(a));
-    a.prompt_nav.reset(a.gpa);
-    if (a.wizard) |*w| w.deinit();
-    a.wizard = null;
+    a.prompt_nav.retire(a);
+    @import("app_question.zig").suspendQuestion(a);
     a.draft_stash.clearRetainingCapacity();
 }
 
 /// After: the selected chat's prompt, or the new chat's, in the composer.
 pub fn enter(a: *App) void {
     a.composer.set(a.drafts.get(a.selected orelse canvas_key) orelse "");
+    @import("composer_completion.zig").enter(a);
 }
 
 fn put(a: *App, key: []const u8, text: []const u8) void {
@@ -71,10 +72,15 @@ pub fn canvas(a: *App) !Draft {
     const text = if (a.selected == null) live(a) else a.drafts.get(canvas_key) orelse "";
     var d: Draft = .{ .text = try a.gpa.dupe(u8, text), .harness = &.{} };
     errdefer d.deinit(a.gpa);
+    d.completion = try @import("composer_completion.zig").canvas(a, text);
     d.harness = try a.gpa.dupe(u8, a.new_harness);
     d.model = try dupe(a, a.new_model);
     d.reasoning = try dupe(a, a.new_reasoning);
     d.space = try dupe(a, a.space);
+    d.device = try dupe(a, a.new_device);
+    d.no_project = a.new_no_project;
+    d.checkout_local = a.new_checkout_local;
+    d.ref = try dupe(a, a.new_ref);
     return d;
 }
 
@@ -82,16 +88,49 @@ pub fn canvas(a: *App) !Draft {
 pub fn adopt(a: *App, d: Draft) void {
     if (a.selected == null) a.composer.set(d.text) else put(a, canvas_key, d.text);
     a.gpa.free(d.text);
-    a.gpa.free(a.new_harness);
+    a.retireSlice(a.new_harness);
     a.new_harness = d.harness;
-    inline for (.{ .{ "new_model", "model" }, .{ "new_reasoning", "reasoning" }, .{ "space", "space" } }) |f| {
-        if (@field(a, f[0])) |old| a.gpa.free(old);
+    a.new_no_project = d.no_project;
+    a.new_checkout_local = d.checkout_local;
+    inline for (.{ .{ "new_model", "model" }, .{ "new_reasoning", "reasoning" }, .{ "space", "space" }, .{ "new_device", "device" }, .{ "new_ref", "ref" } }) |f| {
+        if (@field(a, f[0])) |old| a.retireSlice(old);
         @field(a, f[0]) = @field(d, f[1]);
     }
     a.ensureModels(a.target().harness);
+    @import("composer_completion.zig").adopt(a, d.completion);
+    if (d.completion) |v| a.gpa.free(v);
 }
 
 const testing = std.testing;
+test {
+    _ = @import("tests_question_retention.zig");
+    _ = @import("tests_engine_lifecycle_deep.zig");
+}
+
+test "a projectless draft stays projectless when parked and restored" {
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    const spaces = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"project","deviceId":"local","path":"/work/example","gitDetected":true},
+        \\ {"id":"remote-project","deviceId":"remote","path":"/work/remote-example","gitDetected":true}]
+    , .{});
+    defer spaces.deinit();
+    try a.spaces.replace(spaces.value);
+    try testing.expect(@import("app_agent.zig").newChatSpace(&a) != null);
+    a.new_device = try testing.allocator.dupe(u8, "remote");
+    try testing.expectEqualStrings("remote-project", @import("app_agent.zig").newChatSpace(&a).?.id);
+    a.new_no_project = true;
+    a.composer.set("Build something new");
+    const draft = try canvas(&a);
+    a.new_no_project = false;
+    testing.allocator.free(a.new_device.?);
+    a.new_device = null;
+    adopt(&a, draft);
+    try testing.expect(a.new_no_project);
+    try testing.expectEqualStrings("remote", a.new_device.?);
+    try testing.expect(@import("app_agent.zig").newChatSpace(&a) == null);
+    try testing.expectEqualStrings("Build something new", a.composer.text());
+}
 
 test "each chat keeps its own prompt; the new chat's is kept while a chat shows" {
     var a: App = .init(testing.allocator, testing.io, 1);

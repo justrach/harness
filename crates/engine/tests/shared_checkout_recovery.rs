@@ -1,6 +1,6 @@
-//! Legacy chats sharing the primary checkout ask before continuing, even when
-//! its branch has not changed. Recovery forks only the consenting chat from its
-//! recorded context; it never switches, cleans, or copies the shared checkout.
+//! Chats sharing a primary checkout never stop to ask. A "Shared checkout"
+//! question an earlier version saved can still fork the answering chat from its
+//! recorded context; that never switches, cleans, or copies the shared checkout.
 //! Existing linked worktrees are already isolated and must not be re-migrated.
 
 use std::ffi::OsString;
@@ -12,7 +12,10 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use harness_adapters::{Harness, HarnessError, RunControls};
-use harness_doc::{MessagePart, MessageRole, SessionCommandPayload, SessionCommandStatus};
+use harness_doc::{
+    MessagePart, MessageRole, MessageStatus, SessionCommandPayload, SessionCommandStatus,
+    SessionMessageEntry,
+};
 use harness_engine::{EngineCore, HarnessRegistry};
 use harness_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
@@ -221,19 +224,6 @@ async fn wait_for(mut predicate: impl FnMut() -> bool, what: &str) {
     }
 }
 
-async fn wait_question(core: &EngineCore) -> (String, UserInputQuestion) {
-    let mut question = None;
-    wait_for(
-        || {
-            question = open_question(core);
-            question.is_some()
-        },
-        "shared checkout consent",
-    )
-    .await;
-    question.unwrap()
-}
-
 async fn wait_command(core: &EngineCore, id: &str, status: SessionCommandStatus) {
     wait_for(
         || {
@@ -271,25 +261,42 @@ async fn wait_turn(core: &EngineCore, requests: &RequestLog, count: usize) {
     .await;
 }
 
-fn assert_shared_options(question: &UserInputQuestion, branch: &str) {
-    assert!(
-        question
-            .options
-            .iter()
-            .any(|label| label == "Continue independently"),
-        "{question:?}"
-    );
-    assert!(
-        question.options.contains(&format!("Continue on {branch}")),
-        "explicit shared continuation remains available: {question:?}"
-    );
-    assert!(
-        question
-            .options
-            .iter()
-            .all(|label| !label.starts_with("Switch back")),
-        "shared checkout consent must never offer a checkout mutation: {question:?}"
-    );
+/// The question earlier versions asked here, over the message waiting behind it.
+fn seed_saved_question(core: &EngineCore, branch: &str) -> String {
+    let handle = core.doc_host.open(CHAT).unwrap();
+    handle.write_user_message("held", HELD_PROMPT, 1).unwrap();
+    let request_id = "branch-drift-saved-by-an-older-version".to_string();
+    handle
+        .doc()
+        .push_message(&SessionMessageEntry {
+            id: "saved-question".into(),
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Input {
+                id: request_id.clone(),
+                request_id: request_id.clone(),
+                questions: vec![UserInputQuestion {
+                    id: "branch".into(),
+                    header: "Shared checkout".into(),
+                    question: "This checkout is shared with other chats.".into(),
+                    options: vec![
+                        "Continue independently".to_string(),
+                        format!("Continue on {branch}"),
+                        "Don't send".to_string(),
+                    ],
+                    multi_select: false,
+                    prefill: None,
+                    multiline: false,
+                }],
+                resolved: false,
+            }],
+            created_at: 2,
+            device_id: core.device_id.clone(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })
+        .unwrap();
+    request_id
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -350,7 +357,7 @@ fn user_text(core: &EngineCore, id: &str) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn unchanged_shared_primary_checkout_forks_from_recorded_head_without_copying_dirty_work() {
+async fn a_saved_answer_forks_from_the_recorded_head_without_copying_dirty_work() {
     let _serial = WORKTREE_ENV.lock().await;
     for archived_restore in [false, true] {
         let tmp = tempfile::tempdir().unwrap();
@@ -395,8 +402,8 @@ async fn unchanged_shared_primary_checkout_forks_from_recorded_head_without_copy
         assert_ne!(before.head, recorded_head);
         assert_eq!(before.branch, recorded.branch);
 
-        // Restoring an archived conversation after restart must take the
-        // same consent path as an already-open legacy conversation.
+        // Restoring an archived conversation after restart answers the same
+        // way as an already-open legacy conversation.
         let (core, requests, previous_turns) = if archived_restore {
             core.shutdown().await;
             drop(core);
@@ -406,16 +413,8 @@ async fn unchanged_shared_primary_checkout_forks_from_recorded_head_without_copy
         } else {
             (core, requests, 1)
         };
-        let held = send(&core, "held", HELD_PROMPT, &cwd);
-        let (request_id, question) = wait_question(&core).await;
-        wait_command(&core, &held, SessionCommandStatus::Applied).await;
-        assert_shared_options(&question, "alpha");
-        assert_eq!(
-            requests.lock().unwrap().len(),
-            previous_turns,
-            "send is held"
-        );
-        assert_eq!(snapshot(&repo), before, "asking cannot touch shared work");
+        let request_id = seed_saved_question(&core, "alpha");
+        assert_eq!(snapshot(&repo), before);
 
         answer(&core, &request_id, "Continue independently");
         wait_turn(&core, &requests, previous_turns + 1).await;
@@ -524,7 +523,7 @@ async fn unchanged_shared_primary_checkout_forks_from_recorded_head_without_copy
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn shared_clean_drift_refuses_forged_switch_back_and_falls_back_to_recorded_branch() {
+async fn a_saved_answer_refuses_forged_switch_back_and_falls_back_to_recorded_branch() {
     let _serial = WORKTREE_ENV.lock().await;
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().canonicalize().unwrap();
@@ -557,9 +556,7 @@ async fn shared_clean_drift_refuses_forged_switch_back_and_falls_back_to_recorde
         before.status, "",
         "clean checkout would otherwise permit Switch back"
     );
-    send(&core, "held", HELD_PROMPT, &cwd);
-    let (request_id, question) = wait_question(&core).await;
-    assert_shared_options(&question, "beta");
+    let request_id = seed_saved_question(&core, "beta");
 
     let forged = answer(&core, &request_id, "Switch back to alpha");
     wait_command(&core, &forged, SessionCommandStatus::Rejected).await;
@@ -573,9 +570,7 @@ async fn shared_clean_drift_refuses_forged_switch_back_and_falls_back_to_recorde
         1,
         "forged consent cannot dispatch"
     );
-    let (request_id, question) =
-        open_question(&core).expect("the held request still needs consent");
-    assert_shared_options(&question, "beta");
+    let (request_id, _) = open_question(&core).expect("the held request still waits");
     answer(&core, &request_id, "Continue independently");
     wait_turn(&core, &requests, 2).await;
     let independent = requests.lock().unwrap()[1].clone();
@@ -595,7 +590,7 @@ async fn shared_clean_drift_refuses_forged_switch_back_and_falls_back_to_recorde
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn explicit_shared_continuation_is_acknowledged_once_even_after_restart() {
+async fn a_shared_checkout_never_asks_and_stays_where_it_is() {
     let _serial = WORKTREE_ENV.lock().await;
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().canonicalize().unwrap();
@@ -608,39 +603,48 @@ async fn explicit_shared_continuation_is_acknowledged_once_even_after_restart() 
     wait_turn(&core, &requests, 1).await;
     create_chat(&core, PEER, &cwd);
     let before = snapshot(&repo);
-    send(&core, "held", HELD_PROMPT, &cwd);
-    let (request_id, question) = wait_question(&core).await;
-    assert_shared_options(&question, "alpha");
-    assert_eq!(requests.lock().unwrap().len(), 1);
-    answer(&core, &request_id, "Continue on alpha");
+
+    // Nothing moved: the send goes out as typed.
+    send(&core, "same", HELD_PROMPT, &cwd);
     wait_turn(&core, &requests, 2).await;
-    let continued = requests.lock().unwrap()[1].clone();
-    assert_eq!(continued.cwd, cwd);
-    assert_eq!(continued.resume.as_deref(), Some("synthetic-native-1"));
-    assert_eq!(continued.prompt.matches(HELD_PROMPT).count(), 1);
-    assert_eq!(snapshot(&repo), before);
     assert!(open_question(&core).is_none());
+    let same = requests.lock().unwrap()[1].clone();
+    assert_eq!(same.cwd, cwd);
+    assert_eq!(same.prompt, HELD_PROMPT);
+    assert_eq!(same.resume.as_deref(), Some("synthetic-native-1"));
+    assert_eq!(snapshot(&repo), before);
+
+    // The other chat moved the shared folder: go ahead there, and say so.
+    git(&repo, &["switch", "-c", "beta"]);
+    send(&core, "moved", "after the move", &cwd);
+    wait_turn(&core, &requests, 3).await;
+    assert!(open_question(&core).is_none());
+    let moved = requests.lock().unwrap()[2].clone();
+    assert_eq!(moved.cwd, cwd);
+    assert!(moved.prompt.ends_with("after the move"), "{}", moved.prompt);
+    assert!(
+        moved.prompt.contains("now on `beta`") && moved.prompt.contains("ran on `alpha`"),
+        "{}",
+        moved.prompt
+    );
+    assert_eq!(user_text(&core, "moved"), "after the move");
     core.shutdown().await;
     drop(core);
 
+    // Nor after a restart, and no worktree appeared along the way.
     let (core, requests) = engine(&data);
-    send(&core, "follow-up", "acknowledged shared follow-up", &cwd);
+    send(&core, "follow-up", "shared follow-up", &cwd);
     wait_turn(&core, &requests, 1).await;
-    assert!(
-        open_question(&core).is_none(),
-        "the explicit acknowledgement is durable"
-    );
+    assert!(open_question(&core).is_none());
     let follow_up = requests.lock().unwrap()[0].clone();
     assert_eq!(follow_up.cwd, cwd);
-    assert_eq!(follow_up.prompt, "acknowledged shared follow-up");
-    assert_eq!(follow_up.resume.as_deref(), Some("synthetic-native-2"));
+    assert_eq!(follow_up.prompt, "shared follow-up");
     assert_eq!(
         git(&repo, &["worktree", "list", "--porcelain"])
             .matches("worktree ")
             .count(),
         1
     );
-    assert_eq!(snapshot(&repo), before);
     core.shutdown().await;
 }
 

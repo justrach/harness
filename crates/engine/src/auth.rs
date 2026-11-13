@@ -54,15 +54,49 @@ struct RefreshRetry {
     failure: Option<RefreshFailure>,
     /// The last refresh that failed without an answer (or was spared). Unlike
     /// `failure`, an explicit Retry doesn't clear it: only a success does.
-    last_unanswered: Option<tokio::time::Instant>,
+    last_unanswered: Option<UnansweredRefresh>,
     /// A rejection right after unanswered attempts was retried once already.
     rejection_spared: bool,
 }
 
-/// How long the edge replays a rotated refresh's answer (`refresh-leeway.ts`).
-/// A rejection this soon after an unanswered attempt may be that rotation's
-/// lost answer, not a revoked session (#331).
-const REFRESH_REPLAY_WINDOW: Duration = Duration::from_secs(120);
+/// Dual-clock timestamp for [`RefreshRetry::last_unanswered`]: monotonic alone
+/// freezes across OS suspend (`mach_absolute_time` / `CLOCK_MONOTONIC`), while
+/// wall clock alone is vulnerable to backward NTP steps. Taking the larger
+/// elapsed duration matches [`AccessEntry`] and [`RefreshFailure`].
+#[derive(Clone, Copy)]
+struct UnansweredRefresh {
+    at: tokio::time::Instant,
+    wall: std::time::SystemTime,
+}
+
+impl UnansweredRefresh {
+    fn now() -> Self {
+        Self {
+            at: tokio::time::Instant::now(),
+            wall: std::time::SystemTime::now(),
+        }
+    }
+
+    fn elapsed(&self) -> Duration {
+        self.elapsed_at(tokio::time::Instant::now(), std::time::SystemTime::now())
+    }
+
+    fn elapsed_at(
+        &self,
+        mono_now: tokio::time::Instant,
+        wall_now: std::time::SystemTime,
+    ) -> Duration {
+        let mono = mono_now.saturating_duration_since(self.at);
+        let wall = wall_now.duration_since(self.wall).unwrap_or(Duration::ZERO);
+        mono.max(wall)
+    }
+}
+
+/// How long the edge replays a rotated refresh's answer (`refresh-leeway.ts`
+/// `LEEWAY_MS` = 7 days). A rejection within this wall-clock window after an
+/// unanswered attempt — including across multi-minute connectivity drops or
+/// laptop sleep (#330, #331, codegraff#1612) — gets one retry before sign-out.
+const REFRESH_REPLAY_WINDOW: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// A refresh rejection's cause, from the edge's own `{error}` text, as a fixed
 /// category: logs name the kind, never the response body (#331).
@@ -610,6 +644,16 @@ impl Auth {
         self.inner.retry_tx.send_replace(retry.generation);
     }
 
+    fn reset_refresh_session(&self) {
+        let mut retry = lock(&self.inner.refresh_retry);
+        retry.generation = retry.generation.wrapping_add(1);
+        retry.failures = 0;
+        retry.failure = None;
+        retry.last_unanswered = None;
+        retry.rejection_spared = false;
+        self.inner.retry_tx.send_replace(retry.generation);
+    }
+
     /// Sleep-until-near-expiry refresh loop so long-lived dials (relay, rooms) always
     /// have a live token to present on reconnect. No-op task in dev mode.
     pub fn spawn_refresh_loop(&self) -> tokio::task::JoinHandle<()> {
@@ -790,7 +834,7 @@ impl Auth {
         sign_in.pending.clear();
         *lock(&self.inner.stored) = None;
         *lock(&self.inner.access) = None;
-        self.retry_refresh();
+        self.reset_refresh_session();
         self.persist::<&StoredSession>(None);
         self.inner.state_tx.send_replace(AuthState::SignedOut);
         self.inner
@@ -1016,7 +1060,7 @@ impl Auth {
             user: session.user.clone(),
             org_id: org_id.clone(),
         });
-        self.retry_refresh();
+        self.reset_refresh_session();
         tracing::info!(email = %session.user.email, "auth: sandbox signed in");
         self.inner
             .state_tx
@@ -1047,7 +1091,7 @@ impl Auth {
         self.persist(Some(&session));
         self.set_lost_session(false);
         *lock(&self.inner.stored) = Some(session);
-        self.retry_refresh();
+        self.reset_refresh_session();
         tracing::info!(email = %result.user.email, org = org_id.as_deref().unwrap_or("<none>"),
             "auth: signed in");
         self.inner
@@ -1124,7 +1168,7 @@ impl Auth {
         // A Retry/sign-in/sign-out during the request invalidates its cooldown.
         if organization_id.is_none() {
             match &result {
-                Err(_) => retry.last_unanswered = Some(tokio::time::Instant::now()),
+                Err(_) => retry.last_unanswered = Some(UnansweredRefresh::now()),
                 Ok(_) => {
                     retry.last_unanswered = None;
                     retry.rejection_spared = false;
@@ -1871,6 +1915,124 @@ mod tests {
                 "user": {"id": "u1", "email": "u@x", "name": null},
             })
         );
+    }
+
+    #[test]
+    fn replay_window_survives_extended_outages_and_expires_by_wall_clock_across_sleep() {
+        // Multi-minute connectivity drops (> 120s, e.g. 35 min sleep/wake cycles)
+        // stay inside the 7-day edge replay window (`refresh-leeway.ts`).
+        let unanswered = UnansweredRefresh::now();
+        let after_outage = unanswered.elapsed_at(
+            unanswered.at + Duration::from_secs(35 * 60),
+            unanswered.wall + Duration::from_secs(35 * 60),
+        );
+        assert_eq!(after_outage, Duration::from_secs(35 * 60));
+        assert!(after_outage < REFRESH_REPLAY_WINDOW);
+
+        // When the OS suspends for over 7 days, `tokio::time::Instant` freezes while
+        // `SystemTime` advances: wall-clock expiry still ages out the stale attempt.
+        let slept_past_window = UnansweredRefresh {
+            at: tokio::time::Instant::now(),
+            wall: std::time::SystemTime::now() - (REFRESH_REPLAY_WINDOW + Duration::from_secs(1)),
+        };
+        assert!(slept_past_window.elapsed() >= REFRESH_REPLAY_WINDOW);
+
+        // Backward NTP corrections fall back cleanly to monotonic elapsed time.
+        let future_wall = UnansweredRefresh {
+            at: tokio::time::Instant::now(),
+            wall: std::time::SystemTime::now() + Duration::from_secs(600),
+        };
+        assert!(future_wall.elapsed() < REFRESH_REPLAY_WINDOW);
+    }
+
+    #[tokio::test]
+    async fn rejection_after_long_outage_spares_once_until_wall_clock_window_expires() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let mode = Arc::new(AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_mode = mode.clone();
+        let server = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0_u8; 2048];
+                let _ = stream.read(&mut buf).await;
+                match server_mode.load(Ordering::SeqCst) {
+                    // 0: drop connection without answering (lost rotation answer).
+                    0 => drop(stream),
+                    // 1: reject rotated credential with 401.
+                    1 => {
+                        let body = r#"{"error":"CodeGraff rejected the grant (401)"}"#;
+                        let resp = format!(
+                            "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = stream.write_all(resp.as_bytes()).await;
+                    }
+                    // 2: succeed with a fresh token pair.
+                    _ => {
+                        let body = r#"{"accessToken":"h.eyJleHAiOjQwMDAwMDAwMDAsImlhdCI6MTAwMCwib3JnX2lkIjoib3JnXzEifQ.s","refreshToken":"harness_rt_fresh"}"#;
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = stream.write_all(resp.as_bytes()).await;
+                    }
+                }
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("session.json"),
+            r#"{"refreshToken":"harness_rt_initial","user":{"id":"u1","email":"u@example.com"},"orgId":"org_1"}"#,
+        )
+        .unwrap();
+        let mut config = AuthConfig::new(format!("http://127.0.0.1:{port}"), dir.path());
+        config.codegraff_client_id = Some("cg_client_test".into());
+        config.codegraff_api_base = "https://codegraff.example".into();
+        let auth = Auth::new(config);
+
+        // 1) Unanswered refresh (connection dropped mid-flight).
+        assert!(matches!(
+            auth.access_token().await,
+            Err(TokenError::TemporarilyUnavailable(_))
+        ));
+        // Simulate a 45-minute wall-clock sleep since the unanswered attempt (> old 120s window).
+        lock(&auth.inner.refresh_retry).last_unanswered = Some(UnansweredRefresh {
+            at: tokio::time::Instant::now(),
+            wall: std::time::SystemTime::now() - Duration::from_secs(45 * 60),
+        });
+
+        // 2) First 401 after reconnect is spared once, preserving the session.
+        mode.store(1, Ordering::SeqCst);
+        auth.retry_refresh();
+        assert!(matches!(
+            auth.access_token().await,
+            Err(TokenError::TemporarilyUnavailable(_))
+        ));
+        assert!(auth.state().is_signed_in());
+        assert!(dir.path().join("session.json").exists());
+
+        // 3) Next retry succeeds and clears the unanswered/spared state.
+        mode.store(2, Ordering::SeqCst);
+        auth.retry_refresh();
+        assert!(auth.access_token().await.is_ok());
+        assert!(lock(&auth.inner.refresh_retry).last_unanswered.is_none());
+        assert!(!lock(&auth.inner.refresh_retry).rejection_spared);
+
+        // 4) If wall clock ages past REFRESH_REPLAY_WINDOW across sleep (even with fresh Instant),
+        //    a rejection is no longer treated as a recent replay and signs out immediately.
+        *lock(&auth.inner.access) = None;
+        lock(&auth.inner.refresh_retry).last_unanswered = Some(UnansweredRefresh {
+            at: tokio::time::Instant::now(),
+            wall: std::time::SystemTime::now() - (REFRESH_REPLAY_WINDOW + Duration::from_secs(5)),
+        });
+        mode.store(1, Ordering::SeqCst);
+        assert_eq!(auth.access_token().await, Err(TokenError::SignedOut));
+        assert_eq!(auth.state(), AuthState::SignedOut);
+
+        server.abort();
     }
 }
 

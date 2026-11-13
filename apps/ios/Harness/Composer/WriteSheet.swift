@@ -399,8 +399,7 @@ struct WriteSheet<Chips: View>: View {
                         .font(.system(size: 16, weight: .medium))
                         .foregroundStyle(Theme.textMuted)
                         .frame(width: 40, height: 40)
-                        .background(ink(0.06), in: Circle())
-                        .overlay(Circle().strokeBorder(hairline(0.08), lineWidth: 1))
+                        .glassEffect(.regular.interactive(), in: Circle())
                         .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
@@ -415,9 +414,8 @@ struct WriteSheet<Chips: View>: View {
             }
         }
         .padding(8)
-        .background(Theme.composerPlane, in: RoundedRectangle(cornerRadius: 28))
         .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 28))
-        .overlay(RoundedRectangle(cornerRadius: 28).strokeBorder(hairline(0.05), lineWidth: 1))
+        .shadow(color: .black.opacity(0.08), radius: 10, y: 3)
         .padding(.horizontal, 12)
         .padding(.bottom, 8)
         .frame(maxWidth: 704)

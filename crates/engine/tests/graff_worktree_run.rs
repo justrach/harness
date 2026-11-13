@@ -365,3 +365,217 @@ async fn unchanged_checkout_keeps_its_complete_source_context() {
     );
     core.shutdown().await;
 }
+
+/// Channel-backed Graff harness for mid-turn `session_info_update` (`workspace use`)
+/// + `show_image` sequencing (#1737).
+struct LiveGraff {
+    tx: Mutex<Option<tokio::sync::mpsc::Sender<Result<AgentEvent, HarnessError>>>>,
+}
+
+impl LiveGraff {
+    fn new() -> Self {
+        Self {
+            tx: Mutex::new(None),
+        }
+    }
+
+    async fn emit(&self, event: AgentEvent) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let tx = loop {
+            if let Some(tx) = self.tx.lock().unwrap().clone() {
+                break tx;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for LiveGraff run"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        tx.send(Ok(event)).await.expect("run alive");
+    }
+}
+
+#[async_trait]
+impl Harness for LiveGraff {
+    fn id(&self) -> HarnessId {
+        HarnessId::Graff
+    }
+    fn display_name(&self) -> &str {
+        "Graff"
+    }
+    fn supports_steering(&self) -> bool {
+        false
+    }
+    fn steering_mode(&self) -> SteeringMode {
+        SteeringMode::TurnBoundary
+    }
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        &[ReasoningLevel::Medium]
+    }
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        Ok(vec![])
+    }
+    async fn run(
+        &self,
+        _request: RunRequest,
+        _controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        *self.tx.lock().unwrap() = Some(tx);
+        Ok(Box::pin(futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|event| (event, rx))
+        })))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mid_turn_session_cwd_change_reroots_show_image_and_workspace() {
+    const PNG: &[u8] = b"\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x0d\x49\x44\x41\x54\x78\xda\x63\xfc\xcf\xc0\x50\x0f\x00\x04\x85\x01\x80\x84\xa9\x8c\x21\x00\x00\x00\x00\x49\x45\x4e\x44\xae\x42\x60\x82";
+
+    let tmp = tempfile::tempdir().unwrap();
+    let tmp_path = tmp.path().canonicalize().unwrap();
+    let repo = tmp_path.join("repo");
+    let main_cwd = init_repo(&repo);
+    let linked = tmp_path.join("linked-wt");
+    let linked_cwd = linked.to_string_lossy().into_owned();
+    git(
+        &main_cwd,
+        &["worktree", "add", "-b", "feat/linked", &linked_cwd],
+    );
+
+    std::fs::write(repo.join("main-only.png"), PNG).unwrap();
+    std::fs::write(linked.join("switched.png"), PNG).unwrap();
+
+    let live = Arc::new(LiveGraff::new());
+    let registry = HarnessRegistry::new();
+    registry.register(live.clone());
+    let core = EngineCore::assemble(
+        &tmp_path.join("data"),
+        Arc::new(registry),
+        HarnessId::Graff,
+        None,
+    )
+    .unwrap();
+    core.workspace
+        .create_chat(
+            CHAT,
+            None,
+            Some(&core.device_id),
+            None,
+            Some(main_cwd.clone()),
+        )
+        .unwrap();
+    core.workspace.rename_chat(CHAT, "Pre-titled").unwrap();
+    core.doc_host
+        .queue_command(CHAT, run("msg-switch", &main_cwd, None))
+        .unwrap();
+
+    live.emit(AgentEvent::SessionStarted {
+        harness: HarnessId::Graff,
+        model: "codex/gpt-6-sol".into(),
+        tools: vec![],
+        cwd: main_cwd.clone(),
+        session_id: "sess-live".into(),
+        assistant_message_id: "a-1".into(),
+    })
+    .await;
+    live.emit(AgentEvent::TextDelta {
+        text: "in main".into(),
+    })
+    .await;
+    wait_for(
+        || {
+            core.doc_host
+                .open(CHAT)
+                .ok()
+                .and_then(|h| h.doc().read_entries().ok())
+                .unwrap_or_default()
+                .iter()
+                .any(|e| e.role == MessageRole::Assistant)
+        },
+        "assistant started",
+    )
+    .await;
+
+    // Before switching checkouts, an image that exists only in `linked-wt` is rejected.
+    let before = core
+        .sessions
+        .show_image(CHAT, "req-before", "switched.png", None)
+        .await;
+    assert!(before.is_err(), "unswitched cwd must not read linked-wt");
+
+    // `workspace use` moves the session into `linked-wt` and emits `session_info_update`.
+    live.emit(AgentEvent::SessionCwdChanged {
+        cwd: linked_cwd.clone(),
+    })
+    .await;
+    wait_for(
+        || {
+            core.workspace
+                .chat(CHAT)
+                .unwrap()
+                .and_then(|c| c.cwd)
+                .as_deref()
+                == Some(linked_cwd.as_str())
+        },
+        "chat cwd re-homed to linked worktree",
+    )
+    .await;
+
+    let imported = core
+        .sessions
+        .show_image(
+            CHAT,
+            "req-after",
+            "switched.png",
+            Some("switched capture".into()),
+        )
+        .await
+        .expect("show_image resolves relative path inside newly active worktree");
+    assert_eq!(imported.name, "switched capture");
+
+    let chat = core.workspace.chat(CHAT).unwrap().unwrap();
+    assert_eq!(chat.branch.as_deref(), Some("feat/linked"));
+    assert_eq!(
+        chat.source_context.as_ref().map(|c| c.cwd.as_str()),
+        Some(linked_cwd.as_str())
+    );
+    assert_eq!(
+        core.workspace.chat_harness_session(CHAT),
+        Some(("sess-live".into(), Some(linked_cwd.clone()))),
+        "resume session scope follows the live cwd change"
+    );
+
+    // Switching back to the main checkout (`graff/worktree: null`, `graff/cwd: main_cwd`)
+    // re-roots `show_image` and the chat row back to main as well.
+    live.emit(AgentEvent::SessionCwdChanged {
+        cwd: main_cwd.clone(),
+    })
+    .await;
+    wait_for(
+        || {
+            core.workspace
+                .chat(CHAT)
+                .unwrap()
+                .and_then(|c| c.cwd)
+                .as_deref()
+                == Some(main_cwd.as_str())
+        },
+        "chat cwd re-homed back to main checkout",
+    )
+    .await;
+    core.sessions
+        .show_image(CHAT, "req-main", "main-only.png", None)
+        .await
+        .expect("show_image resolves inside main checkout after switching back");
+
+    live.emit(AgentEvent::Done {
+        status: DoneStatus::Completed,
+        result: None,
+        error: None,
+        session_id: Some("sess-live".into()),
+    })
+    .await;
+    wait_for(|| completed_turns(&core) == 1, "turn completes").await;
+    core.shutdown().await;
+}

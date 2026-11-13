@@ -59,6 +59,13 @@ pub fn main(init: std.process.Init) !void {
         if (scene.get(l[0])) |v| try l[1].replace(v);
     }
     @import("workspace.zig").sortChats(a.chats.items);
+    // Optional synthetic RPC replies, as in parity scenes. Never connect a
+    // fixture to the user's engine just to exercise project setup.
+    if (scene.get("replies")) |v| {
+        a.engine.scene = try json.parseFromSlice(json.Value, gpa, try json.Stringify.valueAlloc(init.arena.allocator(), v, .{}), .{});
+        a.engine.state = .connected;
+        a.device_id = try gpa.dupe(u8, first(scene, "spaces", "deviceId") orelse first(scene, "devices", "id") orelse "local");
+    }
     // The account badge's: "workspaceScope", "auth" (an AuthStatus item),
     // "codegraff" (a CodegraffAuthStatus reply).
     const acct = @import("app_account.zig");
@@ -66,6 +73,32 @@ pub fn main(init: std.process.Init) !void {
     if (scene.get("auth")) |v| a.account.user = try acct.readUser(gpa, v);
     if (scene.get("codegraff")) |v| a.account.codegraff = try acct.readCodegraff(gpa, v);
     if (str(scene, "open")) |id| a.openChat(id, null);
+    // Bots: a `BotsState` reply as "bots", the clock its times are read
+    // against as "botsNow" (ms), and the page shown: "inbox", "new" or a
+    // bot's name. "botsDetail" is what `BotDetail` would answer for its
+    // "bot": that bot's memory and log.
+    if (scene.get("bots")) |v| {
+        const bots = @import("bots.zig");
+        if (scene.get("botsNow")) |n| if (n == .integer) {
+            a.bots.clock_ms = n.integer;
+        };
+        a.bots.launch_seen = true;
+        try bots.apply(&a, v);
+        if (scene.get("botsDetail")) |d| if (d == .object) {
+            if (str(d.object, "bot")) |name| try a.bots.detail_of.appendSlice(gpa, name);
+            if (d.object.get("memory")) |m| if (m == .string) try a.bots.memory.appendSlice(gpa, m.string);
+            if (d.object.get("log")) |l| if (l == .string) try a.bots.log.appendSlice(gpa, l.string);
+        };
+        if (str(scene, "botsPage")) |p| {
+            if (std.mem.eql(u8, p, "inbox")) a.bots.page = .inbox else if (std.mem.eql(u8, p, "new")) {
+                a.bots.page = .new;
+                a.bots.new_primary = false;
+            } else {
+                try a.bots.focus.appendSlice(gpa, p);
+                a.bots.page = .bot;
+            }
+        }
+    }
 
     var t: ui.Tester = undefined;
     try t.init(gpa, .init(&a, @import("view.zig").view), .{
@@ -124,6 +157,7 @@ fn parity(init: std.process.Init, scene: json.ObjectMap, name: []const u8, out: 
     const arena = init.arena.allocator();
     var a: App = .init(gpa, init.io, 1);
     defer a.deinit();
+    a.updates.desktop_update = false;
     a.new_harness = try gpa.dupe(u8, "graff");
     // A data folder of its own, empty, as the renderer's temporary one: what
     // a scene saves (a theme it imports) goes there, never in ~/.harness.
@@ -131,6 +165,9 @@ fn parity(init: std.process.Init, scene: json.ObjectMap, name: []const u8, out: 
     std.Io.Dir.cwd().deleteTree(init.io, data) catch {};
     try std.Io.Dir.cwd().createDirPath(init.io, data);
     a.settings.path = try std.fs.path.join(gpa, &.{ data, "ui-settings.json" });
+    // No file yet: a first run's settings, as the renderer's
+    // `settings::init` reads them (`UiSettings::load` → `first_run`).
+    a.settings.load();
     @import("themes.zig").loadLibrary(init.io, data);
     a.env = init.environ_map;
     // Match the scene's synthetic device, not the host's installed Codex or
@@ -171,6 +208,11 @@ fn parity(init: std.process.Init, scene: json.ObjectMap, name: []const u8, out: 
     // renderer's `SCENE_ACCOUNTS`.
     const accounts_page = @import("view_settings_accounts.zig");
     if (scene.get("accounts")) |v| accounts_page.scene_accounts = try json.Stringify.valueAlloc(gpa, v, .{});
+    // The scene's cloud sandboxes reach the shell too (the running strip),
+    // not just Settings › Accounts, as GPUI's renderer applies them at boot.
+    if (scene.get("accounts")) |v| if (v == .object) if (v.object.get("codegraffSandboxes")) |sb| {
+        @import("app_sandboxes.zig").apply(&a, sb);
+    };
     defer if (accounts_page.scene_accounts) |text| {
         gpa.free(text);
         accounts_page.scene_accounts = null;
@@ -178,7 +220,12 @@ fn parity(init: std.process.Init, scene: json.ObjectMap, name: []const u8, out: 
     if (str(scene, "selectedSpace") orelse first(scene, "spaces", "id")) |sp| a.space = try gpa.dupe(u8, sp);
     if (str(scene, "selectedChat")) |id| {
         a.openChat(id, null);
-        if (scene.get("transcript")) |v| a.transcript.apply(reset(arena, v) orelse return error.OutOfMemory) catch {};
+        if (scene.get("transcript")) |v| {
+            var frame = (reset(arena, v) orelse return error.OutOfMemory);
+            // The chat's context meter rides its transcript frame.
+            if (scene.get("contextUsage")) |u| try frame.object.put(arena, "contextUsage", u);
+            a.transcript.apply(frame) catch {};
+        }
     }
 
     var t: ui.Tester = undefined;

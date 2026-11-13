@@ -257,6 +257,7 @@ enum DocDisk {
         var description: String?
         var reasoningLevels: [String]
         var options: [CachedOption]
+        var billing: String?
     }
 
     private struct CachedOption: Codable {
@@ -288,7 +289,8 @@ enum DocDisk {
                             CachedOption(id: $0.id, label: $0.label,
                                          choices: $0.choices.map { CachedChoice(id: $0.id, label: $0.label) },
                                          defaultChoice: $0.defaultChoice)
-                        })
+                        },
+                        billing: model.billing)
         }
         guard let data = try? JSONEncoder().encode(cached) else { return false }
         return saveRegistry(data: data, to: modelsURL(deviceId: deviceId, harness: harness), kind: .models)
@@ -304,7 +306,8 @@ enum DocDisk {
                           ModelOptionInfo(id: $0.id, label: $0.label,
                                           choices: $0.choices.map { ModelOptionChoiceInfo(id: $0.id, label: $0.label) },
                                           defaultChoice: $0.defaultChoice)
-                      })
+                      },
+                      billing: model.billing)
         }
     }
 

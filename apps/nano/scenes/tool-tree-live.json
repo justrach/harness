@@ -1,0 +1,107 @@
+{
+  "width": 1440,
+  "height": 1000,
+  "dark": true,
+  "spaces": [
+    {
+      "id": "synthetic-space",
+      "deviceId": "synthetic-device",
+      "path": "/synthetic",
+      "gitDetected": true,
+      "createdAt": "2026-11-01T00:00:00Z"
+    }
+  ],
+  "chats": [
+    {
+      "id": "synthetic",
+      "deviceId": "synthetic-device",
+      "title": "Synthetic parser",
+      "cwd": "/synthetic",
+      "spaceId": "synthetic-space",
+      "archived": false,
+      "config": {
+        "harness": "graff",
+        "model": "synthetic-model",
+        "reasoning": null,
+        "modelOptions": {},
+        "sandbox": "workspace-write"
+      },
+      "createdAt": "2026-11-01T00:00:00Z",
+      "lastMessageAt": "2026-11-01T00:00:00Z"
+    }
+  ],
+  "open": "synthetic",
+  "transcripts": {
+    "synthetic": [
+      {
+        "id": "prompt",
+        "role": "user",
+        "parts": [
+          {
+            "id": "text",
+            "kind": "text",
+            "text": "Inspect a synthetic long command and Unicode path"
+          }
+        ]
+      },
+      {
+        "id": "live",
+        "role": "assistant",
+        "status": "streaming",
+        "parts": [
+          {
+            "id": "thought",
+            "kind": "reasoning",
+            "text": "Check the synthetic command and path."
+          },
+          {
+            "id": "narration",
+            "kind": "text",
+            "text": "Inspecting synthetic inputs."
+          },
+          {
+            "id": "long-command",
+            "kind": "tool",
+            "resolved": false,
+            "call": {
+              "kind": "exec",
+              "command": "zig build test -- --synthetic-task-tree-regression --preserve-readable-command-ends"
+            }
+          },
+          {
+            "id": "unicode-read",
+            "kind": "tool",
+            "resolved": false,
+            "call": {
+              "kind": "readFile",
+              "path": "src/synthetic/\u8def\u5f84_parser.zig"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "steps": [
+    {
+      "click": "Thought process \u00b7 ran 1 command \u00b7 read 1 file"
+    },
+    {
+      "click": "Ran 1 command \u00b7 read 1 file"
+    },
+    {
+      "wait": 0.12
+    },
+    {
+      "snap": "live-tree-arrival"
+    },
+    {
+      "wait": 0.65
+    },
+    {
+      "snap": "live-tree-running"
+    },
+    {
+      "expect": "Tool access"
+    }
+  ]
+}

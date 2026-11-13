@@ -4,7 +4,15 @@
  "dictationAvailable": true,
  "width": 1200,
  "height": 780,
- "spaces": [{"id":"s","deviceId":"scene-device","path":"/work/fieldnotes","gitDetected":true,"createdAt":"2026-09-24T14:41:22.685Z"}],
+ "spaces": [
+  {
+   "id": "s",
+   "deviceId": "scene-device",
+   "path": "/work/fieldnotes",
+   "gitDetected": true,
+   "createdAt": "2026-09-24T14:41:22.685Z"
+  }
+ ],
  "selectedSpace": "s",
  "replies": {
   "ListHarnesses": [
@@ -91,24 +99,38 @@
   },
   {
    "do": "click",
-   "x": 500,
-   "y": 412
+   "x": 440,
+   "y": 450
   },
   {
    "do": "wait",
-   "ms": 200
+   "ms": 500
   },
   {
-   "do": "type",
-   "text": "Plan"
+   "do": "hover",
+   "x": 480,
+   "y": 596
   },
   {
    "do": "wait",
-   "ms": 100
+   "ms": 600
+  },
+  {
+   "do": "click",
+   "x": 480,
+   "y": 596
+  },
+  {
+   "do": "wait",
+   "ms": 500
   },
   {
    "do": "key",
    "keys": "escape"
+  },
+  {
+   "do": "wait",
+   "ms": 400
   }
  ]
 }

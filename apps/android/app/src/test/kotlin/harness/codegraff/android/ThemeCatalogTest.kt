@@ -24,7 +24,9 @@ class ThemeCatalogTest {
 
     @Test
     fun everyFamilyParsesAndBothHarnessVariantsExist() {
-        assertTrue(catalog.families.size >= 19)
+        assertTrue(catalog.families.size >= 20)
+        assertNotNull(catalog.variant("opencodex-light"))
+        assertNotNull(catalog.variant("opencodex-dark"))
         assertNotNull(catalog.variant(ThemeStore.FALLBACK_LIGHT))
         assertNotNull(catalog.variant(ThemeStore.FALLBACK_DARK))
         assertNotNull(catalog.variant(ThemeStore.DEFAULT_LIGHT))

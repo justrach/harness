@@ -183,22 +183,6 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
             if (!p.deleting and b.clicked()) requestDeleteAll(a);
         }
     }
-    {
-        const cd = set.card(c, k);
-        defer cd.end();
-        const r = set.row(c, k, true, false);
-        defer r.end();
-        {
-            const w = ui.div(c).column().w(@max(set.inner_w - 2 - 2 * 20 - 14 - 40, 80)).gap(4);
-            defer w.end();
-            ui.text(c, "Archive sessions when closing tabs or panes", set.st(c, 13, .{ .weight = .medium, .color = k.text }));
-            ui.text(c, "Closing a session tab or pane with ⌘W or its ✕ button archives it if idle, unless it is still open in another tab or pane in this app. ⌥⌘W always closes without archiving. Running sessions and sessions waiting for input remain in the sidebar. Closing the app or a window does not archive sessions.", set.st(c, 12, .{ .wrap = true, .color = k.muted }));
-        }
-        if (set.toggle(c, k, a.settings.get(.archive_sessions_on_close), true)) {
-            a.settings.toggle(.archive_sessions_on_close);
-            a.redraw();
-        }
-    }
     if (p.failure.items.len > 0) {
         if (@import("view_settings_accounts_rows.zig").errorStrip(c, k, p.failure.items, false)) p.failure.clearRetainingCapacity();
     }
@@ -229,7 +213,7 @@ fn row(c: *ui.Context, a: *App, k: theme.Colors, ch: @import("workspace.zig").Ch
     const p = &a.view.archived;
     ui.key(c, ch.id);
     const busy = if (p.busy) |b| std.mem.eql(u8, b, ch.id) else false;
-    const r = ui.div(c).row().wFull().px(12).py(8).gap(12).itemsCenter().rounded(8).hover(k.ink(0.03));
+    const r = ui.div(c).row().wFull().px(12).py(8).gap(12).itemsCenter().rounded(8).hover(k.hover);
     defer r.end();
     const hot = r.hovered();
     {

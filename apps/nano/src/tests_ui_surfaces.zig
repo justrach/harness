@@ -12,6 +12,8 @@ const Harness = struct {
     fn init(h: *Harness) !void {
         @import("theme.zig").registerFonts();
         h.a = .init(testing.allocator, testing.io, 1);
+        // Each step as its own row: these tests are about the detailed transcript.
+        h.a.settings.set(.transcript_compact_mode, false);
         h.a.dark = true;
         h.a.openChat("synthetic-parent", null);
         try h.t.init(testing.allocator, .init(&h.a, @import("view.zig").view), .{ .width = 1400, .height = 900, .dark = true });
@@ -80,8 +82,20 @@ test "finished MCP agents use their frozen transcript and the original Harness b
     try h.t.clickText("Review synthetic icons");
     h.t.settle(0.1);
     try testing.expect(h.t.hasText("Synthetic frozen findings"));
-    try testing.expectEqual(@as(usize, 1), h.a.engine.sent.items.len);
-    try testing.expect(std.mem.indexOf(u8, h.a.engine.sent.items[0], "synthetic-parent/synthetic-parent--sub--frozen") != null);
+    var fetches: usize = 0;
+    for (h.a.engine.sent.items) |frame| {
+        const request = try std.json.parseFromSlice(std.json.Value, testing.allocator, frame, .{});
+        defer request.deinit();
+        const method = request.value.object.get("method").?.string;
+        if (std.mem.eql(u8, method, "FetchToolBlob")) {
+            fetches += 1;
+            try testing.expect(std.mem.indexOf(u8, frame, "synthetic-parent/synthetic-parent--sub--frozen") != null);
+        }
+        // The parent can watch live progress, but a finished child must
+        // never be reattached as a live transcript stream.
+        if (std.mem.eql(u8, method, "WatchDocMessages")) try testing.expect(std.mem.indexOf(u8, frame, "synthetic-parent--sub--frozen") == null);
+    }
+    try testing.expectEqual(@as(usize, 1), fetches);
     try testing.expect(h.a.panels.tabs.items[0].agent.?.loaded);
 }
 
@@ -195,10 +209,81 @@ test "generated-page chips open only their local host's validated page and lock 
     h.a.device_id = try testing.allocator.dupe(u8, "synthetic-local");
     try h.t.clickText("render_html");
     h.t.settle(0.1);
+    try testing.expectEqual(@as(usize, 1), h.a.panels.tabs.items.len);
     const b = h.a.panels.tabs.items[0].browser.?;
     try testing.expectEqualStrings("graff-view://html/0123456789abcdef0123456789abcdef", b.url);
     b.navigate("https://example.com/");
     try testing.expectEqualStrings("graff-view://html/0123456789abcdef0123456789abcdef", b.url);
     // ui.Tester never starts WebKit, even after opening a Browser tab.
     try testing.expect(b.native == null);
+}
+
+test "a link opens beside the chat at the side pane's width" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.a.newTab();
+    h.a.openChat("peer-a", null);
+    h.a.showTab(0);
+    h.t.settle(0.1);
+    @import("app_browser.zig").openLink(&h.a, "synthetic-parent", "http://localhost:31997/one");
+    h.t.settle(0.1);
+    try testing.expect(h.a.panels.host_open);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+    try testing.expectEqual(@as(usize, 0), h.a.tabs.active);
+    try testing.expectEqualStrings("synthetic-parent", h.a.selected.?);
+    try testing.expectEqual(@as(usize, 1), h.a.panels.tabs.items.len);
+}
+
+test "a second link joins the panel already holding a page" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    const browser = @import("app_browser.zig");
+    browser.openLink(&h.a, "synthetic-parent", "http://localhost:31997/first");
+    h.t.settle(0.1);
+    browser.openLink(&h.a, "synthetic-parent", "http://localhost:31997/second");
+    h.t.settle(0.1);
+    try testing.expect(h.a.panels.host_open);
+    try testing.expectEqual(@as(usize, 2), h.a.panels.tabs.items.len);
+    try testing.expectEqual(@as(usize, 1), h.a.panels.active);
+    try testing.expectEqualStrings("synthetic-parent", h.a.selected.?);
+}
+
+test "closing a linked page once gives the chat its room back" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    const full = h.a.view.chrome.chat_width;
+    @import("app_browser.zig").openLink(&h.a, "synthetic-parent", "http://localhost:31997/one");
+    h.t.settle(0.1);
+    try testing.expect(h.a.panels.host_open);
+    try testing.expect(h.a.view.chrome.chat_width < full);
+    @import("app_panels.zig").closeTab(&h.a, 0);
+    h.t.settle(0.1);
+    try testing.expect(!h.a.panels.host_open);
+    try testing.expectEqual(@as(usize, 0), h.a.panels.tabs.items.len);
+    try testing.expectEqual(full, h.a.view.chrome.chat_width);
+    try testing.expectEqualStrings("synthetic-parent", h.a.selected.?);
+}
+
+test "command w closes the page beside the chat before the chat" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.a.newTab();
+    h.a.openChat("peer-a", null);
+    h.a.showTab(0);
+    h.t.settle(0.1);
+    @import("app_browser.zig").openLink(&h.a, "synthetic-parent", "http://localhost:31997/one");
+    h.t.settle(0.1);
+    // Focus back on the chat panel, as after clicking the transcript to keep reading.
+    @import("view_tab_strip.zig").focus(&h.a, .{ .chat = 0 });
+    h.t.settle(0.1);
+    h.a.closeByShortcut();
+    h.t.settle(0.1);
+    try testing.expect(!h.a.panels.host_open);
+    try testing.expectEqual(@as(usize, 0), h.a.panels.tabs.items.len);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+    try testing.expectEqualStrings("synthetic-parent", h.a.selected.?);
 }

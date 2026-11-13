@@ -1,5 +1,8 @@
-//! Model rows and maker marks follow crates/ui/src/pickers.rs. Catalogs
-//! retain their agent identity, including replies arriving after a tab switch.
+//! Model rows and maker marks follow crates/ui/src/pickers.rs and the
+//! two-step picker in pickers/model_preview.rs: models grouped by the route
+//! they're served through, a detail card that states only what the catalog
+//! says, then a reasoning slider. Catalogs retain their agent identity,
+//! including replies arriving after a tab switch.
 const std = @import("std");
 const ui = @import("nanoui").ui;
 const workspace = @import("workspace.zig");
@@ -11,7 +14,19 @@ pub const Favorite = struct { harness: []const u8, model: []const u8 };
 pub const Row = struct {
     harness: []const u8,
     model: workspace.Model,
+    /// A section's heading: the provider's name, its route's mark.
     header: ?[]const u8 = null,
+};
+
+/// The model staged for its reasoning (`Pending`): the second step.
+pub const Stage = struct {
+    harness: []u8,
+    model: []u8,
+    /// Index into the model's levels; null for the model's default.
+    level: ?usize = null,
+    error_text: ?[]const u8 = null,
+    compact: bool = false,
+    fast: bool = false,
 };
 
 pub const Catalog = struct {
@@ -20,9 +35,12 @@ pub const Catalog = struct {
     models: workspace.Models,
     loaded: bool = false,
     loading: bool = false,
+    /// The last ask failed (`Loadable::Error`): not loading any more.
+    failed: bool = false,
 
     fn reply(cat: *Catalog, _: u64, r: @import("rpc.zig").Reply) void {
         cat.loading = false;
+        cat.failed = r == .err;
         switch (r) {
             .ok => |v| {
                 cat.models.replace(v) catch return;
@@ -35,10 +53,51 @@ pub const Catalog = struct {
     }
 };
 
+/// A scalar transition on the shell's 200ms `RESIZE` curve (`cubic-bezier(0, 0, 0.58, 1)`),
+/// ported from `crates/ui/src/pickers/compact.rs` (`ScalarTransition`):
+/// changing the target mid-flight starts from the live interpolated value, and
+/// dragging seeds `from == to == drag_fraction` so releasing glides smoothly
+/// from the exact pointer position to the snapped stop.
+pub const ScalarTransition = struct {
+    from: f32,
+    to: f32,
+    started: f64,
+
+    pub const Sample = struct { value: f32, moving: bool };
+
+    pub fn valueAt(self: ScalarTransition, now: f64, reduced: bool) Sample {
+        const duration: f64 = 0.2;
+        if (reduced or (self.from - self.to) == 0) return .{ .value = self.to, .moving = false };
+        const elapsed = @max(0.0, now - self.started);
+        if (elapsed >= duration) return .{ .value = self.to, .moving = false };
+        const raw: f32 = @floatCast(std.math.clamp(elapsed / duration, 0.0, 1.0));
+        const progress = ui.motion.Easing.css_ease_out.sample(raw)[0];
+        return .{
+            .value = self.from + (self.to - self.from) * progress,
+            .moving = true,
+        };
+    }
+
+    pub fn sample(slot: *?ScalarTransition, target: f32, now: f64, reduced: bool) Sample {
+        if (slot.*) |*tr| {
+            const current = tr.valueAt(now, reduced);
+            if ((tr.to - target) != 0) {
+                tr.* = .{
+                    .from = if (reduced) target else current.value,
+                    .to = target,
+                    .started = now,
+                };
+            }
+            return tr.valueAt(now, reduced);
+        }
+        slot.* = .{ .from = target, .to = target, .started = now };
+        return .{ .value = target, .moving = false };
+    }
+};
+
 pub const State = struct {
     query: ui.TextBuffer = .{},
     starred: bool = false,
-    reasoning_open: bool = false,
     focus: bool = false,
     active: usize = 0,
     reveal: bool = false,
@@ -47,6 +106,8 @@ pub const State = struct {
     height: f32 = 337,
     visible: bool = false,
     closing_since: ?f64 = null,
+    /// First frame of this opening, for the menu's entrance tween.
+    opened_at: ?f64 = null,
     anchor: ?ui.Rect = null,
     favorites: std.ArrayList(Favorite) = .empty,
     loaded_favorites: bool = false,
@@ -54,8 +115,62 @@ pub const State = struct {
     /// A click is applied before the next frame, never freeing text that
     /// the current frame's composer or rows still borrow.
     pending: ?struct { harness: ?[]u8 = null, model: ?[]u8 = null, reasoning: ?[]u8 = null } = null,
+    /// The second step, once a model is clicked.
+    stage: ?Stage = null,
+    /// The row whose detail card shows, and when the pointer reached the
+    /// row it's waiting on (180 ms, 60 once a card is showing).
+    detail: ?usize = null,
+    hover_target: ?usize = null,
+    hover_since: f64 = 0,
+    detail_rect: ?ui.Rect = null,
+    /// The slider's track as last laid out, and a drag on it.
+    track: ?ui.Rect = null,
+    dragging: bool = false,
+    slider_seeded: bool = false,
+    /// Continuous 0–1 pointer position while dragging the effort slider (`CompactMotion.drag_fraction`).
+    drag_fraction: ?f32 = null,
+    /// 0–1 effort thumb/fill position (`CompactMotion.effort`).
+    effort_anim: ?ScalarTransition = null,
+    /// 0–1 press elevation while dragging the effort thumb (`CompactMotion.press`).
+    press_anim: ?ScalarTransition = null,
+    /// 0–1 glow/shimmer energy on deeper effort stops (`CompactMotion.energy`).
+    energy_anim: ?ScalarTransition = null,
+    /// Continuous 0–1 phase of the effort shimmer wave (`CompactMotion.shimmer_phase`).
+    shimmer_phase: f32 = 0,
+    shimmer_last: ?f64 = null,
+    /// Animated width of the composer's model + effort trigger chip (`model_chip_width`).
+    chip_width: ?ScalarTransition = null,
+    /// Animated height of the model picker card when expanding from compact panel to list.
+    card_height: ?ScalarTransition = null,
+    /// True when the full model list was opened from the compact thinking tier panel.
+    can_return_compact: bool = false,
+    /// Retired stage strings freed at the start of the next frame (`reap`).
+    retired_strings: std.ArrayList([]u8) = .empty,
+
+    pub fn clearStage(s: *State, gpa: Allocator) void {
+        if (s.stage) |st| {
+            s.retired_strings.append(gpa, st.harness) catch gpa.free(st.harness);
+            s.retired_strings.append(gpa, st.model) catch gpa.free(st.model);
+        }
+        s.stage = null;
+        s.dragging = false;
+        s.slider_seeded = false;
+        s.drag_fraction = null;
+        s.effort_anim = null;
+        s.press_anim = null;
+        s.energy_anim = null;
+        s.shimmer_last = null;
+    }
+
+    pub fn reap(s: *State, gpa: Allocator) void {
+        for (s.retired_strings.items) |str| gpa.free(str);
+        s.retired_strings.clearRetainingCapacity();
+        var it = s.catalogs.valueIterator();
+        while (it.next()) |item| item.*.models.reap();
+    }
 
     pub fn deinit(s: *State, gpa: Allocator) void {
+        @import("text_buffer.zig").deinit(&s.query);
         for (s.favorites.items) |f| {
             gpa.free(f.harness);
             gpa.free(f.model);
@@ -69,6 +184,9 @@ pub const State = struct {
             gpa.destroy(cat);
         }
         s.catalogs.deinit(gpa);
+        s.clearStage(gpa);
+        for (s.retired_strings.items) |str| gpa.free(str);
+        s.retired_strings.deinit(gpa);
         if (s.pending) |p| {
             if (p.harness) |v| gpa.free(v);
             if (p.model) |v| gpa.free(v);
@@ -118,7 +236,7 @@ pub fn copyModels(to: *workspace.Models, models: []const workspace.Model) !void 
         for (m.levels, levels) |v, *l| l.* = try gpa.dupe(u8, v);
         n.levels = levels;
     }
-    to.arena.deinit();
+    to.retireArena(to.arena);
     to.arena = next;
     to.items = out;
 }
@@ -147,7 +265,11 @@ pub fn ensureCatalog(a: *App, harness: []const u8, refresh: bool) ?*Catalog {
 }
 
 pub fn modelsFor(a: *const App, harness: []const u8) []const workspace.Model {
-    if (std.mem.eql(u8, a.models_for, harness) or std.mem.eql(u8, a.target().harness, harness)) return a.models.items;
+    // target() resolves plain-chat defaults through this catalog. Reading
+    // it here would recurse before a first model has been selected.
+    const selected = if (a.selected) |id| a.findChat(id) else null;
+    const active = if (@import("app_agent.zig").chatMode(a)) @import("chat_mode.zig").harness else if (selected) |chat| chat.harness orelse "graff" else a.new_harness;
+    if (std.mem.eql(u8, a.models_for, harness) or std.mem.eql(u8, active, harness)) return a.models.items;
     const cat = a.view.model_picker.catalogs.get(harness) orelse return &.{};
     return cat.models.items;
 }
@@ -155,27 +277,6 @@ pub fn modelsFor(a: *const App, harness: []const u8) []const workspace.Model {
 pub fn provider(id: []const u8) []const u8 {
     const slash = std.mem.indexOfScalar(u8, id, '/') orelse return "";
     return id[0..slash];
-}
-
-pub fn providerName(id: []const u8) []const u8 {
-    const pairs = .{ .{ "anthropic", "Anthropic" }, .{ "cerebras", "Cerebras" }, .{ "codegraff", "Codegraff" }, .{ "codex", "Codex" }, .{ "deepseek", "DeepSeek" }, .{ "fugu", "Fugu" }, .{ "kimi", "Kimi" }, .{ "lmstudio", "LM Studio" }, .{ "mlx", "MLX" }, .{ "openai", "OpenAI" }, .{ "openrouter", "OpenRouter" }, .{ "xai", "xAI" }, .{ "xiaomi", "Xiaomi" }, .{ "", "Other" } };
-    inline for (pairs) |pair| if (std.mem.eql(u8, pair[0], id)) return pair[1];
-    return id;
-}
-
-pub fn billingRank(billing: ?[]const u8) u8 {
-    const b = billing orelse return 2;
-    if (std.mem.eql(u8, b, "plan")) return 0;
-    if (std.mem.eql(u8, b, "local")) return 1;
-    if (std.mem.eql(u8, b, "api")) return 3;
-    return 2;
-}
-
-pub fn billingNote(billing: ?[]const u8) ?[]const u8 {
-    const b = billing orelse return null;
-    const pairs = .{ .{ "plan", "your plan" }, .{ "local", "local" }, .{ "credits", "credits" }, .{ "api", "your key" } };
-    inline for (pairs) |pair| if (std.mem.eql(u8, b, pair[0])) return pair[1];
-    return null;
 }
 
 pub fn maker(m: workspace.Model) ?[]const u8 {
@@ -211,54 +312,302 @@ pub fn searchRank(query: []const u8, m: workspace.Model) ?u8 {
     return null;
 }
 
+/// The route a model is served through: its id's prefix (`claude-agent/…`),
+/// else its maker (`route`).
+pub fn route(m: workspace.Model) []const u8 {
+    if (std.mem.indexOfScalar(u8, m.id, '/')) |slash| return m.id[0..slash];
+    return maker(m) orelse "other";
+}
+
+/// Registry presentation only (model_preview.rs `PROVIDERS`): a route's
+/// name and mark. Never used to filter a live catalog.
+pub fn providerInfo(id: []const u8) struct { name: []const u8, icon: icons.Name } {
+    const P = struct { []const u8, []const u8, icons.Name };
+    const table = [_]P{
+        .{ "anthropic", "Anthropic", .@"claude-mark" },   .{ "codegraff", "Codegraff", .@"graff-mark" },
+        .{ "deepseek", "DeepSeek", .@"maker-deepseek" },  .{ "openai", "OpenAI", .@"openai-mark" },
+        .{ "google", "Google", .@"maker-gemini" },        .{ "minimax", "MiniMax", .@"maker-minimax" },
+        .{ "xiaomi", "Xiaomi", .@"maker-mimo" },          .{ "kilo", "Kilo Gateway", .globe },
+        .{ "groq", "Groq", .globe },                      .{ "cerebras", "Cerebras", .globe },
+        .{ "mistral", "Mistral", .@"maker-mistral" },     .{ "kimi", "Kimi", .@"maker-kimi" },
+        .{ "moonshot", "Moonshot", .@"maker-kimi" },      .{ "xai", "xAI", .@"grok-mark" },
+        .{ "zai", "Z.ai", .@"maker-zai" },                .{ "meta", "Meta", .@"maker-meta" },
+        .{ "vercel", "Vercel AI Gateway", .globe },       .{ "openrouter", "OpenRouter", .globe },
+        .{ "fugu", "Sakana", .globe },                    .{ "fireworks", "Fireworks", .globe },
+        .{ "mlx", "MLX", .globe },                        .{ "lmstudio", "LM Studio", .globe },
+        .{ "omlx", "oMLX", .globe },                      .{ "chatgpt-new", "ChatGPT plan", .@"openai-mark" },
+        .{ "codex", "Codex / ChatGPT", .@"openai-mark" }, .{ "claude-agent", "Claude Agent", .@"claude-mark" },
+    };
+    for (table) |p| if (std.mem.eql(u8, p[0], id)) return .{ .name = p[1], .icon = p[2] };
+    return .{ .name = id, .icon = .globe };
+}
+
+/// The model's mark: its maker's, else its route's (`model_icon`).
+pub fn modelIcon(m: workspace.Model) icons.Name {
+    return makerIcon(m) orelse providerInfo(route(m)).icon;
+}
+
+/// The reasoning slider's colour (`brand_accent`): the maker's (or the
+/// route's) sourced accent, else its agent's; null for the theme's text.
+pub fn brandHex(m: workspace.Model, harness: []const u8, dark: bool) ?u24 {
+    const key = maker(m) orelse route(m);
+    const Pair = struct { []const u8, u24, u24 };
+    const table = [_]Pair{
+        .{ "openai", 0x66b5ff, 0x66b5ff },     .{ "codex", 0x66b5ff, 0x66b5ff },    .{ "chatgpt-new", 0x66b5ff, 0x66b5ff },
+        .{ "anthropic", 0xd97757, 0xd97757 },  .{ "moonshot", 0x00a1ff, 0x007cff }, .{ "kimi", 0x00a1ff, 0x007cff },
+        .{ "deepseek", 0x3964fe, 0x3964fe },   .{ "google", 0x3186ff, 0x3186ff },   .{ "minimax", 0x1887fb, 0x1887fb },
+        .{ "xiaomi", 0xff6900, 0xff6900 },     .{ "mistral", 0xff5229, 0xff5229 },  .{ "codegraff", 0x0285ff, 0x0285ff },
+        .{ "groq", 0xf43e01, 0xf43e01 },       .{ "cerebras", 0xf15a27, 0xf15a27 }, .{ "kilo", 0xffdd00, 0xffdd00 },
+        .{ "openrouter", 0x6467f2, 0x6467f2 }, .{ "fugu", 0xe10600, 0xe10600 },     .{ "fireworks", 0xffc0e7, 0x7a155c },
+        .{ "lmstudio", 0x7b74db, 0x4338ca },   .{ "xai", 0xffffff, 0x000000 },      .{ "zai", 0xb4b4b4, 0x4d4d4d },
+    };
+    for (table) |p| if (std.mem.eql(u8, p[0], key)) return if (dark) p[1] else p[2];
+    for ([_][]const u8{ "vercel", "mlx", "omlx" }) |mono| if (std.mem.eql(u8, mono, key)) return null;
+    if (std.mem.eql(u8, harness, "graff")) return 0x0285ff;
+    if (std.mem.eql(u8, harness, "claude-code")) return 0xd97757;
+    if (std.mem.eql(u8, harness, "codex")) return 0x66b5ff;
+    return null;
+}
+
+/// Off and High only: a switch, "Thinking" Off/On (`binary_reasoning_switch`).
+pub fn binary(levels: []const []const u8) bool {
+    if (levels.len != 2) return false;
+    var off = false;
+    var high = false;
+    for (levels) |l| {
+        off = off or std.mem.eql(u8, l, "none");
+        high = high or std.mem.eql(u8, l, "high");
+    }
+    return off and high;
+}
+
+pub fn levelLabel(level: []const u8, is_binary: bool) []const u8 {
+    if (is_binary and std.mem.eql(u8, level, "high")) return "On";
+    return @import("rules.zig").reasoningLabel(level);
+}
+
+/// "Low – High": the levels the catalog lists (`reasoning_range`).
+pub fn reasoningRange(buf: []u8, levels: []const []const u8) ?[]const u8 {
+    if (levels.len == 0) return null;
+    const rules = @import("rules.zig");
+    const first = rules.reasoningLabel(levels[0]);
+    const last = rules.reasoningLabel(levels[levels.len - 1]);
+    if (std.mem.eql(u8, first, last)) return first;
+    return std.fmt.bufPrint(buf, "{s} – {s}", .{ first, last }) catch null;
+}
+
+/// The catalog's billing tag, in words (`billing_label`).
+pub fn billingLabel(billing: []const u8) []const u8 {
+    const pairs = .{ .{ "plan", "Your plan" }, .{ "credits", "Credits" }, .{ "api", "API usage" }, .{ "local", "Runs locally" } };
+    inline for (pairs) |p| if (std.mem.eql(u8, billing, p[0])) return p[1];
+    return billing;
+}
+
+/// Subscription (`plan`) models lead, followed by local models, then
+/// non-subscription (`credits` / unreported / `api`) models.
+pub fn billingRank(billing: ?[]const u8) u8 {
+    const b = billing orelse return 2;
+    if (std.mem.eql(u8, b, "plan")) return 0;
+    if (std.mem.eql(u8, b, "local")) return 1;
+    if (std.mem.eql(u8, b, "api")) return 3;
+    return 2;
+}
+
+fn routeBillingRank(models: []const workspace.Model, id: []const u8) u8 {
+    var best: u8 = 3;
+    var found = false;
+    for (models) |m| if (std.mem.eql(u8, route(m), id)) {
+        best = @min(best, billingRank(m.billing));
+        found = true;
+    };
+    return if (found) best else 2;
+}
+
+/// "1M", "200k", "1.05M" (`harness_proto::context_label`).
+pub fn contextLabel(buf: []u8, tokens: u64) []const u8 {
+    if (tokens >= 1 << 10 and std.math.isPowerOfTwo(tokens)) {
+        return (if (tokens >= 1 << 20) std.fmt.bufPrint(buf, "{d}M", .{tokens >> 20}) else std.fmt.bufPrint(buf, "{d}k", .{tokens >> 10})) catch "";
+    }
+    if (tokens < 1_000) return std.fmt.bufPrint(buf, "{d}", .{tokens}) catch "";
+    const thousands = (tokens + 500) / 1_000;
+    if (thousands < 1_000) return std.fmt.bufPrint(buf, "{d}k", .{thousands}) catch "";
+    const hundredths = (tokens + 5_000) / 10_000;
+    const whole = hundredths / 100;
+    const frac = hundredths % 100;
+    if (frac == 0) return std.fmt.bufPrint(buf, "{d}M", .{whole}) catch "";
+    if (frac % 10 == 0) return std.fmt.bufPrint(buf, "{d}.{d}M", .{ whole, frac / 10 }) catch "";
+    return std.fmt.bufPrint(buf, "{d}.{d:0>2}M", .{ whole, frac }) catch "";
+}
+
+/// The picker's rows (`preview_rows`): the starred models across agents;
+/// a search's matches, flat; else the agent's models in one headed
+/// section per route, in first-appearance order except that Claude
+/// Agent's leads Anthropic's (`route_sections`).
 pub fn rows(a: *const App, gpa: Allocator) ![]Row {
     const p = &a.view.model_picker;
     const harness = a.target().harness;
     const query = std.mem.trim(u8, p.query.text(), " \t\r\n");
     var out: std.ArrayList(Row) = .empty;
+    if (@import("app_agent.zig").chatMode(a)) {
+        // A plain chat offers the three Auto tiers and nothing else.
+        const chat_mode = @import("chat_mode.zig");
+        var buf: [chat_mode.tiers.len]workspace.Model = undefined;
+        for (chat_mode.models(&buf, modelsFor(a, chat_mode.harness))) |m| {
+            if (query.len > 0 and searchRank(query, m) == null) continue;
+            try out.append(gpa, .{ .harness = chat_mode.harness, .model = m });
+        }
+        return out.toOwnedSlice(gpa);
+    }
     if (p.starred) {
-        for (p.favorites.items) |f| {
+        for (0..4) |b_rank| for (p.favorites.items) |f| {
             if (a.selected != null and !std.mem.eql(u8, f.harness, harness)) continue;
-            for (modelsFor(a, f.harness)) |m| if (std.mem.eql(u8, m.id, f.model) and searchRank(query, m) != null) {
+            for (modelsFor(a, f.harness)) |m| if (billingRank(m.billing) == b_rank and std.mem.eql(u8, m.id, f.model) and searchRank(query, m) != null) {
                 try out.append(gpa, .{ .harness = f.harness, .model = m });
             };
-        }
+        };
         return out.toOwnedSlice(gpa);
     }
     const models = a.models.items;
     if (query.len > 0) {
-        for (0..3) |rank| for ([_]bool{ true, false }) |starred| for (models) |m| {
-            if (p.favorite(harness, m.id) != starred) continue;
+        for (0..4) |b_rank| for (0..3) |rank| for (models) |m| {
+            if (billingRank(m.billing) != b_rank) continue;
             if (searchRank(query, m)) |r| if (r == rank) try out.append(gpa, .{ .harness = harness, .model = m });
         };
         return out.toOwnedSlice(gpa);
     }
-    var groups: std.StringArrayHashMapUnmanaged(usize) = .empty;
-    for (models, 0..) |m, i| if (!p.favorite(harness, m.id)) {
-        const result = try groups.getOrPut(gpa, provider(m.id));
-        if (!result.found_existing) result.value_ptr.* = i;
+    var raw_routes: std.ArrayList([]const u8) = .empty;
+    for (models) |m| {
+        const id = route(m);
+        for (raw_routes.items) |have| {
+            if (std.mem.eql(u8, have, id)) break;
+        } else try raw_routes.append(gpa, id);
+    }
+    claudeAgentFirst(raw_routes.items);
+    var routes: std.ArrayList([]const u8) = .empty;
+    for (0..4) |b_rank| for (raw_routes.items) |id| {
+        if (routeBillingRank(models, id) == b_rank) try routes.append(gpa, id);
     };
-    var starred_head = false;
-    for (models) |m| if (p.favorite(harness, m.id)) {
-        if (!starred_head and groups.count() > 1) try out.append(gpa, .{ .harness = harness, .model = m, .header = "Starred" });
-        starred_head = true;
-        try out.append(gpa, .{ .harness = harness, .model = m });
-    };
-    for (0..4) |rank| for (groups.keys(), groups.values()) |provider_id, first| {
-        if (billingRank(models[first].billing) != rank) continue;
-        if (groups.count() > 1) {
-            const name = providerName(provider_id);
-            const title = if (billingNote(models[first].billing)) |note| try std.fmt.allocPrint(gpa, "{s} · {s}", .{ name, note }) else name;
-            try out.append(gpa, .{ .harness = harness, .model = models[first], .header = title });
-        }
-        for (models) |m| if (!p.favorite(harness, m.id) and std.mem.eql(u8, provider(m.id), provider_id)) {
-            var shown = m;
-            if (groups.count() > 1) if (m.description) |d| if (std.mem.startsWith(u8, d, provider_id) and provider_id.len > 0) {
-                const rest = d[provider_id.len..];
-                shown.description = if (rest.len == 0) null else if (std.mem.startsWith(u8, rest, " · ")) rest[" · ".len..] else d;
-            };
-            try out.append(gpa, .{ .harness = harness, .model = shown });
+    for (routes.items) |id| {
+        var first = true;
+        for (0..4) |b_rank| for (models) |m| if (billingRank(m.billing) == b_rank and std.mem.eql(u8, route(m), id)) {
+            if (first) try out.append(gpa, .{ .harness = harness, .model = m, .header = providerInfo(id).name });
+            first = false;
+            try out.append(gpa, .{ .harness = harness, .model = m });
         };
-    };
+    }
     return out.toOwnedSlice(gpa);
+}
+
+/// Claude Agent's section ahead of Anthropic's, wherever each first came.
+fn claudeAgentFirst(routes: [][]const u8) void {
+    var agent: ?usize = null;
+    var anthropic: ?usize = null;
+    for (routes, 0..) |r, i| {
+        if (std.mem.eql(u8, r, "claude-agent")) agent = i;
+        if (std.mem.eql(u8, r, "anthropic")) anthropic = i;
+    }
+    const from = agent orelse return;
+    const to = anthropic orelse return;
+    if (from < to) return;
+    const moving = routes[from];
+    std.mem.copyBackwards([]const u8, routes[to + 1 .. from + 1], routes[to..from]);
+    routes[to] = moving;
+}
+
+const testing = std.testing;
+
+test "Claude Agent's section leads Anthropic's (claude_agent_models_get_their_own_section_ahead_of_anthropic)" {
+    var r = [_][]const u8{ "openai", "anthropic", "xai", "claude-agent" };
+    claudeAgentFirst(&r);
+    try testing.expectEqualStrings("claude-agent", r[1]);
+    try testing.expectEqualStrings("anthropic", r[2]);
+    try testing.expectEqualStrings("xai", r[3]);
+    try testing.expectEqualStrings("Claude Agent", providerInfo("claude-agent").name);
+    try testing.expectEqualStrings("unknown-route", providerInfo("unknown-route").name);
+}
+
+test "the detail card states only what the catalog says (the_detail_card_states_only_what_the_catalog_says)" {
+    var b: [32]u8 = undefined;
+    try testing.expectEqualStrings("Low – High", reasoningRange(&b, &.{ "low", "medium", "high" }).?);
+    try testing.expectEqualStrings("High", reasoningRange(&b, &.{"high"}).?);
+    try testing.expect(reasoningRange(&b, &.{}) == null);
+    try testing.expectEqualStrings("Your plan", billingLabel("plan"));
+    try testing.expectEqualStrings("odd", billingLabel("odd"));
+    try testing.expectEqualStrings("1M", contextLabel(&b, 1 << 20));
+    try testing.expectEqualStrings("200k", contextLabel(&b, 200_000));
+    try testing.expectEqualStrings("1.05M", contextLabel(&b, 1_050_000));
+    try testing.expectEqualStrings("1.5M", contextLabel(&b, 1_500_000));
+}
+
+test "every slider has a colour and Grok and Z.ai differ (every_slider_has_a_color_and_grok_and_zai_differ)" {
+    const grok: workspace.Model = .{ .id = "xai/grok-4", .label = "Grok" };
+    const glm: workspace.Model = .{ .id = "zai/glm-5", .label = "GLM" };
+    try testing.expect(brandHex(grok, "graff", true).? != brandHex(glm, "graff", true).?);
+    const odd: workspace.Model = .{ .id = "nobody/thing", .label = "Thing" };
+    try testing.expectEqual(@as(?u24, 0x0285ff), brandHex(odd, "graff", true));
+    try testing.expectEqual(@as(?u24, 0xd97757), brandHex(odd, "claude-code", false));
+    try testing.expect(binary(&.{ "none", "high" }));
+    try testing.expect(!binary(&.{ "low", "high" }));
+    try testing.expectEqualStrings("On", levelLabel("high", true));
+}
+
+test "subscription models and routes come before non-subscription credits and API models" {
+    try testing.expect(billingRank("plan") < billingRank("local"));
+    try testing.expect(billingRank("local") < billingRank("credits"));
+    try testing.expect(billingRank("credits") < billingRank("api"));
+
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    a.new_harness = try testing.allocator.dupe(u8, "graff");
+    a.models_for = try testing.allocator.dupe(u8, "graff");
+    const sample = [_]workspace.Model{
+        .{ .id = "codegraff/kimi-k3", .label = "kimi-k3", .billing = "credits" },
+        .{ .id = "kimi/kimi-for-coding", .label = "kimi-for-coding", .billing = "plan" },
+        .{ .id = "kimi/k3.1-pro", .label = "k3.1-pro", .billing = "plan" },
+    };
+    try copyModels(&a.models, &sample);
+
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const grouped = try rows(&a, arena.allocator());
+    try testing.expectEqualStrings("Kimi", grouped[0].header.?);
+    try testing.expectEqualStrings("kimi/kimi-for-coding", grouped[1].model.id);
+    try testing.expectEqualStrings("kimi/k3.1-pro", grouped[2].model.id);
+    try testing.expectEqualStrings("Codegraff", grouped[3].header.?);
+    try testing.expectEqualStrings("codegraff/kimi-k3", grouped[4].model.id);
+
+    a.view.model_picker.query.set("kimi");
+    const searched = try rows(&a, arena.allocator());
+    try testing.expectEqual(@as(usize, 3), searched.len);
+    // Both Kimi subscription models lead the Codegraff credits model even though
+    // `k3.1-pro` matches `kimi` via its route prefix (`kimi/k3.1-pro`).
+    try testing.expectEqualStrings("kimi/kimi-for-coding", searched[0].model.id);
+    try testing.expectEqualStrings("kimi/k3.1-pro", searched[1].model.id);
+    try testing.expectEqualStrings("codegraff/kimi-k3", searched[2].model.id);
+}
+
+test "ScalarTransition glides from pointer release position to snapped effort stop" {
+    var slot: ?ScalarTransition = null;
+    // First sample seeds at target without moving.
+    const s0 = ScalarTransition.sample(&slot, 0.5, 1.0, false);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), s0.value, 1e-5);
+    try testing.expect(!s0.moving);
+
+    // Dragging roots the transition at the continuous pointer fraction (e.g. 0.62).
+    slot = .{ .from = 0.62, .to = 0.62, .started = 1.1 };
+
+    // On mouse release at t = 1.1, sampling against snapped stop 0.5 starts a smooth glide from 0.62 -> 0.5.
+    const s1 = ScalarTransition.sample(&slot, 0.5, 1.1, false);
+    try testing.expectApproxEqAbs(@as(f32, 0.62), s1.value, 1e-5);
+    try testing.expect(s1.moving);
+
+    // Halfway through the 200ms RESIZE curve, the thumb is between 0.62 and 0.5.
+    const s_mid = ScalarTransition.sample(&slot, 0.5, 1.2, false);
+    try testing.expect(s_mid.value < 0.62 and s_mid.value > 0.5);
+    try testing.expect(s_mid.moving);
+
+    // At 200ms (t = 1.3), it lands cleanly at 0.5 and stops moving.
+    const s_end = ScalarTransition.sample(&slot, 0.5, 1.31, false);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), s_end.value, 1e-5);
+    try testing.expect(!s_end.moving);
 }

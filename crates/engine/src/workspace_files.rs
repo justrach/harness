@@ -269,7 +269,7 @@ impl WorkspaceFiles {
                 let (checkout, identity) = tokio::join!(
                     self.inner
                         .repos
-                        .workspace_checkout(Path::new(&space.path), &cwd),
+                        .workspace_folder(Path::new(&space.path), &cwd),
                     self.inner.repos.checkout_identity(&cwd),
                 );
                 let root = checkout.ok_or_else(|| {
@@ -317,11 +317,13 @@ impl WorkspaceFiles {
         // git-dir identity; plain roots get a device-scoped stable key so the
         // existing SearchFiles behavior and shared watcher semantics remain intact.
         match identity {
-            Ok(identity) => Ok(ResolvedWorkspace {
+            Ok(identity) if identity.root == root => Ok(ResolvedWorkspace {
                 checkout_id: identity.id,
-                root: identity.root,
+                root,
             }),
-            Err(_) => Ok(ResolvedWorkspace {
+            // A subfolder has its own relative paths and watcher root. Never
+            // reuse the whole checkout's identity for a narrower file surface.
+            _ => Ok(ResolvedWorkspace {
                 checkout_id: plain_folder_identity(&self.inner.device_id, &root),
                 root,
             }),

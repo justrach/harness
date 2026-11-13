@@ -128,4 +128,25 @@ final class HarnessCatalogTests: XCTestCase {
         XCTAssertEqual(first?.id, "claude-fable-5-1")
         XCTAssertEqual(first?.options.first?.id, "contextWindow")
     }
+
+    func testOrderedModelsPlacesSubscriptionsBeforeNonSubscriptions() {
+        let sample = [
+            ModelInfo(id: "codegraff/kimi-k3", label: "kimi-k3", description: nil,
+                      reasoningLevels: [], billing: "credits"),
+            ModelInfo(id: "kimi/kimi-for-coding", label: "kimi-for-coding", description: nil,
+                      reasoningLevels: [], billing: "plan"),
+            ModelInfo(id: "kimi/k3.1-pro", label: "k3.1-pro", description: nil,
+                      reasoningLevels: [], billing: "plan"),
+        ]
+        XCTAssertEqual(HarnessCatalog.orderedModels(sample).map(\.id), [
+            "kimi/kimi-for-coding",
+            "kimi/k3.1-pro",
+            "codegraff/kimi-k3",
+        ])
+        XCTAssertEqual(HarnessCatalog.orderedModels(sample, query: "kimi").map(\.id), [
+            "kimi/kimi-for-coding",
+            "kimi/k3.1-pro",
+            "codegraff/kimi-k3",
+        ])
+    }
 }

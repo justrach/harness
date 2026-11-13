@@ -1,0 +1,12 @@
+{
+  "package": "emoji-datasource",
+  "version": "16.0.0",
+  "source": "https://raw.githubusercontent.com/iamcal/emoji-data/v16.0.0/emoji.json",
+  "license_source": "https://raw.githubusercontent.com/iamcal/emoji-data/v16.0.0/LICENSE",
+  "source_sha256": "1d602e65be88772bf8cc368ce16b855d719eeddbafe128d471b80203f494d29f",
+  "upstream_base_entries": 1911,
+  "catalog_entries": 3786,
+  "catalog_sha256": "f05c85f1d7617c4c78aa2934ac26b5d72bef0c9a114d70394d288aaa8e6a97a4",
+  "images_included": false,
+  "category_mapping": "Upstream categories retained separately; Component skin-tone modifiers browse under People & body."
+}

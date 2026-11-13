@@ -1,8 +1,8 @@
 //! The sidebar header's two menus, as the GPUI app's (shell/spaces.rs):
 //! the project filter's (`render_spaces_menu`: a search, All projects and
 //! each project with its device, New project pinned under them) and the
-//! view options' (`render_sidebar_view_menu`: Organize, Sort and Show, each
-//! a menu of its own beside it, and Compact).
+//! view options' (`render_sidebar_view_menu`: Organize and Sort submenus,
+//! Compact, then the visible detail switches).
 const std = @import("std");
 const nanoui = @import("nanoui");
 const ui = nanoui.ui;
@@ -27,7 +27,7 @@ pub const State = struct {
     active: usize = 0,
     focus: bool = false,
     /// The view menu's group under the pointer or keys, and the one whose
-    /// menu is open beside it (Organize, Sort, Show; 3 is Compact).
+    /// menu is open beside it (Organize, Sort; 2 is Compact, then fields).
     group: ?usize = null,
     open: ?usize = null,
     sub_active: ?usize = null,
@@ -39,6 +39,7 @@ pub const State = struct {
     ctx_h: ?f32 = null,
 
     pub fn deinit(s: *State, gpa: std.mem.Allocator) void {
+        @import("text_buffer.zig").deinit(&s.query);
         s.ctx_id.deinit(gpa);
     }
 };
@@ -68,6 +69,9 @@ pub fn openView(a: *App) void {
 }
 
 pub fn close(a: *App) void {
+    // The search's focus goes with the projects menu, and the composer takes
+    // the keys back; the view menu's stays, to no one.
+    if (a.view.filter_menu) a.view.focus_composer = true;
     a.view.menus.ctx_at = null;
     a.view.filter_menu = false;
     a.view.more_menu = false;
@@ -110,11 +114,15 @@ pub fn keys(c: *ui.Context, a: *App) void {
             if (c.shortcut(.{ .key = S.enter })) if (m.sub_active) |i| choose(a, groups[g].rows[i]);
             return;
         }
-        if (c.shortcut(.{ .key = S.down })) m.group = rules.menuStep(m.group, groups.len + 1, 1);
-        if (c.shortcut(.{ .key = S.up })) m.group = rules.menuStep(m.group, groups.len + 1, -1);
+        const fields = displayRows(a.settings.get(.sidebar_compact));
+        const count = viewItemCount(a.settings.get(.sidebar_compact));
+        if (c.shortcut(.{ .key = S.down })) m.group = rules.menuStep(m.group, count, 1);
+        if (c.shortcut(.{ .key = S.up })) m.group = rules.menuStep(m.group, count, -1);
         if (m.group) |g| {
-            if (g == groups.len) {
-                if (c.shortcut(.{ .key = S.enter }) or c.shortcut(.{ .key = ' ' })) a.settings.toggle(.sidebar_compact);
+            if (g >= groups.len) {
+                if (c.shortcut(.{ .key = S.enter }) or c.shortcut(.{ .key = ' ' })) {
+                    if (g == groups.len) a.settings.toggle(.sidebar_compact) else if (g - groups.len - 1 < fields.len) choose(a, fields[g - groups.len - 1]);
+                }
             } else if (c.shortcut(.{ .key = S.right }) or c.shortcut(.{ .key = S.enter })) {
                 m.open = g;
                 m.sub_active = 0;
@@ -207,7 +215,7 @@ fn activate(a: *App, r: Row) void {
         .space => |id| a.setSpaceFilter(id),
         .add => {
             close(a);
-            a.addFolder();
+            @import("app_open_chooser.zig").open(a, .new_project);
         },
     }
     close(a);
@@ -216,7 +224,7 @@ fn activate(a: *App, r: Row) void {
 fn projects(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
     const m = &a.view.menus;
     // Under the trigger, 6 below, across the header row (`anchored_menu_below`).
-    const w = sidebar.width - 2 * 8;
+    const w = sidebar.widthOf(a) - 2 * 8;
     const h = m.h orelse 160;
     const x = rules.snapToWindow(r.x, w, c.size.w, 8);
     const y = rules.snapToWindow(r.y + r.h + 6, h, c.size.h, 8);
@@ -400,41 +408,68 @@ fn labelWeight(c: *ui.Context, k: theme.Colors, text: []const u8, lit: bool, wei
 // The view options.
 
 pub const Choice = enum {
+    by_status,
     by_device,
     by_project,
     in_one_list,
     last_called,
     created,
+    activity_1d,
+    activity_3d,
+    activity_7d,
+    activity_30d,
+    activity_all,
     branch,
     harness,
+    updated,
     project_icon,
     location,
     archived,
 
     fn label(ch: Choice) []const u8 {
         return switch (ch) {
+            .by_status => "By status",
             .by_device => "By device",
             .by_project => "By project",
             .in_one_list => "None",
             .last_called => "Last called",
             .created => "Created",
+            .activity_1d => "1d",
+            .activity_3d => "3d",
+            .activity_7d => "7d",
+            .activity_30d => "30d",
+            .activity_all => "All",
             .branch => "Branch",
-            .harness => "Harness",
+            .harness => "Agent icon",
+            .updated => "Last updated",
             .project_icon => "Project icon",
-            .location => "Location",
+            .location => "Project name",
             .archived => "Archived",
+        };
+    }
+
+    fn activity(ch: Choice) ?settings.LastActivity {
+        return switch (ch) {
+            .activity_1d => .d1,
+            .activity_3d => .d3,
+            .activity_7d => .d7,
+            .activity_30d => .d30,
+            .activity_all => .all,
+            else => null,
         };
     }
 
     fn icon(ch: Choice) icons.Name {
         return switch (ch) {
+            .by_status => .bell,
             .by_device => .laptop,
             .by_project, .location => .folder,
             .in_one_list => .list,
-            .last_called => .@"clock-circle",
+            .last_called, .activity_1d, .activity_3d, .activity_7d, .activity_30d, .activity_all => .@"clock-circle",
             .created => .calendar,
             .branch => .@"git-branch",
             .harness => .bot,
+            .updated => .@"clock-circle",
             .project_icon => .@"project-default",
             .archived => .@"archive-minimalistic",
         };
@@ -444,44 +479,84 @@ pub const Choice = enum {
 const Group = struct { label: []const u8, rows: []const Choice };
 
 const groups = [_]Group{
-    .{ .label = "Organize", .rows = &.{ .by_device, .by_project, .in_one_list } },
+    .{ .label = "Organize", .rows = &.{ .by_device, .by_project, .in_one_list, .by_status } },
     .{ .label = "Sort", .rows = &.{ .last_called, .created } },
-    .{ .label = "Show", .rows = &.{ .branch, .harness, .project_icon, .location, .archived } },
+    .{ .label = "Last activity", .rows = &.{ .activity_1d, .activity_3d, .activity_7d, .activity_30d, .activity_all } },
 };
+
+const display_rows = [_]Choice{ .branch, .harness, .updated, .project_icon, .location, .archived };
+
+/// Keyboard positions follow only controls currently visible, like desktop.
+pub fn displayRows(compact: bool) []const Choice {
+    return if (compact) display_rows[display_rows.len - 1 ..] else &display_rows;
+}
+
+pub fn viewItemCount(compact: bool) usize {
+    return groups.len + 1 + displayRows(compact).len;
+}
+
+pub fn activityCount(a: *const App, window: settings.LastActivity) usize {
+    const now = a.nowMs();
+    const filter_space: ?[]const u8 = if (a.view.filter) |f| (if (a.findSpace(f) != null) f else null) else null;
+    var count: usize = 0;
+    for (a.chats.items) |ch| {
+        if (ch.archived or ch.parent_chat_id != null) continue;
+        if (ch.space_id) |sid| if (a.findSpace(sid) == null) continue;
+        if (filter_space) |f| if (ch.space_id == null or !std.mem.eql(u8, ch.space_id.?, f)) continue;
+        const sess = workspace.sessionOf(a.sessions.items, ch.id);
+        const mark = workspace.markOf(ch, sess, now);
+        if (mark == .working or mark == .awaiting_input or window.matches(ch.timeMs(), now)) count += 1;
+    }
+    return count;
+}
 
 pub fn chosen(a: *const App, ch: Choice) bool {
     const s = &a.settings;
+    if (ch.activity()) |win| return s.lastActivity() == win;
     return switch (ch) {
+        .by_status => s.organization() == .by_status,
         .by_device => s.organization() == .by_device,
         .by_project => s.organization() == .by_project,
         .in_one_list => s.organization() == .in_one_list,
         .last_called => s.sort() == .last_updated,
         .created => s.sort() == .created,
+        .activity_1d, .activity_3d, .activity_7d, .activity_30d, .activity_all => unreachable,
         .branch => s.get(.sidebar_show_branch),
         .harness => s.get(.sidebar_show_harness),
+        .updated => s.get(.sidebar_show_updated),
         .project_icon => s.get(.sidebar_show_project_icon),
         .location => s.get(.sidebar_show_project_label),
         .archived => s.get(.sidebar_show_archived),
     };
 }
 
-/// Organize and Sort pick one and close their menu; Show's switch.
+/// Organize, Sort, and Last activity pick one and close their menu; Show's switch.
 pub fn choose(a: *App, ch: Choice) void {
     const s = &a.settings;
+    if (ch.activity()) |win| {
+        s.setText("sidebarLastActivity", win.key());
+        a.view.menus.open = null;
+        a.view.menus.sub_active = null;
+        a.redraw();
+        return;
+    }
     switch (ch) {
+        .by_status => s.setText("sidebarOrganization", settings.Organization.by_status.key()),
         .by_device => s.setText("sidebarOrganization", settings.Organization.by_device.key()),
         .by_project => s.setText("sidebarOrganization", settings.Organization.by_project.key()),
         .in_one_list => s.setText("sidebarOrganization", settings.Organization.in_one_list.key()),
         .last_called => s.setText("sidebarSort", settings.Sort.last_updated.key()),
         .created => s.setText("sidebarSort", settings.Sort.created.key()),
+        .activity_1d, .activity_3d, .activity_7d, .activity_30d, .activity_all => unreachable,
         .branch => s.toggle(.sidebar_show_branch),
         .harness => s.toggle(.sidebar_show_harness),
+        .updated => s.toggle(.sidebar_show_updated),
         .project_icon => s.toggle(.sidebar_show_project_icon),
         .location => s.toggle(.sidebar_show_project_label),
         .archived => s.toggle(.sidebar_show_archived),
     }
     switch (ch) {
-        .by_device, .by_project, .in_one_list, .last_called, .created => {
+        .by_status, .by_device, .by_project, .in_one_list, .last_called, .created => {
             a.view.menus.open = null;
             a.view.menus.sub_active = null;
         },
@@ -495,21 +570,66 @@ fn view(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
     const m = &a.view.menus;
     // Right of the ⋯, 6 along, level with it (`anchored_menu_right`),
     // from inside the ⋯'s 1-point clear border, where GPUI hangs it.
-    const w = sidebar.width - 2 * 8;
+    const w = sidebar.widthOf(a) - 2 * 8;
     const x = rules.snapToWindow(r.x + r.w - 1 + 6, w, c.size.w, 8);
     const y = @max(8, r.y + 1);
     ui.key(c, "sidebar-view-menu");
     const card = card_(c, k, x, y, w);
     defer card.end();
+    {
+        const motion = @import("motion_rules.zig");
+        const profile = a.settings.hierarchyProfile();
+        const dev = profile.effectiveMode() == .developer;
+        const seg = ui.div(c).row().wFull().p(3).gap(3).rounded(8).bg(k.ink(0.06));
+        defer seg.end();
+        inline for (.{
+            .{ motion.UiMode.zen, "sidebar-preset-zen", icons.Name.@"magic-stick-3", "Zen", !dev },
+            .{ motion.UiMode.developer, "sidebar-view-developer-mode", icons.Name.terminal, "Developer", dev },
+        }) |item| {
+            ui.key(c, item[1]);
+            var pill = ui.div(c).row().grow().w(0).h(26).gap(5).center().rounded(6);
+            pill = if (item[4]) pill.bg(if (k.frosted) k.card else k.shell).border(k.border).borderW(1) else pill.hover(k.selected);
+            defer pill.end();
+            icons.icon(c, item[2], 12.5, if (item[4]) k.text else k.muted, 0);
+            ui.text(c, item[3], .{ .size = 12, .line_height = 14, .weight = if (item[4]) .semibold else .regular, .color = if (item[4]) k.text else k.muted });
+            if (pill.clicked()) {
+                m.open = null;
+                a.settings.applyUiMode(item[0]);
+                a.redraw();
+            }
+        }
+    }
+    {
+        const motion = @import("motion_rules.zig");
+        const profile = a.settings.hierarchyProfile();
+        const parts = [_]struct { part: motion.MovingPart, text: []const u8 }{
+            .{ .part = .open_workspaces_tree, .text = "Open workspaces" },
+            .{ .part = .git_checkout_chrome, .text = "Git & branch footer" },
+            .{ .part = .prompt_rail, .text = "Prompt rail" },
+            .{ .part = .action_toolbar, .text = "Actions bar" },
+        };
+        for (parts) |entry| {
+            ui.key(c, c.print("sidebar-part-{s}", .{@tagName(entry.part)}));
+            const on = profile.partEnabled(entry.part);
+            var row = ui.div(c).row().wFull().h(28).px(8).gap(10).itemsCenter().rounded(7).hover(k.selected);
+            defer row.end();
+            if (row.clicked()) {
+                m.open = null;
+                a.settings.toggleMovingPart(entry.part);
+                a.redraw();
+            }
+            label(c, k, entry.text, row.hovered() or on);
+            toggle(c, k, on);
+        }
+    }
+    separator(c, k, w);
     for (groups, 0..) |g, gi| {
-        if (gi == 2) separator(c, k, w);
         ui.key(c, c.print("sidebar-view-group-{d}", .{gi}));
         const open = m.open == gi;
         var row = ui.div(c).row().wFull().h(30).px(8).gap(10).itemsCenter().rounded(7);
         row = if (open or m.group == gi) row.bg(k.selected) else row.hover(k.selected);
         defer row.end();
-        // Coming onto a group opens its menu; a click on the group closes
-        // it until the pointer comes back.
+        // Coming onto a group opens its menu; a click on the group toggles it.
         if (row.hovered() and m.group != gi) {
             m.group = gi;
             m.open = gi;
@@ -517,10 +637,10 @@ fn view(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
         }
         if (row.clicked()) {
             m.group = gi;
-            m.open = null;
+            m.open = if (m.open == gi) null else gi;
         }
         label(c, k, g.label, row.hovered() or open);
-        if (gi < 2) {
+        if (gi < groups.len) {
             var value: []const u8 = g.rows[0].label();
             for (g.rows) |ch| if (chosen(a, ch)) {
                 value = ch.label();
@@ -537,13 +657,38 @@ fn view(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
         var row = ui.div(c).row().wFull().h(30).px(8).gap(10).itemsCenter().rounded(7);
         row = if (m.group == groups.len) row.bg(k.selected) else row.hover(k.selected);
         defer row.end();
-        if (row.hovered()) {
+        if (row.hovered() and (m.open == null or c.input.mouse.x <= x + w - 28)) {
             m.group = groups.len;
             m.open = null;
         }
-        if (row.clicked()) a.settings.toggle(.sidebar_compact);
+        if (row.clicked()) {
+            m.group = groups.len;
+            m.open = null;
+            a.settings.toggle(.sidebar_compact);
+        }
         label(c, k, "Compact", row.hovered());
         toggle(c, k, a.settings.get(.sidebar_compact));
+    }
+    for (displayRows(a.settings.get(.sidebar_compact)), 0..) |ch, ix| {
+        const index = groups.len + 1 + ix;
+        ui.key(c, c.print("sidebar-display-{s}", .{@tagName(ch)}));
+        const on = chosen(a, ch);
+        const row = menuRow(c, k, on, m.group == index);
+        defer row.end();
+        if (row.hovered() and (m.open == null or c.input.mouse.x <= x + w - 28)) {
+            m.group = index;
+            m.open = null;
+        }
+        if (row.clicked()) {
+            m.group = index;
+            m.open = null;
+            choose(a, ch);
+        }
+        icons.icon(c, ch.icon(), 15, k.muted, 0);
+        label(c, k, ch.label(), row.hovered() or on);
+        const check = ui.div(c).row().w(14);
+        defer check.end();
+        if (on) icons.icon(c, .check, 14, k.muted, 0);
     }
 }
 
@@ -551,15 +696,16 @@ fn view(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
 /// when there isn't room.
 fn submenu(c: *ui.Context, a: *App, k: theme.Colors, g: Group, row: ui.Rect) void {
     const m = &a.view.menus;
-    const w: f32 = 232;
-    const left = row.x + row.w + 244 > c.size.w;
+    const is_activity = std.mem.eql(u8, g.label, "Last activity");
+    const w: f32 = if (is_activity) 164 else 232;
+    const left = row.x + row.w + w + 12 > c.size.w;
     const x = if (left) row.x - inset - 6 - w else row.x + row.w + inset + 6;
-    const est: f32 = 30 + @as(f32, @floatFromInt(g.rows.len)) * 35;
+    const est: f32 = (if (is_activity) @as(f32, 12) else 30) + @as(f32, @floatFromInt(g.rows.len)) * 35;
     const y = rules.snapToWindow(row.y, est, c.size.h, 8);
     const card = held(kit.shadowLg(ui.div(c).fixed().offset(x, y).w(w).layer(6).column().p(inset + 1).gap(2)
         .bg(k.composer).border(k.border).borderW(1).rounded(12)));
     defer card.end();
-    {
+    if (!is_activity) {
         // `menu_heading`: small capitals, spaced.
         const hd = ui.div(c).row().wFull().px(8).pt(6).pb(4);
         defer hd.end();
@@ -571,11 +717,14 @@ fn submenu(c: *ui.Context, a: *App, k: theme.Colors, g: Group, row: ui.Rect) voi
         const it = menuRow(c, k, on, m.sub_active == i);
         defer it.end();
         if (it.clicked()) choose(a, ch);
-        icons.icon(c, ch.icon(), 15, k.muted, 0);
+        if (!is_activity) icons.icon(c, ch.icon(), 15, k.muted, 0);
         label(c, k, ch.label(), it.hovered() or on);
+        if (ch.activity()) |win| {
+            ui.text(c, c.print("{d}", .{activityCount(a, win)}), .{ .size = 12, .line_height = 12 * phi, .color = k.muted.alpha(0.75) });
+        }
         const slot = ui.div(c).row().w(14);
         defer slot.end();
-        if (on) icons.icon(c, .check, 14, k.muted, 0);
+        if (on) icons.icon(c, .check, 14, if (is_activity) k.accent else k.muted, 0);
     }
 }
 

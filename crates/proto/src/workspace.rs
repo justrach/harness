@@ -18,6 +18,8 @@ pub mod capabilities {
     pub const TOOL_PROGRESS_V1: &str = "tool-progress-v1";
     /// Request-scoped question dismissal, distinct from submitting an answer.
     pub const DISMISS_INPUT_V1: &str = "dismiss-input-v1";
+    /// Device-local agent CLI update stream and explicit update actions.
+    pub const HARNESS_UPDATES_V1: &str = "harness-updates-v1";
 
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
@@ -28,6 +30,7 @@ pub mod capabilities {
         MESSAGE_QUEUE_EDIT_LEASE_V1,
         TOOL_PROGRESS_V1,
         DISMISS_INPUT_V1,
+        HARNESS_UPDATES_V1,
     ];
 
     pub fn current() -> Vec<String> {
@@ -59,6 +62,9 @@ pub struct EngineInfo {
     /// Supported protocol/document features. Missing on older engines.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
+    /// App version this engine is running; absent on older versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 impl EngineInfo {
@@ -93,6 +99,7 @@ mod tests {
             workspace_scope: WorkspaceScope::Local,
             cursor_sdk_version: Some("1.0.31".into()),
             capabilities: capabilities::current(),
+            version: None,
         };
         assert_eq!(
             serde_json::to_value(&info).unwrap(),
@@ -108,7 +115,8 @@ mod tests {
                     "message-queue-clean-attachment-text-v1",
                     "message-queue-edit-lease-v1",
                     "tool-progress-v1",
-                    "dismiss-input-v1"
+                    "dismiss-input-v1",
+                    "harness-updates-v1"
                 ],
             })
         );

@@ -293,7 +293,7 @@ fn empty(c: *ui.Context, k: theme.Colors) void {
 
 fn list(c: *ui.Context, a: *App, k: theme.Colors) void {
     set.space(c, 16);
-    const cd = ui.div(c).column().wFull().p(1).rounded(12).border(k.border).borderW(1).bg(if (k.frosted) k.card else k.shell).clip();
+    const cd = ui.div(c).column().wFull().p(1).rounded(12).border(k.border).borderW(1).bg(if (k.frosted) k.card else k.shell);
     defer cd.end();
     for (a.mcp.servers.items, 0..) |s, ix| {
         ui.key(c, s.name);
@@ -308,7 +308,7 @@ fn server(c: *ui.Context, a: *App, k: theme.Colors, s: Server) void {
     const open = m.open.contains(s.name);
     const box = ui.div(c).column().wFull();
     defer box.end();
-    const r = ui.div(c).row().wFull().px(20).py(14).gap(14).itemsCenter().hover(k.ink(0.015));
+    const r = ui.div(c).row().wFull().px(20).py(14).gap(14).itemsCenter().hover(k.hover);
     {
         defer r.end();
         set.tile(c, k, if (std.mem.eql(u8, s.transport, "http")) .@"remote-server" else .terminal);

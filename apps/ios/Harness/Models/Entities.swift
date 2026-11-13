@@ -100,6 +100,11 @@ struct Chat: Identifiable, Hashable {
     /// When a person last prompted this chat (a send or steer). Agent replies
     /// move `lastMessageAt`, never this. Nil from hosts that predate it.
     var lastPromptAt: Int64? = nil
+    /// Agent-created child chats stay in the registry for orchestration, not
+    /// as independent sessions the person can open (desktop `parent_chat_id`).
+    var parentChatId: String? = nil
+
+    var isTopLevel: Bool { parentChatId == nil }
 
     /// Where the chat sits in lists: when you last called it; older hosts
     /// without the stamp fall back to the last message, then creation.
@@ -276,6 +281,14 @@ struct RenderToolCall: Hashable {
 
     /// A todo call's list (proto `TodoItem`); nil for other calls.
     var tasks: [TaskItem]? { tag == "todo" ? fields["items"] as? [TaskItem] : nil }
+
+    /// Model thinking rides a tool group as a "Thought process" chip, like
+    /// desktop's `thought_item`. The tag is UI-only: no engine call uses it.
+    static let thoughtTag = "thought"
+    static func thought(_ text: String) -> RenderToolCall {
+        RenderToolCall(tag: thoughtTag, fields: ["text": text])
+    }
+    var isThought: Bool { tag == Self.thoughtTag }
 }
 
 /// One entry of an agent's task list (proto `TodoItem`).
@@ -317,13 +330,15 @@ enum AgentReauthProvider: String, Hashable, Sendable {
 enum MessagePart: Hashable, Identifiable {
     case image(id: String, reference: GeneratedImageReference)
     case text(id: String, text: String)
+    /// Model thinking (doc kind "reasoning", body in its `reasoning` field).
+    case reasoning(id: String, text: String)
     case tool(id: String, call: RenderToolCall, isError: Bool, resolved: Bool)
     case input(id: String, requestId: String, questions: [UserInputQuestion], resolved: Bool)
     case error(id: String, message: String, reauth: AgentReauthProvider? = nil)
 
     var id: String {
         switch self {
-        case .text(let id, _), .image(let id, _), .tool(let id, _, _, _), .input(let id, _, _, _), .error(let id, _, _):
+        case .text(let id, _), .reasoning(let id, _), .image(let id, _), .tool(let id, _, _, _), .input(let id, _, _, _), .error(let id, _, _):
             return id
         }
     }

@@ -37,10 +37,23 @@ pub fn select(a: *App, next: ?[]const u8) void {
 }
 
 fn visiblePeer(a: *const App, id: []const u8) bool {
-    const split = a.tabs.layout() orelse return false;
-    for (split.panes.items, 0..) |p, ix| {
-        if (ix != split.focus and same(p, id)) return true;
+    return otherSlotHas(a, id);
+}
+
+pub fn otherSlotHas(a: *const App, id: []const u8) bool {
+    for (a.tabs.items.items, 0..) |c, i| {
+        if (i != a.tabs.active and same(c, id)) return true;
     }
+    for (a.tabs.splits.items, 0..) |sp, tab_ix| if (sp) |s| {
+        for (s.panes.items, 0..) |p, ix| {
+            if ((tab_ix != a.tabs.active or ix != s.focus) and same(p, id)) return true;
+        }
+        for (s.groups[0..s.panes.items.len], 0..) |group, pane| {
+            for (group.items.items, 0..) |tab, ix| {
+                if ((tab_ix != a.tabs.active or pane != s.focus or ix != group.active) and same(tab.chat, id)) return true;
+            }
+        }
+    };
     return false;
 }
 

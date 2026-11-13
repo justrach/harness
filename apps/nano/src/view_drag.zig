@@ -170,9 +170,9 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
         if (!c.input.down) d.id.clearRetainingCapacity();
         return;
     }
-    const x0 = a.view.sidebar_width;
+    const x0 = a.view.sidebar_width + a.view.seam_inset;
     var buf: [2]Zone = undefined;
-    const targets = if (a.view.settings_open) buf[0..0] else zones(a, x0, transcript_view.mainWidth(c, a), c.size.h, &buf);
+    const targets = if (a.view.settings_open) buf[0..0] else zones(a, x0, transcript_view.contentWidth(c, a), c.size.h, &buf);
     var over: ?Zone = null;
     for (targets) |z| if (z.rect.contains(c.input.mouse)) {
         over = z;
