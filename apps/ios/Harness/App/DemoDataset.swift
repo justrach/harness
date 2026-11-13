@@ -252,6 +252,32 @@ final class DemoDataset {
                     parts: [.text(id: "t0", text: "Select this word and drag across multiple lines to copy only the highlighted passage. The rest of this response stays unselected.")],
                     createdAt: nowMs(), deviceId: "demo", status: .complete, continuationOf: nil)
             ])
+        } else if ProcessInfo.processInfo.arguments.contains("-promptselection") {
+            // Synthetic sent prompts only. Keep both collapsed prompts and the
+            // first reply visible at 402pt, without scrolling during selection.
+            store.setEntries([
+                MessageEntry(id: "prompt-selection-ask-1", role: .user,
+                    parts: [.text(id: "t0", text: "Select this word and drag across lines.\n\nOnly this prompt belongs in the copied range.")],
+                    createdAt: nowMs(), deviceId: "demo", status: .complete, continuationOf: nil),
+                MessageEntry(id: "prompt-selection-reply-1", role: .assistant,
+                    parts: [.text(id: "t0", text: "Assistant reply one: excluded.")],
+                    createdAt: nowMs(), deviceId: "demo", status: .complete, continuationOf: nil),
+                MessageEntry(id: "prompt-selection-ask-2", role: .user,
+                    parts: [.text(id: "t0", text: """
+                        Long prompt starts here.
+                        Second line.
+                        Third line.
+                        Fourth line.
+                        Fifth line.
+                        Hidden sixth line.
+                        Hidden seventh line.
+                        Hidden eighth line.
+                        """)],
+                    createdAt: nowMs(), deviceId: "demo", status: .complete, continuationOf: nil),
+                MessageEntry(id: "prompt-selection-reply-2", role: .assistant,
+                    parts: [.text(id: "t0", text: "Assistant reply two: excluded.")],
+                    createdAt: nowMs(), deviceId: "demo", status: .complete, continuationOf: nil)
+            ])
         } else if ProcessInfo.processInfo.arguments.contains("-responseselection") {
             // Keep the entire mixed-block reply visible at a 402pt phone width
             // so the regression exercises selection, not transcript scrolling.
