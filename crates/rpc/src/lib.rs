@@ -21,6 +21,8 @@ use serde::{Deserialize, Serialize};
 mod client;
 pub mod git_actions;
 pub use git_actions::*;
+pub mod github_repository;
+pub use github_repository::*;
 pub mod device_room;
 mod server;
 mod ws;
@@ -289,6 +291,7 @@ pub mod methods {
     /// remove only its untracked, non-ignored paths.
     pub const DISCARD_WORKING_TREE: &str = "DiscardWorkingTree";
     pub const GET_CHECKOUT_GIT_STATE: &str = "GetCheckoutGitState";
+    pub const BROWSE_CHECKOUT_GITHUB: &str = "BrowseCheckoutGitHub";
     pub const APPLY_CHECKOUT_GIT_ACTION: &str = "ApplyCheckoutGitAction";
     pub const GET_CHECKOUT_FILE_DIFF_TEXT: &str = "GetCheckoutFileDiffText";
     // Agent accounts (ControlRpc, relay-forwardable — CLI logins are per-device).

@@ -1573,6 +1573,8 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         methods::CREATE_WORKTREE => Duration::from_secs(120),
         // One bounded push (120s), plus pre/post snapshot checks and relay.
         methods::APPLY_CHECKOUT_GIT_ACTION => Duration::from_secs(180),
+        // Includes bounded pre/post Git context resolution and provider wait.
+        methods::BROWSE_CHECKOUT_GITHUB => Duration::from_secs(100),
         // Allow the adapter discovery budget plus relay and shutdown overhead.
         methods::LIST_MODELS | methods::LIST_COMMANDS => Duration::from_secs(100),
         // A reconnect handshakes every server; a login waits on a browser page.
@@ -1663,6 +1665,7 @@ fn forwardable(method: &str) -> bool {
             | methods::GET_CHECKOUT_DIFF
             | methods::DISCARD_WORKING_TREE
             | methods::GET_CHECKOUT_GIT_STATE
+            | methods::BROWSE_CHECKOUT_GITHUB
             | methods::APPLY_CHECKOUT_GIT_ACTION
             | methods::GET_CHECKOUT_FILE_DIFF_TEXT
             // Terminals live on the chat's host device.
@@ -3039,6 +3042,20 @@ impl RpcService for EngineRpc {
                         checksum: snapshot.checksum,
                         updated_at: chrono::Utc::now(),
                     })
+                })
+                .await
+            }
+            methods::BROWSE_CHECKOUT_GITHUB => {
+                Box::pin(async move {
+                    let p: harness_rpc::BrowseCheckoutGitHubParams = parse_params(params)?;
+                    let response = crate::github_repository::browse(
+                        &self.workspace,
+                        &self.repos,
+                        self.doc_host.device_id(),
+                        p,
+                    )
+                    .await?;
+                    RpcReply::value(&response)
                 })
                 .await
             }
@@ -4548,6 +4565,16 @@ mod tests {
         assert_eq!(
             forward_deadline(methods::QUEUE_UPDATE),
             std::time::Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn github_repository_browse_routes_to_host_with_context_budget() {
+        assert!(forwardable(methods::BROWSE_CHECKOUT_GITHUB));
+        assert!(!is_stream_method(methods::BROWSE_CHECKOUT_GITHUB));
+        assert_eq!(
+            forward_deadline(methods::BROWSE_CHECKOUT_GITHUB),
+            std::time::Duration::from_secs(100)
         );
     }
 

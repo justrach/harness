@@ -102,6 +102,7 @@ pub const Panels = struct {
     discard_confirm: bool = false,
     history: @import("app_git.zig").State = .{},
     git_workflow: @import("app_git_workflow.zig").State = .{},
+    github_repository: @import("app_github_repository.zig").State = .{},
 
     pub fn init(gpa: Allocator) Panels {
         return .{ .gpa = gpa, .arena = .init(gpa) };
@@ -110,6 +111,7 @@ pub const Panels = struct {
     pub fn deinit(p: *Panels) void {
         p.history.deinit(p.gpa);
         p.git_workflow.deinit(p.gpa);
+        p.github_repository.deinit(p.gpa);
         @import("text_buffer.zig").deinit(&p.search);
         if (p.pending_agent) |s| s.destroy();
         if (p.pending_browser) |b| b.destroy();
@@ -171,6 +173,7 @@ pub fn chatChanged(a: *App) void {
     if (same) return;
     @import("app_git.zig").reset(a);
     @import("app_git_workflow.zig").reset(a);
+    @import("app_github_repository.zig").reset(a);
     if (p.w_diffs) |id| a.engine.cancel(id);
     if (p.w_git) |id| a.engine.cancel(id);
     p.w_diffs = null;
@@ -213,9 +216,11 @@ pub fn chatChanged(a: *App) void {
 pub fn chatsArrived(a: *App) void {
     @import("app_git.zig").reconcile(a);
     @import("app_git_workflow.zig").reconcile(a);
+    @import("app_github_repository.zig").reconcile(a);
     const p = &a.panels;
     if (a.selected == null) return;
     if (p.host_open and p.history.target == null) if (p.activeTab()) |tab| if (tab.kind == .git) @import("app_git.zig").load(a, 0);
+    if (p.host_open and p.github_repository.open and p.github_repository.target == null) if (p.activeTab()) |tab| if (tab.kind == .github) @import("app_github_repository.zig").show(a);
     @import("app_actions.zig").refresh(a);
     if (p.host_open and p.diff == null and !p.diff_loading) {
         if (p.activeTab()) |t| if (t.kind == .diffs) openDiffs(a);
@@ -254,6 +259,7 @@ pub fn closeTab(a: *App, i: usize) void {
         @import("app_git.zig").reset(a);
         @import("app_git_workflow.zig").reset(a);
     }
+    if (t.kind == .github) @import("app_github_repository.zig").reset(a);
     if (t.agent) |s| s.stop();
     if (comptime @import("builtin").os.tag == .macos) if (t.browser) |b| if (b.native) |n| n.show(false);
     p.retired.appendAssumeCapacity(t);
@@ -286,7 +292,10 @@ pub fn showTab(a: *App, i: usize) void {
             if (p.history.snapshot == null) @import("app_git.zig").load(a, 0);
             if (p.git_workflow.open) @import("app_git_workflow.zig").load(a);
         },
-        .github => @import("app_change_requests.zig").reconcile(a),
+        .github => {
+            @import("app_change_requests.zig").reconcile(a);
+            if (p.github_repository.open) @import("app_github_repository.zig").show(a);
+        },
         .file => if (t.editor) |e| {
             e.focus = true;
             if (!e.belongsTo(a.selected)) @import("app_file_editor.zig").reveal(a, e) else readFile(a, t.path);

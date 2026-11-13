@@ -30,6 +30,7 @@ pub mod diff_sync;
 pub mod doc_host;
 pub mod external_history;
 pub mod git_actions;
+pub mod github_repository;
 mod graff_logins;
 pub mod harness_updates;
 mod http_error;

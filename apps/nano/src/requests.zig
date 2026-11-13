@@ -113,6 +113,21 @@ pub fn gitAction(chat_id: []const u8, checkout_id: []const u8, checksum: []const
     return .{ .method = "ApplyCheckoutGitAction", .params = .{ .chatId = chat_id, .checkoutId = checkout_id, .expectedChecksum = checksum, .action = action, .targetDeviceId = host } };
 }
 
+pub const GitHubKind = enum { pulls, issues, pull, issue, files, activity };
+pub const GitHubFilter = enum { open, closed, all };
+pub const GitHubBrowse = struct {
+    chatId: []const u8,
+    kind: GitHubKind,
+    state: ?GitHubFilter = null,
+    number: ?u64 = null,
+    page: usize = 1,
+    expectedRepository: ?[]const u8 = null,
+    targetDeviceId: ?[]const u8 = null,
+};
+pub fn githubBrowse(params: GitHubBrowse) Request(GitHubBrowse) {
+    return .{ .method = "BrowseCheckoutGitHub", .params = params };
+}
+
 pub fn listRefs(repo_path: []const u8, host: ?[]const u8) Request(struct { repoPath: []const u8, targetDeviceId: ?[]const u8 }) {
     return .{ .method = "ListRefs", .params = .{ .repoPath = repo_path, .targetDeviceId = host } };
 }

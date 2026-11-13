@@ -75,10 +75,37 @@ source/base branch and shared-checkout provenance. Open on GitHub launches
 the PR URL; Open session switches to its conversation. Merge is offered only
 for the selected session through the existing confirm-then-merge flow.
 
-This is deliberately **not** a complete GitHub repository PR browser, a
-review editor or an issue board. It reuses the engine's existing `gh`
-installation, authentication, bounded requests and watch cache. There is no
-new token store, hidden authentication prompt or second network poller.
+Select **Repository** to browse beyond session-linked PRs. The native
+repository browser shows paged **Pull requests** and **Issues** with
+**Open / Closed / All** filters. It uses the selected session's real checkout
+and owning device to resolve a GitHub remote, and shows the resulting
+`owner/repository` explicitly. Existing upstream/branch remote selection rules
+apply; the result is repository-wide, not filtered to the session's branch.
+
+Open a PR for **Summary**, **Code** and **Activity**. Code lists paged files
+with status/addition/deletion counts and one expandable patch at a time.
+Missing/binary/clipped patches are clearly marked incomplete. Activity shows
+paged GitHub timeline entries, comments and review summaries; it is not an
+inline review-thread editor. Issues have their own description and activity.
+Remote text is rendered as plain native text: no HTML, remote image loading
+or executable provider links. **Open on GitHub** constructs a validated
+canonical URL for the selected item.
+
+The browser reuses the host's installed/authenticated `gh`, bounded process
+runner and remote resolution; no token store or hidden sign-in is added.
+All new API calls are GET-only and occur on explicit navigation/refresh, not
+a new polling loop. Repo keys fence subsequent pages/details; the host
+rechecks checkout/repository identity after a provider request. Chat,
+checkout/branch changes and panel closure cancel subscriptions and reject
+late replies. Refresh starts a fresh repository listing.
+
+This slice supports `github.com` repositories on a branch; enterprise hosts
+and detached HEAD require a browser/terminal. It does not create PRs/issues,
+post comments/reviews, merge unrelated repository PRs, switch branches or
+check out PR code. Existing selected-session merge confirmation is unchanged.
+Provider pages are capped at 30 entries, descriptions/patches at 16 KiB and
+event bodies at 8 KiB. GitHub may itself omit large diffs; clipping/omission
+is labelled rather than presenting a partial patch as complete.
 
 ## NanoUI contribution boundary
 
@@ -95,11 +122,14 @@ package, with provenance recorded there.
 ```sh
 scripts/heavy-build.sh sh -c 'cd apps/nano && zig build test -Dtest-filter="native git" -j2'
 scripts/heavy-build.sh sh -c 'cd apps/nano && zig build vectors -j2'
+scripts/heavy-build.sh sh -c 'cd apps/nano && zig build test -Dtest-filter="repository github" -j2'
+scripts/heavy-build.sh cargo test -p harness-engine --lib github_repository
 scripts/heavy-build.sh cargo test -p harness-engine --lib git_actions
 scripts/heavy-build.sh cargo test -p harness-engine --test desktop_requests
 scripts/heavy-build.sh sh -c 'cd apps/nano && zig build -Doptimize=ReleaseSafe -j2'
 node scripts/test-nano-source-control-e2e.mjs
 node scripts/test-nano-git-workflow-e2e.mjs
+node scripts/test-nano-github-repository-e2e.mjs
 ```
 
 The native tests use synthetic chats, host identities, commit pages and PRs,
@@ -111,3 +141,6 @@ regressions check per-file requests, confirmations, busy/error guards, host
 routing, teardown and rejection of delayed replies. The end-to-end
 fixture creates its own repository, engine, home and data directories; it
 never reads the developer's application data or uses a GitHub account.
+`NANO_GITHUB_REPO_SNAP_DIR` captures repository browser fixtures. Its
+end-to-end runner uses a fake `gh` executable, a synthetic Git remote and
+loopback-only sandboxing, so UI/engine integration never contacts GitHub.
