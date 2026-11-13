@@ -89,7 +89,9 @@ test {
     _ = @import("tests_ui_footer.zig");
     _ = @import("view_rail.zig");
     _ = @import("tests_ui_rail.zig");
+    _ = @import("view_tooltip.zig");
     _ = @import("tests_ui_tooltips.zig");
+    _ = @import("tests_ui_queue.zig");
     _ = @import("change_requests.zig");
     _ = @import("agent_updates.zig");
     _ = @import("tests_ui_change_requests.zig");

@@ -45,6 +45,68 @@ pub fn iconButton(c: *ui.Context, k: theme.Colors, name: icons.Name, o: IconButt
     return clicked;
 }
 
+/// Shared responsive action geometry: measurement and paint must never drift.
+const action_metrics = struct {
+    const text: ui.TextStyle = .{ .size = 11.5 };
+    const icon: f32 = 13;
+    const gap: f32 = 5;
+    const pad: f32 = 8;
+    const height: f32 = 28;
+    const radius: f32 = 5;
+};
+
+pub const Action = struct {
+    icon: icons.Name,
+    label: []const u8,
+    short_label: ?[]const u8 = null,
+
+    fn text(a: Action, mode: ActionMode) []const u8 {
+        return if (mode == .short) a.short_label orelse a.label else a.label;
+    }
+};
+
+pub const ActionMode = enum { full, short, icons };
+pub const ActionLayout = struct { mode: ActionMode, status: bool };
+
+fn actionWidth(c: *ui.Context, a: Action, mode: ActionMode) f32 {
+    if (mode == .icons) return action_metrics.height;
+    return c.text.width(a.text(mode), action_metrics.text) + action_metrics.icon + action_metrics.gap + 2 * action_metrics.pad;
+}
+
+/// Complete hit targets first, then optional status. The same action data and
+/// metrics drive rendering, so callers do not maintain their own width guesses.
+pub fn actionLayout(c: *ui.Context, width: f32, actions: []const Action, status_width: f32, gap: f32) ActionLayout {
+    var full: f32 = 0;
+    var short: f32 = 0;
+    for (actions, 0..) |a, i| {
+        full += actionWidth(c, a, .full) + (if (i == 0) @as(f32, 0) else gap);
+        short += actionWidth(c, a, .short) + (if (i == 0) @as(f32, 0) else gap);
+    }
+    return .{
+        .mode = if (width >= full) .full else if (width >= short) .short else .icons,
+        .status = width >= full + status_width + gap,
+    };
+}
+
+/// One action in the chosen layout. Visible labels never get duplicate hints;
+/// icon-only actions use the app-wide tooltip policy in view_tooltip.zig.
+pub fn actionButton(c: *ui.Context, k: theme.Colors, a: Action, mode: ActionMode, enabled: bool) bool {
+    const glyph_only = mode == .icons;
+    var b = ui.div(c).row().size(actionWidth(c, a, mode), action_metrics.height).rounded(action_metrics.radius);
+    if (glyph_only) b = b.center().opacity(if (enabled) 0.72 else 0.45) else b = b.px(action_metrics.pad).gap(action_metrics.gap).itemsCenter();
+    if (enabled) b = b.hover(k.ink(0.07)) else if (!glyph_only) b = b.opacity(0.45);
+    if (glyph_only) b = @import("view_tooltip.zig").on(b, k, .{ .text = a.label, .delay = @import("view_tooltip.zig").quick });
+    defer b.end();
+    const color = if (!glyph_only) k.muted else if (b.hovered() and enabled) k.text else k.muted.alpha(0.8);
+    icons.icon(c, a.icon, action_metrics.icon, color, 0);
+    if (!glyph_only) {
+        var st = action_metrics.text;
+        st.color = k.muted;
+        ui.text(c, a.text(mode), st);
+    }
+    return b.clicked() and enabled;
+}
+
 /// A short, reversible press without changing layout or the hit target.
 pub fn pressFeedback(d: ui.Div) ui.Div {
     const held = d.interaction().pressed;

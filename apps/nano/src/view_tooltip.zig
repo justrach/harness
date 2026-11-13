@@ -14,7 +14,7 @@ pub const has = @hasDecl(ui.Div, "tooltip");
 pub const default_delay: f32 = 0.5;
 pub const quick: f32 = 0.35;
 
-/// Action labels now share `popover::tooltip_surface`, including queue,
+/// All ordinary action labels share `options` below, including queue,
 /// file and surface-tab labels. Keep the call-site names for rich-card callers.
 pub const Look = enum { text, queue, file, tab };
 
@@ -50,19 +50,18 @@ pub fn on(d: ui.Div, k: theme.Colors, t: Tip) ui.Div {
 /// The box and text of `look`.
 pub fn options(k: theme.Colors, look: Look, delay: f32) if (has) ui.TooltipOptions else void {
     if (comptime !has) return;
-    _ = k;
     _ = look;
-    // Theme::tooltip_colors is deliberately the same opaque charcoal in
-    // light and dark appearances, independent of popup/glass surface roles.
+    // Action hints belong to the active palette, just like other popup cards.
+    // Never introduce an unrelated black surface into a light/custom theme.
     return .{
         .delay = delay,
-        .background = ui.Color.hex(0x282828),
-        .border = ui.Color.hex(0x383838),
+        .background = k.composer,
+        .border = k.border_strong,
         .padding = .xy(12, 5),
-        .radius = 13,
+        .radius = 6,
         .max_width = 380,
         .shadows = &label_shadow,
-        .text = .{ .size = 13, .line_height = 18, .color = ui.Color.hex(0xf8f8f8) },
+        .text = .{ .size = 13, .line_height = 18, .color = k.text },
     };
 }
 
@@ -85,20 +84,21 @@ pub fn project(c: *ui.Context, d: ui.Div, k: theme.Colors, name: []const u8, dev
     return d.tooltipWith(p, Project.draw, o);
 }
 
-test "compact action tooltips use the shared opaque app-font bubble in both appearances" {
+test "compact action tooltips use the active palette in both appearances" {
     if (comptime !has) return error.SkipZigTest;
     for ([_]bool{ false, true }) |dark| {
         for ([_]Look{ .text, .queue, .file, .tab }) |look| {
-            const o = options(theme.colors(dark), look, quick);
-            try std.testing.expectEqual(ui.Color.hex(0x282828), o.background.?);
-            try std.testing.expectEqual(ui.Color.hex(0x383838), o.border.?);
-            try std.testing.expectEqual(ui.Color.hex(0xf8f8f8), o.text.color.?);
+            const k = theme.colors(dark);
+            const o = options(k, look, quick);
+            try std.testing.expectEqual(k.composer, o.background.?);
+            try std.testing.expectEqual(k.border_strong, o.border.?);
+            try std.testing.expectEqual(k.text, o.text.color.?);
             try std.testing.expectEqual(@as(f32, 13), o.text.size);
             try std.testing.expectEqual(@as(f32, 18), o.text.line_height);
             try std.testing.expect(!o.text.system_font);
             try std.testing.expectEqual(@as(f32, 12), o.padding.left);
             try std.testing.expectEqual(@as(f32, 5), o.padding.top);
-            try std.testing.expectEqual(@as(f32, 13), o.radius);
+            try std.testing.expectEqual(@as(f32, 6), o.radius);
             try std.testing.expectEqual(@as(f32, 380), o.max_width);
             try std.testing.expectEqual(quick, o.delay);
             try std.testing.expectEqual(@as(usize, 1), o.shadows.len);
