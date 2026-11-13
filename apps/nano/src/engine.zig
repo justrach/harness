@@ -2,7 +2,7 @@
 //! on `ws://127.0.0.1:{HARNESS_IPC_PORT|27664}`.
 //!
 //! A thread of its own dials and reads; each message reaches the UI thread
-//! through `nanoui.App.after` and goes to `rpc.Mux` there. Calls are written
+//! through `nanoui.App.onMain` and goes to `rpc.Mux` there. Calls are written
 //! from the UI thread. When the socket drops, every call ends with an error
 //! and the thread dials again after a pause.
 const std = @import("std");
@@ -221,10 +221,51 @@ pub const Engine = struct {
         }
     };
 
+    var post_to_main: *const fn (?*anyopaque, *const fn (?*anyopaque) callconv(.c) void) bool = nanoui.App.onMain;
+
     fn post(e: *Engine, d: Delivery) void {
-        const p = e.gpa.create(Delivery) catch return;
+        const p = e.gpa.create(Delivery) catch {
+            if (d.message) |m| e.gpa.free(m);
+            return;
+        };
         p.* = d;
         p.e = e;
-        nanoui.App.after(0, p, Delivery.run);
+        // Windows timers belong to the calling thread. The socket reader
+        // has no message loop: post to the UI queue instead.
+        if (!post_to_main(p, Delivery.run)) {
+            if (p.message) |m| e.gpa.free(m);
+            e.gpa.destroy(p);
+        }
     }
 };
+
+test "worker engine deliveries use the UI dispatcher and release rejected frames" {
+    const Fixture = struct {
+        var ctx: ?*anyopaque = null;
+        var callback: ?*const fn (?*anyopaque) callconv(.c) void = null;
+        fn queue(context: ?*anyopaque, func: *const fn (?*anyopaque) callconv(.c) void) bool {
+            @This().ctx = context;
+            @This().callback = func;
+            return true;
+        }
+        fn reject(_: ?*anyopaque, _: *const fn (?*anyopaque) callconv(.c) void) bool {
+            return false;
+        }
+        fn worker(e: *Engine) void {
+            e.post(.{ .state = .disconnected });
+        }
+    };
+    var e = Engine.init(std.testing.allocator, std.testing.io, 1);
+    defer e.deinit();
+    const original = Engine.post_to_main;
+    defer Engine.post_to_main = original;
+    Engine.post_to_main = Fixture.queue;
+    const thread = try std.Thread.spawn(.{}, Fixture.worker, .{&e});
+    thread.join();
+    try std.testing.expect(Fixture.callback != null);
+    try std.testing.expectEqual(State.connecting, e.state);
+    Fixture.callback.?(Fixture.ctx);
+    try std.testing.expectEqual(State.disconnected, e.state);
+    Engine.post_to_main = Fixture.reject;
+    e.post(.{ .message = try std.testing.allocator.dupe(u8, "discarded") });
+}

@@ -9,6 +9,7 @@ const chrome = @import("panel_chrome.zig");
 const tabs = @import("tabs.zig");
 const strip = @import("view_tab_strip.zig");
 const tip = @import("view_tooltip.zig");
+const caption = @import("window_chrome.zig");
 
 pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (a.view.settings_open) return;
@@ -35,9 +36,9 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
     var aligned: [tabs.max_panes + 2]f32 = undefined;
     const in_row = (if (split) |s| s.axis == .horizontal and !s.zoomed else true) and a.view.strip.expanded == null and a.view.chrome.width <= c.size.w - a.view.chrome.x + 0.5;
-    const columns = in_row and chrome.columns(widths[0..n], a.view.chrome.leading, left, 8, &aligned);
+    const columns = in_row and chrome.columns(widths[0..n], a.view.chrome.leading, left, 8 + caption.trailing, &aligned);
     const other_tabs: usize = if (a.tabs.items.items.len > 1) a.tabs.items.items.len - 1 else 0;
-    const avail_bar = @max(0, c.size.w - a.view.sidebar_width - left - 8 - 32);
+    const avail_bar = @max(0, c.size.w - a.view.sidebar_width - left - caption.trailing - 8 - 32);
     const max_other_budget = if (columns)
         @max(0, @min(aligned[0] * 0.55, aligned[0] - 180))
     else
@@ -45,9 +46,9 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
     const other_shown: usize = if (other_tabs > 0 and max_other_budget >= 76) @min(other_tabs, @as(usize, @intFromFloat(@max(1, @floor(max_other_budget / 76))))) else 0;
     const other_pill_w: f32 = if (other_shown > 0) @min(128, @max(72, max_other_budget / @as(f32, @floatFromInt(other_shown)) - 4)) else 0;
     const other_reserve: f32 = if (other_shown > 0) @as(f32, @floatFromInt(other_shown)) * (other_pill_w + 4) else 0;
-    const shared = @min(chrome.slot_max, chrome.sharedSlotRoom(@max(240, c.size.w - a.view.sidebar_width - other_reserve), left, 8, n));
+    const shared = @min(chrome.slot_max, chrome.sharedSlotRoom(@max(240, c.size.w - a.view.sidebar_width - other_reserve - caption.trailing), left, 8, n));
     ui.key(c, "instrument-strip");
-    const row = ui.div(c).fixed().offset(a.view.sidebar_width, 0).w(c.size.w - a.view.sidebar_width).h(chrome.titlebar_height).pt(chrome.top_pad).pl(left).pr(8).row().gap(if (columns) chrome.gutter else 4).itemsCenter().layer(2);
+    const row = ui.div(c).fixed().offset(a.view.sidebar_width, 0).w(c.size.w - a.view.sidebar_width - caption.trailing).h(chrome.titlebar_height).pt(chrome.top_pad).pl(left).pr(8).row().gap(if (columns) chrome.gutter else 4).itemsCenter().layer(2);
     defer row.end();
     for (targets[0..n], 0..) |target, ix| {
         if (columns and ix == 0 and other_shown > 0) {
@@ -304,7 +305,7 @@ pub fn selectedBounds(a: *const App) ?Selected {
     const n = if (group) |g| g.count() else a.tabs.items.items.len;
     const selected = if (group) |g| g.active else a.tabs.active;
     const left = @max(strip.leftInset(a), a.view.chrome.leading);
-    const available = @max(0, a.view.chrome.width - left - chrome.device_room - 4);
+    const available = @max(0, a.view.chrome.width - left - chrome.device_room - caption.trailing - 4);
     const width = chrome.tabWidth(available, n);
     const scroll = @max(0, @as(f32, @floatFromInt(selected + 1)) * (width + 3) - @max(0, available - 32));
     const start = left - a.view.chrome.leading + @as(f32, @floatFromInt(selected)) * (width + 3) - scroll;
@@ -315,7 +316,7 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
     const group = if (a.tabs.layout()) |s| (if (s.groups[s.focus].count() > 1 or a.tabs.items.items.len <= 1) &s.groups[s.focus] else null) else null;
     const n = if (group) |g| g.count() else a.tabs.items.items.len;
     const selected = if (group) |g| g.active else a.tabs.active;
-    const available = @max(0, a.view.chrome.width - left - chrome.device_room - 4);
+    const available = @max(0, a.view.chrome.width - left - chrome.device_room - caption.trailing - 4);
     const width = chrome.tabWidth(available, n);
     const scroll = @max(0, @as(f32, @floatFromInt(selected + 1)) * (width + 3) - @max(0, available - 32));
     ui.key(c, "panel-tabs");
@@ -375,7 +376,7 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
 fn devicePicker(c: *ui.Context, a: *App, k: theme.Colors) void {
     const target = strip.active(a);
     const editable = target == .chat;
-    const lane = ui.div(c).fixed().offset(c.size.w - chrome.device_room - 12, chrome.tab_top).size(chrome.device_room, chrome.tab_height).pl(8).row().itemsCenter().justifyEnd().layer(3);
+    const lane = ui.div(c).fixed().offset(c.size.w - caption.trailing - chrome.device_room - 12, chrome.tab_top).size(chrome.device_room, chrome.tab_height).pl(8).row().itemsCenter().justifyEnd().layer(3);
     defer lane.end();
     ui.key(c, "panel-device-trigger");
     var box = ui.div(c).row().h(18).px(if (editable) 4 else 0).gap(3).itemsCenter().rounded(4).clip();

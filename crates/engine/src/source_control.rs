@@ -947,10 +947,13 @@ struct SystemProcessRunner;
 #[async_trait]
 impl ProcessRunner for SystemProcessRunner {
     async fn run(&self, request: ProcessRequest) -> Result<ProcessOutput, ProcessRunError> {
-        let mut command = tokio::process::Command::new(&request.program);
-        if request.program == "gh" {
-            harness_adapters::compose_login_shell_path(&mut command);
-        }
+        // `gh` gets the login shell's PATH, resolved up front so the spawn
+        // doesn't fork (`harness_adapters::login_shell_command`).
+        let mut command = if request.program == "gh" {
+            harness_adapters::login_shell_command(&request.program)
+        } else {
+            tokio::process::Command::new(&request.program)
+        };
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;

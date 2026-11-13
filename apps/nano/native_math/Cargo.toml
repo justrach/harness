@@ -1,0 +1,19 @@
+[package]
+name = "harness-native-math"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Standalone native helper, not a member of the desktop Rust workspace.
+[workspace]
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+latex-rust = "=2.1.1"
+usvg = { version = "=0.46.0", default-features = false }
+
+[profile.release]
+opt-level = 2
+panic = "unwind"

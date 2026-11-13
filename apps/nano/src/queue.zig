@@ -37,6 +37,9 @@ fn parseRow(a: Allocator, o: json.ObjectMap) ?Row {
         r.paths = paths.toOwnedSlice(a) catch return null;
     };
     if (ws.str(a, o, "turnOrigin")) |origin| r.agent = !std.mem.eql(u8, origin, "human");
+    // Older deployed hosts retain only the textual peer envelope. It is
+    // presentation metadata, but also keeps coordination out of human edits.
+    r.agent = r.agent or @import("peer_message.zig").parse(r.text) != null;
     if (o.get("deliveryGate")) |g| if (g == .object) {
         const kind = ws.str(a, g.object, "kind") orelse "";
         if (std.mem.eql(u8, kind, "editing")) r.gate = .{ .editing = ws.str(a, g.object, "ownerDeviceId") orelse "another device" };
@@ -54,6 +57,21 @@ pub fn items(v: json.Value) json.Value {
 /// A row's text on one line: runs of whitespace become one space, and
 /// validated canonical `harness-invoke:` links project to `/cmd` or `$skill`.
 pub fn oneLine(buf: []u8, text: []const u8) []const u8 {
+    if (@import("peer_message.zig").parse(text)) |message| {
+        const sender = oneLineRaw(buf, message.sender);
+        var n = sender.len;
+        for (": ") |ch| {
+            if (n == buf.len) return buf[0..n];
+            buf[n] = ch;
+            n += 1;
+        }
+        const body = oneLineRaw(buf[n..], message.body);
+        return buf[0 .. n + body.len];
+    }
+    return oneLineRaw(buf, text);
+}
+
+fn oneLineRaw(buf: []u8, text: []const u8) []const u8 {
     var n: usize = 0;
     var space = false;
     const refs = @import("attachment_refs.zig");

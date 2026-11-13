@@ -81,16 +81,16 @@ fn installLatest(a: *App, auto_update: bool) void {
         if (is_newer) {
             if (!auto_update) {
                 a.updates.publishGraff(.available, current, bare_tag, null);
-                nanoui.App.after(0, a, notifyUi);
+                _ = nanoui.App.onMain(a, notifyUi);
                 return;
             }
             a.updates.publishGraff(.updating, current, bare_tag, null);
-            nanoui.App.after(0, a, notifyUi);
+            _ = nanoui.App.onMain(a, notifyUi);
             if (downloadAndSwap(a, home, managed, t)) {
                 const new_out = versionOutput(a, managed);
                 defer if (new_out) |b| a.gpa.free(b);
                 a.updates.publishGraff(.updated, current, bare_tag, new_out);
-                nanoui.App.after(0, a, notifyUi);
+                _ = nanoui.App.onMain(a, notifyUi);
                 std.log.info("harness-nano: graff {s} -> {s}", .{ current orelse "none", t });
                 return;
             }
@@ -104,7 +104,7 @@ fn installLatest(a: *App, auto_update: bool) void {
         const should_show = if (dismissed) |d| newer(cur, d) else true;
         if (should_show) {
             a.updates.publishGraff(.updated, dismissed, cur, out_bytes);
-            nanoui.App.after(0, a, notifyUi);
+            _ = nanoui.App.onMain(a, notifyUi);
         }
     }
 }

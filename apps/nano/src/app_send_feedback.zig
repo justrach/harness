@@ -13,6 +13,11 @@ pub const Pending = struct {
     started_ms: i64,
     finished: bool = false,
     rejected: bool = false,
+    /// A remote Run command is presentation only: it owns no local retry/draft.
+    remote: bool = false,
+    withdrawn: bool = false,
+    delivery_pending: bool = false,
+    waiting_for_attachments: bool = false,
 
     pub fn entry(p: *Pending) tr.Entry {
         return .{
@@ -65,11 +70,69 @@ pub fn echoed(p: *const Pending, t: *const tr.Transcript) bool {
     return false;
 }
 
+pub fn visible(p: *const Pending, chat: []const u8, t: *const tr.Transcript) bool {
+    return !p.rejected and !p.withdrawn and std.mem.eql(u8, p.chat, chat) and !echoed(p, t);
+}
+
 pub fn active(a: *const App, chat: []const u8, t: *const tr.Transcript) ?*Pending {
-    for (a.pending_sends.items) |p| {
-        if (!p.rejected and std.mem.eql(u8, p.chat, chat) and !echoed(p, t)) return p;
-    }
+    for (a.pending_sends.items) |p| if (visible(p, chat, t)) return p;
     return null;
+}
+
+/// A full WatchQueue snapshot can arrive before WatchDocMessages on any device.
+/// Keep its UI-only entries out of delivery acknowledgements and local draft recovery.
+pub fn syncRemote(a: *App, chat: []const u8, value: std.json.Value) void {
+    const list: []const std.json.Value = blk: {
+        if (value != .object) break :blk &.{};
+        const items = value.object.get("pendingPrompts") orelse break :blk &.{};
+        if (items != .array) break :blk &.{};
+        break :blk items.array.items;
+    };
+    for (a.pending_sends.items) |p| if (std.mem.eql(u8, p.chat, chat)) {
+        p.delivery_pending = false;
+        if (p.remote) p.withdrawn = true;
+    };
+    for (list) |item| {
+        if (item != .object) continue;
+        const id = item.object.get("messageId") orelse continue;
+        const text = item.object.get("text") orelse continue;
+        const issued = item.object.get("issuedAt") orelse continue;
+        if (id != .string or id.string.len == 0 or text != .string or issued != .integer or issued.integer <= 0) continue;
+        const millis = std.math.mul(i64, issued.integer, 1000) catch continue;
+        const attached = item.object.get("waitingForAttachments");
+        const waiting = if (attached) |v| (v == .bool and v.bool) else false;
+        var found: ?*Pending = null;
+        var i = a.pending_sends.items.len;
+        while (i > 0) {
+            i -= 1;
+            const p = a.pending_sends.items[i];
+            if (p.rejected or (!p.remote and p.withdrawn) or !std.mem.eql(u8, p.chat, chat) or !std.mem.eql(u8, p.message, id.string)) continue;
+            if (!std.mem.eql(u8, p.part.text.items, text.string)) {
+                // Keep the previous frame's borrowed text alive until reap().
+                p.withdrawn = true;
+                continue;
+            }
+            found = p;
+            break;
+        }
+        const p = found orelse blk: {
+            const made = begin(a, chat, id.string, text.string) catch continue;
+            made.remote = true;
+            made.finished = true;
+            break :blk made;
+        };
+        p.started_ms = @min(p.started_ms, millis);
+        p.withdrawn = false;
+        p.delivery_pending = true;
+        p.waiting_for_attachments = waiting;
+    }
+    a.redraw();
+}
+
+pub fn clearRemote(a: *App, chat: []const u8) void {
+    for (a.pending_sends.items) |p| if (p.remote and std.mem.eql(u8, p.chat, chat)) {
+        p.withdrawn = true;
+    };
 }
 
 /// At a frame boundary only: the previous layout can still reference the
@@ -79,12 +142,17 @@ pub fn reap(a: *App) void {
     while (i < a.pending_sends.items.len) {
         const p = a.pending_sends.items[i];
         const t = if (a.selected != null and std.mem.eql(u8, a.selected.?, p.chat)) &a.transcript else if (a.peer(p.chat)) |peer| &peer.transcript else null;
-        if (p.finished and (p.rejected or (t != null and echoed(p, t.?)))) {
+        if (p.finished and (p.rejected or p.withdrawn or (t != null and echoed(p, t.?)))) {
             // Restore failed sends only at this boundary, including immediate
             // errors delivered before send() has cleared the composer.
-            if (p.rejected) {
+            if (p.rejected and !p.remote and !p.withdrawn) {
                 if (a.selected != null and std.mem.eql(u8, a.selected.?, p.chat)) {
-                    if (a.composer.text().len == 0) a.composer.set(p.part.text.items);
+                    if (a.wizard != null or a.queue_edit != null) {
+                        // A borrowed composer is an answer/leased queue row,
+                        // not the prompt that failed. Recovery belongs behind
+                        // it and must never replace even an empty answer.
+                        if (a.draft_stash.items.len == 0) a.draft_stash.appendSlice(a.gpa, p.part.text.items) catch {};
+                    } else if (a.composer.text().len == 0) a.composer.set(p.part.text.items);
                 } else if (!a.drafts.contains(p.chat)) {
                     const key = a.gpa.dupe(u8, p.chat) catch break;
                     const value = a.gpa.dupe(u8, p.part.text.items) catch {

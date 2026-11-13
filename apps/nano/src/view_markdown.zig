@@ -3,8 +3,8 @@
 //! boxes; quotes with a bar; tables in a grid; code in a panel with its
 //! language, syntax colors and a copy button. After nanoterm's
 //! view_markdown.zig (markdown.zig, markdown_html.zig and highlight.zig
-//! are nanoterm's, unchanged), without its pictures and diagrams: a
-//! picture shows as its alt text.
+//! are nanoterm's, unchanged). Reply pictures use the containing chat's
+//! host-jailed attachment loader; unavailable sources retain their alt text.
 const std = @import("std");
 const nanoui = @import("nanoui");
 const ui = nanoui.ui;
@@ -119,6 +119,24 @@ pub fn markdown(c: *ui.Context, colors: theme.Colors, src: []const u8) void {
 }
 
 fn rich(c: *ui.Context, in: md.Inline, style: ui.TextStyle) void {
+    if (in.images.len > 0) {
+        // Preserve the exact selectable text, styled runs, links and native
+        // equations. Pictures follow that prose instead of replacing ranges
+        // (which would invalidate all three sets of byte offsets).
+        var prose = in;
+        prose.images = &.{};
+        rich(c, prose, style);
+        for (in.images, 0..) |image, i| {
+            ui.key(c, c.print("md-picture-{d}", .{i}));
+            const alt = in.text[image.start..image.end];
+            if (link_owner) |owner| {
+                @import("view_reply_images.zig").draw(c, owner.app, k, owner.parent, image.src, alt, image.width);
+            } else {
+                ui.text(c, c.print("Image unavailable{s}{s}", .{ if (alt.len > 0) ": " else "", alt }), .{ .size = 12, .color = k.muted, .wrap = true });
+            }
+        }
+        return;
+    }
     var st = style;
     if (st.color == null) st.color = k.text;
     // Inline code at the text's own size, as `render.rs` sets it (nanoui's
@@ -128,6 +146,7 @@ fn rich(c: *ui.Context, in: md.Inline, style: ui.TextStyle) void {
     // round (`INLINE_CODE_PAD_X`, `INLINE_CODE_INSET_Y`,
     // `INLINE_CODE_RADIUS`; nanoui's `span_box`).
     if (comptime @hasField(ui.TextStyle, "span_box")) st.span_box = .{ .pad_x = 2, .inset_y = 2, .radius = 4.5 };
+    if (in.maths.len > 0) return @import("native_math_flow.zig").draw(c, in, st, k.text, rich);
     const spans: []const ui.Span = if (active_veil) |v| blk: {
         const v_spans = v.advance(c.gpa, c.alloc(), current_elem_ix, in.text, veil_now_ms);
         current_elem_ix += 1;
@@ -161,6 +180,7 @@ fn rich(c: *ui.Context, in: md.Inline, style: ui.TextStyle) void {
             const hit = @import("view_tooltip.zig").on(ui.div(c).absolute().offset(rect.x - origin.x + x, rect.y - origin.y + @as(f32, @floatFromInt(row)) * line_h).size(@max(right - x, 1), line_h), k, .{ .text = link.url });
             defer hit.end();
             const action = c.interact(hit.index, .{ .focusable = true });
+            if (link_owner) |owner| @import("view_link_menu.zig").track(c, owner.app, owner.parent, link.url, hit.index, action.right_clicked or action.secondary_clicked);
             const activate = action.clicked or (action.focused and (c.shortcut(.{ .key = ui.Shortcut.enter }) or c.shortcut(.{ .key = ' ' })));
             if (activate) {
                 if (link_owner) |owner| {

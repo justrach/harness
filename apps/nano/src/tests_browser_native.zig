@@ -51,6 +51,102 @@ test "the native Browser renders a generated page without injecting an app bridg
     try testing.expect(objc.msg(objc.BOOL, native.view, "isHidden", .{}));
 }
 
+const App = @import("app.zig").App;
+const Browser = @import("app_browser.zig").Browser;
+
+fn zoomKey(menu: *nanoui.Menu, key: []const u8, code: u16) bool {
+    const objc = nanoui.objc;
+    const event = objc.msg(objc.Object, objc.class("NSEvent"), "keyEventWithType:location:modifierFlags:timestamp:windowNumber:context:characters:charactersIgnoringModifiers:isARepeat:keyCode:", .{
+        @as(objc.NSUInteger, 10), objc.CGPoint{}, @as(objc.NSUInteger, 1 << 20), @as(f64, 0), @as(objc.NSInteger, 0), @as(?objc.Object, null), objc.nsString(key), objc.nsString(key), objc.NO, code,
+    });
+    return objc.msg(objc.BOOL, menu.ns, "performKeyEquivalent:", .{event});
+}
+
+fn fixtureBrowser(a: *App, home: []const u8, parent: nanoui.objc.Object, probe: *Probe) !*Browser {
+    @import("app_browser.zig").openLink(a, "zoom-fixture", "http://localhost:31997/synthetic");
+    @import("app_browser.zig").settleFrame(a);
+    const b = a.panels.tabs.items[a.panels.active].browser.?;
+    const n = try @import("browser_native.zig").Native.create(testing.allocator, testing.io, home, .{ .ctx = probe, .changed = Probe.changed });
+    b.native = n;
+    n.mount(parent, .{ .x = 0, .y = 0, .w = 520, .h = 400 });
+    n.navigate("graff-view://html/0123456789abcdef0123456789abcdef");
+    return b;
+}
+
+test "browser zoom shortcuts route native menu and UI keys to the focused visible WebKit page" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const objc = nanoui.objc;
+    const pool = objc.Pool.push();
+    defer pool.pop();
+    prepareAppKit();
+    @import("theme.zig").registerFonts();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, ".graff/views");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = ".graff/views/0123456789abcdef0123456789abcdef.html", .data = "<!doctype html><title>Synthetic zoom fixture</title><p>Made-up zoom target.</p>" });
+    const home = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(home);
+    const window = objc.msg(objc.Object, objc.alloc("NSWindow"), "initWithContentRect:styleMask:backing:defer:", .{ objc.CGRect{ .size = .{ .width = 520, .height = 400 } }, @as(objc.NSUInteger, 0), @as(objc.NSUInteger, 2), objc.NO });
+    defer objc.release(window);
+    const parent = objc.msg(objc.Object, window, "contentView", .{});
+    // The two paths share App's production routing, not test-only zoom logic.
+    for ([_]bool{ true, false }) |native_menu| {
+        var a: App = .init(testing.allocator, testing.io, 1);
+        defer a.deinit();
+        a.openChat("zoom-fixture", null);
+        var t: nanoui.ui.Tester = undefined;
+        try t.init(testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 1400, .height = 900 });
+        defer t.deinit();
+        t.settle(1);
+        var probe: Probe = .{};
+        const inactive = try fixtureBrowser(&a, home, parent, &probe);
+        inactive.native.?.show(false);
+        const focused = try fixtureBrowser(&a, home, parent, &probe);
+        nanoui.runFor(3);
+        try testing.expectEqualStrings("Synthetic zoom fixture", focused.native.?.title());
+        try testing.expectEqualStrings("Synthetic zoom fixture", inactive.native.?.title());
+        const config = objc.msg(objc.Object, focused.native.?.view, "configuration", .{});
+        const store = objc.msg(objc.Object, config, "websiteDataStore", .{});
+        try testing.expect(!objc.msg(objc.BOOL, store, "isPersistent", .{}));
+        const items = @import("native_menu.zig").viewItems(&a);
+        const menu = try nanoui.Menu.create(testing.allocator, "Fixture", &.{.{ .role = .view_menu, .submenu = &items }});
+        defer menu.destroy();
+        for ([_]struct { key: []const u8, code: u16, zoom: f64 }{
+            .{ .key = "=", .code = 24, .zoom = 1.1 },
+            .{ .key = "-", .code = 27, .zoom = 1.0 },
+            .{ .key = "=", .code = 24, .zoom = 1.1 },
+            .{ .key = "0", .code = 29, .zoom = 1.0 },
+        }) |key| {
+            if (native_menu) try testing.expect(zoomKey(menu, key.key, key.code)) else try testing.expect(t.shortcut(.{ .key = key.key[0], .cmd = true }));
+            try testing.expectApproxEqAbs(key.zoom, focused.native.?.pageZoom(), 1e-12);
+            try testing.expectApproxEqAbs(key.zoom, focused.zoom, 1e-12);
+            try testing.expectEqual(@as(f32, 16), a.settings.uiFontSize());
+            try testing.expectApproxEqAbs(@as(f64, 1), inactive.native.?.pageZoom(), 1e-12);
+        }
+        // A click in WebKit changes AppKit's responder without a UI event.
+        // Native focus must still win even if the strip last focused chat.
+        a.view.strip.focused = .{ .chat = 0 };
+        try testing.expect(objc.msg(objc.BOOL, window, "makeFirstResponder:", .{focused.native.?.view}));
+        if (native_menu) try testing.expect(zoomKey(menu, "=", 24)) else try testing.expect(t.shortcut(.{ .key = '=', .cmd = true }));
+        try testing.expectApproxEqAbs(@as(f64, 1.1), focused.native.?.pageZoom(), 1e-12);
+        try testing.expectEqual(@as(f32, 16), a.settings.uiFontSize());
+        if (native_menu) try testing.expect(zoomKey(menu, "0", 29)) else try testing.expect(t.shortcut(.{ .key = '0', .cmd = true }));
+        try testing.expect(objc.msg(objc.BOOL, window, "makeFirstResponder:", .{@as(?objc.Object, null)}));
+        // A visible but unfocused browser, a hidden native view, and a closed
+        // host panel must not steal app text zoom. Stale host focus is covered.
+        for (0..3) |state| {
+            a.panels.host_open = state != 2;
+            a.view.strip.focused = if (state == 0) .{ .chat = 0 } else .host;
+            focused.native.?.show(state != 1);
+            if (native_menu) try testing.expect(zoomKey(menu, "=", 24)) else try testing.expect(t.shortcut(.{ .key = '=', .cmd = true }));
+            try testing.expectEqual(@as(f32, 18), a.settings.uiFontSize());
+            try testing.expectApproxEqAbs(@as(f64, 1), focused.native.?.pageZoom(), 1e-12);
+            if (native_menu) try testing.expect(zoomKey(menu, "0", 29)) else try testing.expect(t.shortcut(.{ .key = '0', .cmd = true }));
+            try testing.expectEqual(@as(f32, 16), a.settings.uiFontSize());
+        }
+    }
+}
+
 const Http = struct {
     server: std.Io.net.Server,
     served: std.atomic.Value(bool) = .init(false),
