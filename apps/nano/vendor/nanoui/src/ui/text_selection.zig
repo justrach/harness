@@ -123,6 +123,66 @@ pub fn wordRange(s: []const u8, at: usize) [2]usize {
     unreachable;
 }
 
+/// A logical paragraph, independent of its visual wrapping. Markdown
+/// paragraphs already have separate text nodes; literal newlines delimit
+/// paragraphs in text that has not been parsed as Markdown.
+pub fn paragraphRange(s: []const u8, at: usize) [2]usize {
+    if (s.len == 0) return .{ 0, 0 };
+    const hit = @min(at, s.len - 1);
+    var start = hit;
+    var end = hit;
+    while (start > 0 and s[start - 1] != '\n' and s[start - 1] != '\r') start -= 1;
+    while (end < s.len and s[end] != '\n' and s[end] != '\r') end += 1;
+    return .{ start, end };
+}
+
+fn sentenceStop(cp: u21) bool {
+    return switch (cp) {
+        '.', '!', '?', 0x3002, 0xff01, 0xff1f => true,
+        else => false,
+    };
+}
+
+fn sentenceClose(cp: u21) bool {
+    return switch (cp) {
+        '\"', '\'', ')', ']', '}', 0x2019, 0x201d, 0x3009, 0x300b, 0x300d, 0x300f => true,
+        else => false,
+    };
+}
+
+/// Sentence punctuation followed by whitespace (or a paragraph end) ends
+/// a prose selection. Keep closing quotes/brackets with their sentence,
+/// and never split decimal/version numbers or punctuation inside a URL.
+/// Offsets and the selected text remain the original UTF-8 source bytes.
+pub fn sentenceRange(s: []const u8, at: usize) [2]usize {
+    const paragraph = paragraphRange(s, at);
+    const hit = @min(at, s.len);
+    var start = paragraph[0];
+    while (start < paragraph[1] and class(s, start) == .space) start = scalar(s, start).end;
+    var pos = start;
+    while (pos < paragraph[1]) {
+        const ch = scalar(s, pos);
+        pos = ch.end;
+        if (!sentenceStop(ch.cp)) continue;
+        var end = pos;
+        while (end < paragraph[1]) {
+            const next = scalar(s, end);
+            if (!sentenceStop(next.cp) and !sentenceClose(next.cp)) break;
+            end = next.end;
+        }
+        const cjk = ch.cp == 0x3002 or ch.cp == 0xff01 or ch.cp == 0xff1f;
+        if (end < paragraph[1] and class(s, end) != .space and !cjk) continue;
+        var next = end;
+        while (next < paragraph[1] and class(s, next) == .space) next = scalar(s, next).end;
+        if (hit < next or next == paragraph[1]) return .{ start, end };
+        start = next;
+        pos = next;
+    }
+    var end = paragraph[1];
+    while (end > start and std.ascii.isWhitespace(s[end - 1])) end -= 1;
+    return .{ start, end };
+}
+
 /// A word click uses the glyph cell under the pointer, not its nearest
 /// insertion caret (the latter jumps across half a glyph/emoji). Shared by
 /// native and reference shaping; their glyph indices remain source bytes.
@@ -142,6 +202,30 @@ pub fn glyphClusterAt(glyphs: anytype, width: f32, x: f32) usize {
         }
     }
     return best;
+}
+
+test "selection prose boundaries preserve sentences paragraphs and UTF-8 source bytes" {
+    const t = std.testing;
+    for ([_]struct { text: []const u8, hit: []const u8, expected: []const u8 }{
+        .{ .text = "First sentence. Second sentence! Last?", .hit = "Second", .expected = "Second sentence!" },
+        .{ .text = "First sentence. Second sentence! Last?", .hit = "First", .expected = "First sentence." },
+        .{ .text = "First sentence. Second sentence! Last?", .hit = "Last", .expected = "Last?" },
+        .{ .text = "Use v0.2.190 and https://example.com/path. Next sentence.", .hit = "190", .expected = "Use v0.2.190 and https://example.com/path." },
+        .{ .text = "She said \"Done!\" Next sentence.", .hit = "Done", .expected = "She said \"Done!\"" },
+        .{ .text = "Café 👩‍💻 works! Another sentence.", .hit = "👩‍💻", .expected = "Café 👩‍💻 works!" },
+        .{ .text = "你好。下一句！最后？", .hit = "下一", .expected = "下一句！" },
+        .{ .text = "First paragraph.\nSecond paragraph without punctuation", .hit = "Second", .expected = "Second paragraph without punctuation" },
+        .{ .text = "  Unpunctuated text  ", .hit = "text", .expected = "Unpunctuated text" },
+    }) |vector| {
+        const at = std.mem.indexOf(u8, vector.text, vector.hit).?;
+        const r = sentenceRange(vector.text, at);
+        try t.expectEqualStrings(vector.expected, vector.text[r[0]..r[1]]);
+    }
+    try t.expectEqual([2]usize{ 0, 0 }, sentenceRange("", 0));
+    const paragraphs = "First paragraph.\r\nSecond paragraph.\nThird paragraph.";
+    const at = std.mem.indexOf(u8, paragraphs, "Second").?;
+    const r = paragraphRange(paragraphs, at);
+    try t.expectEqualStrings("Second paragraph.", paragraphs[r[0]..r[1]]);
 }
 
 test "selection Unicode grapheme clusters conform to Unicode 17 break vectors" {

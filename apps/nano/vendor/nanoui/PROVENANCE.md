@@ -50,6 +50,14 @@ teardown uses `destroyNow` after close decisions have been resolved, matching
 Windows' forced-disposal path and avoiding a vetoed-close teardown loop.
 This supplies the same dirty-document veto contract to all desktop windows.
 
+Harness-local prose selection adds `TextStyle.prose_selection`: Markdown
+selects a logical sentence on double-click and a paragraph on triple-click,
+independent of visual wraps and styled spans. Code and ordinary labels keep
+word/line selection. Multi-click ranges survive stationary held frames and
+small pointer jitter, and dragging extends in whole units in either direction.
+Pure UTF-8 sentence/paragraph rules live in `text_selection.zig`; native
+regressions run with Harness's `retention selection` test filter.
+
 These changes live in this checked-in package, not an ignored download cache.
 
 To update: start with the pinned upstream distribution, retain the notices,

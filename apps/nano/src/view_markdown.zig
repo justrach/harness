@@ -138,6 +138,7 @@ fn rich(c: *ui.Context, in: md.Inline, style: ui.TextStyle) void {
         return;
     }
     var st = style;
+    st.prose_selection = true;
     if (st.color == null) st.color = k.text;
     // Inline code at the text's own size, as `render.rs` sets it (nanoui's
     // `mono_scale`, justrach/nanoui mono-scale; 90% before).
