@@ -11,6 +11,7 @@ import Foundation
 
 enum RowKind {
     case generatedImage(owner: String, reference: GeneratedImageReference)
+    case visual(title: String, script: String)
     case user(text: String)
     case markdown(block: MDBlock, streaming: Bool)
     case toolGroup(tools: [ToolItem], autoOpen: Bool)
@@ -237,6 +238,18 @@ enum TranscriptRowBuilder {
                 rows.append(TranscriptRow(id: "\(entry.id)#\(partId)", version: version,
                                           turnStart: first,
                                           kind: .generatedImage(owner: entry.deviceId, reference: reference),
+                                          entryId: entry.id,
+                                          timestamp: settled && ix == lastPartIx ? entry.createdAt : nil,
+                                          partKey: nil))
+                first = false
+
+            case .visual(let partId, let title, let script):
+                flushTools(lastIx: ix - 1)
+                var version = fnv1a("\(title)\0\(script)")
+                if settled, ix == lastPartIx { version ^= 1 << 62 }
+                rows.append(TranscriptRow(id: "\(entry.id)#\(partId)", version: version,
+                                          turnStart: first,
+                                          kind: .visual(title: title, script: script),
                                           entryId: entry.id,
                                           timestamp: settled && ix == lastPartIx ? entry.createdAt : nil,
                                           partKey: nil))
