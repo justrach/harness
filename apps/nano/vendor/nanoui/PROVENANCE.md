@@ -58,6 +58,17 @@ small pointer jitter, and dragging extends in whole units in either direction.
 Pure UTF-8 sentence/paragraph rules live in `text_selection.zig`; native
 regressions run with Harness's `retention selection` test filter.
 
+Harness-local macOS accessibility selection adds `src/ui/accessible_text.zig`
+and updates `a11y.zig`. Native selected-text queries read current source nodes
+and UTF-16 ranges, including cross-paragraph and offscreen selection, instead
+of the paint cache or an empty composer caret. A stable, read-only text-area
+proxy supplies native focus for page selection; real editor selections retain
+their own native element and the NSTextInputClient/IME contract. Selection
+notifications follow ownership/range changes, not every repaint. The
+`native speech` Harness tests exercise real hidden NSViews, native queries,
+Option-Escape delivery, Unicode ranges, replacement and window isolation.
+They do not assert audible system speech or change Spoken Content settings.
+
 These changes live in this checked-in package, not an ignored download cache.
 
 To update: start with the pinned upstream distribution, retain the notices,
