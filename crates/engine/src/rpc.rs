@@ -1571,6 +1571,8 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         methods::APPLY_HARNESS_UPDATE => crate::harness_updates::APPLY_REPLY_DEADLINE,
         methods::BOOT_SIMULATOR => Duration::from_secs(150),
         methods::CREATE_WORKTREE => Duration::from_secs(120),
+        // One bounded push (120s), plus pre/post snapshot checks and relay.
+        methods::APPLY_CHECKOUT_GIT_ACTION => Duration::from_secs(180),
         // Allow the adapter discovery budget plus relay and shutdown overhead.
         methods::LIST_MODELS | methods::LIST_COMMANDS => Duration::from_secs(100),
         // A reconnect handshakes every server; a login waits on a browser page.
@@ -1660,6 +1662,8 @@ fn forwardable(method: &str) -> bool {
             | methods::MERGE_CHANGE_REQUEST
             | methods::GET_CHECKOUT_DIFF
             | methods::DISCARD_WORKING_TREE
+            | methods::GET_CHECKOUT_GIT_STATE
+            | methods::APPLY_CHECKOUT_GIT_ACTION
             | methods::GET_CHECKOUT_FILE_DIFF_TEXT
             // Terminals live on the chat's host device.
             | methods::OPEN_TERMINAL
@@ -3038,6 +3042,36 @@ impl RpcService for EngineRpc {
                 })
                 .await
             }
+            methods::GET_CHECKOUT_GIT_STATE => {
+                Box::pin(async move {
+                    let p: harness_rpc::GetCheckoutGitStateParams = parse_params(params)?;
+                    let state = crate::git_actions::get_state(
+                        &self.workspace,
+                        &self.repos,
+                        &self.sessions,
+                        self.doc_host.device_id(),
+                        &p.chat_id,
+                    )
+                    .await?;
+                    RpcReply::value(&state)
+                })
+                .await
+            }
+            methods::APPLY_CHECKOUT_GIT_ACTION => {
+                Box::pin(async move {
+                    let p: harness_rpc::ApplyCheckoutGitActionParams = parse_params(params)?;
+                    let state = crate::git_actions::apply(
+                        self.workspace.clone(),
+                        self.repos.clone(),
+                        self.sessions.clone(),
+                        self.doc_host.device_id().to_owned(),
+                        p,
+                    )
+                    .await?;
+                    RpcReply::value(&state)
+                })
+                .await
+            }
             methods::DISCARD_WORKING_TREE => {
                 // This destructive branch performs several nested filesystem
                 // futures. Box it so unrelated RPC calls do not inherit that
@@ -3106,11 +3140,18 @@ impl RpcService for EngineRpc {
                         }
                     }
 
-                    let snapshot = self
-                        .diff_sync
-                        .discard_working_tree(&identity.id, &p.expected_checksum)
-                        .await
-                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    let diff_sync = self.diff_sync.clone();
+                    // Hold the shared Git workflow gate until the independent
+                    // discard task finishes, even if this RPC is cancelled.
+                    let snapshot = tokio::spawn(async move {
+                        let _guard = crate::git_actions::mutation_guard(&identity.id).await;
+                        diff_sync
+                            .discard_working_tree(&identity.id, &p.expected_checksum)
+                            .await
+                    })
+                    .await
+                    .map_err(|_| RpcError::Failed("discard task failed".into()))?
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
                     RpcReply::value(&serde_json::json!({
                         "ok": true,
                         "checksum": snapshot.checksum,
@@ -4525,6 +4566,14 @@ mod tests {
         assert!(forwardable(methods::WATCH_CHECKOUT_CHANGE_REQUEST));
         assert!(is_stream_method(methods::WATCH_CHECKOUT_CHANGE_REQUEST));
         assert!(forwardable(methods::DISCARD_WORKING_TREE));
+        assert!(forwardable(methods::GET_CHECKOUT_GIT_STATE));
+        assert!(forwardable(methods::APPLY_CHECKOUT_GIT_ACTION));
+        assert!(!is_stream_method(methods::GET_CHECKOUT_GIT_STATE));
+        assert!(!is_stream_method(methods::APPLY_CHECKOUT_GIT_ACTION));
+        assert_eq!(
+            forward_deadline(methods::APPLY_CHECKOUT_GIT_ACTION),
+            std::time::Duration::from_secs(180)
+        );
         assert!(forwardable(methods::LIST_WORKSPACE_DIRECTORY));
         assert!(forwardable(methods::SEARCH_WORKSPACE_FILES));
         assert!(forwardable(methods::READ_WORKSPACE_FILE));
