@@ -8,7 +8,10 @@ const EditState = ctx_mod.EditState;
 const tf = @import("textfield.zig");
 const keymap = @import("keymap.zig");
 
-pub const Granularity = enum { char, word, line };
+pub const Granularity = enum { char, word, line, paragraph, all };
+/// Prompt editors use logical paragraphs and the complete draft; ordinary
+/// fields retain the platform's word/line gestures.
+pub const SelectionMode = enum { standard, prompt };
 pub const UndoOp = enum { none, undo, redo };
 
 pub fn isWordByte(b: u8) bool {
@@ -41,10 +44,16 @@ pub fn lineEnd(s: []const u8, i: usize) usize {
     return j;
 }
 
-pub fn pointerSelect(c: *Context, e: *EditState, s: []const u8, at: usize, multiline: bool) void {
+pub fn pointerSelect(c: *Context, e: *EditState, s: []const u8, at: usize, multiline: bool, mode: SelectionMode) void {
     e.undo.group = false;
     c.caret_moved_at = c.time;
-    if (c.input.click_count >= 3) {
+    if (mode == .prompt and c.input.click_count >= 2) {
+        c.select_granularity = if (c.input.click_count >= 3) .all else .paragraph;
+        const range = if (c.select_granularity == .all) [2]usize{ 0, s.len } else @import("text_selection.zig").paragraphRange(s, at);
+        e.anchor = range[0];
+        e.caret = range[1];
+        c.select_origin = range;
+    } else if (c.input.click_count >= 3) {
         c.select_granularity = .line;
         const lo: usize = if (multiline) lineStart(s, at) else 0;
         const hi: usize = if (multiline) lineEnd(s, at) else s.len;
@@ -74,6 +83,20 @@ pub fn pointerDrag(c: *Context, e: *EditState, s: []const u8, at: usize, multili
     const orig1 = @min(c.select_origin[1], s.len);
     switch (c.select_granularity) {
         .char => e.caret = at,
+        .all => {
+            e.anchor = 0;
+            e.caret = s.len;
+        },
+        .paragraph => {
+            const range = @import("text_selection.zig").paragraphRange(s, at);
+            if (range[0] < orig0) {
+                e.anchor = orig1;
+                e.caret = range[0];
+            } else {
+                e.anchor = orig0;
+                e.caret = @max(orig1, range[1]);
+            }
+        },
         .word => if (at >= orig0) {
             e.anchor = orig0;
             e.caret = @max(orig1, nextWord(s, at));

@@ -69,6 +69,14 @@ notifications follow ownership/range changes, not every repaint. The
 Option-Escape delivery, Unicode ranges, replacement and window isolation.
 They do not assert audible system speech or change Spoken Content settings.
 
+Harness-local prompt selection (#839) routes multiline `textField` pointer
+presses and held drags through `textedit.zig` rather than overwriting the
+caret each frame. `Options.selection_mode = .prompt` opts the composer and
+expanded Write editor into paragraph double-click / full-buffer triple-click
+selection, retaining logical units while held or dragged. Ordinary fields
+and text areas retain word/line selection. Synthetic Harness regressions run
+with the `composer selection` filter and check Copy, replacement and undo.
+
 These changes live in this checked-in package, not an ignored download cache.
 
 To update: start with the pinned upstream distribution, retain the notices,
