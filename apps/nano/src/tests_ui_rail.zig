@@ -57,7 +57,8 @@ const Harness = struct {
     /// chat column.
     fn ticks(h: *Harness, out: []Node) []Node {
         var n: usize = 0;
-        const left = sidebar.width + 16;
+        // 16 into the rounded panel's content, inside its one-point border.
+        const left = h.a.view.sidebar_width + 1 + 16;
         for (h.t.ctx.nodes.items) |node| {
             if (node.rect.h != 2 or @abs(node.rect.x - left) > 0.5) continue;
             if (n == out.len) break;
@@ -88,10 +89,10 @@ test "the rail: a tick per prompt, 12 points wide, the last lit while the transc
     const ticks = h.ticks(&buf);
     try testing.expectEqual(@as(usize, 3), ticks.len);
     for (ticks) |n| try testing.expectEqual(@as(f32, 12), n.rect.w);
-    // Ticks 13 points apart, the stack in the middle of the window's height.
+    // Ticks 13 points apart, centered in the panel below the 42-point strip.
     try testing.expectEqual(@as(f32, 13), ticks[1].rect.y - ticks[0].rect.y);
     const mid = (ticks[0].rect.y + ticks[2].rect.y + 2) / 2;
-    try testing.expect(@abs(mid - 390) < 1);
+    try testing.expect(@abs(mid - 407) < 1);
     try testing.expectEqual(@as(?usize, 2), h.lit());
 }
 
@@ -127,7 +128,7 @@ test "clicking a tick glides its prompt to the top of the transcript, and lights
     // The row's top is at the column's top (under the title bar, as the
     // GPUI list's), the bubble's text 10 into it; a later prompt's row
     // starts at the turn's 16-point gap above its bubble.
-    try testing.expect(@abs(at.y - 10) < 4);
+    try testing.expect(@abs(at.y - 53) < 4);
     try testing.expect(half < at.y - 20);
     try testing.expectEqual(@as(?usize, 0), h.lit());
     // The second prompt's tick takes it to the second prompt.
@@ -135,7 +136,7 @@ test "clicking a tick glides its prompt to the top of the transcript, and lights
     h.t.click(q[0], q[1]);
     h.t.advance(0.6);
     h.t.settle(1);
-    try testing.expect(@abs(h.t.findText(prompts[1]).?.y - 26) < 4);
+    try testing.expect(@abs(h.t.findText(prompts[1]).?.y - 69) < 4);
     try testing.expectEqual(@as(?usize, 1), h.lit());
 }
 

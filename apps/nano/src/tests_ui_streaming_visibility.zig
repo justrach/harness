@@ -23,6 +23,7 @@ test "a short live turn stays visible when its expanded reasoning shrinks to too
     @import("theme.zig").registerFonts();
     var a: App = .init(testing.allocator, testing.io, 1);
     defer a.deinit();
+    a.settings.set(.transcript_compact_mode, false);
     a.offscreen = true;
     a.dark = false;
     a.view.sidebar_open = false;
@@ -39,6 +40,10 @@ test "a short live turn stays visible when its expanded reasoning shrinks to too
     defer t.deinit();
     t.settle(1);
     try visible(&t, "Synthetic second prompt");
+    if (@import("builtin").os.tag == .macos) {
+        try t.clickText("Thought process");
+        t.settle(1);
+    }
     try visible(&t, "Synthetic live thought");
 
     // A long live thought moves the viewport to its end. Replacing that
@@ -74,4 +79,165 @@ test "a short live turn stays visible when its expanded reasoning shrinks to too
     );
     t.settle(1);
     try visible(&t, "Synthetic final reply");
+}
+
+test "an unfocused window slows loader redraws and an off-screen spinner schedules none" {
+    @import("theme.zig").registerFonts();
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    a.offscreen = true;
+    a.dark = true;
+    a.view.sidebar_open = false;
+    a.openChat("synthetic", null);
+    const agents = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"graff","name":"graff","enabled":true}]
+    , .{});
+    defer agents.deinit();
+    try a.harnesses.replace(agents.value);
+    const models = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"synthetic","label":"Synthetic","maker":"openai"}]
+    , .{});
+    defer models.deinit();
+    try a.models.replace(models.value);
+    a.new_harness = try testing.allocator.dupe(u8, "graff");
+    a.new_model = try testing.allocator.dupe(u8, "synthetic");
+    const sessions = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"chatId":"synthetic","status":"working","startedAt":"2026-10-03T00:00:00Z","updatedAt":"2026-10-03T00:00:00Z"}]
+    , .{});
+    defer sessions.deinit();
+    try a.sessions.replace(sessions.value);
+    var history: std.ArrayList(u8) = .empty;
+    defer history.deinit(testing.allocator);
+    try history.appendSlice(testing.allocator, "{\"reset\":[");
+    for (0..40) |i| {
+        if (i > 0) try history.appendSlice(testing.allocator, ",");
+        try history.print(testing.allocator, "{{\"id\":\"u{d}\",\"role\":\"user\",\"parts\":[{{\"id\":\"p\",\"kind\":\"text\",\"text\":\"Synthetic prompt {d}\"}}]}}", .{ i, i });
+    }
+    try history.appendSlice(testing.allocator, ",{\"id\":\"live\",\"role\":\"assistant\",\"status\":\"streaming\",\"parts\":[]}]}");
+    try apply(&a, history.items);
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 900, .height = 420, .dark = true });
+    defer t.deinit();
+    t.frame();
+    const focused = t.ctx.frame_in orelse return error.LoaderNotScheduled;
+    try testing.expectApproxEqAbs(@as(f32, 0.5), focused, 0.001);
+
+    t.ctx.input.window_active = false;
+    t.frame();
+    const unfocused = t.ctx.frame_in orelse return error.BackgroundLoaderNotScheduled;
+    try testing.expectApproxEqAbs(focused * @import("view_kit.zig").background_tick_divisor, unfocused, 0.001);
+
+    // Leave the working trailer below the window. GPUI never mounts that
+    // row; Nano must not keep redrawing a spinner the reader cannot see.
+    const box = for (t.ctx.nodes.items) |n| {
+        if (n.style.scroll and n.rect.h > 200) break n.id;
+    } else return error.NoTranscriptScroll;
+    try t.ctx.scroll.put(t.ctx.gpa, box, 0);
+    try t.ctx.scroll_follow.put(t.ctx.gpa, box, false);
+    // The frame that applies the scroll still sees the previous on-screen
+    // rect. The next one must not paint or schedule the hidden loader.
+    t.frame();
+    t.frame();
+    if (t.containsText("Working out the next step")) {
+        var on_screen = false;
+        for (t.ctx.nodes.items) |n| switch (n.content) {
+            .text => |tx| if (std.mem.indexOf(u8, tx.str, "Working out the next step") != null and n.rect.y + n.rect.h > 0 and n.rect.y < t.size.h) {
+                on_screen = true;
+            },
+            else => {},
+        };
+        if (on_screen) return error.TrailerStillVisible;
+    }
+    // The overlay scrollbar lingers after the jump. Once that fade is gone,
+    // an off-screen working trailer must not keep a loader tick alive.
+    t.advance(1.7);
+    try testing.expect(t.ctx.frame_in == null);
+}
+
+test "a short chat has no rail dash, and scrolling away offers jump to bottom" {
+    @import("theme.zig").registerFonts();
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    a.offscreen = true;
+    a.dark = true;
+    a.view.sidebar_open = false;
+    a.openChat("synthetic", null);
+    try apply(&a,
+        \\{"reset":[{"id":"u","role":"user","parts":[{"id":"p","kind":"text","text":"Synthetic short prompt"}]}]}
+    );
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 1100, .height = 800, .dark = true });
+    defer t.deinit();
+    t.frame();
+    try testing.expect(!t.hasText("Scroll to bottom"));
+    // The rail's tick is a 12-point dash. A chat that fits must not draw one
+    // in the empty band above the prompt.
+    for (t.ctx.nodes.items) |n| if (n.content == .none and n.rect.h <= 2 and n.rect.w >= 12 and n.rect.w <= 20 and n.rect.x < 80) {
+        return error.RailDashInShortChat;
+    };
+
+    var history: std.ArrayList(u8) = .empty;
+    defer history.deinit(testing.allocator);
+    try history.appendSlice(testing.allocator, "{\"reset\":[");
+    for (0..30) |i| {
+        if (i > 0) try history.appendSlice(testing.allocator, ",");
+        try history.print(testing.allocator, "{{\"id\":\"u{d}\",\"role\":\"user\",\"parts\":[{{\"id\":\"p\",\"kind\":\"text\",\"text\":\"Synthetic prompt {d}\"}}]}}", .{ i, i });
+    }
+    try history.appendSlice(testing.allocator, "]}");
+    try apply(&a, history.items);
+    t.frame();
+    const box = for (t.ctx.nodes.items) |n| {
+        if (n.style.scroll and n.rect.h > 200) break n.id;
+    } else return error.NoTranscriptScroll;
+    try t.ctx.scroll.put(t.ctx.gpa, box, 0);
+    try t.ctx.scroll_follow.put(t.ctx.gpa, box, false);
+    t.frame();
+    t.frame();
+    const pill = t.findText("Scroll to bottom") orelse return error.NoJumpPill;
+    t.click(pill.x + 8, pill.y + 8);
+    t.frame();
+    try testing.expect(!t.hasText("Scroll to bottom"));
+    try testing.expect(t.ctx.scroll_follow.get(box) orelse false);
+}
+
+test "live streaming reply dissolves incoming words with a 120Hz veil and balances unclosed markdown" {
+    @import("theme.zig").registerFonts();
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    // Live window (`offscreen = false`) activates the 120Hz streaming veil and inline balancer.
+    a.offscreen = false;
+    a.dark = true;
+    a.view.sidebar_open = false;
+    a.openChat("synthetic-live", null);
+    try apply(&a,
+        \\{"reset":[
+        \\ {"id":"u1","role":"user","parts":[{"id":"p","kind":"text","text":"Explain the architecture"}]},
+        \\ {"id":"a1","role":"assistant","status":"streaming","parts":[{"id":"ans","kind":"text","text":"1. **Initial MVP"}]}]}
+    );
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 900, .height = 600, .dark = true });
+    defer t.deinit();
+    t.frame();
+
+    // Unclosed `**Initial MVP` is auto-balanced on the active streaming line so
+    // "Initial MVP" renders without literal `**` markers.
+    try testing.expect(t.containsText("Initial MVP"));
+    try testing.expect(!t.containsText("**Initial MVP"));
+    const part_id = @import("tool_ui_state.zig").key("synthetic-live", "a1", "ans");
+    try testing.expect(a.view.tool_ui.veils.isFading(part_id));
+    const wake = t.ctx.frame_in orelse return error.VeilFrameNotScheduled;
+    try testing.expect(wake <= 1.0 / 120.0 + 0.001);
+
+    // Advance past the fade duration: the veil settles and stops requesting 120Hz frames.
+    t.advance(0.6);
+    t.frame();
+    try testing.expect(!a.view.tool_ui.veils.isFading(part_id));
+}
+
+test "build.zig keeps src/main.zig as the single root module so std and nanoui never split across optimize modes" {
+    const build_src = try std.Io.Dir.cwd().readFileAlloc(testing.io, "build.zig", testing.allocator, .limited(1 << 16));
+    defer testing.allocator.free(build_src);
+    try testing.expect(std.mem.indexOf(u8, build_src, ".root_source_file = b.path(\"src/main.zig\")") != null);
+    try testing.expect(std.mem.indexOf(u8, build_src, "entry.zig") == null);
+    _ = @import("main.zig");
 }

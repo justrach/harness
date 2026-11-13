@@ -23,6 +23,7 @@ const rows = @import("view_settings_accounts_rows.zig");
 const login = @import("view_settings_accounts_login.zig");
 const graff = @import("view_settings_accounts_graff.zig");
 const cloud = @import("view_settings_accounts_sandboxes.zig");
+const browse = @import("view_settings_accounts_browse.zig");
 const sandboxes = @import("sandboxes.zig");
 const App = @import("app.zig").App;
 const Allocator = std.mem.Allocator;
@@ -105,9 +106,11 @@ pub const Page = struct {
     login: login.State = .{},
     /// The cloud sandboxes card's own state (the list is the app's).
     cloud: cloud.Cloud = .{},
+    browse: browse.State = .{},
 
     pub fn deinit(p: *Page, gpa: Allocator) void {
         p.cloud.deinit(gpa);
+        p.browse.deinit(gpa);
         p.snapshot.deinit(gpa);
         p.usage.deinit(gpa);
         p.jobs.deinit(gpa);
@@ -387,11 +390,12 @@ fn onSignOutGraff(a: *App, _: u64, r: rpc.Reply) void {
 }
 
 /// Escape closes the sign-in dialog (cancelling it), else the device list.
-pub fn escape(c: *ui.Context, a: *App) void {
+pub fn escape(c: *ui.Context, a: *App) bool {
     const p = &a.view.accounts;
-    if (!login.open(a) and !p.menu) return;
-    if (!c.shortcut(.{ .key = ui.Shortcut.escape })) return;
+    if (!login.open(a) and !p.menu) return false;
+    if (!c.shortcut(.{ .key = ui.Shortcut.escape })) return false;
     if (login.open(a)) login.cancel(a) else p.menu = false;
+    return true;
 }
 
 // Rendering.
@@ -408,11 +412,13 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
     login.tick(c, a);
     const now = a.nowMs();
     header(c, a, k);
+    @import("view_account_notice.zig").strip(c, a, k);
     set.subtitle(c, k, "CodeGraff usage, graff's provider sign-ins, and the Claude Code, Codex, and Cursor logins on this device. Harness keeps local agent logins backed up and can swap between them.", false);
     if (p.notice.items.len > 0) if (rows.errorStrip(c, k, p.notice.items, false)) p.notice.clearRetainingCapacity();
     if (p.key_notice) if (rows.warningStrip(c, k, key_rejected_notice)) {
         p.key_notice = false;
     };
+    if (browse.shown(a)) browse.card(c, a, k);
     codegraff(c, a, k, now);
     graff.chatgpt(c, a, k);
     graff.providers(c, a, k);
@@ -423,6 +429,10 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
         defer f.end();
         ui.text(c, "Switching rewrites the CLI\u{2019}s stored login, so new agent sessions use the selected account immediately. On macOS, an already-\u{2060}running Claude Code can hold the previous login for up to ~30 seconds (Keychain cache).", .{ .size = 12, .line_height = 19, .wrap = true, .color = k.muted.alpha(0.6) });
     }
+}
+
+pub fn overlays(c: *ui.Context, a: *App, k: theme.Colors) void {
+    const p = &a.view.accounts;
     if (p.menu) deviceMenu(c, a, k);
     login.dialog(c, a, k);
 }
@@ -515,8 +525,8 @@ fn deviceMenu(c: *ui.Context, a: *App, k: theme.Colors) void {
         ui.key(c, c.print("accounts-device-{s}", .{d.id}));
         const active = eqOpt(eff, d.id);
         const local = eqOpt(a.device_id, d.id);
-        var r = ui.div(c).row().wFull().px(8).py(6).gap(10).itemsCenter().rounded(7);
-        r = if (active) r.bg(k.selected) else r.hover(k.selected);
+        var r = ui.div(c).row().wFull().px(8).py(5).gap(10).itemsCenter().rounded(7);
+        r = if (active) r.bg(if (k.is_harp) k.active else k.selected) else r.hover(k.hover);
         defer r.end();
         icons.icon(c, platformIcon(d.platform), 16, k.muted, 0);
         const you_w: f32 = if (local) 10 + c.text.width("You", .{ .size = 10.5 }) else 0;

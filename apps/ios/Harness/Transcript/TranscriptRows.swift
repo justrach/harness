@@ -116,7 +116,14 @@ enum TranscriptRowBuilder {
         if completed.count > live.count {
             completed = completed.filter { live.contains($0.key) }
         }
+        var seenIDs = Set<String>()
+        seenIDs.reserveCapacity(rows.count)
         for ix in rows.indices {
+            if !seenIDs.insert(rows[ix].id).inserted {
+                let candidate = "\(rows[ix].id)#dup\(ix)"
+                rows[ix].id = candidate
+                seenIDs.insert(candidate)
+            }
             rows[ix].topGap = gap(for: rows[ix],
                                   previous: ix > 0 ? rows[ix - 1] : nil,
                                   isFirst: ix == 0)

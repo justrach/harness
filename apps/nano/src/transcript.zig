@@ -28,17 +28,60 @@ pub const Question = struct {
     prefill: ?[]const u8 = null,
 };
 
+/// What graff kept out of the context (`ContextSavings`), from the last
+/// frame that said.
+pub const Savings = struct {
+    /// Tool-result bytes kept in files instead of the conversation.
+    handle_bytes: u64 = 0,
+    /// Estimated context tokens freed by compaction.
+    compacted_tokens: u64 = 0,
+    /// Input tokens the provider served from its prompt cache.
+    cache_read_tokens: u64 = 0,
+
+    pub fn handleTokens(s: Savings) u64 {
+        return s.handle_bytes / 4;
+    }
+
+    /// Tokens that never had to sit in the model's context.
+    pub fn keptOut(s: Savings) u64 {
+        return s.handleTokens() +| s.compacted_tokens;
+    }
+};
+
+/// A "Compact context" chip's record (`CompactionMeta`): each count null
+/// when the agent didn't say. `opaque_item` for a provider's sealed item.
+pub const Compaction = struct {
+    opaque_item: bool = false,
+    tokens_before: ?u64 = null,
+    tokens_after: ?u64 = null,
+    item_tokens: ?u64 = null,
+
+    pub fn freed(m: Compaction) ?u64 {
+        return (m.tokens_before orelse return null) -| (m.tokens_after orelse return null);
+    }
+};
+
+/// One file of an edit's `diffStats`.
+pub const Stat = struct { path: []const u8, additions: u64, deletions: u64 };
+
+/// The compaction chip's tool name (`COMPACTION_TOOL_NAME`).
+pub const compaction_tool = "Compact context";
+
 pub const Part = struct {
     id: []u8,
     kind: PartKind,
     /// Text and reasoning: their text. A tool: what it ran (the command,
     /// path, pattern, URL or tool name). An error: its message.
     text: std.ArrayList(u8) = .empty,
+    /// A todo call's first unfinished item, as the working trailer's plan step.
+    todo_step: []u8 = &.{},
     tool: ToolKind = .unknown,
     /// A tool's chip, as the desktop labels it ("Run", "Agent", "Waiting on").
     chip: []const u8 = "Tool",
     /// The file a tool read or changed, for counting distinct files.
     path: []u8 = &.{},
+    /// The full call, retained for the tool access map's input inspector.
+    invocation: []u8 = &.{},
     /// The engine's tool-result summary, owned independently of the RPC frame.
     output: []u8 = &.{},
     /// Lazy full output's owned sidecar reference and optional byte count.
@@ -51,6 +94,19 @@ pub const Part = struct {
     subagent_title: []u8 = &.{},
     subagent_status: ?@import("agent_link.zig").Status = null,
     saved_view: ?@import("saved_view.zig").View = null,
+    /// An edit's lines added and removed (`diffStats`, or its inline
+    /// `diff`), and the stats' paths one to a line when they name any.
+    additions: u64 = 0,
+    deletions: u64 = 0,
+    stat_paths: []u8 = &.{},
+    /// Each named file's counts, its path in `stat_paths`.
+    stats: []Stat = &.{},
+    /// The edit's inline `diff`: the file before (none for a new one) and
+    /// after, which an opened step draws as hunks (`ToolDetail::Diff`).
+    diff_old: ?[]u8 = null,
+    diff_new: ?[]u8 = null,
+    /// A compaction chip (`ToolCall::is_compaction`) and its record.
+    compaction: ?Compaction = null,
     /// A tool has finished, or an input request was answered.
     resolved: bool = false,
     is_error: bool = false,
@@ -64,11 +120,17 @@ pub const Part = struct {
 
     pub fn deinit(p: *Part, gpa: Allocator) void {
         gpa.free(p.id);
+        gpa.free(p.todo_step);
         gpa.free(p.path);
+        gpa.free(p.invocation);
         gpa.free(p.output);
         gpa.free(p.output_ref);
         gpa.free(p.subagent_ref);
         gpa.free(p.subagent_title);
+        gpa.free(p.stat_paths);
+        gpa.free(p.stats);
+        if (p.diff_old) |s| gpa.free(s);
+        if (p.diff_new) |s| gpa.free(s);
         p.text.deinit(gpa);
         if (p.arena) |a| {
             a.deinit();
@@ -84,6 +146,26 @@ pub const Entry = struct {
     parts: std.ArrayList(Part) = .empty,
     /// How long the turn worked (`durationMs`), once it has said.
     duration_ms: ?i64 = null,
+    /// When it was made (`createdAt`); 0 for one that hasn't said.
+    created_ms: i64 = 0,
+    /// Last laid-out height and column width for offscreen culling.
+    cached_h: f32 = 0,
+    cached_w: f32 = 0,
+    measured_w: f32 = 0,
+
+    /// Deployed adapters retain coordination as user-role text. Project
+    /// sender/body without rewriting the stored envelope or transport role.
+    pub fn peer(e: *const Entry) ?@import("peer_message.zig").Message {
+        if (e.role != .user) return null;
+        for (e.parts.items) |*p| if (p.kind == .text) {
+            return @import("peer_message.zig").parse(p.text.items);
+        };
+        return null;
+    }
+
+    pub fn isHumanPrompt(e: *const Entry) bool {
+        return e.role == .user and e.peer() == null;
+    }
 
     pub fn deinit(e: *Entry, gpa: Allocator) void {
         gpa.free(e.id);
@@ -101,6 +183,10 @@ pub const Transcript = struct {
     /// The context window used, from the last frame that said.
     tokens: ?u64 = null,
     window: ?u64 = null,
+    savings: ?Savings = null,
+    /// Latest turn's prompt-cache delta and input tokens, for live hit rate %.
+    turn_cache_read_tokens: ?u64 = null,
+    turn_input_tokens: ?u64 = null,
 
     pub fn deinit(t: *Transcript) void {
         t.clear();
@@ -113,6 +199,9 @@ pub const Transcript = struct {
         t.complete = false;
         t.tokens = null;
         t.window = null;
+        t.savings = null;
+        t.turn_cache_read_tokens = null;
+        t.turn_input_tokens = null;
     }
 
     /// Applies one `TranscriptUpdate`, retaining the last verified state on
@@ -123,10 +212,40 @@ pub const Transcript = struct {
             .object => |o| o,
             else => return error.Desync,
         };
+        const was_reset = o.get("reset") != null;
+        const prev_tokens = t.tokens;
+        const prev_savings = t.savings;
         try t.applyFrame(o);
         if (o.get("contextUsage")) |u| if (u == .object) {
             t.tokens = uint(u.object.get("tokens"));
             t.window = uint(u.object.get("window"));
+            t.savings = null;
+            if (u.object.get("savings")) |s| if (s == .object) {
+                const next_savings: Savings = .{
+                    .handle_bytes = uint(s.object.get("handleBytes")) orelse 0,
+                    .compacted_tokens = uint(s.object.get("compactedTokens")) orelse 0,
+                    .cache_read_tokens = uint(s.object.get("cacheReadTokens")) orelse 0,
+                };
+                t.savings = next_savings;
+                if (was_reset) {
+                    t.turn_cache_read_tokens = null;
+                    t.turn_input_tokens = null;
+                } else if (prev_savings) |prev| {
+                    if (next_savings.cache_read_tokens > prev.cache_read_tokens) {
+                        t.turn_cache_read_tokens = next_savings.cache_read_tokens - prev.cache_read_tokens;
+                        t.turn_input_tokens = t.tokens orelse prev_tokens;
+                    } else if (next_savings.cache_read_tokens < prev.cache_read_tokens) {
+                        t.turn_cache_read_tokens = next_savings.cache_read_tokens;
+                        t.turn_input_tokens = t.tokens;
+                    } else if (t.tokens != null and prev_tokens != null and t.tokens.? != prev_tokens.? and next_savings.cache_read_tokens == 0) {
+                        t.turn_cache_read_tokens = 0;
+                        t.turn_input_tokens = t.tokens;
+                    }
+                } else {
+                    t.turn_cache_read_tokens = next_savings.cache_read_tokens;
+                    t.turn_input_tokens = t.tokens;
+                }
+            };
         };
     }
 
@@ -199,6 +318,9 @@ pub const Transcript = struct {
             try undo.append(temp, .{ .appended = .{ .part = part, .len = part.text.items.len } });
             try part.text.appendSlice(t.gpa, string(a.object.get("text")) orelse "");
             if (part.text.items.len != uint(a.object.get("len")) orelse return error.Desync) return error.Desync;
+            t.entries.items[i].cached_h = 0;
+            t.entries.items[i].cached_w = 0;
+            t.entries.items[i].measured_w = 0;
         }
         if (o.get("count")) |n| if (t.entries.items.len != uint(n) orelse return error.Desync) return error.Desync;
         // Only an accepted frame releases the entries it replaced/removed.
@@ -247,6 +369,9 @@ fn parseEntry(gpa: Allocator, v: json.Value) !Entry {
     if (o.get("durationMs")) |d| if (d == .integer) {
         e.duration_ms = d.integer;
     };
+    if (o.get("createdAt")) |d| if (d == .integer) {
+        e.created_ms = d.integer;
+    };
     for (array(o.get("parts"))) |p| if (p == .object) try e.parts.append(gpa, try parsePart(gpa, p.object));
     return e;
 }
@@ -256,7 +381,10 @@ fn parsePart(gpa: Allocator, o: json.ObjectMap) !Part {
     var p: Part = .{ .id = try gpa.dupe(u8, string(o.get("id")) orelse ""), .kind = kind };
     errdefer p.deinit(gpa);
     switch (kind) {
-        .text, .reasoning => try p.text.appendSlice(gpa, string(o.get("text")) orelse ""),
+        .text => try p.text.appendSlice(gpa, string(o.get("text")) orelse ""),
+        // The doc stores thinking in `reasoning`, not `text`. Reading only
+        // `text` dropped the body, so a thinking-heavy turn painted blank.
+        .reasoning => try p.text.appendSlice(gpa, string(o.get("reasoning")) orelse string(o.get("text")) orelse ""),
         .@"error" => {
             try p.text.appendSlice(gpa, string(o.get("message")) orelse "");
             p.reauth = @import("reauth_recovery.zig").Provider.parse(string(o.get("reauth")) orelse "");
@@ -271,16 +399,59 @@ fn parsePart(gpa: Allocator, o: json.ObjectMap) !Part {
             if (string(o.get("subagentRef"))) |s| p.subagent_ref = try gpa.dupe(u8, s);
             p.subagent_status = std.meta.stringToEnum(@import("agent_link.zig").Status, string(o.get("subagentStatus")) orelse "");
             if (o.get("view")) |v| p.saved_view = @import("saved_view.zig").View.parse(v);
+            try diffStats(gpa, &p, o);
         },
         .input => {
             p.resolved = if (o.get("resolved")) |r| r == .bool and r.bool else false;
             try parseQuestions(gpa, &p, o);
         },
-        .image => try p.text.appendSlice(gpa, string(o.get("name")) orelse ""),
+        .image => {
+            try p.text.appendSlice(gpa, string(o.get("name")) orelse "");
+            p.path = try gpa.dupe(u8, string(o.get("path")) orelse "");
+        },
         .visual => try p.text.appendSlice(gpa, string(o.get("title")) orelse ""),
         .delegation, .other => {},
     }
     return p;
+}
+
+/// `diff_stats` when the fold kept them, else the inline `diff` an older
+/// document carries (`turn_work::latest_turn_changes`). The inline diff's
+/// text is kept either way: an opened step shows it.
+fn diffStats(gpa: Allocator, p: *Part, o: json.ObjectMap) !void {
+    if (o.get("diff")) |d| if (d == .object) if (string(d.object.get("newText"))) |new| {
+        p.diff_new = try gpa.dupe(u8, new);
+        if (string(d.object.get("oldText"))) |old| p.diff_old = try gpa.dupe(u8, old);
+    };
+    if (o.get("diffStats")) |v| if (v == .array) {
+        var paths: std.ArrayList(u8) = .empty;
+        errdefer paths.deinit(gpa);
+        var counts: std.ArrayList(Stat) = .empty;
+        errdefer counts.deinit(gpa);
+        for (v.array.items) |s| if (s == .object) {
+            const add = uint(s.object.get("additions")) orelse 0;
+            const del = uint(s.object.get("deletions")) orelse 0;
+            p.additions += add;
+            p.deletions += del;
+            if (string(s.object.get("path"))) |path| {
+                try paths.appendSlice(gpa, path);
+                try paths.append(gpa, '\n');
+                try counts.append(gpa, .{ .path = &.{}, .additions = add, .deletions = del });
+            }
+        };
+        p.stat_paths = try paths.toOwnedSlice(gpa);
+        p.stats = try counts.toOwnedSlice(gpa);
+        // Their paths, now that the buffer holding them has settled.
+        var it = std.mem.splitScalar(u8, p.stat_paths, '\n');
+        for (p.stats) |*s| s.path = it.next() orelse "";
+        return;
+    };
+    const d = o.get("diff") orelse return;
+    if (d != .object) return;
+    const stat = @import("turn_work.zig").diffStat(gpa, string(d.object.get("oldText")), string(d.object.get("newText")) orelse "");
+    p.additions = stat.additions;
+    p.deletions = stat.deletions;
+    if (string(d.object.get("path"))) |path| p.stat_paths = try std.fmt.allocPrint(gpa, "{s}\n", .{path});
 }
 
 fn parseQuestions(gpa: Allocator, p: *Part, o: json.ObjectMap) !void {
@@ -313,8 +484,20 @@ fn parseQuestions(gpa: Allocator, p: *Part, o: json.ObjectMap) !void {
 fn toolCall(gpa: Allocator, p: *Part, call: ?json.Value) !void {
     const c = call orelse return;
     if (c != .object) return;
+    p.invocation = try json.Stringify.valueAlloc(gpa, c, .{ .whitespace = .indent_2 });
     const o = c.object;
     p.tool = std.meta.stringToEnum(ToolKind, string(o.get("kind")) orelse "") orelse .unknown;
+    if (p.tool == .todo) p.todo_step = try todoStep(gpa, o);
+    if (p.tool == .unknown and std.mem.eql(u8, string(o.get("name")) orelse "", compaction_tool)) {
+        var m: Compaction = .{};
+        if (o.get("input")) |i| if (i == .object) {
+            m.opaque_item = std.mem.eql(u8, string(i.object.get("kind")) orelse "", "opaque");
+            m.tokens_before = uint(i.object.get("tokensBefore"));
+            m.tokens_after = uint(i.object.get("tokensAfter"));
+            m.item_tokens = uint(i.object.get("itemTokens"));
+        };
+        p.compaction = m;
+    }
     p.agent = @import("agent_link.zig").isAgent(o);
     p.subagent_title = (try @import("agent_link.zig").title(gpa, o)) orelse &.{};
     // Keep read paths too: file badges need the identity, not just chip text.
@@ -326,6 +509,20 @@ fn toolCall(gpa: Allocator, p: *Part, call: ?json.Value) !void {
     const c_ = @import("tools.zig").chipContent(arena.allocator(), o);
     p.chip = c_.label;
     try p.text.appendSlice(gpa, c_.detail);
+}
+
+/// A todo call's first unfinished item. The todo payload is the canonical
+/// `[{text, done}]`; an absent or malformed list simply has no plan step.
+fn todoStep(gpa: Allocator, o: json.ObjectMap) ![]u8 {
+    for (array(o.get("items"))) |item| {
+        if (item != .object) continue;
+        const done = if (item.object.get("done")) |v| v == .bool and v.bool else false;
+        if (done) continue;
+        const text = string(item.object.get("text")) orelse continue;
+        if (std.mem.trim(u8, text, " \t\r\n").len == 0) continue;
+        return gpa.dupe(u8, text);
+    }
+    return &.{};
 }
 
 const testing = std.testing;
@@ -406,6 +603,10 @@ test "remove, a tool's summary, and replacing an entry by id" {
     try testing.expectEqualStrings("zig build test", t.entries.items[0].parts.items[0].text.items);
     try testing.expectEqualStrings("Run", t.entries.items[0].parts.items[0].chip);
     try testing.expectEqual(ToolKind.exec, t.entries.items[0].parts.items[0].tool);
+    // The RPC frame was freed by applyText: the inspector owns its input.
+    const call = try json.parseFromSlice(json.Value, testing.allocator, t.entries.items[0].parts.items[0].invocation, .{});
+    defer call.deinit();
+    try testing.expectEqualStrings("zig build test", call.value.object.get("command").?.string);
     try applyText(&t,
         \\{"remove":["b"],"upsert":[{"after":null,"entry":{"id":"a","role":"assistant","status":"complete","parts":[]}}],"count":1}
     );

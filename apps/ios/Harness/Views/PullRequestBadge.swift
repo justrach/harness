@@ -76,8 +76,7 @@ struct BranchContextChip: View {
         }
         .padding(.horizontal, 12)
         .frame(height: 40)
-        .background(ink(0.06), in: Capsule())
-        .overlay(Capsule().strokeBorder(hairline(0.08), lineWidth: 1))
+        .glassEffect(.regular.interactive(), in: Capsule())
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Branch \(branch)")
     }

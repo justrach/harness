@@ -19,6 +19,11 @@ pub fn builtin_registry() -> &'static ThemeRegistry {
                 vec![codegraff_light(), codegraff_dark()],
             ),
             family(
+                "opencodex",
+                "OpenCodex",
+                vec![opencodex_light(), opencodex_dark()],
+            ),
+            family(
                 "vscode-default",
                 "VS Code Default",
                 vec![vscode_light(), vscode_dark()],
@@ -276,6 +281,74 @@ const ANSI_LIGHT: [&str; 16] = [
     "#1f1f1f", "#dc2626", "#16a34a", "#b45309", "#2563eb", "#9333ea", "#0e7490", "#3f3f46",
     "#71717a", "#b91c1c", "#15803d", "#92400e", "#1d4ed8", "#7e22ce", "#155e75", "#18181b",
 ];
+
+// An independent adaptation of the Codex palette previewed by DexThemes.
+fn opencodex_light() -> ThemeVariant {
+    variant(Seeds {
+        id: "opencodex-light",
+        family_id: "opencodex",
+        name: "OpenCodex Light",
+        appearance: Appearance::Light,
+        treatment: SurfaceTreatment::Opaque,
+        background: "#ffffff",
+        shell: "#f5f5f5",
+        raised: "#f0f0f0",
+        card: "#ffffff",
+        text: "#171717",
+        muted: "#626262",
+        faint: "#737373",
+        accent: "#0169cc",
+        danger: "#c92b28",
+        warning: "#9a5700",
+        success: "#008335",
+        terminal_background: "#ffffff",
+        ansi: ANSI_LIGHT,
+        syntax: [
+            "#737373", "#8250a0", "#087f5b", "#0550ae", "#953800", "#0169cc", "#171717", "#171717",
+            "#626262", "#8250a0", "#953800", "#c92b28",
+        ],
+        source: opencodex_source("opencodex-light"),
+    })
+}
+
+fn opencodex_dark() -> ThemeVariant {
+    variant(Seeds {
+        id: "opencodex-dark",
+        family_id: "opencodex",
+        name: "OpenCodex Dark",
+        appearance: Appearance::Dark,
+        treatment: SurfaceTreatment::Opaque,
+        background: "#111111",
+        shell: "#0a0a0a",
+        raised: "#202020",
+        card: "#181818",
+        text: "#ececec",
+        muted: "#a3a3a3",
+        faint: "#858585",
+        // Preserve the blue hue, with enough contrast for small inline code.
+        accent: "#3d92e8",
+        danger: "#ff7772",
+        warning: "#e6b45d",
+        success: "#55c879",
+        terminal_background: "#111111",
+        ansi: ANSI_DARK,
+        syntax: [
+            "#858585", "#c9a0dc", "#8dd9ad", "#79b8ff", "#ffbd80", "#79b8ff", "#ececec", "#ececec",
+            "#a3a3a3", "#c9a0dc", "#ffbd80", "#ff7772",
+        ],
+        source: opencodex_source("opencodex-dark"),
+    })
+}
+
+fn opencodex_source(id: &str) -> ThemeSource {
+    source(
+        id,
+        "native-palette-adaptation",
+        "https://www.dexthemes.com/codex/dark",
+        "opencodex-v1",
+        "Harness LICENSE (modified AGPL-3.0)",
+    )
+}
 
 // Adapted visual tokens from Harp's sidebar, with opaque transcript surfaces
 // matching its published light/dark screenshots. Rendering remains native to Harness.

@@ -16,18 +16,21 @@ use harness_rpc::{RpcError, RpcReply, RpcService, methods};
 use harness_sync::DocsStore;
 
 pub mod agent_accounts;
+pub mod agents_prepare;
 pub mod auth;
+pub mod bots;
 pub mod browse_link;
 mod build_wait;
 pub mod change_requests;
 pub mod chat2_host;
-pub mod codegraff_auth;
 mod chat_persistence;
+pub mod codegraff_auth;
 mod device_login;
 pub mod diff_sync;
 pub mod doc_host;
 pub mod external_history;
 mod graff_logins;
+pub mod harness_updates;
 mod http_error;
 pub mod instance_lock;
 pub mod keep_awake;
@@ -36,7 +39,6 @@ pub mod localhost_view;
 pub mod mcp_servers;
 mod model_catalogs;
 pub mod profile;
-pub mod agents_prepare;
 pub mod project_actions;
 pub mod registry;
 pub mod repos;
@@ -166,6 +168,7 @@ pub struct EngineCore {
     pub local_import: Option<local_import::LocalImporter>,
     /// Conversations from other tools on this device, importable as chats.
     pub external_history: external_history::ExternalHistory,
+    pub harness_updates: harness_updates::HarnessUpdateCoordinator,
     workspace_scope: WorkspaceScope,
     /// Auth service (attached by [`Engine::run`]; a lazy dev-mode instance otherwise).
     auth: std::sync::Mutex<Option<Auth>>,
@@ -344,6 +347,8 @@ impl EngineCore {
             workspace.clone(),
         );
         let agent_accounts = AgentAccounts::new(agent_accounts_config);
+        let harness_updates =
+            harness_updates::HarnessUpdateCoordinator::new(data_dir, registry.clone());
         sessions.set_titles(TitleGenerator::new(
             workspace.clone(),
             registry.clone(),
@@ -377,6 +382,7 @@ impl EngineCore {
             device_id,
             local_import,
             external_history,
+            harness_updates,
             workspace_scope: profile.scope(),
             auth: std::sync::Mutex::new(None),
             links: std::sync::Mutex::new(None),
@@ -549,7 +555,9 @@ impl EngineCore {
         if let Some(importer) = self.local_import.clone() {
             rpc = rpc.with_local_import(importer);
         }
-        rpc = rpc.with_external_history(self.external_history.clone());
+        rpc = rpc
+            .with_external_history(self.external_history.clone())
+            .with_harness_updates(self.harness_updates.clone());
         Arc::new(rpc)
     }
 
@@ -612,6 +620,7 @@ impl EngineCore {
         if let Some(updater) = updater {
             updater.shutdown().await;
         }
+        self.harness_updates.shutdown().await;
         self.diff_sync.shutdown().await;
         self.workspace_files.shutdown().await;
         self.spaces_sync.shutdown().await;
@@ -819,6 +828,7 @@ impl Engine {
             workspace_scope,
             cursor_sdk_version: Some(harness_adapters::CursorHarness::sdk_version().into()),
             capabilities: harness_proto::capabilities::current(),
+            version: Some(env!("CARGO_PKG_VERSION").into()),
         })
     }
 
@@ -922,6 +932,7 @@ impl Engine {
         });
         core.previews.start(projects, preview_signaling).await;
         core.start_keep_awake();
+        core.harness_updates.start();
         // Installed desktop bundles and managed servers use a public stable
         // release feed, so update checks also run for local-only, signed-out
         // workspaces.
@@ -1017,6 +1028,12 @@ impl Engine {
             stop_tx,
         });
         let server = serve_ipc(config.ipc_port, service).await?;
+        // Bot routines run only while this engine does: it checks them once
+        // a minute, and graff records what came due in between.
+        let bot_ticker = bots::spawn_ticker(
+            runtime.core().rpc_service(),
+            bots::Bots::on_device(&runtime.core().agent_accounts.graff_home()),
+        );
 
         tokio::select! {
             result = shutdown_signal() => result?,
@@ -1038,6 +1055,7 @@ impl Engine {
             }
         }
         tracing::info!("shutting down");
+        bot_ticker.abort();
         server.abort();
         runtime.shutdown().await;
         Ok(())

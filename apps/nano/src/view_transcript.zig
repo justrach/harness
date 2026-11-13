@@ -16,6 +16,9 @@ const kit = @import("view_kit.zig");
 const tools = @import("tools.zig");
 const compact = @import("compact.zig");
 const tr = @import("transcript.zig");
+const steer_order = @import("steer_order.zig");
+const attachment_refs = @import("attachment_refs.zig");
+const attachment_images = @import("app_attachment_images.zig");
 const sidebar = @import("view_sidebar.zig");
 const App = @import("app.zig").App;
 const rows_st = @import("view_settings_accounts_rows.zig").st;
@@ -27,24 +30,41 @@ pub var column_w: f32 = 736;
 /// The column's width in a main area `w` wide, with its gutters.
 pub fn columnWidth(w: f32) f32 {
     const gutter = std.math.clamp(w * 0.06, 12, 48);
-    return @max(@min(column_w, w - 2 * gutter), 200);
+    return @max(0, @min(column_w, w - 2 * gutter));
 }
 
-/// The chat column's width: the window less the sidebar and the panels.
+/// The shared shell frame owns the actual chat allocation, including the
+/// dynamic host/explorer widths; never subtract their old fixed widths.
 pub fn mainWidth(c: *ui.Context, a: *const App) f32 {
-    var w = c.size.w - a.view.sidebar_width;
-    if (a.selected != null and a.panels.host_open) w -= @import("view_host.zig").width + 1;
-    if (a.selected != null and a.panels.files_open) w -= @import("view_files.zig").width + 1;
-    return @max(w, 300);
+    _ = c;
+    return a.view.chrome.chat_width;
+}
+
+/// What lays out inside the column: GPUI's card takes the rounded seam's
+/// hairline as its left border (`border_l_1`), a point of layout, while
+/// its width sums and the rail's gate use the column whole.
+pub fn contentWidth(c: *ui.Context, a: *const App) f32 {
+    return mainWidth(c, a) - a.view.seam_inset;
 }
 
 /// The focused pane's width: the chat column's, less the other panes of a
 /// split across it.
 pub fn paneWidth(c: *ui.Context, a: *const App) f32 {
-    const w = mainWidth(c, a);
+    const w = contentWidth(c, a);
+    if (a.view.strip.expanded != null) return w;
     const s = a.tabs.layout() orelse return w;
-    if (s.zoomed or s.axis != .horizontal) return w;
-    return @max(w * s.shares.items[s.focus] - 1, 200);
+    if (s.zoomed or s.axis != .horizontal or s.panes.items.len <= 1) return w;
+    const total = a.view.chrome.chat_width;
+    const target = @import("panel_chrome.zig").paneSpan(total, s.shares.items[s.focus], s.panes.items.len, true);
+    const span = if (a.view.split_reveal) |r| blk: {
+        if (r.tab != a.tabs.active or r.new_index >= s.panes.items.len) break :blk target;
+        const start = r.started orelse c.time;
+        const raw: f32 = if (c.reduced_motion) 1 else @floatCast(std.math.clamp((c.time - start) / 0.24, 0, 1));
+        const inv = 1 - raw;
+        const t: f32 = if (c.reduced_motion) 1 else 1 - inv * inv * inv * inv * inv;
+        break :blk @import("view.zig").revealSpan(total, true, r, s.focus, target, t);
+    } else target;
+    return @max(0, span - a.view.seam_inset);
 }
 
 /// The focused pane's height under the title bar, in a split down the
@@ -52,7 +72,8 @@ pub fn paneWidth(c: *ui.Context, a: *const App) f32 {
 pub fn paneHeight(c: *ui.Context, a: *const App) ?f32 {
     const s = a.tabs.layout() orelse return null;
     if (s.zoomed or s.axis != .vertical) return null;
-    return (c.size.h - sidebar.titlebar_h) * s.shares.items[s.focus] - 1;
+    _ = c;
+    return @max(0, @import("panel_chrome.zig").paneSpan(a.view.chrome.height, s.shares.items[s.focus], s.panes.items.len, false) - a.view.seam_inset);
 }
 
 /// The open chat's transcript, and over its left edge the prompt rail
@@ -60,13 +81,52 @@ pub fn paneHeight(c: *ui.Context, a: *const App) ?f32 {
 pub fn transcript(c: *ui.Context, a: *App, k: theme.Colors) void {
     const rail = @import("view_rail.zig");
     rail.step(c, &a.view.rail);
-    const drawn = entries(c, a, k, &a.transcript, paneWidth(c, a), a.w_doc.id != null, 64 - sidebar.titlebar_h);
-    rail.rail(c, k, &a.view.rail, &a.transcript, drawn.ticks, drawn.box, mainWidth(c, a));
+    const just_stuck = a.view.stick_end;
+    const pane_w = paneWidth(c, a);
+    const drawn = entries(c, a, k, &a.transcript, pane_w, a.w_doc.id != null, 64 - sidebar.titlebar_h);
+    if (a.settings.hierarchyProfile().shows_prompt_rail)
+        rail.rail(c, k, &a.view.rail, &a.transcript, drawn.ticks, drawn.box, pane_w + a.view.seam_inset);
+    if (!just_stuck) recoverBlank(c, a, drawn);
+    a.view.jump_box = drawn.box;
+    a.view.jump_distance = drawn.from_end;
+}
+
+/// A scroll offset left over from a taller transcript can park the reader
+/// in padding, with no row in the window. That is not a place to stay.
+fn recoverBlank(c: *ui.Context, a: *App, drawn: Drawn) void {
+    if (drawn.box == 0 or drawn.ticks.len == 0) return;
+    const view = c.rects.get(drawn.box) orelse return;
+    var any = false;
+    var near = false;
+    for (drawn.ticks) |tick| if (tick.top) |top| {
+        any = true;
+        if (top + 200 >= view.y - 80 and top <= view.y + view.h + 80) near = true;
+    };
+    if (c.scroll_max.get(drawn.box)) |max| {
+        const at = c.scroll.get(drawn.box) orelse 0;
+        if (at <= max + 1) near = true;
+    }
+    if (!any or near) return;
+    // One correction. Repeating it rebuilds the window forever and the
+    // beachball follows.
+    if (a.view.blank_recovered == drawn.box) return;
+    a.view.blank_recovered = drawn.box;
+    c.scroll.put(c.gpa, drawn.box, std.math.floatMax(f32)) catch {};
+    c.scroll_follow.put(c.gpa, drawn.box, true) catch {};
+    a.view.jump_distance = 0;
+    a.view.jump_shown = false;
+    c.changed = true;
 }
 
 /// What a transcript drew: its scroll box, and its prompts' rows as last
 /// laid out.
-pub const Drawn = struct { box: u64 = 0, ticks: []const @import("view_rail.zig").Tick = &.{} };
+pub const Drawn = struct {
+    box: u64 = 0,
+    ticks: []const @import("view_rail.zig").Tick = &.{},
+    /// How far the reader is from the end. The jump pill shows past GPUI's
+    /// `SCROLL_BUTTON_THRESHOLD_PX`.
+    from_end: f32 = 0,
+};
 
 /// A transcript `w` wide: the open chat's, or a split pane's neighbor's.
 /// The first row sits `top` points down; rows settle at the bottom, over
@@ -90,12 +150,15 @@ fn topFade(c: *ui.Context, k: theme.Colors) void {
     const band: f32 = 24;
     var y: f32 = 0;
     while (y < band) : (y += 1) {
-        _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.shell.alpha(1 - (y + 0.5) / band), .absolute = true, .offset = .{ .x = 0, .y = y } }, .none, null);
+        _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.background.alpha(1 - (y + 0.5) / band), .absolute = true, .offset = .{ .x = 0, .y = y } }, .none, null);
     }
 }
 
 fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f32, loading: bool, top: f32) Drawn {
-    const col = columnWidth(w);
+    const tweening = a.view.sidebar_tween != null or a.view.split_reveal != null;
+    const resizing = c.time < a.view.resize_until;
+    const raw_col = columnWidth(w);
+    const col = @import("motion_rules.zig").tweenColumnWidth(tweening, raw_col, column_w);
     // The last row clears the status strip over the composer and the fade
     // band above it (`bottom_clearance + TRANSCRIPT_FADE_BAND + 8`); the
     // composer itself is under the scroll, not over it. Its bar shows
@@ -107,42 +170,144 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     } else null;
     if (subagent != null) st.justify = .start;
     st.scroll = true;
+    st.selectable = true;
     st.direction = .column;
-    const scroll = c.open(st, null);
-    defer ui.end(c);
-    var drawn: Drawn = .{ .box = c.node(scroll).id };
-    var ticks: std.ArrayList(@import("view_rail.zig").Tick) = .empty;
-    const body = ui.div(c).column().w(col);
-    defer body.end();
-    const entries_ = t.entries.items;
     // The chat these are, for routing a sign-in: the open one's or a pane's.
     const chat_id: ?[]const u8 = if (subagent) |s| s.parent else if (t == &a.transcript) a.selected else for (a.peers.items) |*p| {
         if (&p.transcript == t) break p.id;
     } else null;
+    if (subagent == null) if (chat_id) |id| ui.key(c, c.print("scroll-{s}", .{id}));
+    const scroll = c.open(st, null);
+    // A cached peer is promoted into the focused outlet after its release.
+    // Its native text/edit/control IDs must follow the transcript, not the
+    // old parent's node position, or the just-created selection vanishes.
+    if (subagent) |agent| {
+        // A child tab is a revocable surface, not just a slot or document
+        // name. A press retained from a closed child must not match the
+        // link/control IDs of a replacement (even the same doc reopened).
+        // Duplicate opens reuse the live Agent, so its feed and native IDs
+        // stay stable until that actual surface is retired.
+        const lifetime = @intFromPtr(agent);
+        var identity = std.hash.Wyhash.init(0x4348_494c_445f_5549);
+        identity.update(agent.parent);
+        identity.update(agent.doc);
+        identity.update(std.mem.asBytes(&lifetime));
+        c.node(scroll).id = identity.final();
+    } else if (chat_id) |id| {
+        c.node(scroll).id = std.hash.Wyhash.hash(0x5452_414e_5343_5250, id);
+    }
+    defer ui.end(c);
+    var drawn: Drawn = .{ .box = c.node(scroll).id };
+    const entries_ = t.entries.items;
+    const streaming = entries_.len > 0 and entries_[entries_.len - 1].status == .streaming;
+    // Just sent: past the end, which layout clamps to it, and moving the
+    // offset there makes the box follow its end again (`follow_end`).
+    const just_stuck = subagent == null and t == &a.transcript and a.view.stick_end;
+    if (just_stuck) {
+        a.view.stick_end = false;
+        const sync = @import("motion_rules.zig").stickEndScroll(c.scroll_max.get(drawn.box));
+        c.scroll_follow.put(c.gpa, drawn.box, sync.follow) catch {};
+        c.scroll.put(c.gpa, drawn.box, sync.scroll) catch {};
+        c.scroll_seen.put(c.gpa, drawn.box, sync.seen) catch {};
+    }
+    if (subagent == null and t == &a.transcript) {
+        if (streaming and !a.offscreen and !c.reduced_motion and !just_stuck and a.view.rail.glide == null) {
+            const last_e = &entries_[entries_.len - 1];
+            var sig: u64 = @as(u64, last_e.parts.items.len) << 32;
+            for (last_e.parts.items) |*p| sig +%= @as(u64, p.text.items.len) *% 0x9e3779b97f4a7c15;
+            if (sig != a.view.stream_sig) {
+                a.view.stream_sig = sig;
+                a.view.stream_glide_until = c.time + 0.32;
+            }
+            const follow = c.scroll_follow.get(drawn.box) orelse true;
+            if (follow) {
+                const max_s = c.scroll_max.get(drawn.box) orelse 0;
+                const cap = ui.spring(c, drawn.box, 0x7363_6361, max_s, .{ .response = 0.20, .damping = 1.0 });
+                c.scroll_cap.put(c.gpa, drawn.box, @max(0, cap)) catch {};
+                if (@abs(cap - max_s) > 0.25 or c.time < a.view.stream_glide_until) {
+                    c.frameIn(1.0 / 120.0);
+                }
+            } else {
+                ui.jump(c, drawn.box, 0x7363_6361, c.scroll.get(drawn.box) orelse 0);
+                _ = c.scroll_cap.remove(drawn.box);
+            }
+        } else {
+            a.view.stream_sig = 0;
+            ui.jump(c, drawn.box, 0x7363_6361, c.scroll_max.get(drawn.box) orelse 0);
+            _ = c.scroll_cap.remove(drawn.box);
+        }
+    }
+    if (c.scroll_max.get(drawn.box)) |max| {
+        const at = c.scroll.get(drawn.box) orelse 0;
+        drawn.from_end = @max(0, max - at);
+    }
+    var ticks: std.ArrayList(@import("view_rail.zig").Tick) = .empty;
+    const body = ui.div(c).column().w(col).clip();
+    if (subagent == null and t == &a.transcript and streaming and !a.offscreen and !c.reduced_motion and !just_stuck and a.view.rail.glide == null) {
+        c.node(body.index).style.settle_y = .{ .response = 0.20, .damping = 1.0 };
+    }
+    defer body.end();
     // Loading does not itself imply work; the session row does, even when
     // no assistant part has arrived yet.
     _ = loading;
+    const scroll_rect = c.rects.get(drawn.box);
+    const has_selection = c.selection.anchor != null or c.selection.dragging;
+    // A working sidebar row also animates a completed open transcript.
+    // Use its existing height spacers on those frames, not just while the
+    // selected reply streams. Keep selection and rail navigation intact.
+    const working = for (a.sessions.items) |session| {
+        if (session.status == .working) break true;
+    } else false;
+    const cull_offscreen = !has_selection and (!a.offscreen or tweening or resizing) and @import("motion_rules.zig").shouldCullOffscreen(tweening, resizing, streaming or working, a.view.rail.glide != null);
+    const cull: Cull = .{ .on = cull_offscreen, .loose = tweening or resizing, .pad = if (tweening or resizing) 220 else 380, .view = scroll_rect, .col = col };
+    // A message sent while its turn works is drawn where it arrived, and
+    // what the reply gains after it under it (steer_order.zig).
+    const steer = &a.view.steer;
+    const steer_chat: ?u64 = if (subagent == null) (if (chat_id) |id| steer_order.hash(id) else null) else null;
+    if (steer_chat) |chat| steer.observe(chat, entries_);
+    const steered = if (steer_chat) |chat| steer.any(chat) else false;
     for (entries_, 0..) |*e, i| {
-        ui.key(c, c.print("entry-{s}", .{e.id}));
+        const tail = if (steered and e.role == .user) steer_order.tailAfter(steer, steer_chat.?, entries_, i) else null;
+        // After its message, whether that was drawn or is off screen.
+        defer if (tail) |x| steerTail(c, a, k, x, entries_, i, chat_id, cull, just_stuck);
+        const parts_len = e.parts.items.len;
+        const head_end = if (steered and e.role == .assistant) steer_order.headEnd(steer, steer_chat.?, entries_, i) else parts_len;
+        // Everything it has came after the message: nothing in its place.
+        if (head_end == 0 and parts_len > 0) continue;
         // `top_gap_for`: every entry's first row opens a turn (`SPACE_LG`).
         if (i > 0) _ = c.leaf(.{ .height = .{ .px = 16 } }, .none, null);
-        const at: At = .{ .chat_id = chat_id, .entries = entries_, .index = i, .col = col };
+        ui.key(c, c.print("entry-{s}-{s}", .{ chat_id orelse "", e.id }));
+        if (spacer(c, cull, (!just_stuck or i + 1 < entries_.len) and e.status != .streaming, &e.cached_h, &e.cached_w, &e.measured_w)) |r| {
+            if (e.isHumanPrompt()) {
+                ticks.append(c.alloc(), .{ .entry = i, .top = r.y - (if (i > 0) @as(f32, 16) else 0) }) catch {};
+            }
+            continue;
+        }
+        var at: At = .{ .chat_id = chat_id, .entries = entries_, .index = i, .col = col, .scroll = scroll_rect };
         switch (e.role) {
             .user => {
                 // Its row starts where the turn's gap does (`top_gap_for`).
-                const r = user(c, k, e, col);
-                ticks.append(c.alloc(), .{ .entry = i, .top = if (r) |x| x.y - (if (i > 0) @as(f32, 16) else 0) else null }) catch {};
+                const r = user(c, a, k, e, col, chat_id);
+                if (e.isHumanPrompt()) ticks.append(c.alloc(), .{ .entry = i, .top = if (r) |x| x.y - (if (i > 0) @as(f32, 16) else 0) else null }) catch {};
             },
-            .assistant => assistant(c, a, k, e, at),
+            .assistant => if (head_end == parts_len) assistant(c, a, k, e, at) else {
+                // Under the reply's own id: its rows keep what they
+                // remembered when the message split it.
+                at.closes = false;
+                assistant(c, a, k, steerPiece(c, e, e.id, 0, head_end) orelse e, at);
+            },
             .system => system(c, a, k, e, at),
         }
     }
     if (subagent == null) {
-        if (chat_id) |id| if (@import("app_send_feedback.zig").active(a, id, t)) |pending| {
-            ui.key(c, c.print("pending-{s}", .{pending.message}));
-            if (entries_.len > 0) _ = c.leaf(.{ .height = .{ .px = 16 } }, .none, null);
+        var pending_count: usize = 0;
+        if (chat_id) |id| for (a.pending_sends.items) |pending| {
+            if (!@import("app_send_feedback.zig").visible(pending, id, t)) continue;
+            if (entries_.len > 0 or pending_count > 0) _ = c.leaf(.{ .height = .{ .px = 16 } }, .none, null);
+            ui.key(c, c.print("pending-{s}-{s}", .{ pending.chat, pending.message }));
             const entry = pending.entry();
-            _ = user(c, k, &entry, col);
+            _ = user(c, a, k, &entry, col, chat_id);
+            pending_count += 1;
         };
         @import("view_working.zig").trailer(c, a, k, chat_id, t);
     }
@@ -150,38 +315,188 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     return drawn;
 }
 
+/// What decides whether a row off screen is drawn or stood in for.
+const Cull = struct {
+    on: bool,
+    /// The column is changing width: a remembered height still stands in.
+    loose: bool,
+    pad: f32,
+    view: ?ui.Rect,
+    col: f32,
+};
+
+/// For the row keyed just before: its last rect when it is off screen and
+/// a spacer of its remembered height stands in for it, else null with the
+/// row still to draw. `h`, `w` and `m` are what the row remembers (an
+/// entry's `cached_h`, `cached_w` and `measured_w`).
+fn spacer(c: *ui.Context, cull: Cull, settled: bool, h: *f32, w: *f32, m: *f32) ?ui.Rect {
+    const prev = c.rects.get(c.peekId(null));
+    if (prev) |r| if (r.h > 0 and m.* > 0) {
+        h.* = r.h;
+        w.* = m.*;
+    };
+    const width_ok = cull.loose or @abs(w.* - cull.col) <= 1.0;
+    if (cull.on and settled and h.* > 0 and width_ok) {
+        if (cull.view) |view| if (prev) |r| {
+            if (@import("motion_rules.zig").skipOffscreenRow(true, r.y, r.y + r.h, view.y, view.y + view.h, cull.pad)) {
+                m.* = 0;
+                _ = c.leaf(.{ .width = .fill, .height = .{ .px = h.* } }, .none, null);
+                return r;
+            }
+        };
+    }
+    m.* = cull.col;
+    return null;
+}
+
+/// A reply's parts `[start, end)` as an entry of this frame's to draw.
+fn steerPiece(c: *ui.Context, e: *const tr.Entry, id: []const u8, start: usize, end: usize) ?*const tr.Entry {
+    const p = c.alloc().create(tr.Entry) catch return null;
+    p.* = steer_order.piece(e, id, start, end);
+    return p;
+}
+
+/// Under a message sent while its turn worked: what the reply gained
+/// after it, a row of its own with the gap of one.
+fn steerTail(c: *ui.Context, a: *App, k: theme.Colors, t: steer_order.Tail, entries_: []tr.Entry, user_ix: usize, chat_id: ?[]const u8, cull: Cull, just_stuck: bool) void {
+    if (t.start >= t.end) return;
+    const owner = &entries_[t.owner];
+    const message = entries_[user_ix].id;
+    _ = c.leaf(.{ .height = .{ .px = 16 } }, .none, null);
+    ui.key(c, c.print("entry-{s}-{s}-after-{s}", .{ chat_id orelse "", owner.id, message }));
+    const at_end = user_ix + 1 == entries_.len;
+    if (spacer(c, cull, (!just_stuck or !at_end) and owner.status != .streaming, &t.cut.cached_h, &t.cut.cached_w, &t.cut.measured_w) != null) return;
+    const piece = steerPiece(c, owner, c.print("{s}~{s}", .{ owner.id, message }), t.start, t.end) orelse return;
+    const closes = t.end == owner.parts.items.len;
+    assistant(c, a, k, piece, .{ .chat_id = chat_id, .entries = entries_, .index = t.owner, .col = cull.col, .scroll = cull.view, .closes = closes, .last = closes and at_end });
+}
+
 /// A prompt's bubble; where it was last laid out.
-fn user(c: *ui.Context, k: theme.Colors, e: *const tr.Entry, col: f32) ?ui.Rect {
+fn user(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, col: f32, chat_id: ?[]const u8) ?ui.Rect {
+    if (e.peer()) |message| return peerMessage(c, a, k, e, message);
     const wrap = ui.div(c).column().wFull().itemsEnd();
     defer wrap.end();
     const hovered = wrap.hovered();
+    if (c.hot == c.node(wrap.index).id) c.cursor_hand = false;
     {
         const bubble = ui.div(c).column().maxW(col * 0.8).bg(k.user_bubble).rounded(16).px(16).py(10).gap(6);
         defer bubble.end();
         const st = kit.style(c, 14, 22, .{ .wrap = true, .color = k.text });
         for (e.parts.items) |*p| switch (p.kind) {
-            .text => ui.text(c, p.text.items, st),
+            .text => {
+                const parsed = attachment_refs.parse(c.alloc(), p.text.items) catch attachment_refs.Parsed{ .text = p.text.items };
+                if (parsed.text.len > 0) {
+                    ui.key(c, c.print("user-text-{s}-{s}-{x}", .{ chat_id orelse "", p.id, std.hash.Wyhash.hash(0, parsed.text) }));
+                    ui.text(c, parsed.text, st);
+                }
+                for (parsed.paths, 0..) |path, index| {
+                    ui.key(c, c.print("user-attachment-{s}-{d}", .{ p.id, index }));
+                    sentAttachment(c, a, k, chat_id, path);
+                }
+            },
             .image => attachment(c, k, .document, p.text.items),
             else => {},
         };
     }
-    lane(c, k, e, hovered, true);
+    lane(c, a, k, e, hovered, true);
     return c.rects.get(c.node(wrap.index).id);
 }
 
-/// Under a message: 32 points held for its copy button, shown on hover.
-fn lane(c: *ui.Context, k: theme.Colors, e: *const tr.Entry, hovered: bool, right: bool) void {
-    var l = ui.div(c).row().wFull().h(32).pt(8);
+fn peerMessage(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, message: @import("peer_message.zig").Message) ?ui.Rect {
+    const box = ui.div(c).column().wFull().gap(6);
+    defer box.end();
+    const header = ui.div(c).row().control();
+    ui.text(c, c.print("Agent message · {s}", .{message.sender}), .{ .size = 11, .weight = .medium, .color = k.muted });
+    header.end();
+    // Coordination is not a right-aligned human prompt. Keep its body
+    // selectable, while the sender label is not part of cross-message Copy.
+    @import("view_markdown.zig").markdown(c, k, message.body);
+    lane(c, a, k, e, box.hovered(), false);
+    return c.rects.get(c.node(box.index).id);
+}
+
+fn sentAttachment(c: *ui.Context, a: *App, k: theme.Colors, chat_id: ?[]const u8, path: []const u8) void {
+    const tiles = @import("view_composer_attachments.zig");
+    const name = @import("app_attachments.zig").displayName(path);
+    const image = attachment_images.get(a, chat_id, path);
+    const bytes: []const u8 = if (image) |loaded| attachment_images.tileBytes(loaded) else "";
+    const tile = ui.div(c).column().w(56).gap(2).control();
+    defer tile.end();
+    {
+        const thumb = ui.div(c).row().size(56, 56).center().rounded(8).border(k.border).bg(k.hover).clip();
+        defer thumb.end();
+        tiles.picture(c, k, c.print("{s}:{s}", .{ chat_id orelse "", path }), name, bytes);
+    }
+    kit.ellipsisText(c, name, .{ .size = 10, .line_height = 12, .color = k.muted }, 56);
+}
+
+/// `format_timestamp`: "Jul 1, 3:45 PM", `offset_s` from UTC.
+pub fn formatTimestamp(buf: []u8, ms: i64, offset_s: i64) []const u8 {
+    const accounts = @import("accounts.zig");
+    const at = ms + offset_s * 1000;
+    const day = accounts.monthDay(@divFloor(at, 86_400_000));
+    const in_day = @mod(at, 86_400_000);
+    const h = @divFloor(in_day, 3_600_000);
+    const m = @divFloor(@mod(in_day, 3_600_000), 60_000);
+    const h12: u64 = @intCast(if (@mod(h, 12) == 0) 12 else @mod(h, 12));
+    return std.fmt.bufPrint(buf, "{s} {d}, {d}:{d:0>2} {s}", .{ accounts.month_names[day.month - 1], day.day, h12, @as(u64, @intCast(m)), if (h < 12) "AM" else "PM" }) catch "";
+}
+
+test "a message's timestamp reads as the GPUI app's" {
+    var b: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("Jan 1, 12:00 AM", formatTimestamp(&b, 0, 0));
+    // 2026-07-01 15:45 UTC.
+    try std.testing.expectEqualStrings("Jul 1, 3:45 PM", formatTimestamp(&b, 1782920700000, 0));
+    try std.testing.expectEqualStrings("Jul 1, 11:45 PM", formatTimestamp(&b, 1782920700000, 8 * 3600));
+    try std.testing.expectEqualStrings("Jul 2, 12:05 AM", formatTimestamp(&b, 1782920700000 + 20 * 60_000, 8 * 3600));
+}
+
+/// Whether the pointer is in the padding the last row carries under it: the
+/// clearance that takes it down behind the composer, which nothing there
+/// occludes (`bottom_pad`). A menu or the picker over it does.
+fn underLastRow(c: *ui.Context, a: *const App, row: ?ui.Rect, scroll: ?ui.Rect) bool {
+    const r = row orelse return false;
+    const pane = scroll orelse return false;
+    const m = c.input.mouse;
+    if (@import("view.zig").menuKeepsKeys(a) or a.view.account_menu) return false;
+    return m.x >= pane.x and m.x < pane.x + pane.w and m.y >= r.y + r.h and m.y < c.size.h;
+}
+
+/// GPUI's copied-message check lasts 1.2 seconds. Keep only a stable control
+/// id and a deadline, not a borrowed entry id or a frame-arena string.
+pub const CopyFeedback = struct {
+    button: u64 = 0,
+    until: f64 = 0,
+
+    pub fn active(s: CopyFeedback, button: u64, now: f64) bool {
+        return s.button == button and now < s.until;
+    }
+};
+
+/// Under a message: 32 points held for its time and copy button, shown on
+/// hover (`strip`).
+fn lane(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, hovered: bool, right: bool) void {
+    var l = ui.div(c).row().wFull().h(32).pt(8).gap(8).itemsCenter().control();
     if (right) l = l.justifyEnd();
     defer l.end();
     if (!hovered) return;
-    if (kit.iconButton(c, k, .copy, .{ .size = 24, .radius = 6, .icon = 14 })) {
+    if (e.created_ms != 0) {
+        const buf = c.alloc().alloc(u8, 32) catch return;
+        ui.text(c, formatTimestamp(buf, e.created_ms, @import("accounts.zig").localOffset(e.created_ms)), .{ .size = 12, .line_height = 12 * 1.618, .color = k.muted.alpha(0.55) });
+    }
+    const button = c.node(l.index).id;
+    const copied = a.view.message_copy.active(button, c.time);
+    if (copied) c.frameIn(@floatCast(a.view.message_copy.until - c.time));
+    if (kit.iconButton(c, k, if (copied) .check else .copy, .{ .size = 24, .radius = 6, .icon = 14 })) {
         var text: std.ArrayList(u8) = .empty;
         for (e.parts.items) |*p| if (p.kind == .text) {
             if (text.items.len > 0) text.appendSlice(c.alloc(), "\n\n") catch {};
             text.appendSlice(c.alloc(), p.text.items) catch {};
         };
         c.clipboard.write(c.clipboard.ctx, text.items);
+        a.view.message_copy = .{ .button = button, .until = c.time + 1.2 };
+        c.changed = true;
+        c.frameIn(0);
     }
 }
 
@@ -191,24 +506,33 @@ const At = struct {
     entries: []const tr.Entry,
     index: usize,
     col: f32,
+    /// The scroll box as last laid out.
+    scroll: ?ui.Rect = null,
+    /// Whether the row ends its reply. One split by a message sent while
+    /// it worked (steer_order.zig) ends in the piece under the last such
+    /// message: only that piece has the answer's heading and the lane.
+    closes: bool = true,
+    /// The transcript's last row, though its entry isn't the last one.
+    last: bool = false,
 };
 
 fn assistant(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, at: At) void {
-    const last = at.index + 1 == at.entries.len;
+    const last = at.last or at.index + 1 == at.entries.len;
     const col = ui.div(c).column().wFull();
     defer col.end();
-    const hovered = col.hovered();
+    const hovered = col.hovered() or (last and underLastRow(c, a, c.rects.get(c.node(col.index).id), at.scroll));
+    if (c.hot == c.node(col.index).id) c.cursor_hand = false;
     // Its parts 12 apart; the lane right under the last (the row's
     // `strip`, with no gap of its own).
     const parts_box = ui.div(c).column().wFull().gap(12);
-    const answer: Answer = .{ .part = if (compact.finalAnswerPart(e)) |i| &e.parts.items[i] else null };
+    const answer: Answer = .{ .part = if (!at.closes) null else if (compact.finalAnswerPart(e)) |i| &e.parts.items[i] else null };
     if (a.settings.get(.transcript_compact_mode))
         compactParts(c, a, k, e, at, answer)
     else
         partRows(c, a, k, e, e.parts.items, at, last, answer);
     if (e.status == .streaming and e.parts.items.len == 0) ui.text(c, "Working…", .{ .size = 12, .color = k.muted });
     parts_box.end();
-    if (e.status != .streaming) lane(c, k, e, hovered, false);
+    if (e.status != .streaming and at.closes) lane(c, a, k, e, hovered, false);
 }
 
 /// The part a finished reply's answer starts at, which a divider heads,
@@ -242,6 +566,21 @@ fn partRows(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, parts:
     }
 }
 
+pub fn streamMarkdown(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *const tr.Part, chat_id: ?[]const u8) void {
+    const state = @import("tool_ui_state.zig");
+    const part_id = state.key(chat_id, e.id, p.id);
+    const live = e.status == .streaming;
+    const use_veil = !a.offscreen and !c.reduced_motion and (live or a.view.tool_ui.veils.isFading(part_id));
+    const row_veil = if (use_veil)
+        a.view.tool_ui.veils.getOrCreate(a.gpa, part_id, live and p.text.items.len > 64, c.time * 1000.0)
+    else
+        null;
+    @import("view_markdown.zig").withLinksVeil(c, k, p.text.items, a, chat_id, row_veil, live and !a.offscreen);
+    if (!live and row_veil != null) {
+        a.view.tool_ui.veils.pruneSettled(a.gpa, part_id);
+    }
+}
+
 fn part(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *const tr.Part, at: At, answer: Answer) void {
     switch (p.kind) {
         .text => {
@@ -249,18 +588,18 @@ fn part(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *const 
                 const box = ui.div(c).column().wFull();
                 defer box.end();
                 answerHeading(c, k, e, answer.label);
-                @import("view_markdown.zig").withLinks(c, k, p.text.items, a, at.chat_id);
-            } else @import("view_markdown.zig").withLinks(c, k, p.text.items, a, at.chat_id);
+                streamMarkdown(c, a, k, e, p, at.chat_id);
+            } else streamMarkdown(c, a, k, e, p, at.chat_id);
         },
         .tool => treeRow(c, a, k, e, p, true, at.chat_id),
         .@"error" => errorPart(c, a, k, e, p, at),
-        .image => attachment(c, k, .document, p.text.items),
+        .image => @import("view_reply_images.zig").draw(c, a, k, at.chat_id, p.path, p.text.items, null),
         .visual => attachment(c, k, .widget, p.text.items),
         .delegation => attachment(c, k, .widget, "Delegated to a subagent"),
         .input => {
             const q = if (p.questions.len > 0) p.questions[0] else null;
             const label = if (q) |x| (if (x.question.len > 0) x.question else x.header) else "Question";
-            @import("view_question.zig").chip(c, k, label, p.resolved);
+            @import("view_question.zig").chip(c, k, label, p.resolved, at.col);
         },
         else => {},
     }
@@ -270,7 +609,7 @@ fn part(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *const 
 /// divider, 12 points over the answer, under a muted "Worked for …" (or
 /// "Final answer") unless compact mode's work line already says it.
 fn answerHeading(c: *ui.Context, k: theme.Colors, e: *const tr.Entry, label: bool) void {
-    const h = ui.div(c).column().wFull().pb(12);
+    const h = ui.div(c).column().wFull().pb(12).control();
     defer h.end();
     if (label) {
         const l = ui.div(c).row().wFull().pt(8).pb(12);
@@ -283,9 +622,9 @@ fn answerHeading(c: *ui.Context, k: theme.Colors, e: *const tr.Entry, label: boo
 }
 
 /// Compact mode (GPUI's `compact_shell`): the turn's thinking, tool calls
-/// and the narration between them under one closed line where the first
-/// of them was; it opens to the rows they'd be without compact mode, and
-/// never on its own. Saved views stay rows after it; questions, errors and
+/// and the narration between them stay visible while the turn runs, then
+/// fold behind one line. Finished work can be opened again. Saved views
+/// stay rows after it; questions, errors and
 /// the reply keep their places.
 fn compactParts(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, at: At, answer_in: Answer) void {
     const items = e.parts.items;
@@ -318,162 +657,179 @@ fn compactParts(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, at
 /// The compact work line: a group's header that says what's running while
 /// the turn works, then "Worked for …" once it has.
 fn workLine(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, work: []const tr.Part, at: At) void {
-    const key = c.print("{s}#work", .{e.id});
-    const open = a.view.groupOpen(key, false);
-    const box = ui.div(c).column().wFull().gap(12);
-    defer box.end();
-    {
-        const h = kit.pressFeedback(ui.div(c).row().h(26).gap(6).pr(4).itemsCenter().rounded(4).control().hover(k.wash(0.04)));
-        defer h.end();
-        if (h.clicked()) a.view.toggleGroup(a.gpa, key, false);
-        const slot = ui.div(c).row().size(22, 18).center();
-        icons.icon(c, if (open) .@"alt-arrow-down" else .@"alt-arrow-right", 14, k.muted, 0);
-        slot.end();
-        const st = kit.style(c, 12, 18, .{ .color = if (h.hovered()) k.text else k.muted });
-        const settled = if (e.status != .streaming) compact.workedSecs(e) else null;
-        if (settled) |s| {
-            const lb = c.alloc().alloc(u8, 48) catch return;
-            ui.text(c, compact.workedFor(lb, s), st);
-        } else {
-            const lb = c.alloc().alloc(u8, 160) catch return;
-            const active = e.status == .streaming and for (work) |p| {
-                if (p.kind == .reasoning or (p.kind == .tool and !p.resolved)) break true;
-            } else false;
-            kit.activityText(c, k, tools.label(lb, work), st, active);
+    const legacy = c.print("{s}#work", .{e.id});
+    const key = c.print("{s}/{s}", .{ at.chat_id orelse "", legacy });
+    const live = e.status == .streaming;
+    const live_key = c.print("{s}/live", .{key});
+    const settled_key = c.print("{s}/settled", .{key});
+    // A resumed turn starts a fresh live phase. Choices made while running
+    // must not pin the completed work open; reopening it afterwards is local
+    // to the settled phase. Legacy keys still work for loaded history.
+    if (live) {
+        for ([_][]const u8{ key, legacy, settled_key }) |old_key| {
+            if (a.view.groups.fetchRemove(old_key)) |kv| a.gpa.free(kv.key);
         }
+    } else {
+        if (a.view.groups.fetchRemove(live_key)) |kv| a.gpa.free(kv.key);
     }
-    if (!open) return;
-    const reveal = ui.motion.frame(c, (ui.motion.MotionSpec{ .duration_ms = 140, .curve = ui.motion.Easing.css_ease_out }).animate(.{ .opacity = 0.65, .y = -2 }, .{ .opacity = 1, .y = 0 }));
-    const body = ui.div(c).column().wFull().gap(12).motion(reveal);
-    defer body.end();
-    partRows(c, a, k, e, work, at, false, .{ .part = null });
-}
-
-const row_h: f32 = 32;
-const tree_w: f32 = 48;
-
-/// A run of tool calls and reasoning, folded under one line; it opens on
-/// its own while it is the tail of a streaming reply.
-fn group(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, parts: []const tr.Part, tail: bool, parent: ?[]const u8) void {
-    const key = c.print("{s}/{s}", .{ e.id, parts[0].id });
-    const open = a.view.groupOpen(key, tail);
+    const override = if (live) live_key else settled_key;
+    const open = a.view.groups.get(override) orelse if (live) true else (a.view.groups.get(key) orelse a.view.groups.get(legacy) orelse false);
     const box = ui.div(c).column().wFull();
     defer box.end();
     {
-        const h = kit.pressFeedback(ui.div(c).row().h(26).gap(6).pr(4).itemsCenter().rounded(4).control().hover(k.wash(0.04)));
+        const h = kit.pressFeedback(ui.div(c).row().wFull().h(26).gap(6).pr(4).itemsCenter().rounded(4).clip().control().hover(k.wash(0.04)));
         defer h.end();
-        if (h.clicked()) a.view.toggleGroup(a.gpa, key, tail);
+        if (h.clicked()) a.view.toggleGroup(a.gpa, override, open);
         const slot = ui.div(c).row().size(22, 18).center();
-        icons.icon(c, if (open) .@"alt-arrow-down" else .@"alt-arrow-right", 14, k.muted, 0);
+        @import("view_tool_rows.zig").chevron(c, k, open, 14);
         slot.end();
-        const lb = c.alloc().alloc(u8, 160) catch return;
-        const active = e.status == .streaming and for (parts) |p| {
-            if (p.kind == .reasoning or (p.kind == .tool and !p.resolved)) break true;
-        } else false;
-        kit.activityText(c, k, tools.label(lb, parts), kit.style(c, 12, 18, .{ .color = if (h.hovered()) k.text else k.muted }), active);
+        const max_title_w = @import("motion_rules.zig").toolGroupTitleCap(at.col, 28, 8);
+        const title_slot = ui.div(c).row().grow().w(0).clip();
+        defer title_slot.end();
+        const st = kit.style(c, 15, 18, .{ .color = if (h.hovered()) k.text else k.muted });
+        const settled = if (e.status != .streaming) compact.workedSecs(e) else null;
+        if (settled) |s| {
+            const lb = c.alloc().alloc(u8, 48) catch return;
+            kit.fadeText(c, compact.workedFor(lb, s), st, max_title_w);
+        } else {
+            const lb = c.alloc().alloc(u8, 160) catch return;
+            // Thinking belongs to the piece the reply is still writing.
+            const active = e.status == .streaming and for (work) |p| {
+                if ((p.kind == .reasoning and at.closes) or (p.kind == .tool and !p.resolved)) break true;
+            } else false;
+            @import("view_tool_rows.zig").title(c, k, workLabel(c, lb, work), active, h.hovered(), max_title_w);
+        }
     }
-    if (!open) return;
-    const reveal = ui.motion.frame(c, (ui.motion.MotionSpec{ .duration_ms = 120, .curve = ui.motion.Easing.css_ease_out }).animate(.{ .opacity = 0.65, .y = -2 }, .{ .opacity = 1, .y = 0 }));
-    const children = ui.div(c).column().wFull().motion(reveal);
-    defer children.end();
-    for (parts, 0..) |*p, i| {
-        ui.key(c, c.print("tool-{s}", .{p.id}));
-        treeRow(c, a, k, e, p, i + 1 == parts.len, parent);
-    }
-}
-
-/// One call in an open group: the tree's trunk and elbow, its icon, its
-/// chip and what it ran.
-fn treeRow(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *const tr.Part, last: bool, parent: ?[]const u8) void {
-    const line = k.wash(0.12);
-    const agent_linked = p.agent and p.subagent_ref.len > 0 and p.subagent_title.len > 0 and parent != null;
-    const view_linked = p.saved_view != null and parent != null;
-    const linked = agent_linked or view_linked;
-    const base_row = ui.div(c).row().wFull().gap(8).itemsStart().rounded(5);
-    const r = if (linked) kit.pressFeedback(base_row.control().hover(k.wash(0.06))) else base_row;
-    defer r.end();
-    if (linked and r.clicked()) {
-        if (agent_linked) @import("app_subagents.zig").open(a, parent.?, p) else @import("app_browser.zig").openSaved(a, parent.?, p.saved_view.?);
-    }
-    {
-        const g = ui.div(c).column().w(tree_w).h(row_h);
-        defer g.end();
-        // Trunk down from the header (to the elbow on the last row), then
-        // the branch out to the icon.
-        _ = c.leaf(.{ .width = .{ .px = 1 }, .height = .{ .px = if (last) row_h / 2 else row_h }, .background = line, .absolute = true, .offset = .{ .x = 12, .y = 0 } }, .none, null);
-        _ = c.leaf(.{ .width = .{ .px = 15 }, .height = .{ .px = 1 }, .background = line, .absolute = true, .offset = .{ .x = 13, .y = row_h / 2 } }, .none, null);
-        const ic = ui.div(c).row().absolute().offset(30, (row_h - 18) / 2);
-        defer ic.end();
-        icons.icon(c, toolIcon(p), 16, if (p.is_error) k.danger else k.muted, 18);
-    }
-    // Fill the row's remaining width before measuring wrapped reasoning
-    // and output. A fixed zero width measures them one glyph per line,
-    // leaving phantom height that follow-end scrolls the messages past.
-    // A 22-point file badge still fits GPUI's 32-point tool row.
-    const body = ui.div(c).column().wFull().justifyCenter().gap(4).py(if (p.path.len > 0) 5 else 7);
+    const state = @import("tool_ui_state.zig");
+    const fold_id = state.key(at.chat_id, key, "compact-fold");
+    const estimate = 12 + @as(f32, @floatFromInt(work.len)) * 32;
+    const fold = a.view.tool_ui.fold(a.gpa, fold_id, open, if (a.view.tool_ui.folds.contains(fold_id)) 0 else estimate, c.time, c.reduced_motion);
+    const is_animating = fold.animating(c.time, c.reduced_motion);
+    if (!open and !is_animating) return;
+    var viewport = ui.div(c).column().wFull().clip();
+    if (is_animating and fold.natural > 0) viewport = viewport.h(fold.height(c.time, c.reduced_motion));
+    defer viewport.end();
+    const body = ui.div(c).column().wFull().pt(8).gap(12);
     defer body.end();
-    const detail_key = c.print("detail/{s}/{s}", .{ e.id, p.id });
-    const has_output = p.output.len > 0 or p.output_ref.len > 0;
-    const base = ui.div(c).row().gap(8).itemsCenter().pr(4).rounded(4);
-    const head = if (!linked and has_output) kit.pressFeedback(base.control().hover(k.wash(0.04))) else base;
-    {
-        defer head.end();
-        if (!linked and has_output and head.clicked()) a.view.toggleGroup(a.gpa, detail_key, false);
-        const chip = if (p.kind == .reasoning) "Thought process" else p.chip;
-        const active = !p.is_error and (if (p.agent) p.subagent_status == .running else e.status == .streaming and !p.resolved);
-        kit.activityText(c, k, chip, kit.style(c, 12, 18, .{ .weight = if (toolIcon(p) == .bot) .medium else .regular, .color = if (p.is_error) k.danger else k.muted }), active);
-        if (p.kind == .tool) {
-            const d = firstLine(if (p.agent and p.text.items.len == 0) p.subagent_title else p.text.items);
-            if (p.path.len > 0) fileBadge(c, k, p.path, p.is_error) else kit.fadeText(c, d, .{ .size = 12, .mono = p.tool == .exec, .color = if (p.is_error) k.danger else k.muted }, 560);
-            if (linked) icons.icon(c, .@"arrow-up-right", 12, k.faint, 0);
+    @import("view_tool_tree.zig").rememberHeight(c, a, fold_id, body.index);
+    if (is_animating) c.frameIn(1.0 / 30.0);
+    _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
+    workRows(c, a, k, e, work, at);
+}
+
+fn workLabel(c: *ui.Context, lb: []u8, work: []const tr.Part) []const u8 {
+    var has_tools = false;
+    for (work) |p| if (p.kind == .tool) {
+        has_tools = true;
+        break;
+    };
+    if (!has_tools) return tools.label(lb, work);
+    var filtered = std.ArrayList(tr.Part).empty;
+    for (work) |p| if (p.kind == .tool) {
+        filtered.append(c.alloc(), p) catch return tools.label(lb, work);
+    };
+    return tools.label(lb, filtered.items);
+}
+
+fn workRows(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, work: []const tr.Part, at: At) void {
+    const buf = c.alloc().alloc(tools.Run, work.len) catch {
+        ui.text(c, "Unable to render reply: out of memory", .{ .size = 12, .color = k.danger });
+        return;
+    };
+    const runs = tools.runs(buf, work);
+    var tool_run_count: usize = 0;
+    var has_non_reasoning = false;
+    for (work) |p| {
+        if (p.kind != .reasoning) has_non_reasoning = true;
+    }
+    for (runs) |r| {
+        if (!r.group) continue;
+        for (work[r.start..r.end]) |p| {
+            if (p.kind == .tool) {
+                tool_run_count += 1;
+                break;
+            }
         }
     }
-    if (p.kind == .reasoning) {
-        @import("view_markdown.zig").withLinks(c, k, p.text.items, a, parent);
-    }
-    if (!linked and has_output and a.view.groupOpen(detail_key, false)) {
-        const output = ui.div(c).column().wFull().p(8).rounded(6).bg(k.wash(0.04));
-        defer output.end();
-        const blob = a.tool_blobs.get(p.output_ref);
-        const text = if (blob) |b| (if (b.status == .ready) b.text else p.output) else p.output;
-        if (text.len > 0) ui.text(c, text, kit.style(c, 12, 18, .{ .wrap = true, .mono = true, .color = if (p.is_error) k.danger else k.muted }));
-        if (p.output_ref.len > 0 and (blob == null or blob.?.status != .ready)) {
-            const loading = blob != null and blob.?.status == .loading;
-            const action = ui.div(c).row().py(4);
-            defer action.end();
-            ui.text(c, if (loading) "Loading full output…" else if (blob != null and blob.?.status == .failed) "Retry full output" else "Show full output", .{ .size = 12, .color = k.muted });
-            if (!loading and action.clicked()) a.fetchToolBlob(p.output_ref);
+    for (runs) |r| {
+        const p = &work[r.start];
+        ui.key(c, c.print("run-{s}-{s}", .{ e.id, p.id }));
+        if (!r.group) {
+            part(c, a, k, e, p, at, .{ .part = null });
+            continue;
+        }
+        var tool_parts = std.ArrayList(tr.Part).empty;
+        for (work[r.start..r.end]) |item| {
+            if (item.kind == .tool) tool_parts.append(c.alloc(), item) catch return;
+        }
+        if (tool_parts.items.len == 0) {
+            if (!has_non_reasoning) {
+                const thoughts = ui.div(c).column().wFull().pl(28).gap(6);
+                defer thoughts.end();
+                for (work[r.start..r.end]) |*tp| {
+                    if (tp.kind == .reasoning and tp.text.items.len > 0) {
+                        streamMarkdown(c, a, k, e, tp, at.chat_id);
+                    }
+                }
+            }
+            continue;
+        }
+        if (e.status == .streaming and tool_run_count == 1) {
+            for (tool_parts.items, 0..) |*tp, idx| {
+                ui.key(c, c.print("work-tool-{s}-{s}", .{ e.id, tp.id }));
+                treeRow(c, a, k, e, tp, idx + 1 == tool_parts.items.len, at.chat_id);
+            }
+        } else {
+            group(c, a, k, e, tool_parts.items, false, at.chat_id);
         }
     }
 }
 
-/// The GPUI tool header's filename badge, including its untinted identity.
-fn fileBadge(c: *ui.Context, k: theme.Colors, path: []const u8, failed: bool) void {
-    const badge = ui.div(c).row().h(22).pl(1).pr(6).gap(6).itemsCenter().rounded(5).bg(k.ink(0.06));
-    defer badge.end();
-    {
-        const well = ui.div(c).row().size(20, 20).center().rounded(4).bg(ui.Color.hex(if (k.dark) 0x000000 else 0xffffff).alpha(0.16));
-        defer well.end();
-        file_icons.icon(c, path, false, k.dark, 14);
+/// The current desktop renders expanded results in the task tree itself.
+fn group(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, parts: []const tr.Part, tail: bool, parent: ?[]const u8) void {
+    @import("view_tool_tree.zig").group(c, a, k, e, parts, tail, parent);
+}
+
+fn treeRow(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *const tr.Part, last: bool, parent: ?[]const u8) void {
+    @import("view_tool_tree.zig").row(c, a, k, e, p, last, parent);
+}
+
+/// An opened edit: its hunks as the Changes pane draws them, numbers,
+/// markers and syntax colors (`ToolDetail::Diff`).
+pub fn editDiff(c: *ui.Context, k: theme.Colors, p: *const tr.Part, new: []const u8) void {
+    const f = @import("tool_diff.zig").file(c.alloc(), p.path, p.diff_old, new) catch return;
+    if (f.hunks.len == 0) return;
+    ui.key(c, c.print("edit-diff-{s}", .{p.id}));
+    const box = ui.div(c).column().wFull().py(4).clip();
+    defer box.end();
+    @import("view_diffs.zig").body(c, k, &f);
+}
+
+/// A thinned edit's files, one row each: its icon, path and counts
+/// (`ToolDetail::Stats`).
+pub fn statRows(c: *ui.Context, k: theme.Colors, stats: []const tr.Stat) void {
+    const box = ui.div(c).column().wFull().py(4);
+    defer box.end();
+    const mono: ui.TextStyle = .{ .size = 12, .mono = true, .color = k.faint };
+    for (stats) |s| {
+        const r = ui.div(c).row().wFull().h(18).gap(8).itemsCenter();
+        defer r.end();
+        file_icons.icon(c, s.path, false, k.dark, 14);
+        {
+            const path = ui.div(c).row().grow().w(0).clip();
+            defer path.end();
+            ui.text(c, s.path, mono);
+        }
+        var st = mono;
+        st.color = k.success;
+        ui.text(c, c.print("+{d}", .{s.additions}), st);
+        st.color = k.danger;
+        ui.text(c, c.print("−{d}", .{s.deletions}), st);
     }
-    kit.fadeText(c, file_icons.basename(path), kit.style(c, 12, 18, .{ .color = if (failed) k.danger else k.text.alpha(0.85) }), 520);
 }
 
 fn toolIcon(p: *const tr.Part) icons.Name {
-    if (p.kind == .reasoning) return .@"magic-stick-3";
-    if (p.agent or std.mem.eql(u8, p.chip, "Agent") or std.mem.eql(u8, p.chip, "Waiting on")) return .bot;
-    return switch (p.tool) {
-        .exec => .terminal,
-        .readFile, .applyPatch => .document,
-        .writeFile => .@"document-add",
-        .editFile => .pen,
-        .search => .magnifer,
-        .glob => .@"folder-with-files",
-        .webFetch, .webSearch => .global,
-        .todo => .checklist,
-        .unknown => icons.namedTool(p.text.items),
-        .mcp => .widget,
-    };
+    return @import("view_tool_tree.zig").toolIcon(p);
 }
 
 test "tool rows use the GPUI transcript's original Harness SVGs" {
@@ -546,7 +902,7 @@ pub fn noticeChip(c: *ui.Context, k: theme.Colors, label: []const u8, message: [
     // GPUI's edge insets what's inside it; here it's drawn over the box.
     const chip = ui.div(c).column().wFull().rounded(10).px(10 + 1).py(8 + 1).gap(6).border(k.danger.alpha(0.16)).borderW(1).bg(k.danger.alpha(0.05));
     {
-        const h = ui.div(c).row().wFull().gap(8).itemsCenter();
+        const h = ui.div(c).row().wFull().gap(8).itemsCenter().control();
         defer h.end();
         const tile = ui.div(c).row().size(20, 20).center().rounded(6).bg(k.danger.alpha(0.12));
         icons.icon(c, .@"danger-triangle", 12, k.danger_muted.alpha(0.8), 0);
@@ -577,7 +933,7 @@ fn errorChip(c: *ui.Context, a: *App, k: theme.Colors, chat_id: ?[]const u8, mes
     defer chip.end();
     const p = problem orelse return;
     const id = chat_id orelse return;
-    const r = ui.div(c).row().pt(2);
+    const r = ui.div(c).row().pt(2).control();
     defer r.end();
     // `btn_primary` at px(10) py(5) rounded(7), 12 points.
     const b = ui.div(c).row().px(10).py(5).rounded(7).bg(k.solid);
@@ -590,13 +946,15 @@ fn errorChip(c: *ui.Context, a: *App, k: theme.Colors, chat_id: ?[]const u8, mes
 }
 
 fn attachment(c: *ui.Context, k: theme.Colors, icon: icons.Name, label: []const u8) void {
-    const row = ui.div(c).row().gap(6).itemsCenter();
+    const row = ui.div(c).row().gap(6).itemsCenter().control();
     defer row.end();
     icons.icon(c, icon, 14, k.muted, 0);
     ui.text(c, label, .{ .size = 12, .color = k.muted });
 }
 
 fn system(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, at: At) void {
+    const col = ui.div(c).column().wFull();
+    defer col.end();
     for (e.parts.items) |*p| switch (p.kind) {
         .text => ui.text(c, p.text.items, kit.style(c, 12, 18, .{ .wrap = true, .color = k.faint })),
         .@"error" => errorPart(c, a, k, e, p, at),

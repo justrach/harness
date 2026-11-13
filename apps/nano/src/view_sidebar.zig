@@ -1,9 +1,6 @@
-//! The sidebar, as the GPUI shell lays it out (crates/ui/src/shell.rs,
-//! shell/chat_tabs.rs, shell/spaces.rs): the open tabs, the project filter
-//! with search and view options, then Sessions and Archived, each row a
-//! status mark, the agent's mark, the project's monogram, a fading title
-//! and how long ago; a running cloud sandbox's strip and the account badge
-//! at the foot.
+//! The conversation sidebar from shell.rs/spaces.rs: project filter first,
+//! then session lists and a compact 44-point account/create footer. Panel
+//! conversation tabs belong to the instrument strip, not this column.
 const std = @import("std");
 const nanoui = @import("nanoui");
 const ui = nanoui.ui;
@@ -15,105 +12,321 @@ const rules = @import("rules.zig");
 const workspace = @import("workspace.zig");
 const App = @import("app.zig").App;
 
-pub const width: f32 = 256;
+/// "No sessions yet": GPUI's default line (φ), up to a device pixel.
+const empty_line = kit.measured(12 * 1.618);
+
+pub const width: f32 = @import("settings.zig").sidebar_default;
+
+pub fn widthOf(a: *const App) f32 {
+    return a.settings.sidebarWidth();
+}
 pub const titlebar_h: f32 = 38;
 
 pub fn sidebar(c: *ui.Context, a: *App, k: theme.Colors) void {
     // The edge is drawn over its last column (view.zig), as the GPUI app's.
-    const side = ui.div(c).column().w(width).hFull().bg(k.sidebar).pt(titlebar_h);
+    const side = ui.div(c).column().w(widthOf(a)).hFull().bg(k.sidebar);
     defer side.end();
-    tabList(c, a, k);
+    sidebarTitlebar(c, a, k);
+    const search = @import("view_sidebar_search.zig");
     filterRow(c, a, k);
     // The session search's field, and its results in the lists' place
     // while it filters (view_sidebar_search.zig).
-    const search = @import("view_sidebar_search.zig");
     search.controls(c, a, k);
-    if (!search.results(c, a, k)) lists(c, a, k);
+    if (!search.results(c, a, k)) {
+        openWorkspaces(c, a, k);
+        lists(c, a, k);
+    }
+    // Contacts, not chats in a folder: shown on every project filter.
+    @import("view_bots.zig").group(c, a, k);
     footer(c, a, k);
 }
 
-fn tabList(c: *ui.Context, a: *App, k: theme.Colors) void {
-    const tabs = a.tabs.items.items;
-    const box = ui.div(c).column().wFull().px(10).pt(4).pb(6).gap(2);
-    defer box.end();
-    if (tabs.len > 1) {
-        const h = ui.div(c).row().px(4).pb(2);
-        defer h.end();
-        // GPUI's line: 11 × φ, to the device pixel.
-        ui.text(c, c.print("Tabs · {d}", .{tabs.len}), .{ .size = 11, .line_height = 18, .color = k.muted.alpha(0.8) });
+fn sidebarTitlebar(c: *ui.Context, a: *App, k: theme.Colors) void {
+    const menus = @import("view_sidebar_menus.zig");
+    const side_w = widthOf(a);
+    const layout = @import("motion_rules.zig").sidebarTitlebarLayout(side_w);
+    const group_gap: f32 = if (side_w >= 240) 8 else 4;
+    const right_margin: f32 = if (side_w >= 240) 8 else 4;
+    const bar = ui.div(c).row().wFull().h(titlebar_h).pt(4).pl(layout.back_x).pr(right_margin).itemsCenter();
+    defer bar.end();
+    {
+        ui.key(c, "sidebar-nav-back");
+        if (a.canGoBack()) {
+            if (kit.iconButton(c, k, .@"arrow-left", .{ .size = 24, .radius = 6, .icon = 15, .color = k.muted, .tip = .{ .text = "Go back", .delay = tip.quick } }))
+                a.goBack();
+        } else {
+            const disabled = tip.on(ui.div(c).row().size(24, 24).center().rounded(6), k, .{ .text = "Go back", .delay = tip.quick });
+            icons.icon(c, .@"arrow-left", 15, k.muted.alpha(0.32), 0);
+            disabled.end();
+        }
     }
-    var close: ?usize = null;
-    var show: ?usize = null;
-    for (tabs, 0..) |id, i| {
-        ui.key(c, c.print("tab-{d}", .{i}));
-        const lit = i == a.tabs.active;
-        var row = ui.div(c).row().wFull().h(26).px(8).gap(6).itemsCenter().rounded(7).clip();
-        row = if (lit) row.bg(k.hover) else row.hover(k.hover);
-        defer row.end();
-        const hovered = row.hovered();
-        if (row.clicked() and !lit) show = i;
+    ui.div(c).w(2).end();
+    {
+        ui.key(c, "sidebar-nav-forward");
+        if (a.canGoForward()) {
+            if (kit.iconButton(c, k, .@"arrow-right", .{ .size = 24, .radius = 6, .icon = 15, .color = k.muted, .tip = .{ .text = "Go forward", .delay = tip.quick } }))
+                a.goForward();
+        } else {
+            const disabled = tip.on(ui.div(c).row().size(24, 24).center().rounded(6), k, .{ .text = "Go forward", .delay = tip.quick });
+            icons.icon(c, .@"arrow-right", 15, k.muted.alpha(0.32), 0);
+            disabled.end();
+        }
+    }
+    ui.div(c).w(group_gap).end();
+    ui.key(c, "sidebar-titlebar-new-session");
+    if (kit.iconButton(c, k, .plus, .{ .size = 24, .radius = 6, .icon = 16, .color = k.muted, .tip = .{ .text = "New session", .delay = tip.quick } }))
+        a.newWorkspaceSession();
+    ui.spacer(c);
+    {
+        ui.key(c, "sidebar-view-options");
+        const more = tip.on(ui.div(c).row(), k, .{ .text = "Sidebar view options", .delay = tip.quick });
+        defer more.end();
+        if (kit.iconButton(c, k, .@"more-horizontal", .{ .size = 24, .radius = 6, .icon = 16, .color = k.muted, .on = a.view.more_menu }))
+            if (a.view.more_menu) menus.close(a) else menus.openView(a);
+        if (c.rects.get(c.node(more.index).id)) |r| a.view.more_anchor = r;
+    }
+}
+
+const SessionTab = struct {
+    ws: usize,
+    pane: ?usize = null,
+    tab: ?usize = null,
+    chat_id: ?[]const u8 = null,
+    active: bool = false,
+    flat: bool = false,
+};
+
+const OpenSession = struct {
+    ws: usize,
+    title_chat_id: ?[]const u8 = null,
+    active: bool = false,
+    tabs: []const SessionTab,
+};
+
+/// Open workspace sessions (`⊞`) and all of their corresponding tabs nested
+/// underneath each session at the top of the ⌘B sidebar.
+pub fn openWorkspaces(c: *ui.Context, a: *App, k: theme.Colors) void {
+    if (!a.settings.hierarchyProfile().shows_open_workspaces_tree) return;
+    var sessions: std.ArrayList(OpenSession) = .empty;
+    for (a.tabs.items.items, 0..) |id, ws| {
+        if (a.tabs.items.items.len > 1) {
+            if (a.view.filter) |filter| if (a.findSpace(filter) != null) {
+                const project = a.workspaceProject(ws) orelse continue;
+                if (!std.mem.eql(u8, project, filter)) continue;
+            };
+        }
+        var stabs: std.ArrayList(SessionTab) = .empty;
+        const active_cid: ?[]const u8 = if (ws == a.tabs.active) a.selected else id;
+        var title_cid: ?[]const u8 = active_cid;
+        if (a.tabs.splits.items[ws]) |split| {
+            for (0..split.panes.items.len) |pane_ix| {
+                const g = &split.groups[pane_ix];
+                const pane_cid = if (ws == a.tabs.active and pane_ix == split.focus)
+                    a.selected
+                else if (pane_ix == split.focus)
+                    id
+                else
+                    split.panes.items[pane_ix];
+                if (split.panes.items.len > 1 and title_cid == null and pane_cid != null) title_cid = pane_cid;
+                if (g.items.items.len > 1) {
+                    for (0..g.items.items.len) |pt_ix| {
+                        const cid = if (pt_ix == g.active) pane_cid else g.items.items[pt_ix].chat;
+                        if (split.panes.items.len > 1 and title_cid == null and cid != null) title_cid = cid;
+                        stabs.append(c.alloc(), .{
+                            .ws = ws,
+                            .pane = pane_ix,
+                            .tab = pt_ix,
+                            .chat_id = cid,
+                            .active = ws == a.tabs.active and pane_ix == split.focus and pt_ix == g.active,
+                        }) catch return;
+                    }
+                } else {
+                    stabs.append(c.alloc(), .{
+                        .ws = ws,
+                        .pane = pane_ix,
+                        .chat_id = pane_cid,
+                        .active = ws == a.tabs.active and pane_ix == split.focus,
+                    }) catch return;
+                }
+            }
+        } else {
+            stabs.append(c.alloc(), .{
+                .ws = ws,
+                .chat_id = active_cid,
+                .active = ws == a.tabs.active,
+            }) catch return;
+        }
+        if (a.tabs.items.items.len == 1 and stabs.items.len <= 1) continue;
+        sessions.append(c.alloc(), .{
+            .ws = ws,
+            .title_chat_id = title_cid,
+            .active = ws == a.tabs.active,
+            .tabs = stabs.items,
+        }) catch return;
+    }
+    if (sessions.items.len == 0) return;
+    ui.key(c, "sidebar-open-workspaces");
+    const list = ui.div(c).column().wFull().maxH(260).px(8).pt(6).gap(2).scrollY();
+    c.node(list.index).style.scroll_edge_fade = 12;
+    defer list.end();
+    for (sessions.items, 0..) |sess, idx| {
+        const title = if (sess.title_chat_id) |chat_id| (if (a.findChat(chat_id)) |chat| chatLabel(chat) else "New session") else "New session";
+        const multi_tabs = sess.tabs.len > 1;
         {
-            // The number sits at the slot's left; ✕ is centred in it.
-            const slot = ui.div(c).row().size(16, 16).itemsCenter().rounded(4);
-            defer slot.end();
-            if (hovered and tabs.len > 1) {
-                const x = ui.div(c).row().size(16, 16).center().rounded(4).hover(k.wash(0.12));
-                defer x.end();
-                if (x.clicked()) close = i;
-                icons.icon(c, .close, 12, k.muted, 0);
+            ui.key(c, c.print("workspace-session-{d}", .{idx}));
+            const row_mot = ui.motion.frame(c, .{
+                .initial = .{ .opacity = 0 },
+                .target = .{ .opacity = 1 },
+                .transition = .{ .tween = .{ .duration = 0.14, .ease = .linear } },
+            });
+            var row = ui.div(c).row().wFull().h(32).px(8).gap(7).itemsCenter().rounded(7).control().motion(row_mot);
+            if (sess.active and !multi_tabs) {
+                row = row.bg(k.selected);
+            } else if (sess.active and multi_tabs) {
+                row = row.bg(k.ink(if (k.dark) 0.07 else 0.04)).hover(k.hover.alpha(0.45));
             } else {
-                ui.text(c, c.print("{d}", .{i + 1}), .{ .size = 11, .color = k.muted.alpha(0.7) });
+                row = row.hover(k.hover.alpha(0.45));
+            }
+            defer row.end();
+            const hovered = row.hovered();
+            var closed = false;
+            {
+                const mark = ui.div(c).row().size(20, 20).center();
+                defer mark.end();
+                if (hovered and !multi_tabs and sessions.items.len > 1) {
+                    const close_btn = ui.div(c).row().size(18, 18).center().rounded(4).hover(k.wash(0.12));
+                    defer close_btn.end();
+                    if (close_btn.clicked()) {
+                        closed = true;
+                        @import("view_tab_strip.zig").queue(a, .{ .close_global_tab = sess.ws });
+                    }
+                    icons.icon(c, .close, 12, k.muted, 0);
+                } else {
+                    openChatMark(c, a, k, sess.title_chat_id, sess.active, 14);
+                }
+            }
+            const badge_room: f32 = if (multi_tabs) 28 else 0;
+            kit.ellipsisText(c, title, .{ .size = 13, .weight = if (multi_tabs) theme.ui_medium_weight else .regular, .line_height = kit.measured(13 * 1.618), .color = k.text }, @max(0, widthOf(a) - 2 * 8 - 2 * 8 - 20 - 7 - 22 - 7 - badge_room));
+            if (multi_tabs) {
+                const spacer = ui.div(c).row().grow();
+                spacer.end();
+                const pill = ui.div(c).row().h(18).minW(18).px(5).center().rounded(9).bg(k.ink(if (k.dark) 0.12 else 0.07));
+                defer pill.end();
+                ui.text(c, c.print("{d}", .{sess.tabs.len}), .{ .size = 10.5, .weight = theme.ui_medium_weight, .color = k.muted });
+            }
+            if (!closed and row.clicked()) {
+                if (sess.ws != a.tabs.active) a.showTab(sess.ws);
             }
         }
-        const title = if (id) |cid| (if (a.findChat(cid)) |ch| chatLabel(ch) else "Untitled session") else "New session";
-        kit.ellipsisText(c, title, .{ .size = 12.5, .color = if (lit) k.text else k.muted }, width - 20 - 16 - 16 - 6);
+        if (multi_tabs) {
+            const tree = ui.div(c).column().wFull().pl(16).pr(2).pt(1).pb(3).gap(1);
+            defer tree.end();
+            for (sess.tabs, 0..) |t, t_ix| {
+                const tab_title = if (t.chat_id) |cid| (if (a.findChat(cid)) |chat| chatLabel(chat) else "New tab") else "New tab";
+                ui.key(c, c.print("workspace-session-{d}-tab-{d}", .{ idx, t_ix }));
+                const tab_mot = ui.motion.frame(c, .{
+                    .initial = .{ .opacity = 0 },
+                    .target = .{ .opacity = 1 },
+                    .transition = .{ .tween = .{ .duration = 0.12, .ease = .linear } },
+                    .delay = ui.motion.stagger(t_ix, 0.02),
+                });
+                const trow_wrap = ui.div(c).row().wFull().h(28).itemsCenter().motion(tab_mot);
+                defer trow_wrap.end();
+                // Vertical tree guide rail connecting the tab to its parent Session.
+                const rail = ui.div(c).row().w(10).hFull().center();
+                ui.div(c).size(1.5, if (t_ix + 1 == sess.tabs.len) 18 else 28).rounded(1).bg(if (t.active) k.text.alpha(0.55) else k.border_strong.alpha(0.65)).end();
+                rail.end();
+                var trow = ui.div(c).row().grow().w(0).h(28).px(7).gap(6).itemsCenter().rounded(6).control();
+                if (t.active) {
+                    trow = trow.bg(k.selected);
+                } else {
+                    trow = trow.hover(k.hover.alpha(0.45));
+                }
+                defer trow.end();
+                const thovered = trow.hovered();
+                var tclosed = false;
+                {
+                    const tmark = ui.div(c).row().size(18, 18).center();
+                    defer tmark.end();
+                    if (thovered) {
+                        const close_btn = ui.div(c).row().size(16, 16).center().rounded(4).hover(k.wash(0.12));
+                        defer close_btn.end();
+                        if (close_btn.clicked()) {
+                            tclosed = true;
+                            if (t.flat) {
+                                @import("view_tab_strip.zig").queue(a, .{ .close_global_tab = t.tab orelse 0 });
+                            } else {
+                                if (t.ws != a.tabs.active) a.showTab(t.ws);
+                                if (t.tab) |pt| {
+                                    @import("view_tab_strip.zig").queue(a, .{ .close_panel_tab = .{ .pane = t.pane orelse 0, .tab = pt } });
+                                } else if (t.pane) |p| {
+                                    @import("view_tab_strip.zig").queue(a, .{ .close = .{ .chat = p } });
+                                }
+                            }
+                        }
+                        icons.icon(c, .close, 11, k.muted, 0);
+                    } else {
+                        openChatMark(c, a, k, t.chat_id, t.active, 13);
+                    }
+                }
+                kit.ellipsisText(c, tab_title, .{ .size = 12.5, .line_height = kit.measured(12.5 * 1.5), .color = if (t.active) k.text else k.muted }, @max(0, widthOf(a) - 16 - 16 - 10 - 14 - 18 - 6 - 18));
+                if (!tclosed and trow.clicked()) {
+                    if (t.flat) {
+                        a.showTab(t.tab orelse 0);
+                    } else {
+                        if (t.ws != a.tabs.active) a.showTab(t.ws);
+                        if (t.pane) |p| {
+                            a.focusPane(p);
+                            a.view.strip.focused = .{ .chat = p };
+                        }
+                        if (t.tab) |pt| a.showPaneTab(pt);
+                    }
+                }
+            }
+        }
     }
-    if (close) |i| a.closeTab(i) else if (show) |i| a.showTab(i);
+}
+
+/// Open panes identify the agent that owns the chat, not a generic chat or
+/// workspace glyph. Keep the ordinary conversation list's status slot separate.
+fn openChatMark(c: *ui.Context, a: *const App, k: theme.Colors, chat_id: ?[]const u8, active: bool, size: f32) void {
+    const chat = if (chat_id) |id| a.findChat(id) else null;
+    const mark = icons.harnessMark(if (chat) |ch| ch.harness orelse "graff" else a.new_harness);
+    icons.icon(c, mark.name, size, mark.brand orelse if (active) k.text else k.muted, 0);
 }
 
 fn filterRow(c: *ui.Context, a: *App, k: theme.Colors) void {
     const menus = @import("view_sidebar_menus.zig");
-    const row = ui.div(c).row().wFull().px(8).pt(8).pb(4).gap(4).itemsCenter();
+    const row = ui.div(c).row().wFull().px(8).pt(6).pb(4).itemsCenter();
     defer row.end();
-    {
-        const base = ui.div(c).row().grow().h(29).px(8).gap(8).itemsCenter().rounded(8).clip();
-        // Hovered as GPUI's trigger is (its `hover_listener`): by the
-        // pointer's moves, not the keys.
-        const lh = kit.listenerHover(&a.view.hovers, if (a.view.filter_menu) base.bg(k.hover) else base, k.hover);
-        const t = lh.div;
-        defer t.end();
-        if (t.clicked()) if (a.view.filter_menu) menus.close(a) else menus.openProjects(a);
-        if (c.rects.get(c.node(t.index).id)) |r| a.view.filter_anchor = r;
-        icons.icon(c, .folder, 16, k.muted, 0);
-        const color = if (lh.hovered) k.text else k.text.alpha(0.8);
-        // The trigger less its insets, icon, chevron and gaps.
-        const room = width - 16 - 2 * 29 - 2 * 4 - 16 - 16 - 14 - 2 * 8;
-        if (a.findSpace(a.view.filter)) |s| {
-            // The project, "@ device" after it, and the offline mark.
-            const tag = c.print("@ {s}", .{a.deviceName(s.device_id)});
-            const off = !menus.online(a, s.device_id, a.nowMs());
-            const tag_w = @min(c.text.width(tag, .{ .size = 10 }), room / 2);
-            const name_w = @min(c.text.width(s.name, .{ .size = 13, .weight = .medium }), room - tag_w - 6 - (if (off) @as(f32, 18) else 0));
-            const box = ui.div(c).row().grow().w(0).gap(6).itemsCenter().clip();
-            defer box.end();
-            kit.fadeText(c, s.name, .{ .size = 13, .weight = .medium, .color = color }, name_w);
-            kit.fadeText(c, tag, .{ .size = 10, .color = k.muted.alpha(0.45) }, tag_w);
-            if (off) icons.icon(c, .@"wifi-off", 12, k.warning.alpha(0.8), 0);
-        } else {
-            kit.fadeText(c, "All projects", .{ .size = 13, .weight = .medium, .color = color }, room);
-            ui.spacer(c);
-        }
-        icons.icon(c, .@"alt-arrow-down", 14, k.muted.alpha(0.6), 0);
+    const rest_bg = k.ink(if (k.dark) 0.055 else 0.042);
+    const base = ui.div(c).row().grow().w(0).h(29).px(8).gap(8).itemsCenter().rounded(8).clip();
+    const lh = kit.listenerHover(&a.view.hovers, base.bg(if (a.view.filter_menu) k.hover else rest_bg), k.hover);
+    const t = lh.div;
+    defer t.end();
+    if (t.clicked()) if (a.view.filter_menu) menus.close(a) else menus.openProjects(a);
+    if (c.rects.get(c.node(t.index).id)) |r| a.view.filter_anchor = r;
+    const color = if (lh.hovered or a.view.filter_menu) k.text else k.text.alpha(0.88);
+    const room = @max(0, widthOf(a) - 16 - 16 - 16 - 8);
+    if (a.findSpace(a.view.filter)) |s| {
+        const icon_slot = ui.div(c).row().size(16, 16).center();
+        badge(c, a, k, s.id, lh.hovered or a.view.filter_menu);
+        icon_slot.end();
+        const tag = c.print("@ {s}", .{a.deviceName(s.device_id)});
+        const off = !menus.online(a, s.device_id, a.nowMs());
+        const tag_w = @min(c.text.width(tag, .{ .size = 10 }), room / 2);
+        const name_w = @min(c.text.width(s.name, .{ .size = 13, .weight = theme.ui_medium_weight }), @max(0, room - tag_w - 6 - (if (off) @as(f32, 18) else 0)));
+        const box = ui.div(c).row().grow().w(0).gap(6).itemsCenter().clip();
+        defer box.end();
+        kit.fadeText(c, s.name, .{ .size = 13, .weight = theme.ui_medium_weight, .color = color }, name_w);
+        kit.fadeText(c, tag, .{ .size = 10, .color = k.muted.alpha(0.45) }, tag_w);
+        if (off) icons.icon(c, .@"wifi-off", 12, k.warning.alpha(0.8), 0);
+    } else {
+        icons.icon(c, .folder, 15, if (lh.hovered or a.view.filter_menu) k.text.alpha(0.85) else k.muted.alpha(0.85), 16);
+        const label = ui.div(c).row().grow().w(0).clip();
+        defer label.end();
+        kit.fadeText(c, "All projects", .{ .size = 13, .weight = theme.ui_medium_weight, .color = color }, room);
     }
-    // The magnifier, accent while the search is open (`render_sidebar_search_trigger`).
-    const searching = a.view.search.open;
-    if (kit.iconButton(c, k, .magnifer, .{ .size = 29, .radius = 8, .icon = 16, .color = if (searching) k.accent else k.muted, .on = searching }))
-        @import("view_sidebar_search.zig").toggle(a);
-    const more = tip.on(ui.div(c).row(), k, .{ .text = "Sidebar view options", .delay = tip.quick });
-    defer more.end();
-    if (kit.iconButton(c, k, .@"more-horizontal", .{ .size = 29, .radius = 8, .icon = 16, .color = k.muted.alpha(0.6), .on = a.view.more_menu }))
-        if (a.view.more_menu) menus.close(a) else menus.openView(a);
-    if (c.rects.get(c.node(more.index).id)) |r| a.view.more_anchor = r;
 }
 
 /// The rows the lists show: top-level chats in a project that still
@@ -121,6 +334,8 @@ fn filterRow(c: *ui.Context, a: *App, k: theme.Colors) void {
 /// shows its own results in their place: view_sidebar_search.zig.)
 fn listed(a: *const App, chat: workspace.Chat) bool {
     if (chat.parent_chat_id != null) return false;
+    // A bot's standing chat is its row in the Bots group, not a second one here.
+    if (a.bots.ofChat(chat.id) != null) return false;
     if (chat.space_id) |sid| if (a.findSpace(sid) == null) return false;
     // A filter on a project that's gone shows them all, as its label does.
     if (a.view.filter) |f| if (a.findSpace(f) != null) if (chat.space_id == null or !std.mem.eql(u8, chat.space_id.?, f)) return false;
@@ -130,7 +345,9 @@ fn listed(a: *const App, chat: workspace.Chat) bool {
 /// The pins this list shows, in pin order: listed and not archived.
 pub fn visiblePins(a: *const App, gpa: std.mem.Allocator) []const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
-    for (a.settings.pins.items) |id| if (a.findChat(id)) |ch| if (!ch.archived and listed(a, ch)) out.append(gpa, id) catch {};
+    const last_activity = a.settings.lastActivity();
+    const now = a.nowMs();
+    for (a.settings.pins.items) |id| if (a.findChat(id)) |ch| if (!ch.archived and listed(a, ch) and last_activity.matches(ch.timeMs(), now)) out.append(gpa, id) catch {};
     return out.items;
 }
 
@@ -140,7 +357,7 @@ fn pinned(pins: []const []const u8, id: []const u8) ?usize {
 }
 
 /// A row's slot: its 29 points and the 2 between rows.
-pub const row_slot: f32 = 29 + 2;
+pub const row_slot: f32 = 38 + 2;
 
 const Window = struct {
     top: f32,
@@ -174,10 +391,71 @@ const Rows = struct {
     }
 };
 
+const ChatItem = struct {
+    listed: bool = false,
+    pinned: bool = false,
+    row_h: f32 = 30,
+    group_key: []const u8 = "",
+};
+
+fn prepareItems(c: *ui.Context, a: *App, pins: []const []const u8, grouped: bool, by: Grouping) []const ChatItem {
+    const gpa = c.alloc();
+    const out = gpa.alloc(ChatItem, a.chats.items.len) catch return &.{};
+    const filter_space: ?[]const u8 = if (a.view.filter) |f| (if (a.findSpace(f) != null) f else null) else null;
+    const last_activity = a.settings.lastActivity();
+    const l = Look.of(a);
+    const show_updated = a.settings.get(.sidebar_show_updated);
+    var session_map: std.StringHashMapUnmanaged(workspace.Session) = .empty;
+    if ((grouped or last_activity != .all) and a.sessions.items.len > 8) {
+        session_map.ensureTotalCapacity(gpa, @intCast(a.sessions.items.len)) catch {};
+        for (a.sessions.items) |s| session_map.put(gpa, s.chat_id, s) catch {};
+    }
+    for (a.chats.items, 0..) |ch, idx| {
+        // A subagent's chat, or a bot's standing chat (its row is in the
+        // Bots group): not a session row.
+        if (ch.parent_chat_id != null or a.bots.ofChat(ch.id) != null) {
+            out[idx] = .{};
+            continue;
+        }
+        if (ch.space_id) |sid| if (a.findSpace(sid) == null) {
+            out[idx] = .{};
+            continue;
+        };
+        if (filter_space) |f| if (ch.space_id == null or !std.mem.eql(u8, ch.space_id.?, f)) {
+            out[idx] = .{};
+            continue;
+        };
+        const row_h = contextHeight(l.label, l.branch and ch.branch != null, show_updated, l.harness or l.icon);
+        const is_pinned = !ch.archived and pinned(pins, ch.id) != null;
+        if (!ch.archived and !is_pinned and last_activity != .all) {
+            const sess = if (a.sessions.items.len > 8) session_map.get(ch.id) else workspace.sessionOf(a.sessions.items, ch.id);
+            const mark = workspace.markOf(ch, sess, by.now);
+            if (mark != .working and mark != .awaiting_input and !last_activity.matches(ch.timeMs(), by.now)) {
+                out[idx] = .{};
+                continue;
+            }
+        }
+        var gkey: []const u8 = "";
+        if (grouped and !ch.archived and !is_pinned) {
+            const sess = if (a.sessions.items.len > 8) session_map.get(ch.id) else workspace.sessionOf(a.sessions.items, ch.id);
+            const mark = workspace.markOf(ch, sess, by.now);
+            gkey = if (mark == .awaiting_input or mark == .errored)
+                "needs"
+            else switch (by.org) {
+                .by_status => workspace.statusGroup(mark, ch.timeMs(), by.now, by.offset).key(),
+                .by_project => ch.space_id orelse c.print("home:{s}", .{ch.device_id orelse ""}),
+                else => ch.device_id orelse "",
+            };
+        }
+        out[idx] = .{ .listed = true, .pinned = is_pinned, .row_h = row_h, .group_key = gkey };
+    }
+    return out;
+}
+
 // The input offset may overshoot the end before layout clamps it. Bound
 // the build window against the complete content, not the previous frame's
 // rows; otherwise an immediate jump to the bottom can produce a blank frame.
-fn contentHeight(c: *ui.Context, a: *App, pins: []const []const u8) f32 {
+fn contentHeight(c: *ui.Context, a: *App, pins: []const []const u8, items: []const ChatItem, grouped: bool, by: Grouping) f32 {
     var height: f32 = 4;
     if (pins.len > 0) {
         height += 30;
@@ -187,34 +465,33 @@ fn contentHeight(c: *ui.Context, a: *App, pins: []const []const u8) f32 {
                 height += rowHeight(a, ch) + 2;
             };
         }
-        if (a.settings.organization() == .in_one_list) height += 12;
+        if (!grouped) height += 12;
     }
     var active: usize = 0;
     var archived: usize = 0;
     var archive_height: f32 = 0;
-    var keys: std.StringHashMapUnmanaged(void) = .empty;
-    const grouped = a.settings.organization() != .in_one_list;
-    for (a.chats.items) |ch| if (listed(a, ch)) {
+    var keys: std.StringHashMapUnmanaged(bool) = .empty;
+    for (a.chats.items, items) |ch, it| if (it.listed) {
         if (ch.archived) {
-            if (archived < a.view.archived_limit) archive_height += rowHeight(a, ch) + 2;
+            if (archived < a.view.archived_limit) archive_height += it.row_h + 2;
             archived += 1;
-        } else if (pinned(pins, ch.id) == null) {
+        } else if (!it.pinned) {
             active += 1;
             if (grouped) {
-                const project = a.settings.organization() == .by_project;
-                const key = groupKey(c, ch, project);
-                const open = a.view.groupOpen(c.print("{s}:{s}", .{ if (project) "project" else "device", key }), true);
+                const key = it.group_key;
                 const entry = keys.getOrPut(c.alloc(), key) catch continue;
-                if (!entry.found_existing) height += if (open) @as(f32, 44) else 42;
-                if (open) height += rowHeight(a, ch) + 2;
-            } else if (a.view.sessions_open) height += rowHeight(a, ch) + 2;
+                if (!entry.found_existing) {
+                    const open = a.view.groupOpen(c.print("{s}:{s}", .{ by.prefix(), key }), true);
+                    entry.value_ptr.* = open;
+                    height += if (open) @as(f32, 46) else 44;
+                }
+                if (entry.value_ptr.*) height += it.row_h + 2;
+            } else if (a.view.sessions_open) height += it.row_h + 2;
         }
     };
-    if (!grouped) {
-        if (active > 0) {
-            height += 30 + (if (a.view.sessions_open) @as(f32, 2) else 0);
-        } else if (pins.len == 0) height += 8 + c.text.lineHeight(.{ .size = 12 });
-    }
+    if (active == 0 and pins.len == 0) {
+        height += 8 + c.text.lineHeight(.{ .size = 12 });
+    } else if (!grouped and active > 0) height += 30 + (if (a.view.sessions_open) @as(f32, 2) else 0);
     if (archived > 0 and a.settings.get(.sidebar_show_archived)) {
         height += 6 + 30;
         if (a.view.archived_open) {
@@ -233,33 +510,63 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
     // between builds before layout. A window-height bound also covers the
     // first layout and a resize without relying on stale viewport rectangles.
     const offset = c.scroll.get(c.node(scroll).id) orelse 0;
-    var window: Window = .{ .top = @max(0, offset - 128), .bottom = offset + c.size.h + 128, .y = 4 };
+    const overscan: f32 = if (a.view.sidebar_tween != null) 0 else 128;
+    var window: Window = .{ .top = @max(0, offset - overscan), .bottom = offset + c.size.h + overscan, .y = 4 };
     const drag = @import("view_drag.zig");
     const moving = drag.moving(a);
     window.eager = moving != null;
     const target = drag.sidebarTarget(a);
     const pins = visiblePins(a, c.alloc());
+    const by = Grouping.of(a);
+    const grouped = by.org != .in_one_list;
+    const items = prepareItems(c, a, pins, grouped, by);
     if (!window.eager) {
-        const bounded = @min(offset, @max(0, contentHeight(c, a, pins) - c.size.h));
-        window.top = @max(0, bounded - 128);
-        window.bottom = bounded + c.size.h + 128;
+        const bounded = @min(offset, @max(0, contentHeight(c, a, pins, items, grouped, by) - c.size.h));
+        window.top = @max(0, bounded - overscan);
+        window.bottom = bounded + c.size.h + overscan;
     }
     const source_pin = if (moving) |id| pinned(pins, id) else null;
     var active: usize = 0;
     var archived: usize = 0;
-    for (a.chats.items) |ch| if (listed(a, ch)) {
-        if (ch.archived) archived += 1 else if (pinned(pins, ch.id) == null) active += 1;
+    var regular_full_h: f32 = 0;
+    var archived_full_h: f32 = 0;
+    var archived_counted: usize = 0;
+    for (a.chats.items, items) |ch, it| if (it.listed) {
+        if (ch.archived) {
+            if (archived_counted < a.view.archived_limit) archived_full_h += it.row_h + 2;
+            archived_counted += 1;
+            archived += 1;
+        } else if (!it.pinned) {
+            active += 1;
+            regular_full_h += it.row_h + 2;
+        }
     };
+    if (regular_full_h >= 2) regular_full_h -= 2;
+    if (archived_full_h >= 2) archived_full_h -= 2;
+    if (archived > a.view.archived_limit) archived_full_h += (if (a.settings.get(.sidebar_compact)) @as(f32, 29) else 36) + 2;
     // Pinned, while there are pins or a session is being dragged.
     if (pins.len > 0 or moving != null) {
         a.view.pin_header = rectOf(c, sectionAt(c, k, "Pinned", pins.len, &a.view.pinned_open));
+        const pin_disc = trackDisclosure(c, a, "pinned", a.view.pinned_open);
         window.y += 30;
-        if (a.view.pinned_open) {
+        if (pin_disc.visible(a.view.pinned_open)) {
             window.y += 2;
+            var pin_full_h: f32 = 6;
+            for (pins) |pid| if (a.findChat(pid)) |pch| {
+                pin_full_h += rowHeight(a, pch) + 2;
+            };
+            if (pins.len > 0 and pin_full_h >= 2) pin_full_h -= 2;
+            const animating = pin_disc.animating and moving == null;
+            const clip_box = if (animating)
+                ui.div(c).column().wFull().h(pin_full_h * pin_disc.reveal).clip().opacity(@import("motion_rules.zig").disclosureOpacity(pin_disc.reveal))
+            else
+                null;
+            defer if (clip_box) |cb| cb.end();
             var rows: Rows = .{};
-            const body = ui.div(c).column().wFull().pt(2).pb(4).gap(2);
+            var body = ui.div(c).column().wFull().pt(2).pb(4).gap(2);
+            if (animating) body = body.offset(0, -3 * (1 - pin_disc.reveal));
             defer body.end();
-            a.view.pin_rows = rectOf(c, body);
+            a.view.pin_rows = if (a.view.pinned_open) rectOf(c, body) else null;
             const gap_at: ?usize = if (target) |t| switch (t) {
                 .pinned => |i| if (source_pin == null) i else null,
                 .regular => null,
@@ -287,7 +594,7 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
             if (pins.len == 0 and gap_at == null) _ = c.leaf(.{ .height = .{ .px = 0 } }, .none, null);
         } else a.view.pin_rows = null;
         // Groups bring their own 12 above them.
-        if (a.settings.organization() == .in_one_list) {
+        if (!grouped) {
             _ = c.leaf(.{ .height = .{ .px = 12 - 2 } }, .none, null);
             window.y += 12;
         }
@@ -295,8 +602,16 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
         a.view.pin_header = null;
         a.view.pin_rows = null;
     }
-    if (a.settings.organization() != .in_one_list) {
-        groups(c, a, k, pins, moving, &window);
+    if (grouped) {
+        // Grouped or not, an empty list says so.
+        if (active == 0 and pins.len == 0 and moving == null) {
+            a.view.sessions_header = null;
+            a.view.session_rows = null;
+            const empty = ui.div(c).row().px(8).pb(8);
+            defer empty.end();
+            ui.text(c, "No sessions yet", .{ .size = 12, .line_height = empty_line, .color = k.faint });
+            window.y += 8 + empty_line;
+        } else groups(c, a, k, items, by, moving, &window);
     } else regular: {
         // GPUI has no Sessions disclosure when the regular list is empty.
         // A drag still needs that section as its drop target.
@@ -306,30 +621,38 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
             if (pins.len == 0) {
                 const empty = ui.div(c).row().px(8).pb(8);
                 defer empty.end();
-                ui.text(c, "No sessions yet", .{ .size = 12, .color = k.faint });
-                window.y += 8 + c.text.lineHeight(.{ .size = 12 });
+                ui.text(c, "No sessions yet", .{ .size = 12, .line_height = empty_line, .color = k.faint });
+                window.y += 8 + empty_line;
             }
             break :regular;
         }
         a.view.sessions_header = rectOf(c, sectionAt(c, k, "Sessions", active, &a.view.sessions_open));
+        const sess_disc = trackDisclosure(c, a, "sessions", a.view.sessions_open);
         window.y += 30;
-        if (!a.view.sessions_open) {
+        if (!sess_disc.visible(a.view.sessions_open)) {
             a.view.session_rows = null;
             break :regular;
         }
         // SIDEBAR_DISCLOSURE_BODY_INSET: 4 under the header, the list's 2 twice.
         _ = c.leaf(.{ .height = .{ .px = 0 } }, .none, null);
-        const body = ui.div(c).column().wFull().gap(2);
+        const animating = sess_disc.animating and moving == null;
+        const clip_box = if (animating)
+            ui.div(c).column().wFull().h(regular_full_h * sess_disc.reveal).clip().opacity(@import("motion_rules.zig").disclosureOpacity(sess_disc.reveal))
+        else
+            null;
+        defer if (clip_box) |cb| cb.end();
+        var body = ui.div(c).column().wFull().gap(2);
+        if (animating) body = body.offset(0, -3 * (1 - sess_disc.reveal));
         defer body.end();
-        a.view.session_rows = rectOf(c, body);
+        a.view.session_rows = if (a.view.sessions_open) rectOf(c, body) else null;
         window.y += 2;
         var rows: Rows = .{};
         const unpinning = source_pin != null and target != null and target.? == .regular;
-        for (a.chats.items) |ch| if (!ch.archived and listed(a, ch) and pinned(pins, ch.id) == null) {
+        for (a.chats.items, items) |ch, it| if (it.listed and !ch.archived and !it.pinned) {
             const held = moving != null and std.mem.eql(u8, moving.?, ch.id);
             // Dragged to the pins, a session's row leaves the list.
             if (held and target != null and target.? == .pinned) continue;
-            if (rows.include(c, &window, rowHeight(a, ch))) slotRow(c, a, k, ch, 0, held);
+            if (rows.include(c, &window, it.row_h)) slotRow(c, a, k, ch, 0, held);
         };
         rows.flush(c);
         // An empty body still has its outer gap.
@@ -343,7 +666,7 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
         } else if (active == 0 and pins.len == 0) {
             const e = ui.div(c).row().px(8).py(6);
             defer e.end();
-            ui.text(c, "No sessions yet", .{ .size = 12, .color = k.faint });
+            ui.text(c, "No sessions yet", .{ .size = 12, .line_height = empty_line, .color = k.faint });
         }
     }
     // Show › Archived off: no shelf.
@@ -351,15 +674,28 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
     // 6 under the list above: its 4, and the gap.
     _ = c.leaf(.{ .height = .{ .px = 4 } }, .none, null);
     window.y += 6 + 30;
-    if (section(c, k, "Archived", archived, &a.view.archived_open)) {
+    _ = section(c, k, "Archived", archived, &a.view.archived_open);
+    const arch_disc = trackDisclosure(c, a, "archived", a.view.archived_open);
+    if (arch_disc.visible(a.view.archived_open)) {
         // SIDEBAR_DISCLOSURE_BODY_INSET: 4 under the header, the list's 2 twice.
         _ = c.leaf(.{ .height = .{ .px = 0 } }, .none, null);
+        const animating = arch_disc.animating and moving == null;
+        const clip_box = if (animating)
+            ui.div(c).column().wFull().h(archived_full_h * arch_disc.reveal).clip().opacity(@import("motion_rules.zig").disclosureOpacity(arch_disc.reveal))
+        else
+            null;
+        defer if (clip_box) |cb| cb.end();
+        const body = if (animating)
+            ui.div(c).column().wFull().gap(2).offset(0, -3 * (1 - arch_disc.reveal))
+        else
+            null;
+        defer if (body) |b| b.end();
         window.y += 2;
         var rows: Rows = .{};
         var shown: usize = 0;
-        for (a.chats.items) |ch| if (ch.archived and listed(a, ch)) {
+        for (a.chats.items, items) |ch, it| if (it.listed and ch.archived) {
             if (shown == a.view.archived_limit) break;
-            if (rows.include(c, &window, rowHeight(a, ch))) sessionRow(c, a, k, ch);
+            if (rows.include(c, &window, it.row_h)) sessionRow(c, a, k, ch);
             shown += 1;
         };
         rows.flush(c);
@@ -376,21 +712,33 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
 }
 
-/// By project or by device (`sidebar_organization`): a disclosure for
-/// each, in the order their newest sessions come; this device's first.
-fn groups(c: *ui.Context, a: *App, k: theme.Colors, pins: []const []const u8, moving: ?[]const u8, window: *Window) void {
-    const by_project = a.settings.organization() == .by_project;
+/// By status, by project or by device (`sidebar_organization`): a
+/// disclosure for each, in the order their newest sessions come; this
+/// device's first, and "Needs you" above "Today" above "Earlier".
+fn groups(c: *ui.Context, a: *App, k: theme.Colors, items: []const ChatItem, by: Grouping, moving: ?[]const u8, window: *Window) void {
+    const by_project = by.org == .by_project;
     const gpa = c.alloc();
     var keys: std.ArrayList([]const u8) = .empty;
-    for (a.chats.items) |ch| if (!ch.archived and listed(a, ch) and pinned(pins, ch.id) == null) {
-        const key = groupKey(c, ch, by_project);
+    for (a.chats.items, items) |ch, it| if (it.listed and !ch.archived and !it.pinned) {
+        const key = it.group_key;
         for (keys.items) |have| {
             if (std.mem.eql(u8, have, key)) break;
         } else keys.append(gpa, key) catch {};
     };
-    if (!by_project) if (a.device_id) |me| for (keys.items, 0..) |key, i| if (std.mem.eql(u8, key, me)) {
+    if (by.org == .by_status) std.mem.sort([]const u8, keys.items, {}, struct {
+        fn lt(_: void, x: []const u8, y: []const u8) bool {
+            return @backingInt(workspace.StatusGroup.fromKey(x).?) < @backingInt(workspace.StatusGroup.fromKey(y).?);
+        }
+    }.lt);
+    if (by.org == .by_device) if (a.device_id) |me| for (keys.items, 0..) |key, i| if (std.mem.eql(u8, key, me)) {
         std.mem.copyBackwards([]const u8, keys.items[1 .. i + 1], keys.items[0..i]);
         keys.items[0] = me;
+        break;
+    };
+    // Attention escapes project/device grouping and always comes first.
+    for (keys.items, 0..) |key, i| if (std.mem.eql(u8, key, "needs")) {
+        std.mem.copyBackwards([]const u8, keys.items[1 .. i + 1], keys.items[0..i]);
+        keys.items[0] = key;
         break;
     };
     a.view.sessions_header = null;
@@ -399,51 +747,164 @@ fn groups(c: *ui.Context, a: *App, k: theme.Colors, pins: []const []const u8, mo
     for (keys.items) |key| {
         var count: usize = 0;
         var height: f32 = 0;
-        for (a.chats.items) |ch| if (!ch.archived and listed(a, ch) and pinned(pins, ch.id) == null and std.mem.eql(u8, groupKey(c, ch, by_project), key)) {
+        for (a.chats.items, items) |ch, it| if (it.listed and !ch.archived and !it.pinned and std.mem.eql(u8, it.group_key, key)) {
             count += 1;
-            height += rowHeight(a, ch) + 2;
+            height += it.row_h + 2;
         };
-        const collapse = c.print("{s}:{s}", .{ if (by_project) "project" else "device", key });
-        const open = a.view.groupOpen(collapse, true);
-        const extent: f32 = 12 + 28 + (if (open) 4 + @max(0, height - 2) else @as(f32, 0));
+        const collapse = c.print("{s}:{s}", .{ by.prefix(), key });
+        var open = a.view.groupOpen(collapse, true);
+        const extent: f32 = 14 + 28 + (if (open) 4 + @max(0, height - 2) else @as(f32, 0));
         const start = window.y;
         if (!omitted.include(c, window, extent)) continue;
         ui.key(c, c.print("group-{s}", .{key}));
         // Keep the existing group/body hierarchy and ID-based keys.
-        const box = ui.div(c).column().wFull().pt(12);
+        const box = ui.div(c).column().wFull().pt(14);
         defer box.end();
-        const label = if (by_project)
+        const label = if (std.mem.eql(u8, key, "needs"))
+            "Needs you"
+        else if (by.org == .by_status)
+            workspace.StatusGroup.fromKey(key).?.label()
+        else if (by_project)
             (if (std.mem.startsWith(u8, key, "home:")) "~" else if (a.findSpace(key)) |sp| sp.name else "?")
         else
             a.deviceName(key);
         {
             const h = ui.div(c).row().wFull().h(28).px(8).gap(8).itemsCenter();
             defer h.end();
-            if (h.clicked()) a.view.toggleGroup(a.gpa, collapse, true);
-            const color = k.muted.alpha(0.5);
-            ui.text(c, if (open) label else c.print("{s} ({d})", .{ label, count }), .{ .size = 12, .weight = .medium, .color = color });
+            const color = if (k.is_harp) k.muted else k.muted.alpha(0.5);
+            ui.text(c, if (open) label else c.print("{s} ({d})", .{ label, count }), .{ .size = 11.5, .weight = theme.ui_medium_weight, .color = color });
             ui.spacer(c);
             icons.icon(c, if (open) .@"alt-arrow-down" else .@"alt-arrow-right", 12, color, 0);
+            var create = false;
+            if (by_project and !std.mem.startsWith(u8, key, "home:") and !std.mem.eql(u8, key, "needs")) {
+                ui.key(c, "project-group-new-session");
+                const add = tip.on(ui.div(c).size(20, 20).center().rounded(4).hover(k.hover), k, .{ .text = "New session in this project" });
+                defer add.end();
+                if (h.hovered()) icons.icon(c, .plus, 13, k.muted, 0);
+                create = add.clicked();
+            }
+            if (create) {
+                a.newWorkspaceSession();
+                a.select(null, key);
+                a.new_no_project = false;
+            } else if (h.clicked()) {
+                a.view.toggleGroup(a.gpa, collapse, true);
+                open = a.view.groupOpen(collapse, true);
+            }
         }
-        if (!open) continue;
-        const body = ui.div(c).column().wFull().pt(4).gap(2);
+        const grp_disc = trackDisclosure(c, a, collapse, open);
+        if (!grp_disc.visible(open)) continue;
+        const full_grp_h = 4 + @max(0, height - 2);
+        const grp_anim = grp_disc.animating and moving == null;
+        const clip_box = if (grp_anim)
+            ui.div(c).column().wFull().h(full_grp_h * grp_disc.reveal).clip().opacity(@import("motion_rules.zig").disclosureOpacity(grp_disc.reveal))
+        else
+            null;
+        defer if (clip_box) |cb| cb.end();
+        var body = ui.div(c).column().wFull().pt(4).gap(2);
+        if (grp_anim) body = body.offset(0, -3 * (1 - grp_disc.reveal));
         defer body.end();
         var inside = window.*;
-        inside.y = start + 12 + 28 + 4;
+        inside.y = start + 14 + 28 + 4;
         var rows: Rows = .{};
-        for (a.chats.items) |ch| if (!ch.archived and listed(a, ch) and pinned(pins, ch.id) == null and std.mem.eql(u8, groupKey(c, ch, by_project), key)) {
+        for (a.chats.items, items) |ch, it| if (it.listed and !ch.archived and !it.pinned and std.mem.eql(u8, it.group_key, key)) {
             const held = moving != null and std.mem.eql(u8, moving.?, ch.id);
-            if (rows.include(c, &inside, rowHeight(a, ch))) slotRow(c, a, k, ch, 0, held);
+            if (rows.include(c, &inside, it.row_h)) slotRow(c, a, k, ch, 0, held);
         };
         rows.flush(c);
     }
     omitted.flush(c);
 }
 
-/// A session's group: its project (or its device's home), or its device.
-fn groupKey(c: *ui.Context, ch: workspace.Chat, by_project: bool) []const u8 {
-    if (by_project) return ch.space_id orelse c.print("home:{s}", .{ch.device_id orelse ""});
-    return ch.device_id orelse "";
+/// Active sessions in the exact order the sidebar renders them (Pinned, then
+/// grouped or regular non-archived sessions). Used by Jump to session 1..9
+/// and Next/Previous session when fewer than two tabs are open.
+pub fn visibleSessionIds(c: *ui.Context, a: *App) []const []const u8 {
+    const gpa = c.alloc();
+    var out: std.ArrayList([]const u8) = .empty;
+    const pins = visiblePins(a, gpa);
+    const by = Grouping.of(a);
+    const grouped = by.org != .in_one_list;
+    const items = prepareItems(c, a, pins, grouped, by);
+    if (pins.len > 0 and a.view.pinned_open) {
+        for (pins) |id| {
+            if (a.findChat(id) != null) out.append(gpa, id) catch {};
+        }
+    }
+    if (grouped) {
+        var keys: std.ArrayList([]const u8) = .empty;
+        for (a.chats.items, items) |ch, it| if (it.listed and !ch.archived and !it.pinned) {
+            const key = it.group_key;
+            for (keys.items) |have| {
+                if (std.mem.eql(u8, have, key)) break;
+            } else keys.append(gpa, key) catch {};
+        };
+        if (by.org == .by_status) std.mem.sort([]const u8, keys.items, {}, struct {
+            fn lt(_: void, x: []const u8, y: []const u8) bool {
+                return @backingInt(workspace.StatusGroup.fromKey(x).?) < @backingInt(workspace.StatusGroup.fromKey(y).?);
+            }
+        }.lt);
+        if (by.org == .by_device) if (a.device_id) |me| for (keys.items, 0..) |key, i| if (std.mem.eql(u8, key, me)) {
+            std.mem.copyBackwards([]const u8, keys.items[1 .. i + 1], keys.items[0..i]);
+            keys.items[0] = me;
+            break;
+        };
+        for (keys.items, 0..) |key, i| if (std.mem.eql(u8, key, "needs")) {
+            std.mem.copyBackwards([]const u8, keys.items[1 .. i + 1], keys.items[0..i]);
+            keys.items[0] = key;
+            break;
+        };
+        for (keys.items) |key| {
+            const collapse = c.print("{s}:{s}", .{ by.prefix(), key });
+            if (!a.view.groupOpen(collapse, true)) continue;
+            for (a.chats.items, items) |ch, it| if (it.listed and !ch.archived and !it.pinned and std.mem.eql(u8, it.group_key, key)) {
+                out.append(gpa, ch.id) catch {};
+            };
+        }
+    } else if (a.view.sessions_open) {
+        for (a.chats.items, items) |ch, it| if (it.listed and !ch.archived and !it.pinned) {
+            out.append(gpa, ch.id) catch {};
+        };
+    }
+    return out.items;
+}
+
+/// How the lists group this frame: the organization, and for "By status"
+/// the clock and the local zone it reads "Today" by.
+const Grouping = struct {
+    org: @import("settings.zig").Organization,
+    now: i64 = 0,
+    offset: i64 = 0,
+
+    fn of(a: *App) Grouping {
+        const profile = a.settings.hierarchyProfile();
+        const org = if (profile.flat_session_list) .in_one_list else a.settings.organization();
+        const now = a.nowMs();
+        if (org != .by_status) return .{ .org = org, .now = now };
+        return .{ .org = org, .now = now, .offset = workspace.utcOffsetSeconds(now) };
+    }
+
+    /// The collapse key's prefix, as GPUI saves it.
+    fn prefix(g: Grouping) []const u8 {
+        return switch (g.org) {
+            .by_status => "status",
+            .by_project => "project",
+            .by_device => "device",
+            .in_one_list => "list",
+        };
+    }
+};
+
+/// A session's group: its status section, its project (or its device's
+/// home), or its device.
+fn groupKey(c: *ui.Context, a: *App, ch: workspace.Chat, by: Grouping) []const u8 {
+    const mark = workspace.markOf(ch, workspace.sessionOf(a.sessions.items, ch.id), by.now);
+    if (mark == .awaiting_input or mark == .errored) return "needs";
+    return switch (by.org) {
+        .by_status => workspace.statusGroup(workspace.markOf(ch, workspace.sessionOf(a.sessions.items, ch.id), by.now), ch.timeMs(), by.now, by.offset).key(),
+        .by_project => ch.space_id orelse c.print("home:{s}", .{ch.device_id orelse ""}),
+        else => ch.device_id orelse "",
+    };
 }
 
 /// A row, moved `dy` while rows give way; the held one keeps its place
@@ -460,13 +921,46 @@ fn rectOf(c: *ui.Context, d: ui.Div) ?ui.Rect {
     return c.rects.get(c.node(d.index).id);
 }
 
+const disclosure_duration: f64 = 0.18;
+
+const DisclosureState = struct {
+    reveal: f32,
+    animating: bool,
+
+    fn visible(d: DisclosureState, open: bool) bool {
+        return open or d.reveal > 0.005;
+    }
+};
+
+fn trackDisclosure(c: *ui.Context, a: *App, key: []const u8, open: bool) DisclosureState {
+    const target: f32 = if (open) 1 else 0;
+    if (a.view.disclosures.getPtr(key)) |tw| {
+        if (@abs(tw.to - target) > 0.001) {
+            const cur = tw.sample(c.time, c.reduced_motion);
+            tw.* = .{ .from = cur, .to = target, .start = c.time, .duration = disclosure_duration };
+        }
+        const anim = tw.animating(c.time, c.reduced_motion);
+        if (anim) c.animationFrame();
+        return .{ .reveal = tw.sample(c.time, c.reduced_motion), .animating = anim };
+    }
+    if (a.gpa.dupe(u8, key)) |owned| {
+        a.view.disclosures.put(a.gpa, owned, .{
+            .from = target,
+            .to = target,
+            .start = c.time - 1.0,
+            .duration = disclosure_duration,
+        }) catch a.gpa.free(owned);
+    } else |_| {}
+    return .{ .reveal = target, .animating = false };
+}
+
 /// `section` that hands back its header, for its place as a drop target.
 fn sectionAt(c: *ui.Context, k: theme.Colors, label: []const u8, count: usize, open: *bool) ui.Div {
     ui.key(c, label);
-    const h = ui.div(c).row().wFull().h(28).px(8).gap(8).itemsCenter().rounded(8);
+    const h = ui.div(c).row().wFull().h(28).px(8).gap(8).itemsCenter().rounded(8).hover(k.hover.alpha(0.35));
     if (h.clicked()) open.* = !open.*;
-    const color = k.muted.alpha(0.5);
-    ui.text(c, if (open.*) label else c.print("{s} ({d})", .{ label, count }), .{ .size = 12, .weight = .medium, .color = color });
+    const color = if (k.is_harp) k.muted else k.muted.alpha(0.55);
+    ui.text(c, if (open.*) label else c.print("{s} ({d})", .{ label, count }), .{ .size = 11.5, .weight = theme.ui_medium_weight, .color = color });
     ui.spacer(c);
     icons.icon(c, if (open.*) .@"alt-arrow-down" else .@"alt-arrow-right", 12, color, 0);
     h.end();
@@ -476,11 +970,11 @@ fn sectionAt(c: *ui.Context, k: theme.Colors, label: []const u8, count: usize, o
 /// A disclosure header ("Sessions", "Archived (12)" when shut); true while open.
 fn section(c: *ui.Context, k: theme.Colors, label: []const u8, count: usize, open: *bool) bool {
     ui.key(c, label);
-    const h = ui.div(c).row().wFull().h(28).px(8).gap(8).itemsCenter().rounded(8);
+    const h = ui.div(c).row().wFull().h(28).px(8).gap(8).itemsCenter().rounded(8).hover(k.hover.alpha(0.35));
     defer h.end();
     if (h.clicked()) open.* = !open.*;
-    const color = k.muted.alpha(0.5);
-    ui.text(c, if (open.*) label else c.print("{s} ({d})", .{ label, count }), .{ .size = 12, .weight = .medium, .color = color });
+    const color = if (k.is_harp) k.muted else k.muted.alpha(0.55);
+    ui.text(c, if (open.*) label else c.print("{s} ({d})", .{ label, count }), .{ .size = 11.5, .weight = theme.ui_medium_weight, .color = color });
     ui.spacer(c);
     icons.icon(c, if (open.*) .@"alt-arrow-down" else .@"alt-arrow-right", 12, color, 0);
     return open.*;
@@ -496,12 +990,13 @@ const Look = struct {
 
     fn of(a: *const App) Look {
         const s = &a.settings;
+        const tech = s.hierarchyProfile().shows_row_tech_badges;
         return .{
             .compact = s.get(.sidebar_compact),
             .harness = s.get(.sidebar_show_harness),
             .icon = s.get(.sidebar_show_project_icon),
-            .label = s.get(.sidebar_show_project_label),
-            .branch = s.get(.sidebar_show_branch),
+            .label = tech and s.get(.sidebar_show_project_label),
+            .branch = tech and s.get(.sidebar_show_branch),
         };
     }
 
@@ -511,17 +1006,17 @@ const Look = struct {
     }
 };
 
-/// A row's height (`sidebar_row_height`): 29 compact; else 45 with its
-/// "project @ device" line, 16 more with its branch's.
+/// Desktop reserves a38px slot when context is enabled, even though its
+/// compact renderer keeps the marks, title and timestamp on one line.
 pub fn rowHeight(a: *const App, ch: workspace.Chat) f32 {
     const l = Look.of(a);
-    if (l.compact) return 29;
-    const branch = l.branch and ch.branch != null;
-    return (if (branch) @as(f32, 61) else 45) - (if (l.label) @as(f32, 0) else 16);
+    return contextHeight(l.label, l.branch and ch.branch != null, a.settings.get(.sidebar_show_updated), l.harness or l.icon);
 }
 
-/// A row as drawn while it's dragged: the same content, nothing to hover
-/// or click (`render_chat_row` with `preview`).
+pub fn contextHeight(project: bool, branch: bool, updated: bool, identity: bool) f32 {
+    return if (project or branch or updated or identity) 38 else 30;
+}
+
 pub fn rowPreview(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat) void {
     const l = Look.of(a);
     if (!l.compact) {
@@ -529,13 +1024,13 @@ pub fn rowPreview(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat) 
         defer r.end();
         return expandedLines(c, a, k, ch, l, false, false);
     }
-    const r = ui.div(c).row().wFull().h(29).px(8).pt(6).pb(5).gap(4).itemsCenter();
+    const r = ui.div(c).row().wFull().h(rowHeight(a, ch)).px(8).pt(6).pb(5).gap(4).itemsCenter();
     defer r.end();
     const now = a.nowMs();
     statusSlot(c, k, workspace.markOf(ch, workspace.sessionOf(a.sessions.items, ch.id), now));
     marks(c, a, k, ch, l, false);
     const time = rules.relativeTime(c.alloc().alloc(u8, 16) catch &.{}, now, ch.timeMs());
-    const title_w = width - 16 - 16 - l.marksW() - 4 - 6 - c.text.width(time, .{ .size = 11 });
+    const title_w = widthOf(a) - 16 - 16 - l.marksW() - 4 - 6 - c.text.width(time, .{ .size = 11 });
     {
         const t = ui.div(c).row().grow().w(0).clip();
         defer t.end();
@@ -574,6 +1069,7 @@ fn remote(a: *const App, ch: workspace.Chat) bool {
 fn folderLabel(c: *ui.Context, a: *const App, ch: workspace.Chat) []const u8 {
     const project = if (a.findSpace(ch.space_id)) |s| s.name else if (ch.space_id == null) "~" else "?";
     const dev = ch.device_id orelse return project;
+    if (a.device_id) |local| if (std.mem.eql(u8, local, dev)) return project;
     for (a.devices.items) |d| if (std.mem.eql(u8, d.id, dev)) return c.print("{s} @ {s}", .{ project, d.name });
     return project;
 }
@@ -581,7 +1077,7 @@ fn folderLabel(c: *ui.Context, a: *const App, ch: workspace.Chat) []const u8 {
 /// The expanded row's lines: "project @ device" with the status or time,
 /// the marks and title, then the branch.
 fn expandedLines(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, l: Look, lit: bool, hovered: bool) void {
-    const inner = width - 16 - 16;
+    const inner = widthOf(a) - 16 - 16;
     const subline = k.subline;
     var archive = false;
     if (l.label) {
@@ -619,7 +1115,7 @@ fn expandedLines(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, l
 }
 
 fn cornerWidth(c: *ui.Context, a: *const App, ch: workspace.Chat, hovered: bool) f32 {
-    const st: ui.TextStyle = .{ .size = 10, .weight = .medium };
+    const st: ui.TextStyle = .{ .size = 10, .weight = theme.ui_medium_weight };
     if (hovered) return 4 + 11 + 4 + c.text.width(if (ch.archived) "Unarchive" else "Archive", st);
     const word = statusWord(workspace.markOf(ch, workspace.sessionOf(a.sessions.items, ch.id), a.nowMs()));
     if (word) |w| return 6 + 4 + c.text.width(w, st);
@@ -670,10 +1166,10 @@ fn cornerIn(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, hovere
             .completed => icons.icon(c, .check, 11, color, 0),
             else => kit.dot(c, 6, color),
         }
-        ui.text(c, word, .{ .size = 10, .weight = .medium, .color = color });
+        ui.text(c, word, .{ .size = 10, .weight = theme.ui_medium_weight, .color = color });
         return false;
     }
-    ui.text(c, rules.relativeTime(c.alloc().alloc(u8, 16) catch &.{}, now, ch.timeMs()), .{ .size = 10, .weight = .medium, .color = subline });
+    ui.text(c, rules.relativeTime(c.alloc().alloc(u8, 16) catch &.{}, now, ch.timeMs()), .{ .size = 10, .weight = theme.ui_medium_weight, .color = subline });
     return false;
 }
 
@@ -690,11 +1186,17 @@ pub const SearchRow = struct {
     inner: f32,
     branch: ?[]const u8 = null,
     pr: ?struct { @import("change_requests.zig").Summary, @import("change_requests.zig").Provenance } = null,
+    /// The sidebar search follows the lists' compact setting; the command
+    /// palette always shows the two-line row.
+    follow_compact: bool = false,
 };
 
 pub const SearchHit = struct { clicked: bool = false, pressed: bool = false };
 
 pub fn searchRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, o: SearchRow) SearchHit {
+    // The sidebar's own row (`render_chat_row`): compact, a result is one
+    // line like the lists', its title lit where it matches.
+    if (o.follow_compact and a.settings.get(.sidebar_compact)) return compactSearchRow(c, a, k, ch, o);
     const meta: f32 = if (o.pr != null) 16 else if (o.branch != null) 14 else 0;
     const h: f32 = if (meta == 0) 45 else 47 + meta;
     var r = ui.div(c).column().wFull().h(h).px(8).py(6).gap(2).rounded(10).clip();
@@ -748,13 +1250,85 @@ pub fn searchRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, o
     return .{ .clicked = r.clicked(), .pressed = it.pressed and c.input.pressed };
 }
 
+/// A compact result: the status, the marks, the title with the query lit,
+/// and how long ago (the archive control and menu under the pointer).
+fn compactSearchRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, o: SearchRow) SearchHit {
+    const l = Look.of(a);
+    var r = ui.div(c).row().wFull().h(rowHeight(a, ch)).px(8).pt(6).pb(5).gap(4).itemsCenter().rounded(8).clip();
+    r = if (o.lit) r.bg(k.selected) else r.hover(k.hover);
+    defer r.end();
+    const hovered = r.hovered() and !@import("view_drag.zig").dragging(a);
+    const now = a.nowMs();
+    statusSlot(c, k, workspace.markOf(ch, workspace.sessionOf(a.sessions.items, ch.id), now));
+    marks(c, a, k, ch, l, o.lit or hovered);
+    const time = rules.relativeTime(c.alloc().alloc(u8, 16) catch &.{}, now, ch.timeMs());
+    const time_w = if (hovered) 18 else c.text.width(time, .{ .size = 11 });
+    const far = remote(a, ch);
+    const title_w = o.inner - l.marksW() - 4 - 6 - time_w - (if (hovered or far) @as(f32, 22) else 0);
+    const tc = if (o.lit or hovered) k.text else if (ch.archived) k.text.alpha(0.55) else k.text.alpha(0.8);
+    {
+        const t = ui.div(c).row().grow().w(0).clip();
+        defer t.end();
+        kit.highlightText(c, k, chatLabel(ch), kit.style(c, 13, 17, .{ .color = tc }), @max(24, title_w), o.query);
+    }
+    var archive = false;
+    if (hovered) {
+        const b = ui.div(c).row().size(18, 18).center().rounded(4).hover(k.wash(0.10));
+        defer b.end();
+        if (b.clicked()) archive = true;
+        icons.icon(c, if (ch.archived) .@"archive-up-minimalistic" else .@"archive-minimalistic", 13, k.muted, 0);
+    } else if (far) {
+        const b = ui.div(c).row().size(18, 14).center();
+        defer b.end();
+        icons.icon(c, .@"remote-server", 13, k.muted.alpha(0.5), 0);
+    }
+    {
+        const tm = ui.div(c).row().pl(6);
+        defer tm.end();
+        if (!hovered) ui.text(c, time, .{ .size = 11, .color = k.subline });
+    }
+    if (archive) {
+        a.setArchived(ch.id, !ch.archived);
+        return .{};
+    }
+    const it = r.interaction();
+    return .{ .clicked = r.clicked(), .pressed = it.pressed and c.input.pressed };
+}
+
+/// The inline note (`sidebar-notice`): danger-edged, a click dismisses it;
+/// a timed one goes on its own.
+fn notice(c: *ui.Context, a: *App, k: theme.Colors) void {
+    const v = &a.view;
+    if (v.sidebar_notice_len == 0) return;
+    if (v.sidebar_notice_until) |t| {
+        if (c.time >= t) {
+            v.sidebar_notice_len = 0;
+            v.sidebar_notice_until = null;
+            return;
+        }
+        c.frameIn(@floatCast(t - c.time));
+    }
+    const box = ui.div(c).column().wFull().px(8).pb(8);
+    defer box.end();
+    ui.key(c, "sidebar-notice");
+    const s = ui.div(c).column().wFull().px(8).py(4).rounded(6).border(k.danger).borderW(1);
+    defer s.end();
+    const w = ui.div(c).column().w(widthOf(a) - 16 - 16 - 2);
+    defer w.end();
+    ui.text(c, v.sidebar_notice[0..v.sidebar_notice_len], .{ .size = 11, .wrap = true, .color = k.danger });
+    if (s.clicked()) {
+        v.sidebar_notice_len = 0;
+        v.sidebar_notice_until = null;
+    }
+}
+
 fn sessionRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat) void {
     ui.key(c, c.print("row-{s}", .{ch.id}));
     const selected = a.selected != null and std.mem.eql(u8, a.selected.?, ch.id);
     const l = Look.of(a);
     // 6 above an 18-point line, as `render_chat_row`'s `py(6)` column.
     var r = if (l.compact)
-        ui.div(c).row().wFull().h(29).px(8).pt(6).pb(5).gap(4).itemsCenter().rounded(8).clip()
+        ui.div(c).column().wFull().h(rowHeight(a, ch)).px(8).py(6).gap(2).rounded(8).clip()
     else
         ui.div(c).column().wFull().h(rowHeight(a, ch)).px(8).py(6).gap(2).rounded(8).clip();
     // Hovered as GPUI's row is (its `hover_listener`): by the pointer's
@@ -770,13 +1344,15 @@ fn sessionRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat) void
     if (!l.compact) {
         expandedLines(c, a, k, ch, l, selected or hovered, hovered);
     } else {
+        const line = ui.div(c).row().wFull().h(18).gap(4).itemsCenter();
+        defer line.end();
         statusSlot(c, k, workspace.markOf(ch, workspace.sessionOf(a.sessions.items, ch.id), now));
         marks(c, a, k, ch, l, selected or hovered);
         // In the frame's memory: the text is drawn after this returns.
         const time = rules.relativeTime(c.alloc().alloc(u8, 16) catch &.{}, now, ch.timeMs());
         const time_w = if (hovered) 18 else c.text.width(time, .{ .size = 11 });
         const far = remote(a, ch);
-        const title_w = width - 16 - 16 - l.marksW() - 4 - 6 - time_w - (if (hovered or far) @as(f32, 22) else 0);
+        const title_w = widthOf(a) - 16 - 16 - l.marksW() - 4 - 6 - time_w - (if (hovered or far) @as(f32, 22) else 0);
         const tc = if (selected or hovered) k.text else if (ch.archived) k.text.alpha(0.55) else k.text.alpha(0.8);
         {
             const t = ui.div(c).row().grow().w(0).clip();
@@ -817,7 +1393,10 @@ fn sessionRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat) void
     const drag = @import("view_drag.zig");
     const it = r.interaction();
     if (it.pressed and c.input.pressed) drag.press(c, a, ch.id, it.rect);
-    if (r.clicked() and !selected and !drag.dragging(a)) a.openChat(ch.id, ch.space_id);
+    if (r.clicked() and !drag.dragging(a)) {
+        // A Bots page sits in the chat's place: its own row brings it back.
+        if (selected) @import("bots.zig").close(a) else a.openChatInTab(ch.id);
+    }
 }
 
 fn statusSlot(c: *ui.Context, k: theme.Colors, mark: workspace.Mark) void {
@@ -856,23 +1435,80 @@ fn firstLine(s: []const u8) []const u8 {
 }
 
 fn footer(c: *ui.Context, a: *App, k: theme.Colors) void {
-    // A running cloud sandbox is billed until it is turned off: always in
-    // view, above the account badge.
-    @import("view_sandbox_strip.zig").strip(c, a, k, 0);
-    const f = ui.div(c).row().wFull().p(8);
+    notice(c, a, k);
+    if (a.offscreen or a.window != null)
+        @import("view_sandbox_strip.zig").computers(c, a, k)
+    else
+        @import("view_sandbox_strip.zig").strip(c, a, k, 0);
+    @import("view_updates.zig").sidebarFooterRows(c, a, k);
+    @import("view_account_notice.zig").strip(c, a, k);
+    const f = ui.div(c).row().wFull().h(44).px(10).itemsCenter();
     defer f.end();
-    var b = ui.div(c).row().size(21, 21).center().roundedFull();
-    b = if (a.view.account_menu) b.bg(k.hover) else b.hover(k.hover.alpha(0.8));
-    defer b.end();
-    if (b.clicked()) {
-        a.view.account_menu = !a.view.account_menu;
-        // Opening asks the Codegraff sign-in again.
-        if (a.view.account_menu) @import("app_account.zig").refresh(a);
+    {
+        // The desktop's footer is avatar-only; identity stays in its
+        // accessible tooltip and in the menu, not inside the avatar's row.
+        const account = @import("app_account.zig");
+        const m = account.menu(a.account.scope, a.account.user, a.account.codegraff);
+        const display = m.name orelse m.line;
+        ui.key(c, "user-menu");
+        var b = ui.div(c).row().size(21, 21).center().roundedFull();
+        b = if (a.view.account_menu) b.bg(k.hover) else b.hover(k.hover);
+        b = tip.on(b, k, .{ .text = c.print("Account menu: {s}", .{display}) });
+        defer b.end();
+        if (b.clicked()) {
+            a.view.account_menu = !a.view.account_menu;
+            if (a.view.account_menu) account.refresh(a);
+        }
+        if (c.rects.get(c.node(b.index).id)) |r| a.view.account_anchor = r;
+        const av = ui.div(c).row().size(13, 13).center().roundedFull().bg(k.text);
+        defer av.end();
+        ui.text(c, c.print("{c}", .{account.initial(display)}), .{ .size = 9, .line_height = 13, .weight = .semibold, .mono = true, .color = k.shell });
     }
-    if (c.rects.get(c.node(b.index).id)) |r| a.view.account_anchor = r;
-    const av = ui.div(c).row().size(13, 13).center().roundedFull().bg(k.text);
-    defer av.end();
-    const acc = &a.account;
-    const letter = @import("app_account.zig").initial(@import("app_account.zig").menu(acc.scope, acc.user, acc.codegraff).line);
-    ui.text(c, c.print("{c}", .{letter}), .{ .size = 9, .weight = .semibold, .mono = true, .color = k.shell });
+    ui.div(c).w(6).end();
+    {
+        const searching = a.view.search.open;
+        ui.key(c, "sidebar-search-trigger");
+        const search_wrap = tip.on(ui.div(c).row(), k, .{ .text = "Search sessions", .delay = tip.quick });
+        defer search_wrap.end();
+        if (kit.iconButton(c, k, .magnifer, .{ .size = 24, .radius = 6, .icon = 15, .color = k.muted, .on = searching }))
+            @import("view_sidebar_search.zig").toggle(a);
+        if (c.rects.get(c.node(search_wrap.index).id)) |r| a.view.search_anchor = r;
+    }
+    ui.spacer(c);
+    {
+        const dev = a.settings.uiMode() == .developer;
+        ui.key(c, "sidebar-ui-mode-pill");
+        var pill = tip.on(
+            ui.div(c).row().h(26).px(8).gap(5).itemsCenter().rounded(6)
+                .bg(if (dev) k.ink(0.08) else .transparent)
+                .border(if (dev) k.muted.alpha(0.35) else k.muted.alpha(0.22)).borderW(1)
+                .hover(k.hover),
+            k,
+            .{ .text = "Click to switch Zen / Developer mode (⇧⌘M) · Right-click to customize", .delay = tip.quick },
+        );
+        defer pill.end();
+        icons.icon(c, if (dev) .terminal else .@"magic-stick-3", 13, if (dev) k.text else k.muted, 0);
+        ui.text(c, if (dev) "Dev" else "Zen", .{ .size = 11.5, .line_height = 14, .weight = if (dev) .semibold else theme.ui_medium_weight, .color = if (dev) k.text else k.muted });
+        if (pill.clicked()) {
+            a.settings.toggleUiMode();
+            a.redraw();
+        } else if (kit.secondaryClicked(pill)) {
+            @import("view_sidebar_menus.zig").openView(a);
+            a.redraw();
+        }
+    }
+    ui.div(c).w(6).end();
+    {
+        ui.key(c, "chat-history");
+        const history = tip.on(ui.div(c).row().size(26, 26).center().rounded(6).hover(k.hover), k, .{ .text = "Chat history", .delay = tip.quick });
+        defer history.end();
+        icons.icon(c, .@"clock-circle", 16, k.muted, 0);
+        if (history.clicked()) @import("view_palette.zig").toggle(a, .chat_history);
+    }
+    ui.div(c).w(6).end();
+    ui.key(c, "sidebar-session-create");
+    const b = tip.on(ui.div(c).row().size(26, 26).center().rounded(6).border(k.muted.alpha(0.45)).borderW(1).hover(k.hover), k, .{ .text = "New workspace", .delay = tip.quick });
+    defer b.end();
+    icons.icon(c, .plus, 16, k.muted, 0);
+    if (b.clicked()) a.newWorkspaceSession();
 }

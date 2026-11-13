@@ -596,7 +596,7 @@ final class AppModel {
     var overviewChats: [Chat] {
         if let demo {
             let liveIds = Set(demo.spaces.map(\.id))
-            let live = demo.chats.filter { !$0.archived && ($0.spaceId.map(liveIds.contains) ?? true) }
+            let live = demo.chats.filter { $0.isTopLevel && !$0.archived && ($0.spaceId.map(liveIds.contains) ?? true) }
             return sortPinnedFirst(live, pinnedSessionIds: demoPinnedSessionIds)
         }
         return workspace?.overviewChats ?? []
@@ -605,7 +605,7 @@ final class AppModel {
     func chats(in spaceId: String) -> [Chat] {
         if let demo {
             return sortPinnedFirst(
-                demo.chats.filter { !$0.archived && $0.spaceId == spaceId },
+                demo.chats.filter { $0.isTopLevel && !$0.archived && $0.spaceId == spaceId },
                 pinnedSessionIds: demoPinnedSessionIds
             )
         }
@@ -613,7 +613,7 @@ final class AppModel {
     }
 
     func chat(id: String) -> Chat? {
-        (demo?.chats ?? workspace?.chats)?.first { $0.id == id }
+        (demo?.chats ?? workspace?.chats)?.first { $0.id == id && $0.isTopLevel }
     }
 
     /// state.rs `space_for_chat` — nil for a dangling/missing space_id.
@@ -689,6 +689,8 @@ final class AppModel {
         guard url.scheme == "harness", url.host == "chat" else { return }
         let chatId = url.lastPathComponent
         guard !chatId.isEmpty, chatId != "/" else { return }
+        if let chat = (demo?.chats ?? workspace?.chats)?.first(where: { $0.id == chatId }),
+           !chat.isTopLevel { return }
         launchRoute = .chat(chatId)
     }
 
@@ -1157,7 +1159,7 @@ final class AppModel {
     func archivedChats(in spaceId: String? = nil) -> [Chat] {
         if let demo {
             return sortActive(demo.chats.filter {
-                $0.archived && (spaceId == nil || $0.spaceId == spaceId)
+                $0.isTopLevel && $0.archived && (spaceId == nil || $0.spaceId == spaceId)
             })
         }
         return workspace?.archivedChats(in: spaceId) ?? []

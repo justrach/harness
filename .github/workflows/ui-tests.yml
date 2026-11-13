@@ -88,156 +88,41 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      # Package install overlaps the toolchain and cache restore; the job
-      # waits for it before the first compile.
-      - name: GPUI system dependencies
-        id: system-deps
-        background: true
+      - name: System dependencies
         run: |
-          # Only Ubuntu packages are needed; unrelated runner repositories can be out of sync.
-          # A mirror that stops answering used to hang this step until the job
-          # timed out; give each attempt a deadline and retry.
-          apt() {
-            for attempt in 1 2 3; do
-              sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 "$@" && return 0
-              echo "apt-get $1: attempt $attempt failed" >&2
-              sleep 10
-            done
-            return 1
-          }
-          apt update -qq -o Dir::Etc::sourcelist="sources.list.d/ubuntu.sources" -o Dir::Etc::sourceparts="-"
-          apt install -y -qq \
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
             libx11-dev libxcb1-dev libx11-xcb-dev \
             libfontconfig1-dev libfreetype-dev libasound2-dev \
             libvulkan-dev pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev
-      - name: Rust toolchain
-        run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: mlugg/setup-zig@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: ./.github/actions/kache
-        with:
-          access-key-id: ${{ secrets.KACHE_S3_ACCESS_KEY_ID }}
-          secret-access-key: ${{ secrets.KACHE_S3_SECRET_ACCESS_KEY }}
-          endpoint: ${{ secrets.KACHE_S3_ENDPOINT }}
-          manifest-key: ${{ github.job }}-${{ strategy.job-index }}
-      - wait: system-deps
-      - name: Preview-local design runtime regressions
-        run: node --test crates/ui/tests/visualize-runtime.test.mjs
-      - name: UI and headless layout regressions
-        run: cargo test --release --locked -p harness-ui --lib -- --test-threads=1
+          version: 0.17.0
+      - name: Nano UI and headless layout regressions
+        working-directory: apps/nano
+        run: zig build test --summary all
 
   macos-frame-recovery:
-    # Three release builds that share little, so they run side by side
-    # instead of one after another on a single runner.
-    name: macos-frame-recovery (${{ matrix.suite }})
+    name: macos-frame-recovery
     runs-on: macos-latest
     timeout-minutes: 35
-    strategy:
-      fail-fast: false
-      matrix:
-        suite: [app, native-ui, browser]
     steps:
       - uses: actions/checkout@v4
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - name: Locate the vendored GPUI workspace
-        id: gpui-source
-        run: |
-          python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          import pathlib
-          import tomllib
-
-          root = pathlib.Path.cwd().resolve()
-          with (root / "Cargo.toml").open("rb") as manifest:
-              gpui = tomllib.load(manifest)["workspace"]["dependencies"]["gpui"]
-          source = (root / gpui["path"]).resolve()
-          workspace = source.parent.parent
-          relative = workspace.relative_to(root)
-          test = workspace / "crates/gpui_macos/tests/frame_source_recovery.rs"
-          if not test.is_file():
-              raise SystemExit(f"vendored GPUI frame-source test missing: {test}")
-          print(f"workspace={relative}")
-          PY
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          key: ${{ matrix.suite }}
           cache-on-failure: true
-          workspaces: |
-            .
-            ${{ steps.gpui-source.outputs.workspace }}
-      - uses: ./.github/actions/kache
-        with:
-          access-key-id: ${{ secrets.KACHE_S3_ACCESS_KEY_ID }}
-          secret-access-key: ${{ secrets.KACHE_S3_SECRET_ACCESS_KEY }}
-          endpoint: ${{ secrets.KACHE_S3_ENDPOINT }}
-          manifest-key: ${{ github.job }}-${{ strategy.job-index }}
       - name: Check macOS application
-        if: matrix.suite == 'app'
         run: cargo check --release --locked -p harness
-      - name: Native frame-source recovery regression
-        if: matrix.suite == 'app'
-        working-directory: ${{ steps.gpui-source.outputs.workspace }}
-        # The vendored GPUI workspace has no independent lockfile. Its source
-        # is pinned by this checkout and selected from Cargo.toml above.
-        run: cargo test --release -p gpui_macos --test frame_source_recovery
-      - name: Native diff font geometry regression
-        if: matrix.suite == 'native-ui'
-        run: cargo test --release --locked -p harness-ui --lib native_diff_font_geometry -- --test-threads=1
-      - name: Native notification click regressions
-        if: matrix.suite == 'native-ui'
-        run: |
-          cargo test --release --locked -p harness-ui --lib notify::tests:: -- --test-threads=1
-      - name: Build native browser fixture
-        if: matrix.suite == 'browser'
-        run: cargo build --release --locked -p harness-ui --example browser-fixture --example preview-fixture --features browser-fixture
-      - name: Native browser regression and screenshots
-        if: matrix.suite == 'browser'
-        timeout-minutes: 3
-        env:
-          RUST_BACKTRACE: 1
-        run: |
-          bash scripts/run-macos-browser-fixture.sh target/release/examples/browser-fixture "$RUNNER_TEMP/browser-captures"
-          test -f "$RUNNER_TEMP/browser-captures/result.txt"
-      - name: Native isolated HTML design preview
-        if: matrix.suite == 'browser'
-        timeout-minutes: 2
-        env:
-          HARNESS_HTML_PREVIEW_FIXTURE_ONLY: 1
-        run: |
-          bash scripts/run-macos-browser-fixture.sh target/release/examples/browser-fixture "$RUNNER_TEMP/html-preview"
-          test -f "$RUNNER_TEMP/html-preview/result.txt"
-      - name: Upload browser screenshots
-        if: always() && matrix.suite == 'browser'
-        uses: actions/upload-artifact@v4
-        with:
-          name: browser-macos-captures
-          path: ${{ runner.temp }}/browser-captures
-          if-no-files-found: ignore
-      - uses: actions/setup-node@v4
-        if: matrix.suite == 'browser'
-        with:
-          node-version: 24
-      - name: Install preview fixture server
-        if: matrix.suite == 'browser'
-        run: npm ci --prefix edge
-      - name: Project discovery, stable URLs and HMR in native WebKit
-        if: matrix.suite == 'browser'
-        timeout-minutes: 3
-        env:
-          HARNESS_PREVIEW_AUTO_OPEN: 1
-        run: |
-          VITE_BINARY="$GITHUB_WORKSPACE/edge/node_modules/vite/bin/vite.js" bash scripts/run-macos-browser-fixture.sh target/release/examples/preview-fixture "$RUNNER_TEMP/preview-captures"
-          test -f "$RUNNER_TEMP/preview-captures/result.txt"
-      - name: Upload preview screenshots
-        if: always() && matrix.suite == 'browser'
-        uses: actions/upload-artifact@v4
-        with:
-          name: preview-macos-captures
-          path: ${{ runner.temp }}/preview-captures
-          if-no-files-found: ignore
+      - name: Nano UI macOS tests
+        working-directory: apps/nano
+        run: zig build test --summary all
 
   ios-tests:
     # Skipped for now: the iOS app isn't shipping yet and this job fails.
@@ -273,68 +158,3 @@ jobs:
           name: ios-test-results
           path: ${{ runner.temp }}/ios-tests.xcresult
           if-no-files-found: ignore
-
-  linux-browser:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      # Package install overlaps the toolchain and cache restore; the job
-      # waits for it before the first compile.
-      - name: Native browser and GPUI dependencies
-        id: system-deps
-        background: true
-        run: |
-          # Only Ubuntu packages are needed; unrelated runner repositories can be out of sync.
-          # A mirror that stops answering used to hang this step until the job
-          # timed out; give each attempt a deadline and retry.
-          apt() {
-            for attempt in 1 2 3; do
-              sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 "$@" && return 0
-              echo "apt-get $1: attempt $attempt failed" >&2
-              sleep 10
-            done
-            return 1
-          }
-          apt update -qq -o Dir::Etc::sourcelist="sources.list.d/ubuntu.sources" -o Dir::Etc::sourceparts="-"
-          apt install -y -qq \
-            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libx11-dev libxcb1-dev libx11-xcb-dev libfontconfig1-dev \
-            libfreetype-dev libasound2-dev libvulkan-dev pkg-config cmake \
-            libwebkit2gtk-4.1-dev libjson-glib-dev xvfb xdotool openbox \
-            weston ffmpeg imagemagick fonts-noto-cjk
-      - name: Rust toolchain
-        run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: ./.github/actions/kache
-        with:
-          access-key-id: ${{ secrets.KACHE_S3_ACCESS_KEY_ID }}
-          secret-access-key: ${{ secrets.KACHE_S3_SECRET_ACCESS_KEY }}
-          endpoint: ${{ secrets.KACHE_S3_ENDPOINT }}
-          manifest-key: ${{ github.job }}-${{ strategy.job-index }}
-      - wait: system-deps
-      - name: Build browser fixture
-        run: cargo build --release --locked -p harness-ui --example browser-fixture --features browser-fixture
-      - name: X11 and Wayland browser regressions
-        timeout-minutes: 5
-        env:
-          RUST_LOG: gpui_wgpu=info
-        run: |
-          scripts/test-linux-browser.sh "$RUNNER_TEMP/linux-browser/default"
-          VK_DRIVER_FILES=/dev/null scripts/test-linux-browser.sh "$RUNNER_TEMP/linux-browser/opengl"
-      - name: Native isolated HTML design preview
-        timeout-minutes: 2
-        env:
-          HARNESS_HTML_PREVIEW_FIXTURE_ONLY: 1
-        run: |
-          xvfb-run -a -s '-screen 0 1280x800x24' target/release/examples/browser-fixture "$RUNNER_TEMP/linux-html-preview"
-          test -f "$RUNNER_TEMP/linux-html-preview/result.txt"
-      - name: Upload native browser evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-browser
-          path: ${{ runner.temp }}/linux-browser
-          if-no-files-found: warn

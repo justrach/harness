@@ -49,6 +49,7 @@ pub fn open(a: *App) void {
 
 pub fn close(a: *App) void {
     const d = a.view.theme_import orelse return;
+    @import("text_buffer.zig").deinit(&d.source);
     d.arena.deinit();
     d.err.deinit(a.gpa);
     a.gpa.destroy(d);
@@ -56,11 +57,12 @@ pub fn close(a: *App) void {
 }
 
 /// Escape closes the dialog, or the review.
-pub fn escape(c: *ui.Context, a: *App) void {
-    if (a.view.theme_import == null and !a.view.theme_review_open) return;
-    if (!c.shortcut(.{ .key = ui.Shortcut.escape })) return;
+pub fn escape(c: *ui.Context, a: *App) bool {
+    if (a.view.theme_import == null and !a.view.theme_review_open) return false;
+    if (!c.shortcut(.{ .key = ui.Shortcut.escape })) return false;
     close(a);
     a.view.theme_review_open = false;
+    return true;
 }
 
 pub fn anyOpen(a: *const App) bool {
@@ -164,8 +166,10 @@ pub fn dialog(c: *ui.Context, a: *App, k: theme.Colors) void {
     const back = dialogs.scrim(c, k);
     defer back.end();
     ui.key(c, "theme-import-card");
-    const card = kit.shadowLg(ui.div(c).w(600).maxH(760).column().p(1).rounded(16).bg(k.composer).border(hairline(k, 0.10)).borderW(1).clip());
+    var card = ui.div(c).w(600).maxH(760).column().p(1).rounded(16).bg(if (k.frosted) .transparent else k.composer).border(hairline(k, 0.10)).borderW(1).clip();
+    if (!k.frosted) card = kit.shadowLg(card);
     defer card.end();
+    if (k.frosted) @import("view_palette.zig").frostedBackdropInset(c, k, card, 0);
     // `on_mouse_down_out`.
     if (kit.pressedOutside(c, c.rects.get(c.node(card.index).id))) return close(a);
     if (c.shortcut(.{ .key = ui.Shortcut.enter, .cmd = true })) d.pending = .primary;
@@ -308,7 +312,7 @@ fn sectionLabel(c: *ui.Context, k: theme.Colors, label: []const u8, below: f32) 
 
 /// An install mode: a radio, its name and what it means.
 fn modeControl(c: *ui.Context, k: theme.Colors, label: []const u8, description: []const u8, active: bool) bool {
-    var box = ui.div(c).column().w((600 - 2 - 40 - 8) / 2).p(11).rounded(9).border(if (active) k.accent else k.border).borderW(1).bg(if (active) k.accent_wash else k.raised.alpha(0.28));
+    var box = ui.div(c).column().w((600 - 2 - 40 - 8) / 2).p(11).rounded(9).border(if (active) k.accent else k.border).borderW(1).bg(if (active) (if (k.is_harp) k.active else k.accent_wash) else k.raised.alpha(0.28));
     if (!active) box = box.hover(k.raised);
     defer box.end();
     {
@@ -368,7 +372,7 @@ fn detected(c: *ui.Context, a: *App, k: theme.Colors, d: *Import, comp: imp.Comp
         const reviewing_this = if (d.review) |r| std.mem.eql(u8, r, id) else false;
         space(c, 8);
         ui.key(c, c.print("theme-import-row-{s}", .{id}));
-        const row = ui.div(c).column().wFull().p(12).rounded(10).border(if (on) k.accent.alpha(0.7) else k.border).borderW(1).bg(if (on) k.accent_wash.alpha(0.42) else k.raised.alpha(0.22));
+        const row = ui.div(c).column().wFull().p(12).rounded(10).border(if (on) k.accent.alpha(0.7) else k.border).borderW(1).bg(if (on) (if (k.is_harp) k.active else k.accent_wash.alpha(0.42)) else k.raised.alpha(0.22));
         defer row.end();
         {
             const r = ui.div(c).row().wFull().gap(9).itemsCenter();
@@ -627,8 +631,12 @@ pub fn reviewDialog(c: *ui.Context, a: *App, k: theme.Colors) void {
     const back = dialogs.scrim(c, k);
     defer back.end();
     ui.key(c, "theme-review-card");
-    const card = bare(kit.shadowLg(ui.div(c).w(660).maxH(720).scrollY().column().p(21).rounded(16).bg(k.composer).border(hairline(k, 0.10)).borderW(1)));
+    var card = ui.div(c).w(660).maxH(720).scrollY().column().p(21).rounded(16).bg(if (k.frosted) .transparent else k.composer).border(hairline(k, 0.10)).borderW(1);
+    if (!k.frosted) card = kit.shadowLg(card);
+    card = bare(card);
     defer card.end();
+    if (k.frosted) @import("view_palette.zig").frostedBackdropInset(c, k, card, 20);
+    const first_idx: u32 = @intCast(c.nodes.items.len);
     ui.text(c, "Theme mapping", set.st(c, 15, .{ .weight = .semibold, .color = k.text }));
     space(c, 6);
     ui.text(c, c.print("{s} · {s}", .{ e.name, e.label() }), .{ .size = 13, .line_height = 19, .wrap = true, .color = k.muted });
@@ -657,7 +665,7 @@ pub fn reviewDialog(c: *ui.Context, a: *App, k: theme.Colors) void {
         ui.text(c, "Done", set.st(c, 13, .{ .weight = .medium, .color = k.on_solid }));
         if (b.clicked()) a.view.theme_review_open = false;
     }
-    measure(c, card.index + 1, f.index, spans[0..n]);
+    measure(c, first_idx, f.index, spans[0..n]);
 }
 
 /// Last frame's layout of the card: each panel's content and the rest.

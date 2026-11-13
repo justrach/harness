@@ -54,9 +54,15 @@ const Harness = struct {
     fn carets(h: *const Harness) usize {
         var count: usize = 0;
         for (h.t.ctx.nodes.items) |n| {
+            // The composer's message caret (`composer.message_caret`), in the accent.
             if (n.content == .none and n.style.absolute and
-                n.style.width == .px and n.style.width.px == 1.5 and
-                n.style.height == .px and n.style.height.px == 22.75) count += 1;
+                n.style.width == .px and n.style.width.px == composer.message_caret.width and
+                n.style.height == .px and n.style.height.px == 22.75 - 2 * composer.message_caret.inset)
+            {
+                std.debug.assert(n.style.radius == composer.message_caret.radius);
+                std.debug.assert(std.meta.eql(n.style.background.?, theme.colors(true).accent));
+                count += 1;
+            }
         }
         return count;
     }

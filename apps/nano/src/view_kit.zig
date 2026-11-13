@@ -8,14 +8,14 @@ const ui = nanoui.ui;
 const icons = @import("icons.zig");
 const theme = @import("theme.zig");
 
-/// A text style of `size` points whose lines are `line` points tall, as
-/// the GPUI app sets them (14 px text on 22 px lines).
+/// Exact point line heights, including the desktop's half-point metrics.
+/// A leading ratio is rounded up by nanoui and accumulates vertical drift.
 pub fn style(c: *ui.Context, size: f32, line: f32, base: ui.TextStyle) ui.TextStyle {
+    _ = c;
     var s = base;
     s.size = size;
     s.leading = 1;
-    const natural = c.text.lineHeight(s);
-    s.leading = if (natural > 0) line / natural else 1;
+    s.line_height = line;
     return s;
 }
 
@@ -34,6 +34,7 @@ pub const IconButton = struct {
 /// A square button holding one icon; true when clicked.
 pub fn iconButton(c: *ui.Context, k: theme.Colors, name: icons.Name, o: IconButton) bool {
     var b = ui.div(c).row().size(o.size, o.size).center().rounded(o.radius);
+    if (o.radius * 2 >= o.size) b = b.circular();
     if (o.on) b = b.bg(k.hover) else if (!o.disabled) b = b.hover(k.hover);
     if (o.tip) |t| b = @import("view_tooltip.zig").on(b, k, t);
     if (!o.disabled) b = pressFeedback(b.control());
@@ -57,7 +58,7 @@ pub fn pressFeedback(d: ui.Div) ui.Div {
 /// separate loader beside every file. Static/history/reduced-motion rows
 /// neither animate nor keep a frame timer alive.
 pub fn activityText(c: *ui.Context, k: theme.Colors, text: []const u8, st: ui.TextStyle, active: bool) void {
-    if (!active or c.reduced_motion or text.len == 0) return ui.text(c, text, st);
+    if (!active or c.reduced_motion or text.len == 0 or !loaderOnScreen(c)) return ui.text(c, text, st);
     const base = st.color orelse k.muted;
     var spans: std.ArrayList(ui.Span) = .empty;
     var it = std.unicode.Utf8View.initUnchecked(text).iterator();
@@ -70,7 +71,7 @@ pub fn activityText(c: *ui.Context, k: theme.Colors, text: []const u8, st: ui.Te
         at += cp.len;
     }
     ui.richText(c, text, spans.items, st);
-    c.frameIn(1.0 / 30.0);
+    loaderFrame(c, 1.0 / 30.0);
 }
 
 /// `s` in one line at most `max_w` wide: as is when it fits, else cut and
@@ -119,7 +120,6 @@ pub fn highlightText(c: *ui.Context, k: theme.Colors, s: []const u8, st: ui.Text
     const wash = k.accent_wash;
     var plain = st;
     plain.color = base;
-    if (comptime @hasField(ui.TextStyle, "span_box")) plain.span_box = .{ .pad_x = 1, .inset_y = 1.5, .radius = 3 };
     const total = c.text.width(s, st);
     const band: f32 = 20;
     const fades = total > max_w;
@@ -136,7 +136,7 @@ pub fn highlightText(c: *ui.Context, k: theme.Colors, s: []const u8, st: ui.Text
         const lit = for (ranges) |r| {
             if (at >= r.start and at < r.end) break true;
         } else false;
-        if (lit or t < 1) spans.append(c.alloc(), .{
+        if (lit or t < 1) appendHighlightSpan(c.alloc(), &spans, .{
             .start = @intCast(at),
             .end = @intCast(at + cp.len),
             .color = if (lit) k.accent.alpha(t) else base.alpha(t),
@@ -145,10 +145,60 @@ pub fn highlightText(c: *ui.Context, k: theme.Colors, s: []const u8, st: ui.Text
         at += cp.len;
         x0 = x1;
     }
-    if (!fades) return ui.richText(c, s, spans.items, plain);
-    const box = ui.div(c).row().w(max_w).clip();
+    var box = ui.div(c).row();
+    if (fades) box = box.w(max_w).clip();
     defer box.end();
-    ui.richText(c, s[0..at], spans.items, plain);
+    // One rounded wash per contiguous run, not overlapping rounded boxes
+    // per character. Use shaped glyph boundaries, as nanoui's decorations
+    // do, but lower only the wash by GPUI's optical half point.
+    const label = s[0..at];
+    const layout = c.text.layout(label, plain);
+    const line_h = c.text.lineHeight(plain);
+    for (spans.items) |*span| if (span.background) |bg| {
+        const wash_x0 = for (layout.glyphs) |g| {
+            if (g.index >= span.start) break g.x;
+        } else layout.width;
+        const wash_x1 = for (layout.glyphs) |g| {
+            if (g.index >= span.end) break g.x;
+        } else layout.width;
+        if (wash_x1 > wash_x0) ui.div(c).absolute().offset(wash_x0 - 1, 2).size(wash_x1 - wash_x0 + 2, @max(0, line_h - 3)).rounded(3).bg(bg).end();
+        span.background = null;
+    };
+    ui.richText(c, label, spans.items, plain);
+}
+
+/// Keep each changing fade alpha, but merge neighboring equal treatments.
+/// Match ranges are already unioned by `palette.matchRanges`.
+fn appendHighlightSpan(gpa: std.mem.Allocator, spans: *std.ArrayList(ui.Span), span: ui.Span) !void {
+    if (spans.items.len > 0) {
+        const last = &spans.items[spans.items.len - 1];
+        if (last.end == span.start and std.meta.eql(last.color, span.color) and std.meta.eql(last.background, span.background)) {
+            last.end = span.end;
+            return;
+        }
+    }
+    try spans.append(gpa, span);
+}
+
+test "search highlight coalesces contiguous matches without flattening fade alpha or gaps" {
+    const gpa = std.testing.allocator;
+    var spans: std.ArrayList(ui.Span) = .empty;
+    defer spans.deinit(gpa);
+    const ink = ui.Color.hex(0x8899aa);
+    const wash = ink.alpha(0.2);
+    for (0..6) |i| try appendHighlightSpan(gpa, &spans, .{
+        .start = @intCast(i),
+        .end = @intCast(i + 1),
+        .color = ink,
+        .background = wash,
+    });
+    try std.testing.expectEqual(@as(usize, 1), spans.items.len);
+    try std.testing.expectEqual(@as(u32, 6), spans.items[0].end);
+    try appendHighlightSpan(gpa, &spans, .{ .start = 6, .end = 7, .color = ink.alpha(0.5), .background = wash.alpha(0.5) });
+    try appendHighlightSpan(gpa, &spans, .{ .start = 8, .end = 9, .color = ink.alpha(0.5), .background = wash.alpha(0.5) });
+    try std.testing.expectEqual(@as(usize, 3), spans.items.len);
+    try std.testing.expectEqual(ink.alpha(0.5), spans.items[1].color.?);
+    try std.testing.expectEqual(wash.alpha(0.5), spans.items[1].background.?);
 }
 
 /// A muted key-cap inside a row or header (`popover::kbd_hint`): 5 across,
@@ -213,12 +263,16 @@ pub fn truncateAt(c: *ui.Context, s: []const u8, st: ui.TextStyle, max_w: f32) u
 }
 
 /// The 2×3 "snake" a working session shows: rows in the accent's three
-/// tones, lit clockwise at 15 Hz (`loaders.rs`). Asks for its next frame.
+/// tones, lit clockwise at 2 Hz. Asks for its next frame
+/// only while the graphic is on screen. An unfocused window stretches that
+/// request by GPUI's background tick divisor.
 pub fn snake(c: *ui.Context, k: theme.Colors) void {
-    const order = [_][2]u8{ .{ 0, 0 }, .{ 1, 0 }, .{ 1, 1 }, .{ 1, 2 }, .{ 0, 2 }, .{ 0, 1 } };
-    const step: usize = if (c.reduced_motion) 0 else @intFromFloat(@mod(@floor(c.time * 15), 6));
     const box = ui.div(c).column().size(5, 8).gap(1);
     defer box.end();
+    // Keep the slot, but do not paint or schedule a wave the reader cannot see.
+    if (!c.reduced_motion and !loaderOnScreen(c)) return;
+    const order = [_][2]u8{ .{ 0, 0 }, .{ 1, 0 }, .{ 1, 1 }, .{ 1, 2 }, .{ 0, 2 }, .{ 0, 1 } };
+    const step: usize = if (c.reduced_motion) 0 else @intFromFloat(@mod(@floor(c.time * 2), 6));
     for (0..3) |row| {
         const r = ui.div(c).row().gap(1);
         defer r.end();
@@ -233,7 +287,28 @@ pub fn snake(c: *ui.Context, k: theme.Colors) void {
             _ = c.leaf(.{ .width = .{ .px = 2 }, .height = .{ .px = 2 }, .background = k.glyph[row].alpha(lit) }, .none, null);
         }
     }
-    if (!c.reduced_motion) c.frameIn(1.0 / 15.0);
+    if (!c.reduced_motion) loaderFrame(c, 1.0 / 15.0);
+}
+
+/// GPUI's `BACKGROUND_TICK_DIVISOR`: an unfocused window delivers every
+/// third loader tick. A graphic whose last box is outside
+/// the window schedules nothing — the same as a virtualized row that
+/// never mounts its spinner.
+pub const background_tick_divisor: f32 = 3;
+
+pub fn loaderFrame(c: *ui.Context, seconds: f32) void {
+    if (!loaderOnScreen(c)) return;
+    // nanoui invalidates the window, not an individual spinner. Keep
+    // quiet working sessions at 2 Hz; input and streaming still draw immediately.
+    const interval = @max(seconds, 0.5);
+    c.frameIn(if (c.input.window_active) interval else interval * background_tick_divisor);
+}
+
+pub fn loaderOnScreen(c: *ui.Context) bool {
+    if (c.stack.items.len == 0) return true;
+    const box = c.rects.get(c.node(c.stack.items[c.stack.items.len - 1]).id) orelse return true;
+    if (box.w <= 0 or box.h <= 0) return false;
+    return box.intersect(.{ .x = 0, .y = 0, .w = c.size.w, .h = c.size.h }).h > 0;
 }
 
 /// A small round dot.
@@ -362,7 +437,7 @@ const glass_shadows = blk: {
 pub fn shadowLg(d: ui.Div) ui.Div {
     var pane = d;
     if (surface_frame) |s| if (s.context == d.c and s.frame == d.c.frame and s.frosted) {
-        pane = pane.bg(s.overlay);
+        pane = pane.bg(.{ .r = s.overlay.r, .g = s.overlay.g, .b = s.overlay.b, .a = 1 });
         // Transparent glass must not reveal the shadow inside its own box.
         if (comptime @hasField(ui.Shadow, "knockout")) return pane.shadows(&glass_shadows);
         return pane;
@@ -379,9 +454,13 @@ pub const spinner_w: f32 = 3 * cell + 2 * cell / 2;
 const tints = [_]u24{ 0xB6D3EF, 0xEDB185, 0xF888A0 };
 
 pub fn gradientSpinner(c: *ui.Context) void {
-    const delta: f32 = @floatCast(@mod(c.time / 0.75, 1.0));
     const g = ui.div(c).column().gap(cell / 2);
     defer g.end();
+    if (!loaderOnScreen(c)) {
+        _ = c.leaf(.{ .width = .{ .px = spinner_w }, .height = .{ .px = spinner_w } }, .none, null);
+        return;
+    }
+    const delta: f32 = @floatCast(@mod(c.time / 0.75, 1.0));
     for (0..3) |row| {
         const r = ui.div(c).row().gap(cell / 2);
         defer r.end();
@@ -391,7 +470,7 @@ pub fn gradientSpinner(c: *ui.Context) void {
             _ = c.leaf(.{ .width = .{ .px = cell }, .height = .{ .px = cell }, .radius = cell / 2, .background = tint.alpha(gspinOpacity(delta + d / 4, 0.1)) }, .none, null);
         }
     }
-    c.frameIn(1.0 / 30.0);
+    loaderFrame(c, 1.0 / 30.0);
 }
 
 /// `gspin_opacity`: full, down to `dim` over 45% of the period, resting,
@@ -408,4 +487,209 @@ test "the spinner's pulse, as GPUI's" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.1), gspinOpacity(0.45, 0.1), 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, 0.1), gspinOpacity(0.7, 0.1), 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, 1), gspinOpacity(0.99999, 0.1), 1e-3);
+}
+
+const RollSlot = struct {
+    key: u64 = 0,
+    ctx_ptr: usize = 0,
+    last_frame: u64 = 0,
+    used: bool = false,
+    current_buf: [64]u8 = undefined,
+    current_len: usize = 0,
+    from_buf: [64]u8 = undefined,
+    from_len: usize = 0,
+    started: f64 = 0,
+    active: bool = false,
+};
+
+var roll_slots: [32]RollSlot = @splat(.{});
+var roll_clock: usize = 0;
+
+/// Byte lengths of the shared leading and trailing character runs, never
+/// overlapping in either string (`crates/ui/src/roll_text.rs` `shared_ends`).
+pub fn sharedEnds(from: []const u8, to: []const u8) struct { prefix: usize, suffix: usize } {
+    var prefix: usize = 0;
+    var it_from = std.unicode.Utf8View.initUnchecked(from).iterator();
+    var it_to = std.unicode.Utf8View.initUnchecked(to).iterator();
+    while (true) {
+        const a = it_from.nextCodepointSlice() orelse break;
+        const b = it_to.nextCodepointSlice() orelse break;
+        if (!std.mem.eql(u8, a, b)) break;
+        prefix += a.len;
+    }
+    const room = @min(from.len - prefix, to.len - prefix);
+    var suffix: usize = 0;
+    while (suffix < room) {
+        var step: usize = 1;
+        while (step <= room - suffix and (from[from.len - suffix - step] & 0xC0) == 0x80) : (step += 1) {}
+        if (step > room - suffix) break;
+        const a = from[from.len - suffix - step .. from.len - suffix];
+        const b = to[to.len - suffix - step .. to.len - suffix];
+        if (!std.mem.eql(u8, a, b)) break;
+        suffix += step;
+    }
+    return .{ .prefix = prefix, .suffix = suffix };
+}
+
+/// Scritto-style rolling label transition (`crates/ui/src/roll_text.rs`):
+/// when a keyed label changes, shared prefix/suffix runs stay put (the
+/// trailing run glides with the 200ms resize curve) while changed middle
+/// glyphs roll vertically with `ease_out_quint`, 0.35em travel, 0.6 scale,
+/// and 2° tilt over 550ms + 30% left-to-right stagger.
+pub fn rollText(c: *ui.Context, key: []const u8, text: []const u8, st: ui.TextStyle) void {
+    if (text.len == 0 or text.len > 64) return ui.text(c, text, st);
+    const id = std.hash.Wyhash.hash(0x726f6c6c, key);
+    var slot: ?*RollSlot = null;
+    for (&roll_slots) |*s| {
+        if (s.used and s.key == id) {
+            slot = s;
+            break;
+        }
+    }
+    if (slot == null) {
+        for (&roll_slots) |*s| {
+            if (!s.used) {
+                slot = s;
+                break;
+            }
+        }
+        if (slot == null) {
+            slot = &roll_slots[roll_clock % roll_slots.len];
+            roll_clock +%= 1;
+        }
+        const s = slot.?;
+        s.* = .{ .key = id, .ctx_ptr = @intFromPtr(c), .last_frame = c.frame, .used = true, .current_len = text.len };
+        @memcpy(s.current_buf[0..text.len], text);
+        return ui.text(c, text, st);
+    }
+    const s = slot.?;
+    const mounted_continuously = s.ctx_ptr == @intFromPtr(c) and c.frame > 1 and (s.last_frame == c.frame or s.last_frame + 1 == c.frame);
+    s.ctx_ptr = @intFromPtr(c);
+    s.last_frame = c.frame;
+    if (!mounted_continuously) {
+        @memcpy(s.current_buf[0..text.len], text);
+        s.current_len = text.len;
+        s.active = false;
+        return ui.text(c, text, st);
+    }
+    const current = s.current_buf[0..s.current_len];
+    if (!std.mem.eql(u8, current, text)) {
+        @memcpy(s.from_buf[0..s.current_len], current);
+        s.from_len = s.current_len;
+        @memcpy(s.current_buf[0..text.len], text);
+        s.current_len = text.len;
+        s.started = c.time;
+        s.active = !c.reduced_motion;
+    }
+    const duration: f32 = 0.55;
+    const stagger_frac: f32 = 0.3;
+    const total_span: f64 = @as(f64, duration * (1.0 + stagger_frac));
+    const elapsed_f64 = @max(0.0, c.time - s.started);
+    if (!s.active or c.reduced_motion or elapsed_f64 >= total_span) {
+        s.active = false;
+        return ui.text(c, text, st);
+    }
+    c.frameIn(1.0 / 120.0);
+    c.animationFrame();
+    const elapsed: f32 = @floatCast(elapsed_f64);
+    const from = c.alloc().dupe(u8, s.from_buf[0..s.from_len]) catch return ui.text(c, text, st);
+    const to = text;
+    const ends = sharedEnds(from, to);
+    const resize_p = ui.motion.catalog.resize.progress(@floatCast(elapsed_f64 / ui.motion.catalog.resize.total()));
+    const from_w = c.text.width(from, st);
+    const to_w = c.text.width(to, st);
+    const width = @ceil(ui.motion.effects.lerp(from_w, to_w, resize_p));
+    const line_h = if (st.line_height > 0) st.line_height else c.text.lineHeight(st);
+    const travel = st.size * 0.35;
+    const base_color = st.color orelse c.theme.text;
+
+    const box = ui.div(c).row().w(width).h(line_h).itemsCenter();
+    defer box.end();
+
+    // Shared prefix stays put.
+    if (ends.prefix > 0) {
+        const p_div = ui.div(c).absolute().offset(0, 0);
+        defer p_div.end();
+        ui.text(c, to[0..ends.prefix], st);
+    }
+
+    // Changed middle of `from` rolls up and shrinks out.
+    paintRollRun(c, from, ends.prefix, from.len - ends.suffix, st, base_color, elapsed, duration, stagger_frac, travel, true);
+
+    // Changed middle of `to` rolls up from below and grows in.
+    paintRollRun(c, to, ends.prefix, to.len - ends.suffix, st, base_color, elapsed, duration, stagger_frac, travel, false);
+
+    // Shared suffix slides with the 200ms resize curve.
+    if (ends.suffix > 0) {
+        const from_sx = c.text.width(from[0 .. from.len - ends.suffix], st);
+        const to_sx = c.text.width(to[0 .. to.len - ends.suffix], st);
+        const suffix_dx = (from_sx - to_sx) * (1.0 - resize_p);
+        const s_div = ui.div(c).absolute().offset(to_sx + suffix_dx, 0);
+        defer s_div.end();
+        ui.text(c, to[to.len - ends.suffix ..], st);
+    }
+}
+
+fn paintRollRun(
+    c: *ui.Context,
+    line: []const u8,
+    start_byte: usize,
+    end_byte: usize,
+    st: ui.TextStyle,
+    base_color: ui.Color,
+    elapsed: f32,
+    duration: f32,
+    stagger_frac: f32,
+    travel: f32,
+    outgoing: bool,
+) void {
+    if (start_byte >= end_byte) return;
+    const sub = line[start_byte..end_byte];
+    var count: usize = 0;
+    var it_count = std.unicode.Utf8View.initUnchecked(sub).iterator();
+    while (it_count.nextCodepointSlice()) |_| count += 1;
+    if (count == 0) return;
+
+    const min_x = c.text.width(line[0..start_byte], st);
+    const max_x = c.text.width(line[0..end_byte], st);
+    const spread = duration * stagger_frac * @as(f32, @floatFromInt(count -| 1)) / @as(f32, @floatFromInt(@max(count, 1)));
+
+    var at: usize = start_byte;
+    var it = std.unicode.Utf8View.initUnchecked(sub).iterator();
+    while (it.nextCodepointSlice()) |cp| {
+        const x = c.text.width(line[0..at], st);
+        at += cp.len;
+        const delay = if (max_x > min_x) spread * std.math.clamp((x - min_x) / (max_x - min_x), 0.0, 1.0) else 0.0;
+        const raw_t = std.math.clamp((elapsed - delay) / duration, 0.0, 1.0);
+        const p = ui.motion.catalog.ease_out_quint.sample(raw_t)[0];
+        const alpha = if (outgoing) 1.0 - p else p;
+        if (alpha <= 0.005) continue;
+        const dy = if (outgoing) -travel * p else travel * (1.0 - p);
+        const sc = if (outgoing) ui.motion.effects.lerp(1.0, 0.6, p) else ui.motion.effects.lerp(0.6, 1.0, p);
+        const motion_dist = if (outgoing) p else 1.0 - p;
+        const rot = std.math.degreesToRadians(2.0 * motion_dist);
+        const g_div = ui.div(c).absolute().offset(x, dy).scale(sc).rotate(rot);
+        defer g_div.end();
+        var gst = st;
+        gst.color = base_color.alpha(base_color.a * alpha);
+        ui.text(c, cp, gst);
+    }
+}
+
+test "sharedEnds keeps common leading and trailing character runs without overlapping" {
+    const e1 = sharedEnds("Opus 5.5", "Opus 5.1");
+    try std.testing.expectEqual(@as(usize, 7), e1.prefix);
+    try std.testing.expectEqual(@as(usize, 0), e1.suffix);
+
+    const e2 = sharedEnds("feature/a", "fix/a");
+    try std.testing.expectEqual(@as(usize, 1), e2.prefix);
+    try std.testing.expectEqual(@as(usize, 2), e2.suffix);
+
+    const e3 = sharedEnds("aa", "aaa");
+    try std.testing.expectEqual(@as(usize, 2), e3.prefix);
+    try std.testing.expectEqual(@as(usize, 0), e3.suffix);
+
+    const e4 = sharedEnds("Low", "High");
+    try std.testing.expectEqual(@as(usize, 0), e4.prefix);
+    try std.testing.expectEqual(@as(usize, 0), e4.suffix);
 }

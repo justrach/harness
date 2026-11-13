@@ -19,16 +19,16 @@ pub const width: f32 = 520;
 const band_h: f32 = 38;
 
 pub fn host(c: *ui.Context, a: *App, k: theme.Colors) void {
-    const col = ui.div(c).column().w(width).hFull().bg(if (k.frosted) k.panel else k.shell).clip();
+    const col = ui.div(c).column().wFull().hFull().bg(k.background).clip();
     defer col.end();
-    band(c, a, k);
     const t = a.panels.activeTab() orelse return picker(c, a, k);
     switch (t.kind) {
         .diffs => @import("view_diffs.zig").diffs(c, a, k),
         .file => file(c, a, k, t.path),
         .browser => if (t.browser) |b| @import("view_browser.zig").draw(c, a, k, b),
+        .tool_access => @import("view_tool_access.zig").draw(c, a, k),
         .subagent => if (t.agent) |s| {
-            _ = @import("view_transcript.zig").entries(c, a, k, &s.transcript, width, !s.transcript.complete, 16);
+            _ = @import("view_transcript.zig").entries(c, a, k, &s.transcript, @max(0, a.view.chrome.host_width - 2), !s.transcript.complete, 16);
         },
     }
 }
@@ -89,20 +89,81 @@ fn picker(c: *ui.Context, a: *App, k: theme.Colors) void {
 }
 
 fn file(c: *ui.Context, a: *App, k: theme.Colors, path: []const u8) void {
+    const editor = if (a.panels.activeTab()) |tab| tab.editor else null;
     {
         // The breadcrumbs' `FileEditorTooltip`: the whole path.
-        const bar = tip.on(ui.div(c).row().wFull().h(32).px(12).gap(5).itemsCenter().border(k.border).borderW(0).clip(), k, .{ .text = path, .delay = tip.quick, .look = .file });
+        const bar = tip.on(ui.div(c).row().wFull().h(36).px(12).gap(5).itemsCenter().border(k.border).borderW(0).clip(), k, .{ .text = path, .delay = tip.quick, .look = .file });
         defer bar.end();
-        file_icons.icon(c, path, false, k.dark, 12);
-        var it = std.mem.splitScalar(u8, path, '/');
-        var first = true;
-        while (it.next()) |seg| {
-            if (!first) ui.text(c, "›", .{ .size = 11, .color = k.faint });
-            first = false;
-            ui.text(c, seg, .{ .size = 11, .color = if (it.peek() == null) k.muted else k.faint });
+        {
+            const crumbs = ui.div(c).row().grow().w(0).gap(5).itemsCenter().clip();
+            defer crumbs.end();
+            file_icons.icon(c, path, false, k.dark, 12);
+            var it = std.mem.splitScalar(u8, path, '/');
+            var first = true;
+            while (it.next()) |seg| {
+                if (!first) ui.text(c, "›", .{ .size = 11, .color = k.faint });
+                first = false;
+                ui.text(c, seg, .{ .size = 11, .color = if (it.peek() == null) k.muted else k.faint });
+            }
+        }
+        if (editor) |e| {
+            if (e.dirty()) ui.text(c, "Modified", .{ .size = 11, .color = k.muted });
+            if (e.editable) {
+                if (std.mem.endsWith(u8, path, ".md") or std.mem.endsWith(u8, path, ".markdown")) {
+                    if (fileButton(c, k, if (e.preview) "Edit" else "Preview", true)) {
+                        e.preview = !e.preview;
+                        e.focus = !e.preview;
+                    }
+                }
+            }
+            if (fileButton(c, k, if (e.pending != null) "Saving…" else "Save file", e.editable and e.dirty() and e.pending == null and !e.conflict)) _ = e.save();
+            if (fileButton(c, k, "Reload file", e.pending == null and !e.loading)) @import("app_file_editor.zig").requestReload(a, e);
         }
     }
     _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
+    if (editor) |e| {
+        if (e.loading) return centered(c, k, "Loading…");
+        if (e.error_text) |message| ui.text(c, message, .{ .size = 12, .color = if (e.editable) k.danger else k.muted, .wrap = true });
+        e.focused = false;
+        if (e.editable and !e.preview) {
+            const body = ui.div(c).column().wFull().grow().h(0).p(12).scrollY();
+            defer body.end();
+            ui.key(c, c.print("workspace-file-editor-{d}", .{e.id}));
+            e.field = c.peekId(null);
+            if (e.focus) {
+                e.focus = false;
+                // An explicit file-open requests focus, but a delayed read
+                // must not steal it back after the user chose another pane.
+                if (@import("view_tab_strip.zig").active(a) == .host) {
+                    a.view.focus_composer = false;
+                    c.focus = e.field;
+                }
+            }
+            const lines: u16 = @intFromFloat(std.math.clamp((a.view.chrome.height - 100) / 19, 4, 200));
+            const result = ui.textField(c, &e.buffer, .{ .placeholder = "Edit file…", .width = .fill, .bare = true, .mono = true, .size = 12.5, .line_height = 19, .multiline = true, .max_lines = lines });
+            e.focused = result.focused;
+            if (result.focused and c.shortcut(.{ .key = 'a', .cmd = true })) {
+                if (c.edits.getPtr(e.field)) |edit| {
+                    edit.anchor = 0;
+                    edit.caret = e.buffer.text().len;
+                    c.selection.clear();
+                    c.changed = true;
+                }
+            }
+            if (result.changed) e.changed();
+            if (result.submitted) {
+                _ = e.buffer.insert(result.caret, "\n");
+                e.buffer.want_caret = result.caret + 1;
+                e.changed();
+            }
+            return;
+        }
+        ui.scroll(c, .{ .grow = 1, .width = .fill, .padding = .{ .left = 16, .right = 16, .top = 12, .bottom = 24 } });
+        defer ui.end(c);
+        if (std.mem.endsWith(u8, path, ".md") or std.mem.endsWith(u8, path, ".markdown"))
+            return @import("view_markdown.zig").withLinks(c, k, e.buffer.text(), a, e.target.chatId);
+        return code(c, k, e.buffer.text(), langOf(path));
+    }
     const f = a.panels.file;
     if (f.loading) return centered(c, k, "Loading…");
     const text = f.text orelse return centered(c, k, f.reason orelse "This file can't be shown.");
@@ -111,6 +172,15 @@ fn file(c: *ui.Context, a: *App, k: theme.Colors, path: []const u8) void {
     if (std.mem.endsWith(u8, path, ".md") or std.mem.endsWith(u8, path, ".markdown"))
         return @import("view_markdown.zig").withLinks(c, k, text, a, a.selected);
     code(c, k, text, langOf(path));
+}
+
+fn fileButton(c: *ui.Context, k: theme.Colors, label: []const u8, enabled: bool) bool {
+    ui.key(c, label);
+    var button = ui.div(c).row().px(7).py(5).rounded(5);
+    if (enabled) button = button.hover(k.selected).control() else button = button.opacity(0.4);
+    defer button.end();
+    ui.text(c, label, .{ .size = 11.5, .color = k.text });
+    return enabled and button.clicked();
 }
 
 /// Code with its line numbers, coloured as the language reads.

@@ -1,13 +1,20 @@
-//! Harness's default palettes, Codegraff Dark and Codegraff Light, as the
-//! GPUI app derives its roles from them (crates/theme/src/builtins.rs,
-//! crates/ui/src/theme.rs): both are opaque, so the window and the main
-//! column are painted in `shell`; the sidebar lays a wash over it. Geist for
-//! words, Geist Mono for code.
+//! Harness's desktop palettes from crates/theme's exported registry.
+//! Surface treatment is resolved separately; the sidebar shares the shell,
+//! while rounded conversation panels use the background writing plane.
+//! System type on macOS (Geist elsewhere), Geist Mono for code.
 const nanoui = @import("nanoui");
 const Color = nanoui.ui.Color;
 
+// GPUI's font-kit maps CoreText's SF Medium trait (0.23) above CSS 500.
+// Its CSS 400–500 matching rule therefore selects SF Regular for MEDIUM.
+// Match that system-family selection, without changing monospaced weights.
+pub const ui_medium_weight: nanoui.ui.Weight = if (@import("builtin").os.tag == .macos) .regular else .medium;
+
 pub const Colors = struct {
     dark: bool,
+    is_harp: bool = false,
+    is_warm_harp: bool = false,
+    active: Color = .transparent,
     frosted: bool = false,
     recommended_frosted: bool = false,
     /// Original theme roles, before compositing for opaque paint.
@@ -71,7 +78,56 @@ pub const Colors = struct {
     pub fn wash(k: Colors, a: f32) Color {
         return (if (k.dark) Color.hex(0xebebeb) else Color.hex(0x1a1a1a)).alpha(a);
     }
+
+    /// The conversation column's lift over the shell (`content_plane`):
+    /// light palettes wash it toward white, so the sidebar reads as chrome
+    /// around a bright page; dark ones keep it flush.
+    pub fn plane(k: Colors) ?Color {
+        return if (k.dark) null else white.alpha(0.55);
+    }
+
+    /// The column as painted: the shell under its plane.
+    pub fn column(k: Colors) Color {
+        return if (k.plane()) |p| k.shell.mix(white, p.a) else k.shell;
+    }
+
+    /// The composer's writing plane (`composer_bg`): light palettes lift
+    /// the input tint toward white; dark ones keep the raised input.
+    pub fn pill(k: Colors) Color {
+        return if (k.dark) k.composer else k.composer.mix(white, 0.82);
+    }
+
+    /// Words and glyphs on an accent fill (`on_primary_accent`): the
+    /// near-white `on_accent` where it reads at 4.5:1, else black or white,
+    /// whichever reads better.
+    pub fn onAccent(k: Colors) Color {
+        const on: Color = .{ .r = 0.985, .g = 0.985, .b = 0.985 };
+        if (contrast(on, k.accent) >= 4.5) return on;
+        return if (contrast(black, k.accent) >= contrast(white, k.accent)) black else white;
+    }
 };
+
+fn channel(v: f32) f32 {
+    return if (v <= 0.04045) v / 12.92 else std.math.pow(f32, (v + 0.055) / 1.055, 2.4);
+}
+
+fn luminance(c: Color) f32 {
+    return 0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b);
+}
+
+/// WCAG contrast ratio between two opaque colours.
+pub fn contrast(x: Color, y: Color) f32 {
+    const a = luminance(x);
+    const b = luminance(y);
+    return (@max(a, b) + 0.05) / (@min(a, b) + 0.05);
+}
+
+const std = @import("std");
+
+test "accent fills carry black on Codegraff's amber, as GPUI's on_primary_accent picks" {
+    try std.testing.expectEqual(black, builtin(true).onAccent());
+    try std.testing.expectEqual(black, builtin(false).onAccent());
+}
 
 const white: Color = .{ .r = 1, .g = 1, .b = 1 };
 const black: Color = .{};
@@ -87,8 +143,14 @@ pub fn colors(dark: bool) Colors {
     return builtin(dark);
 }
 
-/// Codegraff Dark and Codegraff Light, as the GPUI app resolves them.
+/// Codegraff's desktop variants come from the same exported registry as GPUI.
 pub fn builtin(dark: bool) Colors {
+    if (@import("themes.zig").find(if (dark) "codegraff-dark" else "codegraff-light")) |v| return v.colors;
+    return fallback(dark);
+}
+
+/// Emergency palette and the unchanged Markdown hues used while loading.
+pub fn fallback(dark: bool) Colors {
     if (dark) {
         const accent = Color.hex(0xe8a33d);
         const muted = Color.hex(0x9a9384);
@@ -222,7 +284,8 @@ pub fn ui(dark: bool) nanoui.ui.Theme {
     t.track = k.raised;
     t.danger = k.danger;
     t.success = k.success;
-    t.font = "Geist";
+    // UiFontFamily::default_for_platform: native system type on macOS.
+    t.font = if (@import("builtin").os.tag == .macos) null else "Geist";
     t.mono_font = "Geist Mono";
     return t;
 }

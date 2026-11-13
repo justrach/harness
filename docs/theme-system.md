@@ -43,8 +43,9 @@ Windows using their in-app renderers. Windows uses the bounded Direct3D
 The preference remains portable even where a particular surface cannot honor blur.
 
 New installs select Codegraff Light and Dark. The built-in registry contains
-31 variants across 19 families:
+33 variants across 20 families:
 
+- OpenCodex Light and Dark (an independently adapted Codex-inspired palette)
 - Codegraff Light and Dark
 - Harness Light and Dark
 - VS Code Light+ and Dark+

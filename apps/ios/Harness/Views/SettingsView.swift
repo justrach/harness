@@ -7,6 +7,8 @@ struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @AppStorage(PhoneSplit.storageKey) private var phoneSplitRaw = PhoneSplit.off.rawValue
+    @AppStorage(HomeUiMode.storageKey) private var uiModeRaw = HomeUiMode.zen.rawValue
+    @AppStorage(HomeMovingPart.overridesStorageKey) private var uiPartOverridesRaw = ""
     /// Opens straight onto Crash reports (the `-sheet crashreports` rig).
     @State private var showCrashReports: Bool
     /// The first-run setup, opened again from Agents.
@@ -120,6 +122,37 @@ struct SettingsView: View {
                 // Shown on every device: the choice applies whenever the window is narrow (a phone, iPhone Duo's
                 // outer display, a narrow iPad window). Wide windows always show the list beside the session.
                 Section {
+                    let profile = HomeHierarchyProfile.resolved(baseModeRaw: uiModeRaw, overridesRaw: uiPartOverridesRaw)
+                    Picker("Experience mode", selection: Binding(
+                        get: { profile.effectiveMode.rawValue },
+                        set: { raw in
+                            let preset = HomeListControls.applyPreset(HomeUiMode(rawValue: raw) ?? .zen)
+                            uiModeRaw = preset.modeRaw
+                            uiPartOverridesRaw = preset.overridesRaw
+                        }
+                    )) {
+                        Text("Zen").tag(HomeUiMode.zen.rawValue)
+                        Text("Developer").tag(HomeUiMode.developer.rawValue)
+                    }
+                    .pickerStyle(.segmented)
+                    .accessibilityIdentifier("settings-ui-mode")
+
+                    ForEach(HomeMovingPart.allCases) { part in
+                        Toggle(isOn: Binding(
+                            get: { profile.partEnabled(part) },
+                            set: { on in
+                                uiPartOverridesRaw = HomeListControls.setMovingPart(
+                                    part,
+                                    on: on,
+                                    overridesRaw: uiPartOverridesRaw
+                                )
+                            }
+                        )) {
+                            Label(part.label, systemImage: part.symbol)
+                        }
+                        .accessibilityIdentifier("settings-part-\(part.rawValue)")
+                    }
+
                     // Through `stored`, so a value saved before Stacked was removed shows as Auto, not blank.
                     Picker("Split view", selection: Binding(get: { PhoneSplit.stored(phoneSplitRaw).rawValue },
                                                             set: { phoneSplitRaw = $0 })) {
@@ -131,7 +164,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Layout")
                 } footer: {
-                    Text("For narrow windows, such as a phone or iPhone Duo's outer display. Shows the session list beside the open session when the window is wide enough, such as in landscape. Off keeps the single screen. Wide windows always show the list beside the session.")
+                    Text("Switch everything at once with Zen (all off) or Developer (all on), or turn individual hierarchy controls on and off independently.")
                 }
                 .harnessListRow()
 

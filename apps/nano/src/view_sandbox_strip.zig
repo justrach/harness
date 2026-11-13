@@ -62,6 +62,66 @@ fn summary(c: *ui.Context, a: *App) ?sandboxes.Summary {
     return sandboxes.runningSummary(c.alloc(), l, a.nowMs()) catch null;
 }
 
+fn statusLabel(s: sandboxes.Sandbox) []const u8 {
+    if (std.mem.eql(u8, s.state, "running")) {
+        if (s.renew_error) |e| if (std.mem.trim(u8, e, " \t\n").len > 0) return "Needs attention";
+        return "Running";
+    }
+    if (std.mem.eql(u8, s.state, "starting")) return "Starting…";
+    if (std.mem.eql(u8, s.state, "stopping")) return "Pausing…";
+    if (std.mem.eql(u8, s.state, "paused")) return "Paused";
+    if (std.mem.eql(u8, s.state, "error")) return "Needs attention";
+    return "Status unavailable";
+}
+
+fn statusTone(label: []const u8, k: theme.Colors) ui.Color {
+    if (std.mem.eql(u8, label, "Running")) return k.success;
+    if (std.mem.eql(u8, label, "Needs attention")) return k.warning;
+    if (std.mem.eql(u8, label, "Starting…") or std.mem.eql(u8, label, "Pausing…")) return k.accent;
+    return k.muted;
+}
+
+/// Named cloud computers in the macOS sidebar (`render_cloud_sandbox_strip`).
+pub fn computers(c: *ui.Context, a: *App, k: theme.Colors) void {
+    const l = state.shown(a) orelse return;
+    if (!l.enabled or l.sandboxes.len == 0) return;
+    const outer = ui.div(c).column().wFull();
+    defer outer.end();
+    if (l.sandboxes.len > 1) {
+        const hd = ui.div(c).row().wFull().px(18).pt(8).itemsCenter().justifyBetween();
+        defer hd.end();
+        ui.text(c, "Computers", st(c, 10.5, .{ .color = k.muted }));
+        ui.text(c, c.print("{d}", .{l.sandboxes.len}), st(c, 10.5, .{ .color = k.muted }));
+    }
+    const cards = ui.div(c).column().wFull().px(8).pt(8).pb(3).gap(5);
+    defer cards.end();
+    const text_w = sidebar.widthOf(a) - 16 - 20 - 18 - 18 - 13;
+    for (l.sandboxes) |sb| {
+        ui.key(c, c.print("cloud-computer-{s}", .{sb.id}));
+        var r = ui.div(c).row().wFull().h(46).px(10).py(6).rounded(8).gap(9).itemsCenter().hover(k.ink(0.065));
+        if (l.sandboxes.len == 1) r = r.bg(k.ink(0.025));
+        defer r.end();
+        icons.icon(c, if (sandboxes.isTemporary(sb)) .cloud else .monitor, 18, k.muted, 0);
+        {
+            const col = ui.div(c).column().grow().w(0).gap(1);
+            defer col.end();
+            kit.ellipsisText(c, sandboxes.title(sb), .{ .size = 12.5, .line_height = 12.5 * 1.2, .weight = theme.ui_medium_weight, .color = k.text }, text_w);
+            const sub = ui.div(c).row().gap(5).itemsCenter();
+            defer sub.end();
+            const label = statusLabel(sb);
+            kit.dot(c, 5, statusTone(label, k));
+            const live = std.mem.eql(u8, sb.state, "running") or std.mem.eql(u8, sb.state, "starting");
+            const line = if (live and sb.price_per_hour_micro_usd != null)
+                c.print("{s} · {s}", .{ label, @import("runners.zig").formatRate(c.alloc(), sb.price_per_hour_micro_usd.?) catch "" })
+            else
+                label;
+            kit.ellipsisText(c, line, .{ .size = 10.5, .line_height = 10.5 * 1.2, .color = k.muted }, text_w - 10);
+        }
+        icons.icon(c, .@"alt-arrow-right", 13, k.faint, 0);
+        if (r.clicked()) openCard(a);
+    }
+}
+
 /// The strip (`render_cloud_sandbox_strip`), 8 in from the sidebar's sides
 /// and 4 below what's above it; `pb` under it.
 pub fn strip(c: *ui.Context, a: *App, k: theme.Colors, pb: f32) void {
@@ -71,13 +131,17 @@ pub fn strip(c: *ui.Context, a: *App, k: theme.Colors, pb: f32) void {
     const pad = ui.div(c).column().wFull().px(8).pt(4).pb(pb);
     defer pad.end();
     ui.key(c, "cloud-sandbox-strip");
-    const s = ui.div(c).row().w(w).px(9).py(7).gap(8).itemsCenter().rounded(6)
+    // GPUI's px 8, py 4 and a 1-point border, which nanoui draws inside.
+    const s = ui.div(c).row().w(w).px(9).py(5).gap(8).itemsCenter().rounded(6)
         .bg(if (sum.warning) k.warning.alpha(0.12) else k.accent_wash).border(tone.alpha(0.3)).borderW(1);
     defer s.end();
     const button_w: f32 = if (sum.running_ids.len > 0) 8 + turnOffWidth(c, turnOffLabel(a, sum.running_ids.len)) else 0;
     const text_w = w - 2 * 9 - button_w;
     {
-        const open = ui.div(c).column().w(text_w).gap(1);
+        const open = tip.on(ui.div(c).column().grow().w(0).gap(1), k, .{
+            .text = sandboxes.compactTooltip(c.alloc(), sum) catch "",
+            .delay = tip.quick,
+        });
         defer open.end();
         {
             const top = ui.div(c).row().gap(6).itemsCenter();
@@ -85,10 +149,12 @@ pub fn strip(c: *ui.Context, a: *App, k: theme.Colors, pb: f32) void {
             kit.dot(c, 6, tone);
             kit.ellipsisText(c, sum.label, st(c, 11, .{ .weight = .medium, .color = k.text }), text_w - 12);
         }
-        {
+        // One line at rest (the detail is in the tooltip); a problem gets
+        // its own line.
+        if (sum.warning) {
             const d = ui.div(c).row().pl(12);
             defer d.end();
-            kit.ellipsisText(c, sum.detail, st(c, 10.5, .{ .color = if (sum.warning) k.warning else k.muted }), text_w - 12);
+            kit.ellipsisText(c, sum.detail, st(c, 10.5, .{ .color = k.warning }), text_w - 12);
         }
         if (open.clicked()) openCard(a);
     }

@@ -16,7 +16,7 @@ const spaces =
 const chats =
     \\[{"id":"local","deviceId":"d","title":"Local","archived":false,"spaceId":"g","cwd":"/work/fieldnotes","branch":null},
     \\ {"id":"tree","deviceId":"d","title":"Tree","archived":false,"spaceId":"g","cwd":"/work/fieldnotes-wt/footer","branch":"feat/footer"},
-    \\ {"id":"graff","deviceId":"d","title":"Graff","archived":false,"spaceId":"g","cwd":"/work/fieldnotes/.graff/worktrees/harness-ab12","branch":"wt-ab12"},
+    \\ {"id":"graff","deviceId":"d","title":"Graff","archived":false,"spaceId":"g","cwd":"/work/fieldnotes/.graff/worktrees/harness-ab12","branch":"wt-ab12","config":{"harness":"graff","model":"gpt-6.1-sol","reasoning":"high"}},
     \\ {"id":"plain","deviceId":"d","title":"Plain","archived":false,"spaceId":"n","cwd":"/work/sketches","branch":"main"},
     \\ {"id":"loose","deviceId":"d","title":"Loose","archived":false,"cwd":"/work/elsewhere","branch":"main"}]
 ;
@@ -126,5 +126,38 @@ test "the footer sits in its 24-point slot 8 under the pill, and follows the pil
         try testing.expect(label.y + label.h <= slot_top + 24);
         // As wide as the conversation column: 736.
         try testing.expectEqual(@as(f32, 736), pill.w);
+    }
+}
+
+test "the footer follow-up chip defaults to Steer on GPT-6.0+ and toggles between Steer and Queue" {
+    const queue_mod = @import("app_queue.zig");
+    {
+        var h: Harness = undefined;
+        try h.init("graff");
+        defer h.deinit();
+        try testing.expectEqual(queue_mod.FollowUp.steer, queue_mod.followUpBehavior(&h.a));
+        try testing.expect(h.t.hasText("gpt-6.1-sol"));
+        try testing.expect(h.t.hasText("High"));
+        try testing.expect(h.t.hasText("Steer"));
+        try testing.expect(!h.t.hasText("Queue"));
+
+        try h.t.clickText("Steer");
+        h.t.settle(1);
+        h.snap("footer-queue");
+        try testing.expectEqual(queue_mod.FollowUp.queue, queue_mod.followUpBehavior(&h.a));
+        try testing.expect(h.t.hasText("Queue"));
+        try testing.expect(!h.t.hasText("Steer"));
+
+        try h.t.clickText("Queue");
+        h.t.settle(1);
+        try testing.expectEqual(queue_mod.FollowUp.steer, queue_mod.followUpBehavior(&h.a));
+        try testing.expect(h.t.hasText("Steer"));
+    }
+    {
+        var h: Harness = undefined;
+        try h.init("local");
+        defer h.deinit();
+        try testing.expectEqual(queue_mod.FollowUp.queue, queue_mod.followUpBehavior(&h.a));
+        try testing.expect(h.t.hasText("Queue"));
     }
 }

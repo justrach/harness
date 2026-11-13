@@ -120,7 +120,12 @@ test "identity SVGs keep their colors, density, dark palette and cache" {
             for (t.ctx.nodes.items) |node| switch (node.content) {
                 .image => |im| {
                     try std.testing.expect(im.tint == null);
-                    const decoded = t.text.images.decoded.get(im.key).?.?;
+                    const Cache = @TypeOf(t.text.images.decoded);
+                    const Key = @FieldType(Cache.KV, "key");
+                    const decoded = if (comptime Key == u64)
+                        t.text.images.decoded.get(im.key).?.?
+                    else
+                        (t.text.images.decoded.get(.{ .key = im.key, .side = 0 }) orelse t.text.images.decoded.get(.{ .key = im.key, .side = @intFromFloat(14 * scale) }).?).?;
                     try std.testing.expectEqual(@as(u32, @intFromFloat(14 * scale)), decoded.width);
                     try std.testing.expectEqual(decoded.width, decoded.height);
                     try std.testing.expectEqual(@as(f32, 14), node.rect.w);

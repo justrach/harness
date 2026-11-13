@@ -7,7 +7,7 @@ const std = @import("std");
 
 pub fn module(b: *std.Build) *std.Build.Module {
     const files = b.addWriteFiles();
-    const manifest = std.json.parseFromSlice(std.json.Value, b.allocator, read(b, "../../crates/ui/src/file-icons.json"), .{}) catch @panic("invalid file-icon manifest");
+    const manifest = std.json.parseFromSlice(std.json.Value, b.allocator, read(b, "assets/file-icons.json"), .{}) catch @panic("invalid file-icon manifest");
     const root = manifest.value.object;
     var definitions: std.StringHashMap(u16) = .init(b.allocator);
     var source: std.ArrayList(u8) = .empty;
@@ -23,7 +23,7 @@ pub fn module(b: *std.Build) *std.Build.Module {
         const icon_path = entry.value_ptr.object.get("iconPath").?.string;
         if (!std.mem.startsWith(u8, icon_path, "./icons/")) @panic("invalid file-icon asset path");
         const path = icon_path["./icons/".len..];
-        const svg = read(b, b.fmt("../../crates/ui/assets/file-icons/{s}", .{path}));
+        const svg = read(b, b.fmt("assets/file-icons/{s}", .{path}));
         const packed_name = b.fmt("deflated/{s}", .{path});
         _ = files.add(packed_name, deflate(b, svg));
         append(b, &source, b.fmt("    .{{ .path = {s}, .deflated = @embedFile({s}), .len = {d} }},\n", .{ quote(b, path), quote(b, packed_name), svg.len }));

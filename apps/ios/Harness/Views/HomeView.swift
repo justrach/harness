@@ -49,7 +49,28 @@ struct HomeView: View {
     /// Status by default; `-homeGroupBy none|project|device` picks another at launch.
     @State private var groupByRaw = UserDefaults.standard.string(forKey: "homeGroupBy")
         .flatMap(HomeGroupBy.init(rawValue:))?.rawValue ?? HomeGroupBy.status.rawValue
+    @State private var activityWindow: HomeActivityWindow = .all
+    @AppStorage(HomeUiMode.storageKey) private var uiModeRaw = HomeUiMode.zen.rawValue
+    @AppStorage(HomeMovingPart.overridesStorageKey) private var uiPartOverridesRaw = ""
     @AppStorage("homeCollapsedGroups") private var collapsedGroupsRaw = ""
+
+    private var hierarchyProfile: HomeHierarchyProfile {
+        HomeHierarchyProfile.resolved(baseModeRaw: uiModeRaw, overridesRaw: uiPartOverridesRaw)
+    }
+
+    private var uiMode: HomeUiMode {
+        hierarchyProfile.effectiveMode
+    }
+
+    private func sendUiEvent(_ event: HomeUiEvent) {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        withAnimation(Motion.resort) {
+            let target = HomeListControls.stepUiState(HomeUiState(mode: uiMode), event).mode
+            let preset = HomeListControls.applyPreset(target)
+            uiModeRaw = preset.modeRaw
+            uiPartOverridesRaw = preset.overridesRaw
+        }
+    }
     // Not persisted: a filter left on across launches reads as lost sessions.
     @State private var searchText = ""
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -415,6 +436,7 @@ struct HomeView: View {
         }
         .onChange(of: horizontalSizeClass) { noteFoldable() }
         .environment(\.switchToSession, switchTo)
+        .environment(\.openNewSession, { startNewSession(prompt: nil) })
         .sheet(isPresented: $showSettings) {
             SettingsView(openCrashReports: settingsOnCrashReports)
         }
@@ -449,7 +471,7 @@ struct HomeView: View {
     /// The session switcher's jump: from inside a session, swap that session
     /// out instead of stacking another one behind it.
     private func switchTo(_ chatId: String) {
-        if !splitLayout, case .chat = path.last {
+        if !splitLayout, !path.isEmpty, case .chat = path.last {
             path[path.count - 1] = .chat(chatId)
         } else {
             open(.chat(chatId))
@@ -772,17 +794,60 @@ struct HomeView: View {
     /// choice used to sit alone in the nav bar as "All", the grouping alone on
     /// this row as "Time". At large text sizes the pair stacks.
     @ViewBuilder private func listControls(showsGrouping: Bool) -> some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 8) {
-                projectMenu
-                if showsGrouping { groupPill }
-            }
-            VStack(alignment: .leading, spacing: 6) {
-                projectMenu
-                if showsGrouping { groupPill }
+        let showFilters = hierarchyProfile.showsMultiAxisFilters
+        let hasProjectScope = selectedSpace != nil || projectlessSelected
+        ScrollView(.horizontal, showsIndicators: false) {
+            GlassEffectContainer(spacing: 5) {
+                HStack(spacing: 5) {
+                    if showFilters || hasProjectScope { projectMenu.fixedSize() }
+                    if showFilters && showsGrouping { groupPill }
+                    uiModePill
+                    customizePartsMenu
+                }
             }
         }
+        .scrollClipDisabled()
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// 1-tap Experience mode switcher (`FrameSchedule.lean`: `UiMode.zen` default for
+    /// a calm flat list, `UiMode.developer` for multi-level filters & git chrome).
+    /// Tap once to flip instantly; hold (or tap the sliders pill beside it) to toggle individual parts.
+    private var uiModePill: some View {
+        Button {
+            sendUiEvent(.toggleMode)
+        } label: {
+            HomeModeTogglePill(mode: uiMode)
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .contextMenu {
+            HomeExperienceMenuContent(uiModeRaw: $uiModeRaw, uiPartOverridesRaw: $uiPartOverridesRaw)
+        }
+        .accessibilityLabel("Experience mode")
+        .accessibilityValue(uiMode.label)
+        .accessibilityHint("Tap to switch between Zen and Developer mode, or hold to customize individual controls")
+        .accessibilityIdentifier("home-ui-mode")
+    }
+
+    /// 1-tap menu for turning individual hierarchy parts on and off independently.
+    private var customizePartsMenu: some View {
+        let customized = !uiPartOverridesRaw.isEmpty
+        return Menu {
+            HomeExperienceMenuContent(uiModeRaw: $uiModeRaw, uiPartOverridesRaw: $uiPartOverridesRaw)
+        } label: {
+            Image(systemName: "slider.horizontal.3")
+                .font(.system(size: 13, weight: customized ? .semibold : .medium))
+                .foregroundStyle(customized ? Theme.text : Theme.textMuted)
+                .frame(width: Theme.chipHeight, height: Theme.chipHeight)
+                .glassEffect(.regular.interactive(), in: Circle())
+                .frame(minHeight: Theme.hitTarget)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .accessibilityLabel("Customize view controls")
+        .accessibilityIdentifier("home-customize-parts")
     }
 
     /// Scopes the session list to one project. Rows are Buttons, not a Picker:
@@ -827,6 +892,9 @@ struct HomeView: View {
     /// space.)
     private var groupPill: some View {
         let grouping = HomeGroupBy(rawValue: groupByRaw) ?? .none
+        let pillTitle = activityWindow == .all
+            ? grouping.pillTitle
+            : "\(grouping.pillTitle) · \(activityWindow.label)"
         return Menu {
             Picker(selection: $groupByRaw) {
                 ForEach(HomeGroupBy.allCases) { option in
@@ -836,8 +904,22 @@ struct HomeView: View {
                 Text("Group by")
             }
             .pickerStyle(.inline)
+            Menu {
+                Picker(selection: $activityWindow) {
+                    ForEach(HomeActivityWindow.allCases) { option in
+                        Text(option.label).tag(option)
+                    }
+                } label: {
+                    Text("Last activity")
+                }
+                .pickerStyle(.inline)
+            } label: {
+                Label(activityWindow == .all ? "Last activity" : "Last activity: \(activityWindow.label)",
+                      systemImage: "clock.arrow.circlepath")
+            }
         } label: {
-            HomeControlPill(symbol: grouping.symbol, title: grouping.pillTitle, active: grouping != .status)
+            HomeControlPill(symbol: grouping.symbol, title: pillTitle,
+                            active: grouping != .status || activityWindow != .all)
         }
         .buttonStyle(.plain)
         .fixedSize()
@@ -893,29 +975,13 @@ struct HomeView: View {
     @ViewBuilder private var sessionsSection: some View {
         let scoped = selectedSpace.map { model.chats(in: $0.id) }
             ?? (projectlessSelected ? HomeListControls.projectless(model.overviewChats) : model.overviewChats)
-        let chats = HomeFilter.apply(scoped, query: searchText, names: model.homeFilterNames)
-        let grouping = HomeGroupBy(rawValue: groupByRaw) ?? .none
-        // The large title, then the pinned people row, then the chips. Not in
-        // the phone split: a narrow pane keeps its rows for sessions.
-        if phoneArrangement == nil {
-            Section {
-                HomeStartHeader(hasProject: startSpaceId != nil,
-                                compose: { startNewSession(prompt: nil) },
-                                start: { startNewSession(prompt: $0.prompt) })
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
-                    .listRowInsets(EdgeInsets(top: 4, leading: Theme.gutter, bottom: 10, trailing: Theme.gutter))
-                let pinnedChats = scoped.filter { model.isPinned(chatId: $0.id) }
-                // Grouped by status, pins already lead the list: no second copy.
-                if searchText.isEmpty, !pinnedChats.isEmpty, grouping != .status {
-                    PinnedRow(chats: pinnedChats) { open(.chat($0)) }
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
-                        .listRowInsets(EdgeInsets(top: 2, leading: 0, bottom: 8, trailing: 0))
-                }
-            }
-            .listSectionSeparator(.hidden)
-        }
+        let activityFiltered = HomeActivityWindow.apply(scoped, window: activityWindow,
+                                                        indicator: { model.indicator(for: $0) },
+                                                        nowMs: nowMs())
+        let chats = HomeFilter.apply(activityFiltered, query: searchText, names: model.homeFilterNames)
+        let grouping: HomeGroupBy = hierarchyProfile.flatSessionList
+            ? .none
+            : (HomeGroupBy(rawValue: groupByRaw) ?? .none)
         if HomeListControls.showsRow(hasSessions: !model.overviewChats.isEmpty,
                                      hasProjects: !model.spaces.isEmpty,
                                      projectSelected: selectedSpace != nil || projectlessSelected) {
@@ -926,34 +992,6 @@ struct HomeView: View {
                     .listRowInsets(EdgeInsets(top: 0, leading: Theme.gutter, bottom: 4, trailing: Theme.gutter))
             }
             .listSectionSeparator(.hidden)
-        }
-        if showSplitOffer {
-            Section {
-                SplitOfferBanner(tryIt: { answerSplitOffer(tryIt: true) },
-                                 notNow: { answerSplitOffer(tryIt: false) })
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
-                    .listRowInsets(EdgeInsets(top: 6, leading: Theme.gutter, bottom: 6, trailing: Theme.gutter))
-            }
-            .listSectionSeparator(.hidden)
-        }
-        if !scoped.isEmpty {
-            // What's running or waiting, above the history. Hidden while
-            // searching so it never competes with a query.
-            let now = NowStrip.active(in: scoped, model: model)
-            // Not in the phone split: the list beside the open session already shows what is running or
-            // waiting, and the cards would take most of a narrow pane.
-            // Grouped by status, "Needs you" already lists what waits on you:
-            // the strip would repeat it (less by default, #417).
-            if searchText.isEmpty, !now.isEmpty, phoneArrangement == nil, grouping != .status {
-                Section {
-                    NowStrip(chats: now) { open(.chat($0)) }
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
-                        .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 10, trailing: 0))
-                }
-                .listSectionSeparator(.hidden)
-            }
         }
         if chats.isEmpty {
             // A search can still hit the archived shelf below.
@@ -1036,14 +1074,14 @@ struct HomeView: View {
     private func sessionRow(_ chat: Chat) -> some View {
         // Location shows even when scoped — without it the row's
         // first line is just a floating dot and a timestamp.
-        ChatRow(chat: chat, showLocation: true) {
+        ChatRow(chat: chat, showLocation: true, showsCodeDetails: hierarchyProfile.showsRowTechBadges) {
             open(.chat(chat.id))
         }
-        .listRowBackground(selectedChatId == chat.id
-            ? AnyView(RoundedRectangle(cornerRadius: ChatRow.washRadius, style: .continuous)
-                .fill(Theme.elementActive)
-                .padding(.horizontal, Theme.gutter - ChatRow.insetH))
-            : AnyView(Color.clear))
+        .listRowBackground(
+            RoundedRectangle(cornerRadius: ChatRow.washRadius, style: .continuous)
+                .fill(selectedChatId == chat.id ? Theme.elementActive : Color.clear)
+                .padding(.horizontal, Theme.gutter - ChatRow.insetH)
+        )
         .listRowSeparator(.hidden)
         // The row pads its content by insetH, so the avatar and text sit on the 24pt gutter.
         .listRowInsets(EdgeInsets(top: 1, leading: Theme.gutter - ChatRow.insetH,
@@ -1099,6 +1137,7 @@ struct ChatRow: View {
     @Environment(AppModel.self) private var model
     let chat: Chat
     var showLocation: Bool
+    var showsCodeDetails: Bool = false
     let onSelect: () -> Void
 
     private var subline: Color { Theme.textMuted.opacity(0.7) }
@@ -1109,15 +1148,14 @@ struct ChatRow: View {
         let _ = model.connectivity.pulse
         let indicator = model.indicator(for: chat)
         let sendState = model.sendState(for: chat)
-        // Less by default (#417, #614): the PR badge lives in the session's
-        // composer, one tap away, not on every row.
-        let pullRequest = ChatRow.showsCodeDetails ? model.changeRequest(for: chat) : nil
+        // Zen mode hides per-row git/PR badges; Developer mode exposes them.
+        let pullRequest = showsCodeDetails ? model.changeRequest(for: chat) : nil
         ZStack(alignment: .bottomTrailing) {
             Button(action: onSelect) {
                 content(indicator: indicator, sendState: sendState,
                         reservesPullRequest: pullRequest != nil)
             }
-            .buttonStyle(PressWashButtonStyle(cornerRadius: ChatRow.washRadius))
+            .buttonStyle(PressWashButtonStyle(cornerRadius: ChatRow.washRadius, scale: 0.985))
             if let pullRequest {
                 PullRequestBadge(summary: pullRequest)
                     .padding(.trailing, 8)
@@ -1154,7 +1192,7 @@ struct ChatRow: View {
         let badge = sendState.flatMap(sendBadge)
         let unread = indicator == .completed && badge == nil
         return HStack(alignment: .top, spacing: 12) {
-            AgentAvatar(harness: chat.config?.harness, size: Theme.rowAvatar)
+            AgentAvatar(harness: chat.config?.harness, spaceId: chat.spaceId, size: Theme.rowAvatar)
             VStack(alignment: .leading, spacing: 3) {
                 // Line 1: the session name, and its time or status in the corner.
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -1196,9 +1234,9 @@ struct ChatRow: View {
                 // spinner rides bottom-right. Always laid out, so every row is
                 // the same height. Left out while rows show less: the corner
                 // already says Working.
-                if ChatRow.showsCodeDetails {
+                if showsCodeDetails {
                 HStack(spacing: 4) {
-                    if ChatRow.showsCodeDetails,
+                    if showsCodeDetails,
                        let branch = chat.branch?.trimmingCharacters(in: .whitespaces), !branch.isEmpty {
                         LineIconView(.gitBranch, size: 11, color: subline)
                         Text(branch)
@@ -1255,12 +1293,16 @@ struct ChatRow: View {
 /// Sessions with no agent recorded yet get a neutral mark.
 struct AgentAvatar: View {
     let harness: String?
+    var spaceId: String? = nil
     var size: CGFloat = Theme.rowAvatar
 
     var body: some View {
         ZStack {
             Circle().fill(ink(0.06))
-            Circle().strokeBorder(hairline(0.06), lineWidth: 0.5)
+            Circle().strokeBorder(
+                spaceId.map { Theme.projectTint($0).opacity(0.32) } ?? hairline(0.06),
+                lineWidth: spaceId != nil ? 1.5 : 0.5
+            )
             if let harness {
                 HarnessBadge(harness: harness, size: size * 0.46, neutral: Theme.text)
             } else {

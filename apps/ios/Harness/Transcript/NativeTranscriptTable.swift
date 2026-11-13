@@ -99,7 +99,7 @@ final class TranscriptViewport: UIView {
 
     private func mirror(_ source: CABasicAnimation, keyPath: String, delta: CGFloat, key: String) {
         guard abs(delta) > 0.01 else { table.layer.removeAnimation(forKey: key); return }
-        let animation = source.copy() as! CABasicAnimation
+        guard let animation = source.copy() as? CABasicAnimation else { return }
         animation.delegate = nil
         animation.keyPath = keyPath
         animation.isAdditive = true
@@ -289,9 +289,9 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
         runwayID = input.runwayID
         expansionHeight = input.expansionHeight
         bottomSpacing = input.bottomSpacing
-        // `performBatchUpdates` first lays out anything pending, asking for
-        // cells by the old count; with `rows` already shorter that trapped.
-        if window != nil, bounds.width > 0, previousIDs != nextIDs, !appending {
+        // `performBatchUpdates` and `insertRows` first lay out anything pending,
+        // asking for cells by the old count; flush pending reloads before mutating `rows`.
+        if window != nil, bounds.width > 0, previousIDs != nextIDs {
             updating = true
             layoutIfNeeded()
             updating = false
@@ -311,13 +311,21 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
         UIView.performWithoutAnimation {
             var reloaded = false
             if previousIDs != nextIDs {
-                if appending {
+                let canBatch = Self.canApplyBatchUpdate(
+                    uiKitRowCount: numberOfSections > 0 ? numberOfRows(inSection: 0) : -1,
+                    previousIDs: previousIDs,
+                    nextIDs: nextIDs
+                )
+                if !canBatch {
+                    reloadData()
+                    reloaded = true
+                } else if appending {
                     insertRows(at: (previousIDs.count..<nextIDs.count).map { IndexPath(row: $0, section: 0) }, with: .none)
                 } else {
                     reloaded = !applyDifference(from: previousIDs, to: nextIDs)
                 }
             }
-            if !reloaded {
+            if !reloaded, numberOfSections > 0, numberOfRows(inSection: 0) == rows.count {
                 // A chunk can finish the previous block and append the next one.
                 // Insertion alone leaves that visible block missing its suffix.
                 var previousVersions: [String: UInt64] = [:]
@@ -325,7 +333,7 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
                 for row in previous { previousVersions[row.id] = row.version }
                 let visible = indexPathsForVisibleRows ?? []
                 let changed = visible.filter {
-                    guard $0.row < rows.count, let old = previousVersions[rows[$0.row].id] else { return false }
+                    guard canIndexRow($0.row), let old = previousVersions[rows[$0.row].id] else { return false }
                     return presentationChanged || old != rows[$0.row].version
                 }
                 if !changed.isEmpty { reconfigureRows(at: changed) }
@@ -344,7 +352,7 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
         updating = false
         if let pending = pendingScroll {
             let windowRow = pending.row - hiddenRows
-            if windowRow >= 0 && windowRow < rows.count {
+            if canIndexRow(windowRow) {
                 pendingScroll = nil
                 super.scrollToRow(at: IndexPath(row: windowRow, section: 0),
                                   at: pending.position, animated: false)
@@ -364,13 +372,44 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
         }
     }
 
+    /// Pure precondition check for UIKit batch updates (`FrameSchedule.lean`:
+    /// `chooseTableUpdateSafe`): UIKit's materialized row count must match
+    /// `previousIDs.count` and both ID lists must be free of duplicates.
+    nonisolated static func canApplyBatchUpdate(uiKitRowCount: Int,
+                                                previousIDs: [String],
+                                                nextIDs: [String]) -> Bool {
+        guard uiKitRowCount == previousIDs.count else { return false }
+        return Set(previousIDs).count == previousIDs.count && Set(nextIDs).count == nextIDs.count
+    }
+
+    /// Pure bounds check for `scrollToRow` and `rectForRow` (`FrameSchedule.lean`:
+    /// `canIndexTableRow`): `row` must be within both `rowsCount` and UIKit's
+    /// materialized `uiKitRowCount`.
+    nonisolated static func canIndexTableRow(row: Int, rowsCount: Int, uiKitRowCount: Int) -> Bool {
+        row >= 0 && row < rowsCount && row < uiKitRowCount
+    }
+
+    private func canIndexRow(_ row: Int, section: Int = 0) -> Bool {
+        guard section >= 0, section < numberOfSections else { return false }
+        return Self.canIndexTableRow(row: row, rowsCount: rows.count,
+                                     uiKitRowCount: numberOfRows(inSection: section))
+    }
+
     /// Delete/insert only the rows whose ids changed; returns false when the
     /// change is too large (or the table has never laid out), in which case
     /// the caller falls back to `reloadData`. Every retained row keeps its
     /// realized cell and height, so reading history through a hydration or
     /// a tool-group split no longer shifts the visible rows.
     private func applyDifference(from previousIDs: [String], to nextIDs: [String]) -> Bool {
-        guard hasPositioned else { reloadData(); return false }
+        guard hasPositioned,
+              Self.canApplyBatchUpdate(
+                  uiKitRowCount: numberOfSections > 0 ? numberOfRows(inSection: 0) : -1,
+                  previousIDs: previousIDs,
+                  nextIDs: nextIDs
+              ) else {
+            reloadData()
+            return false
+        }
         let difference = nextIDs.difference(from: previousIDs)
         guard difference.count <= Self.maxBatchChanges else { reloadData(); return false }
         var deletions: [IndexPath] = []
@@ -570,8 +609,12 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
             self.reconcileGesture()
             self.updating = true
             UIView.performWithoutAnimation {
-                self.beginUpdates()
-                self.endUpdates()
+                if self.numberOfSections > 0, self.numberOfRows(inSection: 0) == self.rows.count {
+                    self.beginUpdates()
+                    self.endUpdates()
+                } else {
+                    self.reloadData()
+                }
                 self.layoutIfNeeded()
                 self.updateRunway()
             }
@@ -661,6 +704,7 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
     override func scrollToRow(at indexPath: IndexPath,
                               at position: UITableView.ScrollPosition, animated: Bool) {
         if indexPath.row < rows.count {
+            guard canIndexRow(indexPath.row, section: indexPath.section) else { return }
             super.scrollToRow(at: indexPath, at: position, animated: animated)
             return
         }
@@ -668,6 +712,7 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
         let transcriptIndex = min(indexPath.row, transcriptTotal - 1)
         let windowRow = transcriptIndex - hiddenRows
         if windowRow >= 0 {
+            guard canIndexRow(windowRow) else { return }
             super.scrollToRow(at: IndexPath(row: windowRow, section: 0),
                               at: position, animated: animated)
             return
@@ -687,11 +732,15 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
     }
 
     override func cellForRow(at indexPath: IndexPath) -> UITableViewCell? {
-        super.cellForRow(at: windowPath(indexPath))
+        let mapped = windowPath(indexPath)
+        guard canIndexRow(mapped.row, section: mapped.section) else { return nil }
+        return super.cellForRow(at: mapped)
     }
 
     override func rectForRow(at indexPath: IndexPath) -> CGRect {
-        super.rectForRow(at: windowPath(indexPath))
+        let mapped = windowPath(indexPath)
+        guard canIndexRow(mapped.row, section: mapped.section) else { return .zero }
+        return super.rectForRow(at: mapped)
     }
 
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {

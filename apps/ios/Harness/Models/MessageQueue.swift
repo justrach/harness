@@ -129,6 +129,18 @@ enum MessageQueue {
         guard from >= 0, from < count, to >= 0, to < count else { return nil }
         return to
     }
+
+    /// Follow-ups steer into the active turn by default on Codex and GPT-6.0+
+    /// models (`app_queue.zig` `defaultSteersNow`, #787).
+    static func defaultSteersNow(harness: String?, model: String?) -> Bool {
+        let h = (harness ?? "").lowercased()
+        if h == "codex" { return true }
+        let m = (model ?? "").lowercased()
+        for prefix in ["gpt-6", "gpt-7", "gpt-8", "gpt-9"] {
+            if m.contains(prefix) { return true }
+        }
+        return false
+    }
 }
 
 enum QueueAction: Equatable {

@@ -36,6 +36,7 @@ mod compaction;
 mod devin_models;
 mod elicitation;
 pub mod exo_bridge;
+pub mod graff_bot;
 pub mod graff_client;
 #[cfg(target_os = "macos")]
 mod graff_connections;
@@ -519,7 +520,7 @@ fn graff_spec() -> AcpAgentSpec {
         // Graff's vendor model catalog advertises per-seat effort ladders;
         // session effort selection uses the standard ACP thought_level option.
         models: Vec::new,
-        steering_mode: SteeringMode::TurnBoundary,
+        steering_mode: SteeringMode::StepBoundary,
         reasoning_levels: &[
             ReasoningLevel::Low,
             ReasoningLevel::Medium,
@@ -1551,6 +1552,14 @@ impl AcpHarness {
             .kill_on_drop(true);
         let child = crate::process::retry_busy(|| cmd.spawn()).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
+                if let Some(dir) = cwd.filter(|c| !c.is_empty())
+                    && !Path::new(dir).exists()
+                {
+                    return HarnessError::Io(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("Project folder is missing: {dir}"),
+                    ));
+                }
                 HarnessError::NotInstalled(crate::executable::binary_hint(&exe))
             } else {
                 HarnessError::Io(e)
@@ -3988,10 +3997,10 @@ async fn run_session(session: Session) {
                     .map(str::to_owned);
             }
         }
-        // Graff reports the worktree it runs the session in; the engine
+        // Graff reports the checkout it runs the session in; the engine
         // re-homes the chat there so later runs, resumes and panels follow.
         let session_cwd = (harness == HarnessId::Graff)
-            .then(|| graff_worktree::session_worktree(&options_snapshot))
+            .then(|| graff_worktree::session_cwd(&options_snapshot))
             .flatten();
         Ok::<(String, bool, Vec<SlashCommand>, Option<String>, Option<String>, bool), HarnessError>((
             session_id,

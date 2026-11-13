@@ -14,6 +14,18 @@ const std = @import("std");
 const builtin = @import("builtin");
 const net = std.Io.net;
 const Allocator = std.mem.Allocator;
+const Server = if (builtin.os.tag == .windows) @import("windows_callback_server.zig").Server else net.Server;
+
+fn listen(io: std.Io, port: u16) !Server {
+    if (comptime builtin.os.tag == .windows) return Server.listen(port);
+    return (try net.IpAddress.parseIp4("127.0.0.1", port)).listen(io, .{});
+}
+
+fn closeStream(stream: net.Stream, io: std.Io) void {
+    if (comptime builtin.os.tag == .windows) {
+        @import("windows_callback_server.zig").closeStream(stream);
+    } else stream.close(io);
+}
 
 /// `WAIT`: how long the listener waits for the browser before giving the
 /// port back.
@@ -106,19 +118,31 @@ pub const Landed = struct {
 pub const Capture = struct {
     gpa: Allocator,
     io: std.Io,
-    server: net.Server,
+    server: Server,
     port: u16,
     path: []u8,
     landed: Landed,
     cancelled: std.atomic.Value(bool) = .init(false),
-    /// The owner's and the thread's (or, once landed, the callee's).
+    /// The owner and thread each hold a ref; a landing gets its own ref.
     refs: std.atomic.Value(u32) = .init(2),
+    stopped: std.atomic.Value(bool) = .init(false),
     /// The address the browser landed on, set before `landed` is told.
     address: []u8 = &.{},
 
     /// Let it go: the listener stops and the port is freed.
     pub fn cancel(c: *Capture) void {
         c.cancelled.store(true, .release);
+        c.release();
+    }
+
+    /// Test/teardown barrier: ordinary UI cancellation stays nonblocking, but
+    /// scoped allocators and callback contexts must outlive the listener.
+    pub fn cancelAndWait(c: *Capture) void {
+        _ = c.refs.fetchAdd(1, .acq_rel);
+        c.cancel();
+        while (!c.stopped.load(.acquire)) {
+            std.Io.sleep(c.io, .fromMilliseconds(1), .awake) catch {};
+        }
         c.release();
     }
 
@@ -134,13 +158,19 @@ pub const Capture = struct {
     }
 
     fn run(c: *Capture) void {
+        defer {
+            c.stopped.store(true, .release);
+            c.release();
+        }
         const got = c.accept(nowMs(c.io) + wait_s * std.time.ms_per_s);
         c.server.deinit(c.io);
         if (got) |address| {
             c.address = address;
-            if (!c.isCancelled()) return c.landed.func(c.landed.ctx, c);
+            if (!c.isCancelled()) {
+                _ = c.refs.fetchAdd(1, .acq_rel);
+                c.landed.func(c.landed.ctx, c);
+            }
         }
-        c.release();
     }
 
     fn accept(c: *Capture, deadline_ms: i64) ?[]u8 {
@@ -150,7 +180,7 @@ pub const Capture = struct {
                 error.WouldBlock, error.ConnectionAborted => continue,
                 else => return null,
             };
-            defer stream.close(c.io);
+            defer closeStream(stream, c.io);
             if (answer(c.gpa, c.io, stream, c.path)) |target| {
                 defer c.gpa.free(target);
                 return std.fmt.allocPrint(c.gpa, "http://127.0.0.1:{d}{s}", .{ c.port, target }) catch null;
@@ -192,7 +222,19 @@ fn nowMs(io: std.Io) i64 {
 }
 
 /// Whether `fd` has something to read within `ms`.
-fn ready(fd: std.posix.fd_t, ms: i32) bool {
+fn ready(fd: net.Socket.Handle, ms: i32) bool {
+    if (comptime builtin.os.tag == .windows) {
+        const WsaPollFd = extern struct {
+            fd: net.Socket.Handle,
+            events: i16,
+            revents: i16,
+        };
+        const ws = struct {
+            extern "ws2_32" fn WSAPoll(fdarray: [*]WsaPollFd, fds: u32, timeout: c_int) callconv(.winapi) c_int;
+        };
+        var fds = [_]WsaPollFd{.{ .fd = fd, .events = 0x0100, .revents = 0 }};
+        return ws.WSAPoll(&fds, 1, ms) > 0;
+    }
     var fds = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
     const n = std.posix.poll(&fds, ms) catch return false;
     return n > 0;
@@ -201,9 +243,7 @@ fn ready(fd: std.posix.fd_t, ms: i32) bool {
 /// `start`: bind the callback port and wait on a thread of its own. Null
 /// when the port is taken, so the caller relies on pasting the address.
 pub fn start(gpa: Allocator, io: std.Io, port: u16, path: []const u8, landed: Landed) ?*Capture {
-    if (builtin.os.tag == .windows) return null;
-    const addr = net.IpAddress.parseIp4("127.0.0.1", port) catch return null;
-    var server = addr.listen(io, .{}) catch return null;
+    var server = listen(io, port) catch return null;
     const c = gpa.create(Capture) catch {
         server.deinit(io);
         return null;
@@ -263,8 +303,7 @@ const Probe = struct {
 
 /// A free loopback port, as the OS hands one out.
 fn freePort() !u16 {
-    const addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
-    var probe = try addr.listen(testing.io, .{});
+    var probe = try listen(testing.io, 0);
     defer probe.deinit(testing.io);
     return probe.socket.address.getPort();
 }
@@ -291,6 +330,10 @@ test "a browser redirect is caught and answered" {
     const port = try freePort();
     var probe: Probe = .{};
     const cap = start(testing.allocator, testing.io, port, "/auth/callback", .{ .ctx = &probe, .func = Probe.landed }) orelse return error.PortBusy;
+    defer {
+        cap.cancelAndWait();
+        if (probe.got.load(.acquire)) |landed| landed.release();
+    }
     var reply: [1024]u8 = undefined;
     // A favicon first: a 404, and the wait goes on.
     try testing.expect(std.mem.startsWith(u8, try get(port, "GET /favicon.ico HTTP/1.1\r\n\r\n", &reply), "HTTP/1.1 404"));
@@ -304,17 +347,15 @@ test "a browser redirect is caught and answered" {
     try testing.expectEqual(cap, landed);
     var want: [96]u8 = undefined;
     try testing.expectEqualStrings(try std.fmt.bufPrint(&want, "http://127.0.0.1:{d}/auth/callback?code=abc&state=st", .{port}), landed.address);
-    // The callee's ref, then the owner's.
-    landed.release();
-    cap.cancel();
 }
 
 test "a busy port falls back to pasting" {
-    const addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
-    var taken = try addr.listen(testing.io, .{});
+    var taken = try listen(testing.io, 0);
     defer taken.deinit(testing.io);
     var probe: Probe = .{};
-    try testing.expect(start(testing.allocator, testing.io, taken.socket.address.getPort(), "/auth/callback", .{ .ctx = &probe, .func = Probe.landed }) == null);
+    const second = start(testing.allocator, testing.io, taken.socket.address.getPort(), "/auth/callback", .{ .ctx = &probe, .func = Probe.landed });
+    defer if (second) |cap| cap.cancelAndWait();
+    try testing.expect(second == null);
 }
 
 test "let go before the browser comes, the port is freed" {
@@ -325,10 +366,9 @@ test "let go before the browser comes, the port is freed" {
     const cap = start(std.heap.smp_allocator, testing.io, port, "/auth/callback", .{ .ctx = &probe, .func = Probe.landed }) orelse return error.PortBusy;
     cap.cancel();
     // Within a poll interval or so, the port binds again.
-    const addr = try net.IpAddress.parseIp4("127.0.0.1", port);
     var tries: usize = 0;
     while (tries < 100) : (tries += 1) {
-        var again = addr.listen(testing.io, .{}) catch {
+        var again = listen(testing.io, port) catch {
             try std.Io.sleep(testing.io, .fromMilliseconds(20), .awake);
             continue;
         };

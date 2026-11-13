@@ -89,6 +89,7 @@ struct TranscriptView: View {
                             .foregroundStyle(Theme.text)
                             .frame(width: 40, height: 40)
                     }
+                    .buttonStyle(PressScaleButtonStyle())
                     .glassEffect(.regular.interactive(), in: Circle())
                     .shadow(color: .black.opacity(0.35), radius: 8, y: 2)
                     .accessibilityLabel("Jump to latest")
@@ -481,7 +482,16 @@ struct UserBubble: View {
                 }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)
-                    .background(Theme.surfaceRaised, in: RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous))
+                    .background(
+                        Theme.surfaceRaised,
+                        in: UnevenRoundedRectangle(
+                            topLeadingRadius: Theme.bubbleRadius,
+                            bottomLeadingRadius: Theme.bubbleRadius,
+                            bottomTrailingRadius: 6,
+                            topTrailingRadius: Theme.bubbleRadius,
+                            style: .continuous
+                        )
+                    )
                     .frame(maxWidth: TranscriptView.maxContentWidth * 0.8, alignment: .trailing)
                     .contextMenu {
                         Button {
@@ -645,20 +655,23 @@ struct ToolGroupView: View {
                             Image(systemName: "chevron.right")
                                 .font(.system(size: 11, weight: .semibold))
                                 .rotationEffect(.degrees(open ? 90 : 0))
-                                .frame(width: 26)
+                                .frame(width: 22)
                             Text(toolGroupSummary(tools))
-                                .font(Theme.sans(14))
+                                .font(Theme.sans(14, weight: .medium))
                                 .lineLimit(2)
                                 .multilineTextAlignment(.leading)
                             Spacer(minLength: 0)
                         }
+                        .padding(.horizontal, 12)
+                        .frame(minHeight: 44)
+                        .background(ink(0.045), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                     }
                 }
                 .foregroundStyle(Theme.textMuted)
                 .frame(minHeight: 44)
-                .contentShape(Rectangle())
+                .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
-            .buttonStyle(PressWashButtonStyle(cornerRadius: 8))
+            .buttonStyle(PressWashButtonStyle(cornerRadius: 16))
             .accessibilityValue(open ? "Expanded" : "Collapsed")
             .accessibilityHint("Shows or hides tool activity")
 
@@ -841,11 +854,10 @@ struct ErrorChipView: View {
                     .accessibilityIdentifier("error-chip-hint")
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 7)
-        .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
-        .background(Theme.danger.opacity(0.05), in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.danger.opacity(0.16), lineWidth: 1))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, minHeight: 38, alignment: .leading)
+        .background(Theme.danger.opacity(0.06), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
 
@@ -860,7 +872,7 @@ struct InputChipView: View {
                 .font(.system(size: 10))
                 .foregroundStyle(Theme.textMuted)
                 .frame(width: 20, height: 20)
-                .background(ink(0.09), in: RoundedRectangle(cornerRadius: 6))
+                .background(ink(0.09), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
             Text("Question")
                 .font(Theme.sans(12, weight: .medium))
                 .foregroundStyle(Theme.text)
@@ -870,9 +882,8 @@ struct InputChipView: View {
                 .lineLimit(1)
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 8)
-        .frame(height: 34)
-        .background(ink(0.045), in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(hairline(0.08), lineWidth: 1))
+        .padding(.horizontal, 12)
+        .frame(height: 38)
+        .background(ink(0.045), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }

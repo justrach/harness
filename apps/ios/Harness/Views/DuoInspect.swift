@@ -140,8 +140,9 @@ enum FileTree {
         for (path, mark) in marks {
             var node = root
             for part in path.split(separator: "/").map(String.init) {
-                if node.children[part] == nil { node.children[part] = Node() }
-                node = node.children[part]!
+                let next = node.children[part] ?? Node()
+                node.children[part] = next
+                node = next
             }
             node.mark = mark
         }

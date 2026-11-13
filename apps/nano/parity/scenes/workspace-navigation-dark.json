@@ -1,0 +1,126 @@
+{
+  "name": "workspace-navigation-dark",
+  "appearance": "dark",
+  "width": 1200,
+  "height": 780,
+  "spaces": [
+    {
+      "id": "notes",
+      "deviceId": "scene-device",
+      "path": "/work/notes",
+      "gitDetected": false,
+      "createdAt": "2026-10-01T00:00:00Z"
+    },
+    {
+      "id": "other",
+      "deviceId": "scene-device",
+      "path": "/work/other",
+      "gitDetected": false,
+      "createdAt": "2026-10-01T00:00:00Z"
+    }
+  ],
+  "chats": [
+    {
+      "id": "first",
+      "deviceId": "scene-device",
+      "title": "First conversation",
+      "spaceId": "notes",
+      "cwd": "/work/notes",
+      "archived": false,
+      "config": {
+        "harness": "graff",
+        "model": null,
+        "reasoning": null,
+        "modelOptions": {},
+        "sandbox": "workspace-write"
+      },
+      "createdAt": "2026-10-01T00:00:00Z",
+      "lastMessageAt": "2026-10-24T00:00:00Z"
+    },
+    {
+      "id": "second",
+      "deviceId": "scene-device",
+      "title": "Second conversation",
+      "spaceId": "notes",
+      "cwd": "/work/notes",
+      "archived": false,
+      "config": {
+        "harness": "graff",
+        "model": null,
+        "reasoning": null,
+        "modelOptions": {},
+        "sandbox": "workspace-write"
+      },
+      "createdAt": "2026-10-01T00:00:00Z",
+      "lastMessageAt": "2026-10-24T00:00:00Z"
+    },
+    {
+      "id": "other-chat",
+      "deviceId": "scene-device",
+      "title": "Other project conversation",
+      "spaceId": "other",
+      "cwd": "/work/other",
+      "archived": false,
+      "config": {
+        "harness": "graff",
+        "model": null,
+        "reasoning": null,
+        "modelOptions": {},
+        "sandbox": "workspace-write"
+      },
+      "createdAt": "2026-10-01T00:00:00Z",
+      "lastMessageAt": "2026-10-24T00:00:00Z"
+    }
+  ],
+  "selectedChat": "first",
+  "steps": [
+    {
+      "do": "key",
+      "keys": "cmd+k"
+    },
+    {
+      "do": "type",
+      "text": "Other project conversation"
+    },
+    {
+      "do": "key",
+      "keys": "enter"
+    },
+    {
+      "do": "wait",
+      "ms": 400
+    },
+    {
+      "do": "key",
+      "keys": "cmd+k"
+    },
+    {
+      "do": "type",
+      "text": "Second conversation"
+    },
+    {
+      "do": "key",
+      "keys": "enter"
+    },
+    {
+      "do": "wait",
+      "ms": 400
+    },
+    {
+      "do": "key",
+      "keys": "cmd+k"
+    },
+    {
+      "do": "type",
+      "text": "First conversation"
+    },
+    {
+      "do": "key",
+      "keys": "enter"
+    },
+    {
+      "do": "wait",
+      "ms": 400
+    }
+  ]
+}

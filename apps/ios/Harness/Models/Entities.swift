@@ -100,6 +100,11 @@ struct Chat: Identifiable, Hashable {
     /// When a person last prompted this chat (a send or steer). Agent replies
     /// move `lastMessageAt`, never this. Nil from hosts that predate it.
     var lastPromptAt: Int64? = nil
+    /// Agent-created child chats stay in the registry for orchestration, not
+    /// as independent sessions the person can open (desktop `parent_chat_id`).
+    var parentChatId: String? = nil
+
+    var isTopLevel: Bool { parentChatId == nil }
 
     /// Where the chat sits in lists: when you last called it; older hosts
     /// without the stamp fall back to the last message, then creation.

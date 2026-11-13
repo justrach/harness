@@ -4,16 +4,30 @@ const std = @import("std");
 const builtin = @import("builtin");
 const nanoui = @import("nanoui");
 const App = @import("app.zig").App;
-const Item = @typeInfo(@FieldType(@FieldType(nanoui.Menu, "items"), "items")).pointer.child;
+const StoredItem = @typeInfo(@FieldType(@FieldType(nanoui.Menu, "items"), "items")).pointer.child;
+const ItemArg = if (@typeInfo(StoredItem) == .pointer) StoredItem else *StoredItem;
 
 pub fn install(app: *nanoui.App, a: *App) !void {
+    const view_items = viewItems(a);
     const items = windowItems(a);
     try app.setMenu(&.{
         .{ .role = .app_menu },
         .{ .role = .edit_menu },
-        .{ .role = .view_menu },
+        .{ .role = .view_menu, .submenu = &view_items },
         .{ .role = .window_menu, .submenu = &items },
     });
+}
+
+pub fn viewItems(a: *App) [7]nanoui.MenuItem {
+    return .{
+        .{ .label = "Bigger Text", .accelerator = "Cmd+=", .click = .of(a, zoomIn) },
+        .{ .label = "Smaller Text", .accelerator = "Cmd+-", .click = .of(a, zoomOut) },
+        .{ .label = "Actual Size", .accelerator = "Cmd+0", .click = .of(a, resetZoom) },
+        .separator,
+        .{ .label = "Toggle Zen / Developer Mode", .accelerator = "Cmd+Shift+M", .click = .of(a, toggleUiMode) },
+        .separator,
+        .{ .role = .toggle_full_screen },
+    };
 }
 
 fn windowItems(a: *App) [7]nanoui.MenuItem {
@@ -28,8 +42,43 @@ fn windowItems(a: *App) [7]nanoui.MenuItem {
     };
 }
 
-fn closeTab(a: *App, _: *Item) void {
-    a.closeFocused();
+fn zoomIn(a: *App, _: ItemArg) void {
+    const was = a.view.in_pre_tree;
+    a.view.in_pre_tree = true;
+    a.stepZoom(1);
+    a.view.in_pre_tree = was;
+    a.redraw();
+}
+
+fn zoomOut(a: *App, _: ItemArg) void {
+    const was = a.view.in_pre_tree;
+    a.view.in_pre_tree = true;
+    a.stepZoom(-1);
+    a.view.in_pre_tree = was;
+    a.redraw();
+}
+
+fn resetZoom(a: *App, _: ItemArg) void {
+    const was = a.view.in_pre_tree;
+    a.view.in_pre_tree = true;
+    a.resetZoom();
+    a.view.in_pre_tree = was;
+    a.redraw();
+}
+
+fn toggleUiMode(a: *App, _: ItemArg) void {
+    const was = a.view.in_pre_tree;
+    a.view.in_pre_tree = true;
+    a.settings.toggleUiMode();
+    a.view.in_pre_tree = was;
+    a.redraw();
+}
+
+fn closeTab(a: *App, _: ItemArg) void {
+    const was = a.view.in_pre_tree;
+    a.view.in_pre_tree = true;
+    a.closeByShortcut();
+    a.view.in_pre_tree = was;
     a.redraw();
 }
 
@@ -41,6 +90,33 @@ fn pressClose(menu: *nanoui.Menu) bool {
         @as(objc.NSUInteger, 10), objc.CGPoint{}, @as(objc.NSUInteger, 1 << 20), @as(f64, 0), @as(objc.NSInteger, 0), @as(?objc.Object, null), objc.nsString("w"), objc.nsString("w"), objc.NO, @as(u16, 13),
     });
     return objc.msg(objc.BOOL, menu.ns, "performKeyEquivalent:", .{event});
+}
+
+test "deep native shortcuts Cmd W dismisses folder search before closing and returns typing to the composer" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const objc = nanoui.objc;
+    const pool = objc.Pool.push();
+    defer pool.pop();
+    _ = objc.msg(objc.Object, objc.class("NSApplication"), "sharedApplication", .{});
+    var h: @import("tests_ui_tab_strip.zig").Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.splitPane(.horizontal);
+    const strip = @import("view_tab_strip.zig");
+    strip.open(&h.a, .folder, strip.active(&h.a), .{ .x = 600, .y = 5, .w = 100, .h = 32 });
+    h.t.settle(1);
+    h.t.typeText("field");
+    const items = windowItems(&h.a);
+    const menu = try nanoui.Menu.create(std.testing.allocator, "Fixture", &.{.{ .role = .window_menu, .submenu = &items }});
+    defer menu.destroy();
+    try std.testing.expect(pressClose(menu));
+    h.t.settle(1);
+    try std.testing.expect(h.a.tabs.layout() == null);
+    try std.testing.expect(h.a.view.strip.menu == null);
+    try std.testing.expectEqualStrings("a", h.a.selected.?);
+    h.t.typeText("After native close");
+    try std.testing.expectEqualStrings("After native close", h.a.composer.text());
+    try std.testing.expectEqualStrings("field", h.a.view.strip.query.text());
 }
 
 test "native Cmd+W closes a split pane, then a tab, without closing the app window" {
@@ -60,13 +136,26 @@ test "native Cmd+W closes a split pane, then a tab, without closing the app wind
     const menu = try nanoui.Menu.create(std.testing.allocator, "Harness", &.{.{ .role = .window_menu, .submenu = &items }});
     defer menu.destroy();
     try std.testing.expect(pressClose(menu));
+    // First Cmd+W closes the split pane, leaving the current tab unsplit and
+    // preserving the other top-level tabs.
     try std.testing.expect(a.tabs.layout() == null);
     try std.testing.expectEqual(tabs, a.tabs.items.items.len);
     try std.testing.expect(pressClose(menu));
     try std.testing.expectEqual(tabs - 1, a.tabs.items.items.len);
-    // Closing the final tab leaves the new-session canvas, not no window.
     while (a.tabs.items.items.len > 1) try std.testing.expect(pressClose(menu));
+    // Closing the final tab leaves the new-session canvas, not no window.
     try std.testing.expect(pressClose(menu));
     try std.testing.expectEqual(@as(usize, 1), a.tabs.items.items.len);
     try std.testing.expect(a.selected == null);
+    // Native accelerators also respect the focused non-chat panel.
+    a.panels.host_open = true;
+    a.panels.active = a.panels.tabs.items.len;
+    a.view.strip.focused = .host;
+    try std.testing.expect(pressClose(menu));
+    try std.testing.expect(!a.panels.host_open);
+    a.panels.files_open = true;
+    a.view.strip.focused = .files;
+    try std.testing.expect(pressClose(menu));
+    try std.testing.expect(!a.panels.files_open);
+    try std.testing.expectEqual(@as(usize, 1), a.tabs.items.items.len);
 }

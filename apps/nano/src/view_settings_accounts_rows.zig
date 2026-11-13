@@ -29,7 +29,7 @@ pub fn rowInner() f32 {
 /// `section_card` `mt` below what's above.
 pub fn card(c: *ui.Context, k: theme.Colors, mt: f32) ui.Div {
     set.space(c, mt);
-    return ui.div(c).column().wFull().p(1).rounded(12).border(k.border).borderW(1).bg(if (k.frosted) k.card else k.shell).clip();
+    return ui.div(c).column().wFull().p(1).rounded(12).border(k.border).borderW(1).bg(if (k.frosted) k.card else k.shell);
 }
 
 /// A row's `border_t_1`.
@@ -107,7 +107,7 @@ pub fn ghostW(c: *ui.Context, g: Ghost) f32 {
 /// `btn_primary` made small (`px(8) py(4) rounded(6)` at 11.5).
 pub fn primary(c: *ui.Context, k: theme.Colors, label: []const u8, dim: bool) bool {
     var b = ui.div(c).row().px(8).py(4).rounded(6).bg(k.solid);
-    if (dim) b = b.opacity(0.5);
+    if (dim) b = b.opacity(0.5) else if (b.hovered()) b = b.opacity(0.9);
     defer b.end();
     ui.text(c, label, st(c, 11.5, .{ .weight = .medium, .color = k.on_solid }));
     return b.clicked();
@@ -188,7 +188,7 @@ pub fn warningStrip(c: *ui.Context, k: theme.Colors, message: []const u8) bool {
 
 /// The pulse a skeleton breathes with (`HARNESS_PULSE`, 2.4 s), 0 to 1.
 fn pulse(c: *ui.Context) f32 {
-    c.frameIn(1.0 / 15.0);
+    kit.loaderFrame(c, 1.0 / 15.0);
     const t: f32 = @floatCast(@mod(c.time / 2.4, 1.0));
     return (1 - @cos(2 * std.math.pi * t)) / 2;
 }

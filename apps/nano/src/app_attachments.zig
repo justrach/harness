@@ -8,6 +8,9 @@ const App = @import("app.zig").App;
 const Allocator = std.mem.Allocator;
 
 pub const max_bytes = 24 * 1024 * 1024;
+/// Preserve the established paste-to-file policy independently of the
+/// text field's now dynamically allocated storage.
+const max_inline_paste_bytes = 16 * 1024;
 const chunk_bytes = 510_000; // 680,000 base64 characters, below the relay ceiling.
 
 pub const Paste = union(enum) {
@@ -32,10 +35,12 @@ pub const Source = struct {
 pub const State = struct {
     items: std.ArrayList(*Item) = .empty,
     source: ?Source = null,
+    images: @import("app_attachment_images.zig").Cache = .{},
 
     pub fn deinit(s: *State, gpa: Allocator) void {
         for (s.items.items) |item| item.destroy();
         s.items.deinit(gpa);
+        s.images.deinit(gpa);
         s.* = .{};
     }
 };
@@ -76,8 +81,16 @@ pub const Item = struct {
         item.app.redraw();
     }
 
+    /// Committed edit refs borrow the same host read-back cache the sent
+    /// transcript uses; keep their durable path even if previewing fails.
+    pub fn preview(item: *Item) []const u8 {
+        if (item.bytes.len > 0) return item.bytes;
+        const image = @import("app_attachment_images.zig").getDevice(item.app, item.target orelse item.app.device_id orelse "", item.path orelse return "") orelse return "";
+        return @import("app_attachment_images.zig").tileBytes(image);
+    }
+
     pub fn start(item: *Item) void {
-        if (!item.app.engine.up() or item.removed) return;
+        if (item.path != null or !item.app.engine.up() or item.removed) return;
         item.status = .uploading;
         item.offset = 0;
         item.seq = 0;
@@ -201,12 +214,24 @@ pub fn stage(a: *App, name: []const u8, bytes: []const u8) !void {
     _ = @import("ids.zig").uuid(a.io, &item.id);
     try a.attachments.items.append(a.gpa, item);
     item.start();
+    @import("sound.zig").play(a, .attach);
     a.view.focus_composer = true;
     a.redraw();
 }
 
-pub fn stageFile(a: *App, path: []const u8) !void {
+/// Shared picker/Paste/drop validation. Native drops must validate before
+/// activating another pane; the returned bytes are owned by the caller.
+pub fn readFile(a: *App, path: []const u8) ![]u8 {
     const bytes = try std.Io.Dir.cwd().readFileAlloc(a.io, path, a.gpa, .limited(max_bytes));
+    if (bytes.len == 0) {
+        a.gpa.free(bytes);
+        return error.EmptyAttachment;
+    }
+    return bytes;
+}
+
+pub fn stageFile(a: *App, path: []const u8) !void {
+    const bytes = try readFile(a, path);
     defer a.gpa.free(bytes);
     try stage(a, std.fs.path.basename(path), bytes);
 }
@@ -252,9 +277,12 @@ pub fn paste(c: *ui.Context, a: *App) void {
             };
         },
         .text => |text| {
-            // Larger pastes become a lossless file instead of silently losing
-            // the tail at the text field's 16 KB editing-buffer boundary.
-            if (text.len > a.composer.buf.len - a.composer.len) {
+            // Large pastes still become a lossless file. For inline text,
+            // reserve before handing the edit to nanoui, whose TextBuffer
+            // uses the C allocator and inserts all bytes or none on OOM.
+            var can_inline = text.len <= max_inline_paste_bytes -| a.composer.text().len;
+            if (can_inline) can_inline = @import("text_buffer.zig").reserveInline(&a.composer, text.len);
+            if (!can_inline) {
                 stage(a, "pasted-text.txt", text) catch {
                     a.setNotice("Couldn't attach the pasted text.");
                 };
@@ -289,6 +317,53 @@ pub fn prompt(a: *App, text: []const u8) !?[]u8 {
     return try out.toOwnedSlice();
 }
 
+/// Restore committed refs as real, removable composer attachments, without
+/// uploading them again. Allocate everything before replacing editor text.
+pub fn restore(a: *App, text: []const u8, extra_paths: []const []const u8) !void {
+    const refs = @import("attachment_refs.zig");
+    const parsed = try refs.parse(a.gpa, text);
+    defer refs.deinit(a.gpa, parsed);
+    var restored: std.ArrayList(*Item) = .empty;
+    defer restored.deinit(a.gpa);
+    errdefer for (restored.items) |item| item.destroy();
+    for ([_][]const []const u8{ parsed.paths, extra_paths }) |paths| for (paths) |path| {
+        if (!refs.validPath(path)) return error.InvalidAttachmentRef;
+        const duplicate = for (restored.items) |item| {
+            if (std.mem.eql(u8, item.path.?, path)) break true;
+        } else false;
+        if (duplicate) continue;
+        const item = try restoredItem(a, path);
+        restored.append(a.gpa, item) catch |err| {
+            item.destroy();
+            return err;
+        };
+    };
+    try a.attachments.items.appendSlice(a.gpa, restored.items);
+    a.composer.set(parsed.text);
+}
+
+fn restoredItem(a: *App, path: []const u8) !*Item {
+    const item = try a.gpa.create(Item);
+    errdefer a.gpa.destroy(item);
+    const key = try a.gpa.dupe(u8, owner(a));
+    errdefer a.gpa.free(key);
+    const label = try a.gpa.dupe(u8, displayName(path));
+    errdefer a.gpa.free(label);
+    const data = try a.gpa.dupe(u8, "");
+    errdefer a.gpa.free(data);
+    const target = if (host(a)) |h| try a.gpa.dupe(u8, h) else null;
+    errdefer if (target) |h| a.gpa.free(h);
+    const ref = try a.gpa.dupe(u8, path);
+    item.* = .{ .app = a, .owner = key, .name = label, .bytes = data, .target = target, .id = undefined, .path = ref, .status = .ready };
+    _ = @import("ids.zig").uuid(a.io, &item.id);
+    return item;
+}
+
+pub fn displayName(path: []const u8) []const u8 {
+    const at = std.mem.lastIndexOfAny(u8, path, "/\\") orelse return path;
+    return path[at + 1 ..];
+}
+
 pub fn clear(a: *App) void {
     for (a.attachments.items.items) |item| if (item.active(a)) item.remove();
 }
@@ -296,6 +371,7 @@ pub fn clear(a: *App) void {
 /// Called at the frame boundary: the previous frame may still borrow a
 /// thumbnail's encoded bytes after its remove button was clicked.
 pub fn reap(a: *App) void {
+    @import("app_attachment_images.zig").reap(a);
     var i: usize = 0;
     while (i < a.attachments.items.items.len) {
         const item = a.attachments.items.items[i];

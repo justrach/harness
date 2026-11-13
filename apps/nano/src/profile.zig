@@ -91,7 +91,8 @@ pub fn main(init: std.process.Init) !void {
         }
     };
     debug_frames = std.c.getenv(debug_frames_env) != null;
-    std.debug.print("pid={d} phase=replay\n", .{std.c.getpid()});
+    const pid_num: i64 = if (@import("builtin").os.tag == .windows) @intCast(std.os.windows.GetCurrentProcessId()) else std.c.getpid();
+    std.debug.print("pid={d} phase=replay\n", .{pid_num});
     const first_at = frames[0].object.get("at").?.integer;
     var next: usize = 0;
     var dirty = true;
@@ -184,7 +185,7 @@ test "resource replay includes GPUI's working animation and stops it when settle
     try testing.expectEqual(.working, a.sessions.items[0].status);
     t.frame();
     try testing.expect(!t.ctx.animating);
-    try testing.expectApproxEqAbs(@as(f32, 1.0 / 15.0), t.ctx.frame_in orelse return error.WorkingAnimationNotScheduled, 0.0001);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), t.ctx.frame_in orelse return error.WorkingAnimationNotScheduled, 0.0001);
     // A finished or interrupted turn must not keep the working animation up.
     for ([_]@import("transcript.zig").EntryStatus{ .complete, .aborted }) |status| {
         a.transcript.entries.items[0].status = status;
@@ -201,4 +202,4 @@ const debug_frames_env = "NANO_PROFILE_FRAMES";
 var debug_frames = false;
 
 /// A nanoui with targets kept across frames (the fork's benchmark draw).
-const has_target = @hasField(ui.Tester, "renderer") and @hasDecl(@FieldType(ui.Tester, "renderer"), "drawTimed");
+const has_target = @hasField(ui.Tester, "renderer") and @FieldType(ui.Tester, "renderer") != void and @hasDecl(@FieldType(ui.Tester, "renderer"), "drawTimed");

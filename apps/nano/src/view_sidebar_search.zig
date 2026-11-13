@@ -201,13 +201,11 @@ pub fn controls(c: *ui.Context, a: *App, k: theme.Colors) void {
             const t = ui.div(c).row().grow().w(0).itemsCenter();
             defer t.end();
             ui.key(c, "sidebar-search-field");
-            const at = c.nodes.items.len;
-            const res = ui.textField(c, &s.query, .{ .placeholder = "Search session names…", .placeholder_color = k.faint, .width = .fill, .bare = true, .size = 14, .line_height = 22.75 });
             if (s.focus) {
-                c.focus = c.node(@intCast(at)).id;
-                c.changed = true;
+                c.focus = c.peekId(null);
                 s.focus = false;
             }
+            const res = ui.textField(c, &s.query, .{ .placeholder = "Search names or session IDs…", .placeholder_color = k.faint, .width = .fill, .bare = true, .size = 14, .line_height = 22.75 });
             s.field_focused = res.focused;
             if (res.focused) s.control_focused = false;
             if (res.changed) reset(c, a);
@@ -225,12 +223,12 @@ pub fn controls(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
     {
         ui.key(c, "sidebar-search-archived");
-        const r = ui.div(c).row().wFull().h(28).gap(6).itemsCenter();
+        const r = ui.div(c).row().wFull().h(28).px(8).gap(6).itemsCenter();
         defer r.end();
         if (r.hovered()) c.cursor_hand = true;
         {
             const on = s.include_archived;
-            const cb = ui.div(c).row().size(12, 12).rounded(3).center().border(if (on) k.accent else k.border_strong).borderW(1);
+            const cb = ui.div(c).row().size(14, 14).rounded(3).center().border(if (on) k.accent else k.border_strong).borderW(1);
             defer cb.end();
             if (on) icons.icon(c, .check, 10, k.accent, 0);
         }
@@ -275,7 +273,7 @@ pub fn results(c: *ui.Context, a: *App, k: theme.Colors) bool {
         const device = deviceName(a, ch.device_id);
         const where = if (device) |d| c.print("{s} @ {s}", .{ project, d }) else project;
         const folder = if (ch.archived) c.print("Archived · {s}", .{where}) else where;
-        const hit = sidebar.searchRow(c, a, k, ch, .{ .folder = folder, .lit = i == s.cursor.active, .query = query, .inner = sidebar.width - 16 - 16 });
+        const hit = sidebar.searchRow(c, a, k, ch, .{ .folder = folder, .lit = i == s.cursor.active, .query = query, .inner = sidebar.widthOf(a) - 16 - 16, .follow_compact = true });
         if (hit.pressed) s.cursor.pick(i, ch.id);
         if (hit.clicked) chosen = i;
         if (s.reveal and i == s.cursor.active) revealRow(c, s.scroll_id, w);

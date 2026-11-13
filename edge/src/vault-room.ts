@@ -25,6 +25,7 @@
  *   POST   /vault/items/{agent}/{slot}/hold     (signed)
  */
 import { AUTH_USER_HEADER, type Env } from "./env";
+import { readCapped } from "./body";
 import { isPurge, wipeObject } from "./purge";
 
 export const VAULT_LIMITS = {
@@ -218,8 +219,8 @@ export class VaultRoom implements DurableObject {
     const parts = url.pathname.split("/").filter(Boolean);
     if (parts[0] !== "vault") return json({ error: "not_found" }, 404);
 
-    const body = new Uint8Array(await request.arrayBuffer());
-    if (body.byteLength > VAULT_LIMITS.bodyBytes) return json({ error: "too_large" }, 413);
+    const body = await readCapped(request, VAULT_LIMITS.bodyBytes);
+    if (!body) return json({ error: "too_large" }, 413);
     const now = Date.now();
     this.prune(now);
 

@@ -1,0 +1,39 @@
+{
+  "width": 1200, "height": 780, "dark": true, "scale": 2,
+  "devices": [{"id":"local","name":"Studio"},{"id":"remote","name":"Build box"}],
+  "spaces": [{"id":"project","deviceId":"local","path":"/synthetic/fieldnotes"}],
+  "chats": [{"id":"chat","deviceId":"local","spaceId":"project","title":"Synthetic project setup","archived":false}],
+  "open": "chat",
+  "replies": {
+    "ListDrives": {"drives":[{"name":"Projects volume","path":"/synthetic/projects"}]},
+    "ListFolders": {"$seq":[
+      {"path":"/synthetic/home","entries":[]},
+      {"path":"/synthetic","entries":[{"name":"notes","isDir":true,"isRepo":true}]},
+      {"path":"/synthetic/notes","entries":[{"name":"src","isDir":true,"isRepo":false}]}
+    ]}
+  },
+  "steps": [
+    {"press":"cmd+d"},
+    {"type":"no matching synthetic project"},
+    {"press":"enter"},
+    {"expect":"New project"},
+    {"expect":"Project name"},
+    {"expect":"Working folder"},
+    {"type":"Synthetic notebook"},
+    {"snap":"name-first-form"},
+    {"click":"Add folder…"},
+    {"expect":"Search folders…"},
+    {"expect":"notes"},
+    {"snap":"internal-folder-browser"},
+    {"click":"notes"},
+    {"expect":"/synthetic/notes"},
+    {"press":"cmd+enter"},
+    {"expect":"Synthetic notebook"},
+    {"expect":"/synthetic/notes"},
+    {"expect":"Change…"},
+    {"snap":"folder-is-still-only-a-draft"},
+    {"click":"Cancel"},
+    {"expectNot":"Working folder"},
+    {"snap":"cancel-without-creation"}
+  ]
+}

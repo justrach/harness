@@ -61,6 +61,18 @@ fn row(c: *ui.Context, a: *App, k: theme.Colors, r: queue.Row, newest: bool, com
     }
     if (rowButton(c, k, .@"trash-bin-minimalistic", "Remove", !gated)) a.queueRemove(r.id);
     if (!r.agent and rowButton(c, k, .pen, "Edit", !gated and a.queue_edit == null)) a.queueBeginEdit(r.id);
+    const queue_mod = @import("app_queue.zig");
+    if (queue_mod.rowCanSteer(a, r)) {
+        if (compact) {
+            if (rowButton(c, k, .@"fast-tier", "Steer into active turn", true)) queue_mod.steerRowNow(a, r.id);
+        } else {
+            var sb = ui.div(c).row().h(28).px(8).center().rounded(5).opacity(0.72).hover(k.ink(0.07));
+            sb = tip.on(sb, k, .{ .text = "Steer into active turn", .delay = tip.quick, .look = .queue });
+            defer sb.end();
+            if (sb.clicked()) queue_mod.steerRowNow(a, r.id);
+            ui.text(c, "Steer", .{ .size = 11.5, .color = k.muted });
+        }
+    }
     const can_send = a.caps.actions and !gated;
     // `QueuePrimaryAction::tooltip`, or why it waits.
     const send_tip = if (can_send) "Send now (interrupt)" else "Waiting for provider capabilities";

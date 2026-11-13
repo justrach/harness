@@ -303,6 +303,12 @@ pub mod methods {
     // disable|login`); per-device like the sign-ins above.
     pub const LIST_MCP_SERVERS: &str = "ListMcpServers";
     pub const MCP_SERVER_ACTION: &str = "McpServerAction";
+    // graff's Bots on a device (`graff bot --user …`): standing roles with
+    // their own memory and routines; per-device like the MCP servers.
+    pub const BOTS_STATE: &str = "BotsState";
+    pub const BOT_DETAIL: &str = "BotDetail";
+    pub const BOT_ACTION: &str = "BotAction";
+    pub const RUN_BOT: &str = "RunBot";
     // Uploads / attachments (ControlRpc, relay-forwardable — target the chat's host device).
     pub const UPLOAD_CHUNK: &str = "UploadChunk";
     pub const UPLOAD_COMMIT: &str = "UploadCommit";
@@ -322,6 +328,14 @@ pub mod methods {
     /// Request one managed-host update, deferred until no chats or terminals
     /// are active. Never fall back to ApplyUpdate on an older host.
     pub const QUEUE_UPDATE: &str = "QueueUpdate";
+
+    // Independently-installed agent CLI updates (ControlRpc, relay-forwardable).
+    pub const WATCH_HARNESS_UPDATES: &str = "WatchHarnessUpdates";
+    pub const CHECK_HARNESS_UPDATES: &str = "CheckHarnessUpdates";
+    pub const APPLY_HARNESS_UPDATE: &str = "ApplyHarnessUpdate";
+    pub const CANCEL_HARNESS_UPDATE: &str = "CancelHarnessUpdate";
+    pub const DISMISS_HARNESS_UPDATE: &str = "DismissHarnessUpdate";
+    pub const SET_HARNESS_UPDATE_POLICY: &str = "SetHarnessUpdatePolicy";
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -539,7 +553,10 @@ mod tests {
             .await
             .unwrap();
         // Let the producer run well past the consumer queue before reading.
-        client.call("Echo", serde_json::json!("sync")).await.unwrap();
+        client
+            .call("Echo", serde_json::json!("sync"))
+            .await
+            .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let mut seen = Vec::new();
         while let Some(v) = items.recv().await {
@@ -557,7 +574,10 @@ mod tests {
             .subscribe("Count", serde_json::json!({"n": 5000}))
             .await
             .unwrap();
-        client.call("Echo", serde_json::json!("sync")).await.unwrap();
+        client
+            .call("Echo", serde_json::json!("sync"))
+            .await
+            .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let mut seen = Vec::new();
         while let Some(v) = items.recv().await {

@@ -25,7 +25,7 @@ pub const Scope = enum {
     }
 };
 
-pub const TabKind = enum { diffs, file, subagent, browser };
+pub const TabKind = enum { diffs, file, subagent, browser, tool_access };
 
 pub const Tab = struct {
     kind: TabKind,
@@ -33,6 +33,9 @@ pub const Tab = struct {
     path: []u8 = &.{},
     agent: ?*@import("app_subagents.zig").Agent = null,
     browser: ?*@import("app_browser.zig").Browser = null,
+    editor: ?*@import("app_file_editor.zig").Editor = null,
+    /// When this tab was last on screen (`showTab`); 0 until shown.
+    shown: u64 = 0,
 };
 
 /// A diff as last fetched: its files (into `arena`) and totals.
@@ -65,6 +68,7 @@ pub const Panels = struct {
     pending_agent: ?*@import("app_subagents.zig").Agent = null,
     pending_browser: ?*@import("app_browser.zig").Browser = null,
     active: usize = 0,
+    next_shown: u64 = 0,
     scope: Scope = .workingTree,
     scope_menu: bool = false,
     scope_anchor: ?@import("nanoui").ui.Rect = null,
@@ -90,6 +94,7 @@ pub const Panels = struct {
     git: std.StringHashMapUnmanaged(GitKind) = .empty,
     w_git: ?u64 = null,
     file: FileText = .{},
+    file_close: @import("app_file_editor.zig").CloseState = .{},
     /// Folder listings asked for, by call id.
     pending_lists: std.AutoHashMapUnmanaged(u64, []const u8) = .empty,
     /// The chat these are for: a change clears them.
@@ -101,6 +106,7 @@ pub const Panels = struct {
     }
 
     pub fn deinit(p: *Panels) void {
+        @import("text_buffer.zig").deinit(&p.search);
         if (p.pending_agent) |s| s.destroy();
         if (p.pending_browser) |b| b.destroy();
         for (p.tabs.items) |t| destroyTab(p, t);
@@ -118,10 +124,16 @@ pub const Panels = struct {
         if (p.chat) |c| p.gpa.free(c);
     }
 
+    pub fn bumpShown(p: *Panels) u64 {
+        p.next_shown += 1;
+        return p.next_shown;
+    }
+
     pub fn activeTab(p: *const Panels) ?Tab {
         const t = if (p.active < p.tabs.items.len) p.tabs.items[p.active] else return null;
         if (t.agent) |s| if (!s.belongsTo(p.chat)) return null;
         if (t.browser) |b| if (!b.belongsTo(p.chat)) return null;
+        if (t.editor) |e| if (!e.belongsTo(p.chat)) return null;
         return t;
     }
 };
@@ -130,6 +142,7 @@ pub fn destroyTab(p: *Panels, t: Tab) void {
     p.gpa.free(t.path);
     if (t.agent) |s| s.destroy();
     if (t.browser) |b| b.destroy();
+    if (t.editor) |e| e.destroy();
 }
 
 pub const GitKind = enum { added, modified, renamed, deleted };
@@ -150,25 +163,42 @@ fn host(a: *const App) ?[]const u8 {
 /// A new chat was opened: what the panels showed was the last one's.
 pub fn chatChanged(a: *App) void {
     const p = &a.panels;
+    const same = if (p.chat) |c| (if (a.selected) |s| std.mem.eql(u8, c, s) else false) else a.selected == null;
+    if (same) return;
     if (p.w_diffs) |id| a.engine.cancel(id);
     if (p.w_git) |id| a.engine.cancel(id);
     p.w_diffs = null;
     p.w_git = null;
-    if (p.diff) |*d| d.arena.deinit();
+    if (p.diff) |d| a.retireArena(d.arena);
     p.diff = null;
+    p.diff_loading = false;
+    if (p.diff_error) |e| a.retireSlice(e);
+    p.diff_error = null;
     p.listings.clearRetainingCapacity();
     p.pending_lists.clearRetainingCapacity();
     p.expanded.clearRetainingCapacity();
     p.git.clearRetainingCapacity();
     p.folded.clearRetainingCapacity();
     p.selected = null;
-    _ = p.arena.reset(.retain_capacity);
+    a.retireArena(p.arena);
+    p.arena = .init(p.gpa);
     p.file = .{};
-    if (p.chat) |c| p.gpa.free(c);
+    if (p.chat) |c| a.retireSlice(c);
     p.chat = if (a.selected) |s| p.gpa.dupe(u8, s) catch null else null;
     if (a.selected == null) return;
     @import("app_actions.zig").refresh(a);
-    if (p.host_open) showTab(a, p.active);
+    // Files retain their editor under their original conversation. Restore
+    // that owner's last file instead of re-reading another owner's path.
+    if (p.active < p.tabs.items.len) if (p.tabs.items[p.active].editor) |previous| {
+        if (!previous.belongsTo(a.selected)) {
+            var best: ?usize = null;
+            for (p.tabs.items, 0..) |tab, ix| if (tab.editor) |e| {
+                if (e.belongsTo(a.selected) and (best == null or tab.shown > p.tabs.items[best.?].shown)) best = ix;
+            };
+            if (best) |ix| p.active = ix;
+        }
+    };
+    if (p.host_open and p.activeTab() != null) showTab(a, p.active);
     if (p.files_open) openFiles(a);
 }
 
@@ -195,9 +225,11 @@ pub fn toggleHost(a: *App) void {
 /// A tab showing the checkout's diff.
 pub fn addDiffsTab(a: *App) void {
     const p = &a.panels;
-    p.tabs.append(p.gpa, .{ .kind = .diffs }) catch return;
+    p.tabs.append(p.gpa, .{ .kind = .diffs, .shown = p.bumpShown() }) catch return;
     p.active = p.tabs.items.len - 1;
     p.host_open = true;
+    a.view.strip.focused = .host;
+    if (a.view.strip.expanded != null) a.view.strip.expanded = .host;
     openDiffs(a);
     a.redraw();
 }
@@ -205,13 +237,27 @@ pub fn addDiffsTab(a: *App) void {
 pub fn closeTab(a: *App, i: usize) void {
     const p = &a.panels;
     if (i >= p.tabs.items.len) return;
+    if (p.tabs.items[i].editor) |e| if (!@import("app_file_editor.zig").requestTabClose(a, e)) return;
     p.retired.ensureUnusedCapacity(p.gpa, 1) catch return;
+    const was_active = p.active;
     const t = p.tabs.orderedRemove(i);
     if (t.agent) |s| s.stop();
     if (comptime @import("builtin").os.tag == .macos) if (t.browser) |b| if (b.native) |n| n.show(false);
     p.retired.appendAssumeCapacity(t);
-    if (i < p.active) p.active -= 1;
-    if (p.active >= p.tabs.items.len) p.active = p.tabs.items.len -| 1;
+    if (p.tabs.items.len == 0) {
+        p.host_open = false;
+        p.active = 0;
+        const chat_panel: @import("view_tab_strip.zig").Panel = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
+        if (a.view.strip.focused == .host) a.view.strip.focused = chat_panel;
+        if (a.view.strip.expanded) |ex| if (ex == .host) {
+            a.view.strip.expanded = null;
+        };
+        return a.redraw();
+    }
+    var stamps: [64]u64 = undefined;
+    const n = @min(p.tabs.items.len, stamps.len);
+    for (p.tabs.items[0..n], 0..) |tab, ix| stamps[ix] = tab.shown;
+    p.active = @import("tabs.zig").activeAfterClose(stamps[0..n], was_active, i);
     showTab(a, p.active);
 }
 
@@ -219,11 +265,15 @@ pub fn showTab(a: *App, i: usize) void {
     const p = &a.panels;
     if (i >= p.tabs.items.len) return a.redraw();
     p.active = i;
+    p.tabs.items[i].shown = p.bumpShown();
     const t = p.tabs.items[i];
     switch (t.kind) {
         .diffs => openDiffs(a),
-        .file => readFile(a, t.path),
-        .subagent, .browser => {},
+        .file => if (t.editor) |e| {
+            e.focus = true;
+            if (!e.belongsTo(a.selected)) @import("app_file_editor.zig").reveal(a, e) else readFile(a, t.path);
+        } else readFile(a, t.path),
+        .subagent, .browser, .tool_access => {},
     }
     a.redraw();
 }
@@ -270,9 +320,24 @@ fn changedFor(a: *const App, v: std.json.Value) bool {
     return false;
 }
 
+pub const not_git_notice = "This folder is not a Git repository. Working-tree diffs require a Git checkout.";
+
+pub fn friendlyDiffError(e: []const u8) []const u8 {
+    const needle = "not a git repository";
+    if (e.len >= needle.len) {
+        for (0..e.len - needle.len + 1) |i| {
+            if (std.ascii.eqlIgnoreCase(e[i .. i + needle.len], needle)) return not_git_notice;
+        }
+    }
+    return e;
+}
+
 pub fn fetchDiff(a: *App) void {
     const p = &a.panels;
-    const dir = cwd(a) orelse return;
+    const dir = cwd(a) orelse {
+        p.diff_loading = false;
+        return;
+    };
     p.diff_loading = true;
     a.request(requests.getDiff(dir, @tagName(p.scope), if (p.scope == .branch) p.base_ref else null, if (p.scope == .turn) a.selected else null, host(a)), .of(App, a, onDiff));
 }
@@ -280,7 +345,7 @@ pub fn fetchDiff(a: *App) void {
 fn onDiff(a: *App, _: u64, r: rpc.Reply) void {
     const p = &a.panels;
     p.diff_loading = false;
-    if (p.diff_error) |e| p.gpa.free(e);
+    if (p.diff_error) |e| a.retireSlice(e);
     p.diff_error = null;
     switch (r) {
         .ok => |v| {
@@ -295,10 +360,10 @@ fn onDiff(a: *App, _: u64, r: rpc.Reply) void {
             next.truncated = if (o.get("truncated")) |t| t == .bool and t.bool else false;
             next.checkout_id = ar.dupe(u8, strOf(o, "checkoutId") orelse "") catch "";
             next.checksum = ar.dupe(u8, strOf(o, "checksum") orelse "") catch "";
-            if (p.diff) |*old| old.arena.deinit();
+            if (p.diff) |old| a.retireArena(old.arena);
             p.diff = next;
         },
-        .err => |e| p.diff_error = p.gpa.dupe(u8, e) catch null,
+        .err => |e| p.diff_error = p.gpa.dupe(u8, friendlyDiffError(e)) catch null,
         else => {},
     }
     a.redraw();

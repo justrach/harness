@@ -1,6 +1,7 @@
 //! Tooltips where the GPUI app has them (`.tooltip(..)` with its
 //! `tooltip_show_delay`), in each one's own box, with a nanoui that has
 //! tooltips (`ui.Div.tooltip`, justrach/nanoui); none before.
+const std = @import("std");
 const nanoui = @import("nanoui");
 const ui = nanoui.ui;
 const theme = @import("theme.zig");
@@ -13,21 +14,11 @@ pub const has = @hasDecl(ui.Div, "tooltip");
 pub const default_delay: f32 = 0.5;
 pub const quick: f32 = 0.35;
 
-/// Which tooltip box.
-pub const Look = enum {
-    /// `widgets::text_tooltip` (and its copies: the sidebar's view
-    /// options, a code block's actions): max_w 280, px 8, py 6, rounded
-    /// 6, a `border_strong` line, `surface_raised`, `shadow_md`, 11-point
-    /// text.
-    text,
-    /// `QueueActionTooltip`: frosted (the popover's surface), a `border`
-    /// line, px 8, py 5, 10.5-point muted text.
-    queue,
-    /// `FileEditorTooltip`: as `queue`, max_w 360, px 9, py 6.
-    file,
-    /// `SurfaceTabTooltip`: as `file`, max_w 380.
-    tab,
-};
+/// Action labels now share `popover::tooltip_surface`, including queue,
+/// file and surface-tab labels. Keep the call-site names for rich-card callers.
+pub const Look = enum { text, queue, file, tab };
+
+const label_shadow = [_]ui.Shadow{.{ .color = .{ .a = 0.18 }, .y = 2, .blur = 6 }};
 
 pub const Tip = struct {
     text: []const u8,
@@ -59,26 +50,19 @@ pub fn on(d: ui.Div, k: theme.Colors, t: Tip) ui.Div {
 /// The box and text of `look`.
 pub fn options(k: theme.Colors, look: Look, delay: f32) if (has) ui.TooltipOptions else void {
     if (comptime !has) return;
-    return switch (look) {
-        .text => .{
-            .delay = delay,
-            .background = k.raised,
-            .border = k.border_strong,
-            .text = style(11, k.text, false),
-        },
-        .queue, .file, .tab => .{
-            .delay = delay,
-            .background = k.composer,
-            .border = k.border,
-            .padding = if (look == .queue) .xy(8, 5) else .xy(9, 6),
-            .max_width = switch (look) {
-                .file => 360,
-                .tab => 380,
-                else => 1e4,
-            },
-            .shadows = &.{},
-            .text = style(10.5, k.muted, look == .file),
-        },
+    _ = k;
+    _ = look;
+    // Theme::tooltip_colors is deliberately the same opaque charcoal in
+    // light and dark appearances, independent of popup/glass surface roles.
+    return .{
+        .delay = delay,
+        .background = ui.Color.hex(0x282828),
+        .border = ui.Color.hex(0x383838),
+        .padding = .xy(12, 5),
+        .radius = 13,
+        .max_width = 380,
+        .shadows = &label_shadow,
+        .text = .{ .size = 13, .line_height = 18, .color = ui.Color.hex(0xf8f8f8) },
     };
 }
 
@@ -91,10 +75,36 @@ pub fn project(c: *ui.Context, d: ui.Div, k: theme.Colors, name: []const u8, dev
     const p = c.alloc().create(Project) catch return d;
     p.* = .{ .name = name, .device = device, .k = k };
     var o = options(k, .text, quick);
+    // Project previews remain rich cards, not compact action labels.
     o.background = k.composer;
+    o.border = k.border_strong;
     o.padding = .xy(9, 7);
+    o.radius = 6;
+    o.shadows = &ui.Shadow.md;
     o.max_width = 320;
     return d.tooltipWith(p, Project.draw, o);
+}
+
+test "compact action tooltips use the shared opaque app-font bubble in both appearances" {
+    if (comptime !has) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |dark| {
+        for ([_]Look{ .text, .queue, .file, .tab }) |look| {
+            const o = options(theme.colors(dark), look, quick);
+            try std.testing.expectEqual(ui.Color.hex(0x282828), o.background.?);
+            try std.testing.expectEqual(ui.Color.hex(0x383838), o.border.?);
+            try std.testing.expectEqual(ui.Color.hex(0xf8f8f8), o.text.color.?);
+            try std.testing.expectEqual(@as(f32, 13), o.text.size);
+            try std.testing.expectEqual(@as(f32, 18), o.text.line_height);
+            try std.testing.expect(!o.text.system_font);
+            try std.testing.expectEqual(@as(f32, 12), o.padding.left);
+            try std.testing.expectEqual(@as(f32, 5), o.padding.top);
+            try std.testing.expectEqual(@as(f32, 13), o.radius);
+            try std.testing.expectEqual(@as(f32, 380), o.max_width);
+            try std.testing.expectEqual(quick, o.delay);
+            try std.testing.expectEqual(@as(usize, 1), o.shadows.len);
+            try std.testing.expectEqual(label_shadow[0], o.shadows[0]);
+        }
+    }
 }
 
 const Project = struct {

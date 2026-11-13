@@ -32,6 +32,150 @@ pub enum HarnessId {
     Mock,
 }
 
+/// Durable user preference for one agent's independently-installed CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HarnessUpdatePolicy {
+    /// Check and surface an update, but never mutate the installation without
+    /// an explicit action.
+    #[default]
+    Notify,
+    /// Apply a discovered update after the harness execution gate becomes idle.
+    AutoWhenIdle,
+    /// Do not probe or update this harness.
+    Off,
+}
+
+/// Best-effort classification of the installation that owns an agent CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HarnessInstallSource {
+    Npm,
+    Homebrew,
+    Cargo,
+    Vendor,
+    ManagedByHarness,
+    #[default]
+    Unknown,
+}
+
+/// The externally visible harness-update state machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HarnessUpdatePhase {
+    Dormant,
+    Checking,
+    Current,
+    Available,
+    WaitingForIdle,
+    Preparing,
+    Downloading,
+    Installing,
+    Verifying,
+    Updated,
+    ManualActionRequired,
+    Failed,
+}
+
+/// Real provider progress only. An absent value means the UI must render an
+/// indeterminate activity indicator rather than inventing a percentage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessUpdateProgress {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessUpdateFailure {
+    pub message: String,
+    #[serde(default)]
+    pub retryable: bool,
+    #[serde(default)]
+    pub kind: HarnessUpdateFailureKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HarnessUpdateFailureKind {
+    #[default]
+    Check,
+    Install,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HarnessCompatibilityStatus {
+    Supported,
+    Unsupported,
+    Broken,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessCompatibility {
+    pub status: HarnessCompatibilityStatus,
+    pub version: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommended_version: Option<String>,
+}
+
+/// One row in the device-local harness-update stream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessUpdateStatus {
+    pub harness: HarnessId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    #[serde(default)]
+    pub source: HarnessInstallSource,
+    #[serde(default)]
+    pub policy: HarnessUpdatePolicy,
+    pub phase: HarnessUpdatePhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<HarnessUpdateProgress>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<HarnessUpdateFailure>,
+    #[serde(default)]
+    pub can_apply: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility: Option<HarnessCompatibility>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_back: Option<HarnessCompatibility>,
+}
+
+impl HarnessUpdateStatus {
+    pub fn show_update_notice(&self) -> bool {
+        matches!(
+            self.phase,
+            HarnessUpdatePhase::Available
+                | HarnessUpdatePhase::WaitingForIdle
+                | HarnessUpdatePhase::Preparing
+                | HarnessUpdatePhase::Downloading
+                | HarnessUpdatePhase::Installing
+                | HarnessUpdatePhase::Verifying
+                | HarnessUpdatePhase::Updated
+                | HarnessUpdatePhase::Failed
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningLevel {
@@ -294,9 +438,11 @@ impl ToolView {
     /// `None` unless `id` has graff's snapshot-name shape, so an id can never
     /// carry a path separator or anything else into a file lookup.
     pub fn new(kind: ToolViewKind, id: &str) -> Option<Self> {
-        (id.len() == 32 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))).then(|| Self {
-            kind,
-            id: id.to_owned(),
+        (id.len() == 32 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))).then(|| {
+            Self {
+                kind,
+                id: id.to_owned(),
+            }
         })
     }
 
@@ -695,6 +841,14 @@ pub enum AgentEvent {
     /// example, a slash command). Updates the chat picker, not the transcript.
     ReasoningChanged {
         reasoning: Option<ReasoningLevel>,
+    },
+    /// The agent switched the session's active working directory mid-run (for
+    /// example, Graff `workspace use` emitting `session_info_update` with
+    /// `_meta["graff/cwd"]`). Re-roots `show_image` and workspace state, not
+    /// the transcript.
+    #[serde(rename_all = "camelCase")]
+    SessionCwdChanged {
+        cwd: String,
     },
     Error {
         message: String,
@@ -1112,9 +1266,18 @@ mod autonomy_tests {
 
     #[test]
     fn autonomy_wire_names_and_default() {
-        assert_eq!(serde_json::to_value(Autonomy::ReadOnly).unwrap(), "read-only");
-        assert_eq!(serde_json::to_value(Autonomy::Workspace).unwrap(), "workspace");
-        assert_eq!(serde_json::to_value(Autonomy::FullAccess).unwrap(), "full-access");
+        assert_eq!(
+            serde_json::to_value(Autonomy::ReadOnly).unwrap(),
+            "read-only"
+        );
+        assert_eq!(
+            serde_json::to_value(Autonomy::Workspace).unwrap(),
+            "workspace"
+        );
+        assert_eq!(
+            serde_json::to_value(Autonomy::FullAccess).unwrap(),
+            "full-access"
+        );
         assert_eq!(Autonomy::default(), Autonomy::FullAccess);
     }
 

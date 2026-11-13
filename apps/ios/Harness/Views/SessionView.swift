@@ -38,6 +38,8 @@ struct SessionView: View {
     @State private var windowMidX: CGFloat = 0
     /// This device is an iPhone Duo (DuoChat): chips, diff card, status pill, two-line title.
     @AppStorage(DuoChat.foldableKey) private var duoChat = false
+    @AppStorage(HomeUiMode.storageKey) private var uiModeRaw = HomeUiMode.zen.rawValue
+    @AppStorage(HomeMovingPart.overridesStorageKey) private var uiPartOverridesRaw = ""
     /// The side the system's vertical bar stands on (the Duo's cover display), and the content's safe area.
     @State private var verticalBarEdge: HorizontalEdge?
     @State private var contentSafeInsets = EdgeInsets()
@@ -96,8 +98,17 @@ struct SessionView: View {
             && model.connectivity.state == .connected
     }
 
+    /// Auxiliary `< 1/12 >` pager buttons and multi-session status dot strips stay
+    /// off the session header by default (`FrameSchedule.lean`:
+    /// `clean_home_layout_has_zero_top_clutter`), leaving the full width for the
+    /// session title and `project @ device` subtitle.
+    nonisolated static func showsAuxiliaryHeaderControls(arguments: [String] = ProcessInfo.processInfo.arguments) -> Bool {
+        arguments.contains("-header-status-count")
+    }
+
     private func headerControls(_ chat: Chat, chats: [Chat], maxVisible: Int) -> some View {
-        HStack(spacing: 4) {
+        let showAuxiliary = Self.showsAuxiliaryHeaderControls()
+        return HStack(spacing: 4) {
             HStack(spacing: 3) {
                 Button {
                     renameChatId = chat.id
@@ -106,7 +117,7 @@ struct SessionView: View {
                 } label: {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(chat.displayTitle)
-                            .font(Theme.sans(15, weight: .medium))
+                            .font(Theme.sans(16, weight: .semibold))
                             .foregroundStyle(Theme.text)
                             // A Duo wraps a long title to a second line instead of cutting it.
                             .lineLimit(duoChat ? 2 : 1)
@@ -126,13 +137,38 @@ struct SessionView: View {
                 .accessibilityHint("Rename session")
                 .accessibilityIdentifier("session-header")
 
-                pagerControls(for: chat)
+                if showAuxiliary {
+                    pagerControls(for: chat)
+                }
             }
             .pagerSwipe()
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("session-navigation-controls")
-            if !pillShows(chat) {
+            if showAuxiliary, !pillShows(chat) {
                 SessionStatusIndicators(current: chat.id, chats: chats, maxVisible: maxVisible)
+            } else if !showAuxiliary {
+                let mode = HomeHierarchyProfile.resolved(baseModeRaw: uiModeRaw, overridesRaw: uiPartOverridesRaw).effectiveMode
+                Button {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    withAnimation(Motion.resort) {
+                        let preset = HomeListControls.applyPreset(mode.flipped)
+                        uiModeRaw = preset.modeRaw
+                        uiPartOverridesRaw = preset.overridesRaw
+                    }
+                } label: {
+                    Image(systemName: mode.symbol)
+                        .font(.system(size: 13.5, weight: .semibold))
+                        .foregroundStyle(mode == .developer ? Theme.text : Theme.textMuted)
+                        .frame(width: 28, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .contextMenu {
+                    HomeExperienceMenuContent(uiModeRaw: $uiModeRaw, uiPartOverridesRaw: $uiPartOverridesRaw)
+                }
+                .accessibilityLabel("Toggle Zen or Developer mode")
+                .accessibilityValue(mode.label)
+                .accessibilityIdentifier("session-ui-mode")
             }
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { headerWidth = $0 }
