@@ -9,6 +9,11 @@ publish.workspace = true
 name = "harness"
 path = "src/main.rs"
 
+[features]
+default = ["preview", "visual"]
+preview = ["harness-engine/preview"]
+visual = ["harness-engine/visual"]
+
 [dependencies]
 harness-engine.workspace = true
 harness-adapters.workspace = true

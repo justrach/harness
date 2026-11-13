@@ -59,25 +59,73 @@ fn effort_label(value: &str) -> &str {
 ///
 /// `None` for blank output.
 pub fn summarize_tool_output(text: &str) -> Option<String> {
-    let kept: Vec<&str> = text
-        .lines()
-        .filter(|l| !l.trim_start().starts_with("```"))
-        .collect();
-    let stripped = kept.join("\n");
-    let stripped = stripped.trim();
-    if stripped.is_empty() {
+    let mut buf = String::new();
+    let mut pending_blank = String::new();
+    let mut pending_blank_chars = 0usize;
+    let mut saw_content = false;
+    let mut char_count = 0usize;
+    let mut over_budget = false;
+
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            continue;
+        }
+        if !saw_content {
+            let trimmed_start = line.trim_start();
+            if trimmed_start.is_empty() {
+                continue;
+            }
+            saw_content = true;
+            buf.push_str(trimmed_start);
+            let trimmed_chars = buf.trim_end().chars().count();
+            if trimmed_chars > TOOL_OUTPUT_SUMMARY_MAX {
+                over_budget = true;
+                break;
+            }
+            char_count = buf.chars().count();
+        } else if line.trim().is_empty() {
+            let extra = 1 + line.chars().count();
+            if char_count + pending_blank_chars + extra <= TOOL_OUTPUT_SUMMARY_MAX {
+                pending_blank.push('\n');
+                pending_blank.push_str(line);
+                pending_blank_chars += extra;
+            } else {
+                pending_blank_chars = TOOL_OUTPUT_SUMMARY_MAX + 1;
+            }
+        } else {
+            let line_trimmed_chars = line.trim_end().chars().count();
+            if char_count + pending_blank_chars + 1 + line_trimmed_chars > TOOL_OUTPUT_SUMMARY_MAX {
+                over_budget = true;
+                break;
+            }
+            if !pending_blank.is_empty() {
+                buf.push_str(&pending_blank);
+                pending_blank.clear();
+                pending_blank_chars = 0;
+            }
+            buf.push('\n');
+            buf.push_str(line);
+            char_count = buf.chars().count();
+        }
+    }
+
+    if !saw_content {
         return None;
     }
-    if stripped.chars().count() <= TOOL_OUTPUT_SUMMARY_MAX {
-        return Some(stripped.to_owned());
+    if !over_budget {
+        let trimmed = buf.trim_end();
+        if trimmed.len() == buf.len() {
+            return Some(buf);
+        }
+        return Some(trimmed.to_owned());
     }
     // Too big to inline: first non-empty line, capped. There is always more
     // than the summary here (whole output exceeded the budget), so the
     // marker is unconditional.
-    let line = stripped
+    let line = buf
         .lines()
         .find(|l| !l.trim().is_empty())
-        .unwrap_or(stripped)
+        .unwrap_or(&buf)
         .trim_end();
     let mut chars = 0usize;
     let mut end = line.len();

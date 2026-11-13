@@ -11,6 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::parts::MessagePart;
 use crate::schema::SessionMessageEntry;
@@ -53,6 +54,29 @@ impl TranscriptBaseline {
                 _ => true,
             })
         })
+    }
+
+    pub fn capture_shared(entries: &[Arc<SessionMessageEntry>]) -> Self {
+        Self {
+            entries: entries
+                .iter()
+                .map(|entry| {
+                    let parts = entry
+                        .parts
+                        .iter()
+                        .map(|part| {
+                            let len = match part {
+                                MessagePart::Text { text, .. }
+                                | MessagePart::Reasoning { text, .. } => text.len(),
+                                _ => 0,
+                            };
+                            (part.id().to_owned(), len)
+                        })
+                        .collect();
+                    (entry.id.clone(), parts)
+                })
+                .collect(),
+        }
     }
 
     pub fn capture(entries: &[SessionMessageEntry]) -> Self {
@@ -146,6 +170,12 @@ impl TranscriptFrame {
     pub fn reset(entries: &[SessionMessageEntry]) -> Self {
         Self::Reset {
             reset: entries.to_vec(),
+        }
+    }
+
+    pub fn reset_shared(entries: &[Arc<SessionMessageEntry>]) -> Self {
+        Self::Reset {
+            reset: entries.iter().map(|e| (**e).clone()).collect(),
         }
     }
 
@@ -251,6 +281,64 @@ pub fn diff_transcript(
     // A delta touching most rows serializes like a reset but applies slower.
     if upsert.len() * 2 >= next.len().max(1) && next.len() > 4 {
         return TranscriptFrame::reset(next);
+    }
+    TranscriptFrame::Delta {
+        upsert,
+        append,
+        remove,
+        count: next.len(),
+    }
+}
+
+/// Shared-entry variant of [`diff_transcript`]: uses `Arc::ptr_eq` to skip
+/// deep equality across unchanged historical entries in O(1).
+pub fn diff_transcript_shared(
+    prev: &[Arc<SessionMessageEntry>],
+    next: &[Arc<SessionMessageEntry>],
+) -> TranscriptFrame {
+    let prev_by_id: std::collections::HashMap<&str, (usize, &Arc<SessionMessageEntry>)> = prev
+        .iter()
+        .enumerate()
+        .map(|(i, e)| (e.id.as_str(), (i, e)))
+        .collect();
+    let next_ids: std::collections::HashSet<&str> = next.iter().map(|e| e.id.as_str()).collect();
+
+    let remove: Vec<String> = prev
+        .iter()
+        .filter(|e| !next_ids.contains(e.id.as_str()))
+        .map(|e| e.id.clone())
+        .collect();
+
+    let mut upsert = Vec::new();
+    let mut append = Vec::new();
+    for (i, entry) in next.iter().enumerate() {
+        let after = i.checked_sub(1).map(|p| next[p].id.as_str());
+        match prev_by_id.get(entry.id.as_str()) {
+            Some((prev_ix, prev_entry)) => {
+                let prev_after = prev_ix.checked_sub(1).map(|p| prev[p].id.as_str());
+                if prev_after == after && (Arc::ptr_eq(prev_entry, entry) || *prev_entry == entry) {
+                    continue;
+                }
+                if prev_after == after
+                    && let Some(text_append) = try_text_append(prev_entry, entry)
+                {
+                    append.push(text_append);
+                    continue;
+                }
+                upsert.push(TranscriptUpsert {
+                    after: after.map(str::to_string),
+                    entry: (**entry).clone(),
+                });
+            }
+            None => upsert.push(TranscriptUpsert {
+                after: after.map(str::to_string),
+                entry: (**entry).clone(),
+            }),
+        }
+    }
+
+    if upsert.len() * 2 >= next.len().max(1) && next.len() > 4 {
+        return TranscriptFrame::reset_shared(next);
     }
     TranscriptFrame::Delta {
         upsert,
@@ -607,6 +695,79 @@ mod context_update_tests {
                 id: "text".into(),
                 text: "🙂".into()
             }
+        );
+    }
+
+    #[test]
+    fn shared_diff_and_baseline_match_owned_with_reused_arcs() {
+        use std::sync::Arc;
+        let a = Arc::new(SessionMessageEntry {
+            id: "a".into(),
+            role: crate::MessageRole::User,
+            parts: vec![MessagePart::Text {
+                id: "t0".into(),
+                text: "hi".into(),
+            }],
+            created_at: 1,
+            device_id: "host".into(),
+            status: None,
+            continuation_of: None,
+            duration_ms: None,
+        });
+        let b0 = Arc::new(SessionMessageEntry {
+            id: "b".into(),
+            role: crate::MessageRole::Assistant,
+            parts: vec![MessagePart::Text {
+                id: "t1".into(),
+                text: "stream".into(),
+            }],
+            created_at: 2,
+            device_id: "host".into(),
+            status: Some(crate::MessageStatus::Streaming),
+            continuation_of: None,
+            duration_ms: None,
+        });
+        let b1 = Arc::new(SessionMessageEntry {
+            id: "b".into(),
+            role: crate::MessageRole::Assistant,
+            parts: vec![MessagePart::Text {
+                id: "t1".into(),
+                text: "stream more".into(),
+            }],
+            created_at: 2,
+            device_id: "host".into(),
+            status: Some(crate::MessageStatus::Streaming),
+            continuation_of: None,
+            duration_ms: None,
+        });
+
+        let prev_shared = [Arc::clone(&a), Arc::clone(&b0)];
+        let next_shared = [Arc::clone(&a), Arc::clone(&b1)];
+        let prev_owned = vec![(*a).clone(), (*b0).clone()];
+        let next_owned = vec![(*a).clone(), (*b1).clone()];
+
+        assert_eq!(
+            serde_json::to_value(diff_transcript_shared(&prev_shared, &next_shared)).unwrap(),
+            serde_json::to_value(diff_transcript(&prev_owned, &next_owned)).unwrap()
+        );
+        // Identical Arc slice: empty delta, zero upserts/appends/removes.
+        match diff_transcript_shared(&next_shared, &next_shared) {
+            TranscriptFrame::Delta {
+                upsert,
+                append,
+                remove,
+                count,
+            } => {
+                assert!(upsert.is_empty());
+                assert!(append.is_empty());
+                assert!(remove.is_empty());
+                assert_eq!(count, 2);
+            }
+            other => panic!("expected empty delta, got {other:?}"),
+        }
+        assert_eq!(
+            TranscriptBaseline::capture_shared(&next_shared),
+            TranscriptBaseline::capture(&next_owned)
         );
     }
 }

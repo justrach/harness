@@ -114,7 +114,7 @@ impl TranscriptHistory {
     pub(crate) fn snapshot(
         &mut self,
         doc: &LoroDoc,
-        entries: &[SessionMessageEntry],
+        entries: &[Arc<SessionMessageEntry>],
     ) -> Arc<TranscriptBaseline> {
         if !self.dirty {
             return self.baseline.clone();
@@ -197,10 +197,13 @@ mod tests {
     }
 
     fn snapshot(doc: &SessionDoc, history: &Mutex<TranscriptHistory>) -> Arc<TranscriptBaseline> {
-        history
-            .lock()
+        let entries: Vec<Arc<SessionMessageEntry>> = doc
+            .read_entries()
             .unwrap()
-            .snapshot(doc.doc(), &doc.read_entries().unwrap())
+            .into_iter()
+            .map(Arc::new)
+            .collect();
+        history.lock().unwrap().snapshot(doc.doc(), &entries)
     }
 
     #[test]

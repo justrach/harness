@@ -152,6 +152,16 @@ pub struct WorkspaceHostConfig {
     pub edge: Option<EdgeConfig>,
 }
 
+#[derive(Default)]
+struct PublishedRegistryCache {
+    initialized: bool,
+    chats_gen: u64,
+    sessions_gen: u64,
+    spaces_gen: u64,
+    devices_gen: u64,
+    raw_devices: Vec<Device>,
+}
+
 struct WorkspaceHostInner {
     store: Arc<DocsStore>,
     config: WorkspaceHostConfig,
@@ -165,6 +175,7 @@ struct WorkspaceHostInner {
     /// last list is published, so an older snapshot can never land after a
     /// newer one (#346). Taken before `reg`, never while holding it.
     publish_gate: Mutex<()>,
+    published_cache: Mutex<PublishedRegistryCache>,
     /// Test hook: runs once, after the next publication sampled the registry.
     #[cfg(test)]
     after_sample: Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -288,6 +299,14 @@ impl WorkspaceHost {
         })?;
 
         let state = doc.read_all()?;
+        let initial_cache = PublishedRegistryCache {
+            initialized: true,
+            chats_gen: doc.kind_generation(harness_doc::KIND_CHATS),
+            sessions_gen: doc.kind_generation(harness_doc::KIND_SESSIONS),
+            spaces_gen: doc.kind_generation(harness_doc::KIND_SPACES),
+            devices_gen: doc.kind_generation(harness_doc::KIND_DEVICES),
+            raw_devices: state.devices.clone(),
+        };
         let (chats_tx, _) = watch::channel(state.chats);
         let (devices_tx, _) = watch::channel(state.devices);
         let (sessions_tx, _) = watch::channel(state.sessions);
@@ -314,6 +333,7 @@ impl WorkspaceHost {
                 spaces_tx,
                 sidebar_preferences_tx,
                 publish_gate: Mutex::new(()),
+                published_cache: Mutex::new(initial_cache),
                 #[cfg(test)]
                 after_sample: Mutex::new(None),
                 room: Mutex::new(None),
@@ -1263,7 +1283,13 @@ impl WorkspaceHostInner {
         let registry_synced = lock(&self.room)
             .as_ref()
             .is_some_and(|room| room.stats().synced);
-        let snapshot = {
+        struct SampledLists {
+            chats: Option<Vec<Chat>>,
+            sessions: Option<Vec<Session>>,
+            spaces: Option<Vec<Space>>,
+            devices: Option<Vec<Device>>,
+        }
+        let sampled = {
             let mut doc = lock(&self.reg);
             match doc.reconcile_sidebar_pins(registry_synced) {
                 Ok(true) => {
@@ -1277,31 +1303,103 @@ impl WorkspaceHostInner {
                 Err(error) => tracing::warn!(%error, "sidebar pin cleanup failed"),
             }
             self.publish_sidebar_preferences(&doc, registry_synced);
-            doc.read_all()
+
+            let mut cache = lock(&self.published_cache);
+            let chats_gen = doc.kind_generation(harness_doc::KIND_CHATS);
+            let sessions_gen = doc.kind_generation(harness_doc::KIND_SESSIONS);
+            let spaces_gen = doc.kind_generation(harness_doc::KIND_SPACES);
+            let devices_gen = doc.kind_generation(harness_doc::KIND_DEVICES);
+            let first = !cache.initialized;
+
+            let chats = if first || chats_gen != cache.chats_gen {
+                match doc.read_chats() {
+                    Ok(v) => {
+                        cache.chats_gen = chats_gen;
+                        Some(v)
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "registry chats read failed");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let sessions = if first || sessions_gen != cache.sessions_gen {
+                match doc.read_sessions() {
+                    Ok(v) => {
+                        cache.sessions_gen = sessions_gen;
+                        Some(v)
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "registry sessions read failed");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let spaces = if first || spaces_gen != cache.spaces_gen {
+                match doc.read_spaces() {
+                    Ok(v) => {
+                        cache.spaces_gen = spaces_gen;
+                        Some(v)
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "registry spaces read failed");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let devices = if first || devices_gen != cache.devices_gen {
+                match doc.read_devices() {
+                    Ok(v) => {
+                        cache.devices_gen = devices_gen;
+                        cache.raw_devices = v.clone();
+                        Some(v)
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "registry devices read failed");
+                        None
+                    }
+                }
+            } else if clock_tick {
+                Some(cache.raw_devices.clone())
+            } else {
+                None
+            };
+            cache.initialized = true;
+            SampledLists {
+                chats,
+                sessions,
+                spaces,
+                devices,
+            }
         };
         #[cfg(test)]
         if let Some(hook) = lock(&self.after_sample).take() {
             hook();
         }
-        match snapshot {
-            Ok(mut state) => {
-                self.overlay_presence(&mut state.devices);
-                // Retain the latest value even with no subscribers, but don't
-                // wake every list for unrelated registry/presence changes.
-                publish_if_changed(&self.chats_tx, state.chats);
-                // The periodic presence tick also drives time-based expiry.
-                // Unrelated registry writes need no synthetic device event.
-                if clock_tick {
-                    self.devices_tx.send_replace(state.devices);
-                } else {
-                    publish_if_changed(&self.devices_tx, state.devices);
-                }
-                publish_if_changed(&self.sessions_tx, state.sessions);
-                publish_if_changed(&self.spaces_tx, state.spaces);
+        if let Some(chats) = sampled.chats {
+            publish_if_changed(&self.chats_tx, chats);
+        }
+        if let Some(mut devices) = sampled.devices {
+            self.overlay_presence(&mut devices);
+            // The periodic presence tick also drives time-based expiry.
+            // Unrelated registry writes need no synthetic device event.
+            if clock_tick {
+                self.devices_tx.send_replace(devices);
+            } else {
+                publish_if_changed(&self.devices_tx, devices);
             }
-            Err(err) => {
-                tracing::warn!(error = %err, "registry read failed");
-            }
+        }
+        if let Some(sessions) = sampled.sessions {
+            publish_if_changed(&self.sessions_tx, sessions);
+        }
+        if let Some(spaces) = sampled.spaces {
+            publish_if_changed(&self.spaces_tx, spaces);
         }
     }
 

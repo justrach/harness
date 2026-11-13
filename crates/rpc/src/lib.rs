@@ -389,16 +389,46 @@ pub struct ServerFrame {
 pub enum RpcReply {
     /// Unary response — sent as `{id, ok}`.
     Value(serde_json::Value),
+    /// Pre-serialized unary JSON payload — sent as `{id, ok}` in a single pass.
+    Raw(Box<serde_json::value::RawValue>),
     /// Stream — each item sent as `{id, item}`, then `{id, done: true}` when it ends.
     Stream(BoxStream<'static, serde_json::Value>),
+    /// Pre-serialized stream items — each sent as `{id, item}` in a single pass.
+    StreamRaw(BoxStream<'static, Box<serde_json::value::RawValue>>),
 }
 
 impl RpcReply {
-    /// Serialize a value into a unary reply.
+    /// Serialize a value directly into a single-pass unary reply.
     pub fn value<T: Serialize>(value: &T) -> Result<Self, RpcError> {
-        serde_json::to_value(value)
-            .map(RpcReply::Value)
+        serde_json::value::to_raw_value(value)
+            .map(RpcReply::Raw)
             .map_err(|e| RpcError::Failed(format!("serialize response: {e}")))
+    }
+
+    /// Decode a unary reply into a `serde_json::Value` (for direct in-process callers/tests).
+    pub fn into_value(self) -> Result<serde_json::Value, RpcError> {
+        match self {
+            RpcReply::Value(v) => Ok(v),
+            RpcReply::Raw(raw) => serde_json::from_str(raw.get())
+                .map_err(|e| RpcError::Failed(format!("parse raw response: {e}"))),
+            RpcReply::Stream(_) | RpcReply::StreamRaw(_) => {
+                Err(RpcError::Failed("expected unary reply, got stream".into()))
+            }
+        }
+    }
+
+    /// Convert a stream reply into a stream of `serde_json::Value` (for direct in-process callers/tests).
+    pub fn into_stream(self) -> Result<BoxStream<'static, serde_json::Value>, RpcError> {
+        use futures::StreamExt;
+        match self {
+            RpcReply::Stream(s) => Ok(s),
+            RpcReply::StreamRaw(s) => Ok(s
+                .filter_map(|raw| async move { serde_json::from_str(raw.get()).ok() })
+                .boxed()),
+            RpcReply::Value(_) | RpcReply::Raw(_) => {
+                Err(RpcError::Failed("expected stream reply, got unary".into()))
+            }
+        }
     }
 }
 

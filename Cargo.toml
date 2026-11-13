@@ -33,7 +33,7 @@ harness-visual = { path = "crates/visual" }
 harness-doc = { path = "crates/doc" }
 harness-sync = { path = "crates/sync" }
 harness-adapters = { path = "crates/harness" }
-harness-engine = { path = "crates/engine" }
+harness-engine = { path = "crates/engine", default-features = false }
 harness-rpc = { path = "crates/rpc" }
 harness-update = { path = "crates/update" }
 harness-syntax = { path = "crates/syntax" }
@@ -49,7 +49,7 @@ loro = "1.13"
 similar = "2"
 
 # async / net
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "fs", "io-util", "io-std", "process", "signal"] }
 tokio-util = "0.7"
 libc = "0.2"
 gethostname = "1"
@@ -59,7 +59,7 @@ async-trait = "0.1"
 
 # serialization
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 json5 = "1"
 # antigravity writes `settings.json` but reads it back with `hjson.load`, so a
 # user's comments and unquoted keys have to survive our read of the same file.
@@ -90,12 +90,7 @@ sha2 = "0.10"
 zip = { version = "7.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 notify = "7"
 portable-pty = "0.8"
-alacritty_terminal = "0.26"
-pulldown-cmark = "0.12"
-unicode-segmentation = "1"
-unicode-width = "0.2"
-fontdb = "0.23"
-ttf-parser = "0.25.1"
+pulldown-cmark = { version = "0.12", default-features = false }
 # Packaged GUI apps do not inherit shell proxy variables; honor the macOS and
 # Windows system proxy for provider usage probes and other HTTP clients.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "system-proxy"] }
@@ -123,6 +118,11 @@ codegen-units = 1
 # The Android app's native library (apps/android builds it per ABI). Release
 # code, smaller than speed-first: it ships inside every APK.
 inherits = "release"
+opt-level = "s"
+
+[profile.headless]
+# Size-optimized headless daemon build (`cargo build --profile headless -p harness --no-default-features`).
+inherits = "dist"
 opt-level = "s"
 
 [profile.dev]
