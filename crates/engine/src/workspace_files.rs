@@ -997,10 +997,8 @@ fn list_directory_blocking(
         if contains_git_component(relative) {
             continue;
         }
-        if path_to_wire(relative)
-            .ok()
-            .is_some_and(|path| is_internal_temp_wire_path(&path))
-        {
+        let path = path_to_wire(relative)?;
+        if is_internal_temp_wire_path(&path) {
             continue;
         }
         if entries.len() == MAX_DIRECTORY_ENTRIES {
@@ -1020,7 +1018,6 @@ fn list_directory_blocking(
         } else {
             WorkspaceEntryKind::File
         };
-        let path = path_to_wire(relative)?;
         let ignored = visible_paths
             .as_ref()
             .is_some_and(|visible| !visible.contains(&path));
@@ -1038,7 +1035,7 @@ fn list_directory_blocking(
     entries.sort_by(|left, right| {
         entry_group(left.kind)
             .cmp(&entry_group(right.kind))
-            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+            .then_with(|| cmp_case_insensitive(&left.name, &right.name))
             .then_with(|| left.path.cmp(&right.path))
     });
     let fingerprint = directory_fingerprint(&entries);
@@ -1114,11 +1111,15 @@ fn search_workspace_blocking(
         return Ok(Vec::new());
     }
     let mut builder = ignore::WalkBuilder::new(root);
-    builder.follow_links(false).hidden(false);
+    builder
+        .follow_links(false)
+        .hidden(false)
+        .filter_entry(|entry| entry.depth() == 0 || entry.file_name() != ".git");
     if include_ignored {
         builder.standard_filters(false);
     }
     let query_lower = query.to_lowercase();
+    let buffer_limit = limit.saturating_mul(4).max(256);
     let mut matches = Vec::new();
     for result in builder.build() {
         if cancel.load(Ordering::Relaxed) {
@@ -1165,12 +1166,13 @@ fn search_workspace_blocking(
             kind,
             score,
         });
-        if matches.len() > limit {
+        if matches.len() >= buffer_limit {
             matches.sort_by(compare_workspace_search_matches);
             matches.truncate(limit);
         }
     }
     matches.sort_by(compare_workspace_search_matches);
+    matches.truncate(limit);
     Ok(matches)
 }
 
@@ -1188,6 +1190,28 @@ fn validate_workspace_search_query(query: &str) -> Result<(), WorkspaceFilesErro
     Ok(())
 }
 
+fn cmp_case_insensitive(left: &str, right: &str) -> std::cmp::Ordering {
+    if left.is_ascii() && right.is_ascii() {
+        return left
+            .bytes()
+            .map(|b| b.to_ascii_lowercase())
+            .cmp(right.bytes().map(|b| b.to_ascii_lowercase()));
+    }
+    let mut l = left.chars().flat_map(char::to_lowercase);
+    let mut r = right.chars().flat_map(char::to_lowercase);
+    loop {
+        match (l.next(), r.next()) {
+            (Some(a), Some(b)) => match a.cmp(&b) {
+                std::cmp::Ordering::Equal => continue,
+                non_eq => return non_eq,
+            },
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+        }
+    }
+}
+
 fn compare_workspace_search_matches(
     left: &WorkspaceFileSearchMatch,
     right: &WorkspaceFileSearchMatch,
@@ -1195,7 +1219,7 @@ fn compare_workspace_search_matches(
     right
         .score
         .cmp(&left.score)
-        .then_with(|| left.path.to_lowercase().cmp(&right.path.to_lowercase()))
+        .then_with(|| cmp_case_insensitive(&left.path, &right.path))
         .then_with(|| left.path.cmp(&right.path))
 }
 

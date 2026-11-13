@@ -1378,3 +1378,72 @@ fn sidebar_ignores_legacy_section_storage_without_deleting_sessions() {
             .all(|op| op.kind == KIND_SIDEBAR_PINS)
     );
 }
+
+#[test]
+fn kind_generation_only_bumps_touched_kinds_and_full_replace_bumps_all() {
+    let mut doc = RegistryDoc::new("dev-a");
+    let c0 = doc.kind_generation("chats");
+    let d0 = doc.kind_generation("devices");
+    let s0 = doc.kind_generation("sessions");
+
+    doc.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    assert!(doc.kind_generation("chats") > c0);
+    assert_eq!(doc.kind_generation("devices"), d0);
+    assert_eq!(doc.kind_generation("sessions"), s0);
+
+    let c1 = doc.kind_generation("chats");
+    let batch = doc.take_pushable()[0].batch.clone();
+    assert!(doc.ack_batch(&batch, 1));
+    assert!(doc.kind_generation("chats") > c1);
+    assert_eq!(doc.kind_generation("devices"), d0);
+
+    let c2 = doc.kind_generation("chats");
+    let d1 = doc.kind_generation("devices");
+    let _ = doc.apply_rows(
+        2,
+        vec![applied(
+            None,
+            &RowOp {
+                kind: "devices".into(),
+                id: "dev-b".into(),
+                op: OpKind::Upsert,
+                set: Some(fields([("id", json!("dev-b")), ("name", json!("B"))])),
+                hlc: hlc_by(10, "dev-b"),
+                clocks: None,
+            },
+        )],
+    );
+    assert_eq!(doc.kind_generation("chats"), c2);
+    assert!(doc.kind_generation("devices") > d1);
+
+    let c3 = doc.kind_generation("chats");
+    let d2 = doc.kind_generation("devices");
+    let s1 = doc.kind_generation("sessions");
+    let _ = doc.apply_state(3, true, 0, vec![]);
+    assert!(doc.kind_generation("chats") > c3);
+    assert!(doc.kind_generation("devices") > d2);
+    assert!(doc.kind_generation("sessions") > s1);
+}
+
+#[test]
+fn overlay_rows_merges_authoritative_pending_and_deletes() {
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.upsert_chat(&chat("c1", "dev-a")).unwrap();
+    doc.upsert_chat(&chat("c2", "dev-a")).unwrap();
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    server_round(&mut server, &mut seq, &mut [&mut doc]);
+
+    // Pending update on c1, pending delete on c2, pending insert on c3.
+    doc.rename_chat("c1", "renamed").unwrap();
+    doc.delete_chat("c2").unwrap();
+    doc.upsert_chat(&chat("c3", "dev-a")).unwrap();
+
+    let rows = doc.overlay_rows("chats");
+    let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+    assert!(ids.contains(&"c1"));
+    assert!(!ids.contains(&"c2"));
+    assert!(ids.contains(&"c3"));
+    let c1 = rows.iter().find(|r| r.id == "c1").unwrap();
+    assert_eq!(c1.fields.get("title"), Some(&json!("renamed")));
+}

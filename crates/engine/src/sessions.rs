@@ -2306,7 +2306,7 @@ impl SubagentSink {
         let result = match self.entry_index {
             Some(ix) => {
                 let mut w = SegmentWriter::resume(&self.doc, ix, std::mem::take(&mut self.written));
-                let r = w.sync(&rendered);
+                let r = w.sync_cows(&rendered);
                 let (ix, written) = w.into_state();
                 self.entry_index = Some(ix);
                 self.written = written;
@@ -2315,7 +2315,7 @@ impl SubagentSink {
             None => {
                 match SegmentWriter::begin(&self.doc, &self.entry_id, device_id, self.started_at) {
                     Ok(mut w) => {
-                        let r = w.sync(&rendered);
+                        let r = w.sync_cows(&rendered);
                         let (ix, written) = w.into_state();
                         self.entry_index = Some(ix);
                         self.written = written;
@@ -2342,10 +2342,10 @@ impl SubagentSink {
         let rendered = render_parts(&self.folded);
         let closed = match self.entry_index.take() {
             Some(ix) => SegmentWriter::resume(&self.doc, ix, std::mem::take(&mut self.written))
-                .finish(&rendered, MessageStatus::Complete),
+                .finish_cows(&rendered, MessageStatus::Complete),
             None if !self.folded.is_empty() => {
                 match SegmentWriter::begin(&self.doc, &self.entry_id, device_id, self.started_at) {
-                    Ok(w) => w.finish(&rendered, MessageStatus::Complete),
+                    Ok(w) => w.finish_cows(&rendered, MessageStatus::Complete),
                     Err(e) => Err(e),
                 }
             }
@@ -2383,10 +2383,10 @@ impl SubagentSink {
         let rendered = render_parts(&self.folded);
         let finished = match self.entry_index {
             Some(ix) => SegmentWriter::resume(&self.doc, ix, std::mem::take(&mut self.written))
-                .finish(&rendered, status),
+                .finish_cows(&rendered, status),
             None if !self.folded.is_empty() => {
                 match SegmentWriter::begin(&self.doc, &self.entry_id, device_id, self.started_at) {
-                    Ok(w) => w.finish(&rendered, status),
+                    Ok(w) => w.finish_cows(&rendered, status),
                     Err(e) => Err(e),
                 }
             }
@@ -2416,8 +2416,9 @@ fn subagent_chip_update(event: &AgentEvent) -> Option<&'static str> {
 }
 
 /// Apply the render-parts privacy policy: strip heavy/sensitive tool inputs before doc
-/// entry. Full inputs live only in the local run journal.
-fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
+/// entry without cloning unchanged text/reasoning parts. Full inputs live only in the
+/// local run journal.
+fn render_parts(parts: &[MessagePart]) -> Vec<std::borrow::Cow<'_, MessagePart>> {
     parts
         .iter()
         .map(|part| match part {
@@ -2436,7 +2437,7 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 subagent_status,
                 subagent_tail,
                 view,
-            } => MessagePart::Tool {
+            } => std::borrow::Cow::Owned(MessagePart::Tool {
                 id: id.clone(),
                 call: sanitize_tool_call(call),
                 is_error: *is_error,
@@ -2456,8 +2457,8 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 subagent_tail: subagent_tail.clone(),
                 // Kind + id only: the host resolves them to its own files.
                 view: view.clone(),
-            },
-            other => other.clone(),
+            }),
+            other => std::borrow::Cow::Borrowed(other),
         })
         .collect()
 }
@@ -2490,7 +2491,7 @@ fn sync_segment<'a>(
         *writer = Some(SegmentWriter::begin(doc, entry_id, device_id, started_at)?);
     }
     if let Some(w) = writer.as_mut() {
-        w.sync(&rendered)?;
+        w.sync_cows(&rendered)?;
     }
     Ok(())
 }
@@ -2515,9 +2516,9 @@ fn finish_segment<'a>(
 ) -> Result<(), DocError> {
     let rendered = render_parts(folded);
     match writer {
-        Some(w) => w.finish(&rendered, status),
+        Some(w) => w.finish_cows(&rendered, status),
         None if !folded.is_empty() => {
-            SegmentWriter::begin(doc, entry_id, device_id, started_at)?.finish(&rendered, status)
+            SegmentWriter::begin(doc, entry_id, device_id, started_at)?.finish_cows(&rendered, status)
         }
         None => Ok(()),
     }
@@ -2615,6 +2616,7 @@ fn apply_reasoning_update(
 }
 
 /// Only the bounded visual runtime evaluates source; never on an async executor thread.
+#[cfg(feature = "visual")]
 async fn check_visual_script(script: String) -> Result<(), EngineError> {
     tokio::task::spawn_blocking(move || harness_visual::check(&script))
         .await
@@ -2622,6 +2624,13 @@ async fn check_visual_script(script: String) -> Result<(), EngineError> {
         .map_err(|_| {
             EngineError::Other("visual script failed bounded first-render validation".into())
         })
+}
+
+#[cfg(not(feature = "visual"))]
+async fn check_visual_script(_script: String) -> Result<(), EngineError> {
+    Err(EngineError::Other(
+        "visual validation is disabled in this build".into(),
+    ))
 }
 
 /// How long a run of streaming deltas may sit in [`DeltaCoalescer`] before

@@ -11,7 +11,7 @@ use tokio_tungstenite::tungstenite::handshake::server::{
 };
 use tokio_tungstenite::tungstenite::http::StatusCode;
 
-use crate::{ClientFrame, RpcError, RpcReply, RpcService, ServerFrame};
+use crate::{ClientFrame, RpcError, RpcReply, RpcService};
 
 /// Serve one connection: read client frames from `inbound`, write server frames to `out`.
 /// Returns when `inbound` closes; all in-flight request tasks are aborted on exit.
@@ -61,6 +61,46 @@ pub async fn serve_connection(
     }
 }
 
+enum OutgoingPayload<'a> {
+    Value(&'a serde_json::Value),
+    Raw(&'a serde_json::value::RawValue),
+}
+
+impl serde::Serialize for OutgoingPayload<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            OutgoingPayload::Value(v) => v.serialize(serializer),
+            OutgoingPayload::Raw(r) => r.serialize(serializer),
+        }
+    }
+}
+
+#[derive(Default, serde::Serialize)]
+struct OutgoingServerFrame<'a> {
+    id: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ok: Option<OutgoingPayload<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    err: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    item: Option<OutgoingPayload<'a>>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    done: bool,
+}
+
+async fn send_frame(
+    out: &mpsc::Sender<String>,
+    frame: OutgoingServerFrame<'_>,
+) -> Result<(), RpcError> {
+    match serde_json::to_string(&frame) {
+        Ok(json) => out.send(json).await.map_err(|_| RpcError::Closed),
+        Err(err) => {
+            tracing::error!(error = %err, "rpc: failed to serialize server frame");
+            Err(RpcError::Closed)
+        }
+    }
+}
+
 async fn handle_request(
     service: Arc<dyn RpcService>,
     out: mpsc::Sender<String>,
@@ -68,67 +108,128 @@ async fn handle_request(
     method: String,
     params: serde_json::Value,
 ) {
-    let send = |frame: ServerFrame| {
-        let out = out.clone();
-        async move {
-            match serde_json::to_string(&frame) {
-                Ok(json) => out.send(json).await.map_err(|_| RpcError::Closed),
-                Err(err) => {
-                    tracing::error!(error = %err, "rpc: failed to serialize server frame");
-                    Err(RpcError::Closed)
-                }
-            }
-        }
-    };
     match service.handle(&method, params).await {
         Ok(RpcReply::Value(value)) => {
-            let _ = send(ServerFrame {
-                id,
-                ok: Some(value),
-                ..Default::default()
-            })
+            let _ = send_frame(
+                &out,
+                OutgoingServerFrame {
+                    id,
+                    ok: Some(OutgoingPayload::Value(&value)),
+                    ..Default::default()
+                },
+            )
+            .await;
+        }
+        Ok(RpcReply::Raw(raw)) => {
+            let _ = send_frame(
+                &out,
+                OutgoingServerFrame {
+                    id,
+                    ok: Some(OutgoingPayload::Raw(&raw)),
+                    ..Default::default()
+                },
+            )
             .await;
         }
         Ok(RpcReply::Stream(mut stream)) => {
             // Only the versioned checkout-PR stream uses an explicit readiness
             // frame. Sending it for legacy streams would make older clients remove
             // their pending stream as if it were a unary response.
-            if method == crate::methods::WATCH_CHECKOUT_CHANGE_REQUEST
-                && send(ServerFrame {
-                    id,
-                    ok: Some(serde_json::json!({ "stream": true })),
-                    ..Default::default()
-                })
+            if method == crate::methods::WATCH_CHECKOUT_CHANGE_REQUEST {
+                let ready = serde_json::value::RawValue::from_string(r#"{"stream":true}"#.into())
+                    .expect("static valid json");
+                if send_frame(
+                    &out,
+                    OutgoingServerFrame {
+                        id,
+                        ok: Some(OutgoingPayload::Raw(&ready)),
+                        ..Default::default()
+                    },
+                )
                 .await
                 .is_err()
-            {
-                return;
+                {
+                    return;
+                }
             }
             while let Some(item) = stream.next().await {
-                if send(ServerFrame {
-                    id,
-                    item: Some(item),
-                    ..Default::default()
-                })
+                if send_frame(
+                    &out,
+                    OutgoingServerFrame {
+                        id,
+                        item: Some(OutgoingPayload::Value(&item)),
+                        ..Default::default()
+                    },
+                )
                 .await
                 .is_err()
                 {
                     return; // connection gone
                 }
             }
-            let _ = send(ServerFrame {
-                id,
-                done: true,
-                ..Default::default()
-            })
+            let _ = send_frame(
+                &out,
+                OutgoingServerFrame {
+                    id,
+                    done: true,
+                    ..Default::default()
+                },
+            )
+            .await;
+        }
+        Ok(RpcReply::StreamRaw(mut stream)) => {
+            if method == crate::methods::WATCH_CHECKOUT_CHANGE_REQUEST {
+                let ready = serde_json::value::RawValue::from_string(r#"{"stream":true}"#.into())
+                    .expect("static valid json");
+                if send_frame(
+                    &out,
+                    OutgoingServerFrame {
+                        id,
+                        ok: Some(OutgoingPayload::Raw(&ready)),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .is_err()
+                {
+                    return;
+                }
+            }
+            while let Some(item) = stream.next().await {
+                if send_frame(
+                    &out,
+                    OutgoingServerFrame {
+                        id,
+                        item: Some(OutgoingPayload::Raw(&item)),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .is_err()
+                {
+                    return;
+                }
+            }
+            let _ = send_frame(
+                &out,
+                OutgoingServerFrame {
+                    id,
+                    done: true,
+                    ..Default::default()
+                },
+            )
             .await;
         }
         Err(err) => {
-            let _ = send(ServerFrame {
-                id,
-                err: Some(err.to_string()),
-                ..Default::default()
-            })
+            let err_msg = err.to_string();
+            let _ = send_frame(
+                &out,
+                OutgoingServerFrame {
+                    id,
+                    err: Some(&err_msg),
+                    ..Default::default()
+                },
+            )
             .await;
         }
     }

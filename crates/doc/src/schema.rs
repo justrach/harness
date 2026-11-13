@@ -15,6 +15,8 @@
 //! Text bodies are **LoroText** so streaming appends RLE-merge (1.03x oplog overhead vs
 //! 125x for whole-value rewrites).
 
+use std::sync::Arc;
+
 use loro::{ExportMode, LoroDoc, LoroError, LoroList, LoroMap, LoroText, LoroValue, ToJson};
 use serde::{Deserialize, Serialize};
 
@@ -515,37 +517,83 @@ impl SessionDoc {
         &self,
         cache: &mut EntryCache,
     ) -> Result<Vec<SessionMessageEntry>, DocError> {
+        let shared = self.read_entries_cached_shared(cache)?;
+        Ok(shared
+            .into_iter()
+            .map(|entry| Arc::unwrap_or_clone(entry))
+            .collect())
+    }
+
+    /// Shared-entry variant of [`Self::read_entries_cached`]: unchanged cached
+    /// entries reuse their `Arc<SessionMessageEntry>` without deep-cloning the
+    /// transcript on every streaming commit.
+    pub fn read_entries_cached_shared(
+        &self,
+        cache: &mut EntryCache,
+    ) -> Result<Vec<Arc<SessionMessageEntry>>, DocError> {
         use loro::{Container, ContainerTrait, ValueOrContainer};
         let messages = self.doc.get_list("messages");
         let stale = std::mem::take(&mut cache.stale);
-        let mut previous = std::mem::take(&mut cache.entries);
-        let mut entries = Vec::with_capacity(messages.len());
-        for index in 0..messages.len() {
+        let len = messages.len();
+        let mut seen = std::collections::HashSet::with_capacity(len);
+        let mut entries = Vec::with_capacity(len);
+        for index in 0..len {
             match messages.get(index) {
                 Some(ValueOrContainer::Container(Container::Map(map))) => {
                     let id = map.id();
-                    let entry = match previous.remove(&id) {
-                        Some(entry) if !stale.contains(&id) => entry,
-                        _ => {
-                            #[cfg(test)]
-                            {
-                                cache.materialized += 1;
-                            }
-                            self.salvage_entry(map.get_deep_value().to_json_value())
+                    seen.insert(id.clone());
+                    let entry = if !stale.contains(&id)
+                        && let Some(cached) = cache.entries.get(&id)
+                    {
+                        cached.clone()
+                    } else {
+                        #[cfg(test)]
+                        {
+                            cache.materialized += 1;
                         }
+                        let parsed = self
+                            .salvage_entry(map.get_deep_value().to_json_value())
+                            .map(Arc::new);
+                        cache.entries.insert(id, parsed.clone());
+                        parsed
                     };
-                    if let Some(entry) = &entry {
-                        entries.push(entry.clone());
+                    if let Some(entry) = entry {
+                        entries.push(entry);
                     }
-                    cache.entries.insert(id, entry);
                 }
                 Some(other) => {
-                    entries.extend(self.salvage_entry(other.get_deep_value().to_json_value()));
+                    if let Some(entry) = self.salvage_entry(other.get_deep_value().to_json_value()) {
+                        entries.push(Arc::new(entry));
+                    }
                 }
                 None => {}
             }
         }
+        cache.entries.retain(|id, _| seen.contains(id));
         Ok(entries)
+    }
+
+    /// Walk `messages` in reverse, calling `visit` on each salvaged entry
+    /// until `visit` returns `false` or all entries are visited.
+    pub fn walk_entries_rev(&self, mut visit: impl FnMut(&SessionMessageEntry) -> bool) {
+        use loro::ValueOrContainer;
+        let messages = self.doc.get_list("messages");
+        for index in (0..messages.len()).rev() {
+            let Some(other) = messages.get(index) else {
+                continue;
+            };
+            let json = match other {
+                ValueOrContainer::Container(loro::Container::Map(map)) => {
+                    map.get_deep_value().to_json_value()
+                }
+                other => other.get_deep_value().to_json_value(),
+            };
+            if let Some(entry) = self.salvage_entry(json)
+                && !visit(&entry)
+            {
+                break;
+            }
+        }
     }
 
     /// Read a bounded suffix directly from the containers, without expanding
@@ -1016,7 +1064,7 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
 /// (a torn import), so it is retried only once it changes.
 #[derive(Default)]
 pub struct EntryCache {
-    entries: std::collections::HashMap<loro::ContainerID, Option<SessionMessageEntry>>,
+    entries: std::collections::HashMap<loro::ContainerID, Option<Arc<SessionMessageEntry>>>,
     stale: std::collections::HashSet<loro::ContainerID>,
     #[cfg(test)]
     materialized: usize,
@@ -1052,7 +1100,7 @@ fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntry, DocError
         #[serde(default)]
         duration_ms: Option<i64>,
     }
-    match serde_json::from_value::<RawEntry>(v.clone()) {
+    match RawEntry::deserialize(&v) {
         Ok(raw) => Ok(SessionMessageEntry {
             id: raw.id,
             role: raw.role,
@@ -1237,6 +1285,39 @@ pub fn join_continuation_entries(entries: Vec<SessionMessageEntry>) -> Vec<Sessi
     out
 }
 
+/// Shared-entry variant of [`join_continuation_entries`] that avoids cloning
+/// entries when no continuations are present, and only mutates roots that
+/// actually receive continuation parts.
+pub fn join_continuation_entries_shared(
+    entries: Vec<Arc<SessionMessageEntry>>,
+) -> Vec<Arc<SessionMessageEntry>> {
+    if !entries.iter().any(|e| e.continuation_of.is_some()) {
+        return entries;
+    }
+    let mut out: Vec<Arc<SessionMessageEntry>> = Vec::with_capacity(entries.len());
+    let mut root_index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for entry in entries {
+        match &entry.continuation_of {
+            Some(root_id) => {
+                if let Some(&at) = root_index.get(root_id) {
+                    let root = Arc::make_mut(&mut out[at]);
+                    root.parts.extend(entry.parts.iter().cloned());
+                    if entry.duration_ms.is_some() {
+                        root.duration_ms = entry.duration_ms;
+                    }
+                } else {
+                    out.push(entry);
+                }
+            }
+            None => {
+                root_index.insert(entry.id.clone(), out.len());
+                out.push(entry);
+            }
+        }
+    }
+    out
+}
+
 /// Incremental streaming writer for one assistant entry.
 ///
 /// Port of harness's `DocSegmentWriter` diff discipline: called with the *folded* parts of the
@@ -1337,10 +1418,27 @@ impl<'a> SegmentWriter<'a> {
 
     /// Diff `folded` (the full folded segment so far) into the doc.
     pub fn sync(&mut self, folded: &[MessagePart]) -> Result<(), DocError> {
+        self.sync_slice(folded)
+    }
+
+    /// Borrowed/owned variant of [`Self::sync`] so callers can pass sanitized
+    /// tool parts without cloning unchanged text/reasoning parts.
+    pub fn sync_cows(
+        &mut self,
+        folded: &[std::borrow::Cow<'_, MessagePart>],
+    ) -> Result<(), DocError> {
+        self.sync_slice(folded)
+    }
+
+    fn sync_slice<P: std::borrow::Borrow<MessagePart>>(
+        &mut self,
+        folded: &[P],
+    ) -> Result<(), DocError> {
         let parts = self.parts_list()?;
         let mut dirty = false;
 
-        for (i, part) in folded.iter().enumerate() {
+        for (i, item) in folded.iter().enumerate() {
+            let part: &MessagePart = item.borrow();
             match self.written.get(i) {
                 None => {
                     push_part(&parts, part)?;
@@ -1405,8 +1503,24 @@ impl<'a> SegmentWriter<'a> {
 
     /// Finish the stream: sync final parts, stamp a terminal status, and
     /// record how long the turn ran (`now - createdAt`).
-    pub fn finish(mut self, folded: &[MessagePart], status: MessageStatus) -> Result<(), DocError> {
-        self.sync(folded)?;
+    pub fn finish(self, folded: &[MessagePart], status: MessageStatus) -> Result<(), DocError> {
+        self.finish_slice(folded, status)
+    }
+
+    pub fn finish_cows(
+        self,
+        folded: &[std::borrow::Cow<'_, MessagePart>],
+        status: MessageStatus,
+    ) -> Result<(), DocError> {
+        self.finish_slice(folded, status)
+    }
+
+    fn finish_slice<P: std::borrow::Borrow<MessagePart>>(
+        mut self,
+        folded: &[P],
+        status: MessageStatus,
+    ) -> Result<(), DocError> {
+        self.sync_slice(folded)?;
         let map = self.entry_map()?;
         map.insert("status", status_str(status))?;
         let now = std::time::SystemTime::now()

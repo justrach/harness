@@ -1,8 +1,8 @@
 use futures::StreamExt;
-use std::{sync::Arc, time::Duration};
 use harness_engine::{EngineCore, HarnessRegistry};
 use harness_proto::{HarnessId, PreviewService};
-use harness_rpc::{RpcReply, RpcService, methods};
+use harness_rpc::{RpcService, methods};
+use std::{sync::Arc, time::Duration};
 
 fn service(device: &str, cwd: &std::path::Path, id: &str) -> PreviewService {
     PreviewService {
@@ -55,16 +55,15 @@ async fn preview_watch_follows_the_session_checkout_and_owning_device() {
         .set_remote("other", vec![service("other", &a, "other")])
         .unwrap();
     let rpc = core.rpc_service();
-    let RpcReply::Stream(mut stream) = rpc
+    let mut stream = rpc
         .handle(
             methods::WATCH_PREVIEWS,
             serde_json::json!({"chatId":"chat", "targetDeviceId":"peer"}),
         )
         .await
         .unwrap()
-    else {
-        panic!("expected preview watch")
-    };
+        .into_stream()
+        .expect("expected preview watch");
     let first = stream.next().await.unwrap();
     assert_eq!(first["services"].as_array().unwrap().len(), 1);
     assert_eq!(first["services"][0]["id"], "a");

@@ -684,8 +684,10 @@ async fn offered_model(rpc: &dyn RpcService, model: &str) -> Option<String> {
 
 async fn call(rpc: &dyn RpcService, method: &str, params: Value) -> Result<Value, EngineError> {
     match rpc.handle(method, params).await {
-        Ok(RpcReply::Value(value)) => Ok(value),
-        Ok(RpcReply::Stream(_)) => Err(other(format!("{method} is a stream"))),
+        Ok(reply @ (RpcReply::Value(_) | RpcReply::Raw(_))) => reply
+            .into_value()
+            .map_err(|err| other(format!("{method}: {err}"))),
+        Ok(RpcReply::Stream(_) | RpcReply::StreamRaw(_)) => Err(other(format!("{method} is a stream"))),
         Err(err) => Err(other(err.to_string())),
     }
 }
@@ -696,12 +698,19 @@ async fn snapshot<T: DeserializeOwned>(
     method: &str,
 ) -> Result<T, EngineError> {
     let value = match rpc.handle(method, json!({})).await {
-        Ok(RpcReply::Stream(mut stream)) => tokio::time::timeout(SNAPSHOT_TIMEOUT, stream.next())
-            .await
-            .ok()
-            .flatten()
-            .ok_or_else(|| other(format!("{method} gave no snapshot")))?,
-        Ok(RpcReply::Value(value)) => value,
+        Ok(reply @ (RpcReply::Stream(_) | RpcReply::StreamRaw(_))) => {
+            let mut stream = reply
+                .into_stream()
+                .map_err(|err| other(format!("{method}: {err}")))?;
+            tokio::time::timeout(SNAPSHOT_TIMEOUT, stream.next())
+                .await
+                .ok()
+                .flatten()
+                .ok_or_else(|| other(format!("{method} gave no snapshot")))?
+        }
+        Ok(reply @ (RpcReply::Value(_) | RpcReply::Raw(_))) => reply
+            .into_value()
+            .map_err(|err| other(format!("{method}: {err}")))?,
         Err(err) => return Err(other(err.to_string())),
     };
     serde_json::from_value(value).map_err(|err| other(format!("{method}: {err}")))

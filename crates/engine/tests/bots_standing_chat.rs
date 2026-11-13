@@ -49,8 +49,18 @@ impl BotCli for Canned {
 
 async fn chats(rpc: &dyn RpcService) -> Vec<Value> {
     match rpc.handle(methods::WATCH_CHATS, json!({})).await.unwrap() {
-        RpcReply::Stream(mut stream) => stream.next().await.unwrap().as_array().unwrap().clone(),
-        RpcReply::Value(value) => value.as_array().unwrap().clone(),
+        reply @ (RpcReply::Stream(_) | RpcReply::StreamRaw(_)) => reply
+            .into_stream()
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .clone(),
+        reply @ (RpcReply::Value(_) | RpcReply::Raw(_)) => {
+            reply.into_value().unwrap().as_array().unwrap().clone()
+        }
     }
 }
 
