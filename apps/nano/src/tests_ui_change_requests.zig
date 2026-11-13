@@ -112,10 +112,10 @@ test "an open PR from the chat's own worktree: a 20-point badge in the success t
     try testing.expectEqual(@as(f32, 20), b.box.h);
     try testing.expectEqual(@as(f32, 6), b.radius);
     try testing.expect(h.t.hasText("Merge"));
-    // The trailing group: the badge ends where the composer's pill does,
-    // Merge before it.
+    // The trailing group: the badge ends inside the footer's two 10-point
+    // insets (`composer-footer`'s and `render_footer`'s), Merge before it.
     const pill = h.a.view.composer_anchor.?;
-    try testing.expectApproxEqAbs(pill.x + pill.w, b.box.x + b.box.w, 0.5);
+    try testing.expectApproxEqAbs(pill.x + pill.w - 20, b.box.x + b.box.w, 0.5);
     try testing.expect(h.t.findText("Merge").?.x < b.box.x);
     try testing.expect(h.t.findText("feat/badges").?.x < h.t.findText("Merge").?.x);
 }

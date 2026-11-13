@@ -1,7 +1,7 @@
 //! Runs `protocol/desktop/theme.json` against the built-in Codegraff themes.
 //! harness-nano draws with the same roles (`apps/nano/src/parity.zig`).
 
-use harness_theme::builtin_registry;
+use harness_theme::ThemeRegistry;
 use serde_json::Value;
 
 fn vectors() -> Value {
@@ -16,7 +16,7 @@ fn vectors() -> Value {
 fn the_codegraff_roles_are_the_vectors() {
     for v in vectors()["variants"].as_array().unwrap() {
         let id = v["id"].as_str().unwrap();
-        let t = builtin_registry()
+        let t = ThemeRegistry::desktop_builtin()
             .variant(id)
             .unwrap_or_else(|| panic!("no theme {id}"));
         let c = &t.colors;

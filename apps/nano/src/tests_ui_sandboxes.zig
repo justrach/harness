@@ -56,6 +56,16 @@ const Harness = struct {
         return n;
     }
 
+    /// The224px sidebar truncates long running labels beside Turn off.
+    /// Locate their visible prefix; the tooltip below verifies the full copy.
+    fn labelRect(h: *Harness, prefix: []const u8) ?ui.Rect {
+        for (h.t.ctx.nodes.items) |node| switch (node.content) {
+            .text => |text| if (std.mem.startsWith(u8, text.str, prefix)) return node.rect,
+            else => {},
+        };
+        return null;
+    }
+
     /// `NANO_SNAP_DIR=dir`, running the test binary: saves what it saw.
     fn snap(h: *Harness, name: []const u8) void {
         const d = std.c.getenv("NANO_SNAP_DIR") orelse return;
@@ -89,12 +99,19 @@ test "the strip shows while a sandbox runs, above the account badge, and opens i
     try testing.expect(!h.t.hasText("Turn off"));
 
     try h.answer(one("running"));
-    try testing.expect(h.t.hasText(label));
-    // "Billed per second until you turn it off", cut to the strip's width.
-    try testing.expect(h.t.containsText("Billed per"));
+    try testing.expect(h.labelRect("Cloud sandbox") != null);
+    // One line at rest: "Billed per second" is the label's tooltip.
+    try testing.expect(!h.t.containsText("Billed per"));
     // In the sidebar's foot, above the badge; the open sidebar has no chip.
-    const at = h.t.findText(label).?;
+    const at = h.labelRect("Cloud sandbox") orelse return error.NoRunningStrip;
     try testing.expect(at.x < sidebar.width and at.y > 780 - 100);
+    // Truncation must not lose the billing warning or the full label.
+    h.t.moveTo(at.x + 2, at.y + 2);
+    h.t.advance(0.4);
+    const hint = h.t.tooltipText() orelse return error.NoBillingTooltip;
+    try testing.expect(std.mem.indexOf(u8, hint, label) != null);
+    try testing.expect(std.mem.indexOf(u8, hint, "billed per second") != null);
+    h.t.moveTo(600, 400);
     try testing.expectEqual(@as(usize, 1), h.count("Turn off"));
     h.snap("sandbox-strip-sidebar");
 
@@ -113,17 +130,22 @@ test "the strip shows while a sandbox runs, above the account badge, and opens i
 
     // Two running: Turn off all.
     try h.answer(two_running);
-    try testing.expect(h.t.containsText("2 cloud sandboxes"));
+    const two = h.labelRect("2 cloud") orelse return error.NoFleetCount;
+    h.t.moveTo(two.x + 2, two.y + 2);
+    h.t.advance(0.4);
+    try testing.expect(std.mem.indexOf(u8, h.t.tooltipText() orelse return error.NoFleetTooltip, "2 cloud sandboxes") != null);
+    h.t.moveTo(600, 400);
     try testing.expect(h.t.hasText("Turn off all"));
     try h.answer(one("running"));
 
     // The label opens Settings › Accounts, whose sidebar keeps it in view.
-    try h.t.clickText(label);
+    const open = h.labelRect("Cloud sandbox") orelse return error.NoRunningStrip;
+    h.t.click(open.x + 2, open.y + 2);
     h.t.settle(1);
     try testing.expect(h.a.view.settings_open);
     try testing.expectEqual(.agents, h.a.settings.section);
-    try testing.expect(h.t.hasText(label));
-    try testing.expect(h.t.findText(label).?.x < sidebar.width);
+    try testing.expect(h.labelRect("Cloud sandbox") != null);
+    try testing.expect(h.labelRect("Cloud sandbox").?.x < sidebar.width);
 
     // Hidden where the feature is off.
     try h.answer("{\"enabled\": false, \"sandboxes\": [{\"id\": \"cnd_1\", \"provider\": \"fleet\", \"state\": \"running\"}]}");
@@ -161,13 +183,13 @@ test "a closed sidebar keeps a chip with Turn off in view under the sidebar togg
     try testing.expect(h.a.view.settings_open);
     try testing.expectEqual(.agents, h.a.settings.section);
     // Settings keeps its sidebar here, and the strip in it.
-    try testing.expect(h.t.hasText(label));
+    try testing.expect(h.labelRect("Cloud sandbox") != null);
 
     // An open sidebar shows the strip instead.
     @import("view_settings.zig").close(&h.a);
     h.a.view.sidebar_open = true;
     h.t.settle(1);
-    try testing.expect(h.t.hasText(label));
+    try testing.expect(h.labelRect("Cloud sandbox") != null);
     try testing.expectEqual(@as(usize, 1), h.count("Turn off"));
     try testing.expect(h.t.findText("Turn off").?.y > 780 - 100);
 }

@@ -36,7 +36,10 @@ mod compaction;
 mod devin_models;
 mod elicitation;
 pub mod exo_bridge;
+pub mod graff_bot;
 pub mod graff_client;
+#[cfg(target_os = "macos")]
+mod graff_connections;
 mod graff_models;
 pub use graff_models::{ModelMismatch, parse_model_mismatch};
 pub mod graff_login;
@@ -517,7 +520,7 @@ fn graff_spec() -> AcpAgentSpec {
         // Graff's vendor model catalog advertises per-seat effort ladders;
         // session effort selection uses the standard ACP thought_level option.
         models: Vec::new,
-        steering_mode: SteeringMode::TurnBoundary,
+        steering_mode: SteeringMode::StepBoundary,
         reasoning_levels: &[
             ReasoningLevel::Low,
             ReasoningLevel::Medium,
@@ -1549,6 +1552,14 @@ impl AcpHarness {
             .kill_on_drop(true);
         let child = crate::process::retry_busy(|| cmd.spawn()).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
+                if let Some(dir) = cwd.filter(|c| !c.is_empty())
+                    && !Path::new(dir).exists()
+                {
+                    return HarnessError::Io(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("Project folder is missing: {dir}"),
+                    ));
+                }
                 HarnessError::NotInstalled(crate::executable::binary_hint(&exe))
             } else {
                 HarnessError::Io(e)
@@ -3524,11 +3535,26 @@ async fn request_draining(
     method: &'static str,
     params: Value,
 ) -> Result<Value, HarnessError> {
+    request_draining_for_session(client, incoming, method, params, None).await
+}
+
+/// Setup calls such as graff/models and a /model command may receive session
+/// metadata after session/load's response. Retain only the requested session's
+/// bounded metadata while continuing to discard replayed transcript content.
+async fn request_draining_for_session(
+    client: &RpcClient,
+    incoming: &mut mpsc::Receiver<Incoming>,
+    method: &'static str,
+    params: Value,
+    session_id: Option<&str>,
+) -> Result<Value, HarnessError> {
     let loading_session = matches!(method, "session/new" | "session/load");
     let requested_session = params
         .get("sessionId")
         .and_then(Value::as_str)
+        .or(session_id)
         .map(str::to_owned);
+    let retain_metadata = loading_session || session_id.is_some();
     let mut metadata = VecDeque::new();
     let mut handle_incoming = |inc| match inc {
         Incoming::Request { id, method, params } => {
@@ -3541,7 +3567,7 @@ async fn request_draining(
             }
         }
         Incoming::Notification { method, params }
-            if loading_session
+            if retain_metadata
                 && method == "session/update"
                 && matches!(
                     params["update"]["sessionUpdate"].as_str(),
@@ -3791,9 +3817,22 @@ async fn run_session(session: Session) {
         {
             // session/load restores the saved provider/model, superseding
             // --model. Do not send a turn on a route other than the picker.
-            let catalog =
-                request_draining(&client, &mut incoming, "graff/models", json!({})).await?;
-            graff_models::verify_resumed_model(&catalog, model)?;
+            #[cfg(target_os = "macos")]
+            graff_connections::ensure_resumed_model(
+                &client,
+                &mut incoming,
+                &session_id,
+                &mut session_response,
+                &init_commands,
+                model,
+            )
+            .await?;
+            #[cfg(not(target_os = "macos"))]
+            {
+                let catalog =
+                    request_draining(&client, &mut incoming, "graff/models", json!({})).await?;
+                graff_models::verify_resumed_model(&catalog, model)?;
+            }
         }
         let mut devin_selection = None;
         if harness == HarnessId::Devin
@@ -3958,10 +3997,10 @@ async fn run_session(session: Session) {
                     .map(str::to_owned);
             }
         }
-        // Graff reports the worktree it runs the session in; the engine
+        // Graff reports the checkout it runs the session in; the engine
         // re-homes the chat there so later runs, resumes and panels follow.
         let session_cwd = (harness == HarnessId::Graff)
-            .then(|| graff_worktree::session_worktree(&options_snapshot))
+            .then(|| graff_worktree::session_cwd(&options_snapshot))
             .flatten();
         Ok::<(String, bool, Vec<SlashCommand>, Option<String>, Option<String>, bool), HarnessError>((
             session_id,

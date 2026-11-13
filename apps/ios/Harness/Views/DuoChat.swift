@@ -150,9 +150,14 @@ enum ToolChips {
         let edits = count(["editFile", "writeFile", "applyPatch"])
         let reads = count(["readFile"])
         let searches = count(["search", "glob", "webSearch", "webFetch"])
-        let other = tools.count - runs - edits - reads - searches
+        let thoughts = count([RenderToolCall.thoughtTag])
+        let other = tools.count - runs - edits - reads - searches - thoughts
         let failed = tools.filter(\.isError).count
         var chips: [Chip] = []
+        if thoughts > 0 {
+            chips.append(Chip(symbol: "text.bubble", count: thoughts,
+                              label: thoughts == 1 ? "Thought" : "\(thoughts) thoughts"))
+        }
         if runs > 0 { chips.append(Chip(symbol: "terminal", count: runs, label: runs == 1 ? "1 run" : "\(runs) runs")) }
         if edits > 0 { chips.append(Chip(symbol: "pencil", count: edits, label: edits == 1 ? "1 edit" : "\(edits) edits")) }
         if reads > 0 { chips.append(Chip(symbol: "doc.text", count: reads, label: reads == 1 ? "1 read" : "\(reads) reads")) }

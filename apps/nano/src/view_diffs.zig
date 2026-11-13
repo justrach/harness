@@ -19,19 +19,59 @@ const App = @import("app.zig").App;
 pub fn diffs(c: *ui.Context, a: *App, k: theme.Colors) void {
     toolbar(c, a, k);
     const p = &a.panels;
-    if (p.diff_error) |e| return centered(c, k, e);
-    const d = p.diff orelse return centered(c, k, if (p.diff_loading) "Preparing diff…" else "No diff yet");
+    if (p.diff_error) |e| return centered(c, k, panels.friendlyDiffError(e));
+    const d = p.diff orelse {
+        if (p.diff_loading) return centered(c, k, "Preparing diff…");
+        if (a.selected) |sel| if (a.findChat(sel)) |ch| if (ch.source_unavailable) {
+            return centered(c, k, panels.not_git_notice);
+        };
+        return centered(c, k, "No diff yet");
+    };
     summary(c, a, k, d);
     if (d.files.len == 0) return centered(c, k, switch (p.scope) {
         .workingTree => "No uncommitted changes",
         .branch => c.print("No changes vs {s}", .{p.base_ref}),
         .turn => "No changes this turn",
     });
-    ui.scroll(c, .{ .grow = 1, .width = .fill });
-    defer ui.end(c);
-    for (d.files, 0..) |*f, i| {
-        ui.key(c, c.print("df-{s}", .{f.path}));
-        fileBlock(c, a, k, f, i == 0);
+    {
+        ui.scroll(c, .{ .grow = 1, .width = .fill });
+        defer ui.end(c);
+        for (d.files, 0..) |*f, i| {
+            ui.key(c, c.print("df-{s}", .{f.path}));
+            fileBlock(c, a, k, f, i == 0);
+        }
+    }
+    if (p.scope == .workingTree and !d.truncated) reviewFooter(c, a, k);
+}
+
+/// GPUI's footer under a working-tree diff (`render_review_footer`): the
+/// review is done. Undo asks first, as the toolbar's discard does, and
+/// Keep changes closes the pane: the edits are on disk already.
+pub const review_note = "Undo reverts every uncommitted file.";
+pub const review_undo = "Undo all changes";
+
+fn reviewFooter(c: *ui.Context, a: *App, k: theme.Colors) void {
+    _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
+    ui.key(c, "changes-review");
+    const bar = ui.div(c).row().wFull().px(12).py(8).gap(8).itemsCenter();
+    defer bar.end();
+    {
+        const note = ui.div(c).column().grow().w(0).clip();
+        defer note.end();
+        kit.ellipsisText(c, review_note, .{ .size = 11, .color = k.muted }, host_view.width - 260);
+    }
+    {
+        const undo = ui.div(c).row().px(12).py(6).rounded(8).hover(k.ink(0.06));
+        defer undo.end();
+        if (undo.clicked()) a.panels.discard_confirm = true;
+        ui.text(c, review_undo, .{ .size = 13, .color = if (undo.hovered()) k.text else k.muted });
+    }
+    {
+        var keep = ui.div(c).row().px(12).py(6).rounded(8).bg(k.solid);
+        if (keep.hovered()) keep = keep.opacity(0.9);
+        defer keep.end();
+        if (keep.clicked()) a.panels.host_open = false;
+        ui.text(c, "Keep changes", .{ .size = 13, .weight = .medium, .color = k.on_solid });
     }
 }
 
@@ -112,6 +152,13 @@ fn fileBlock(c: *ui.Context, a: *App, k: theme.Colors, f: *const diff.File, firs
     if (f.old_path) |old| notice(c, k, c.print("Renamed from {s}", .{old}));
     if (f.mode) |m| notice(c, k, c.print("Mode changed to {s}", .{m}));
     if (f.binary) notice(c, k, "Binary file — contents not shown");
+    body(c, k, f);
+}
+
+/// A file's hunks: each header, then its lines with both numbers, the
+/// marker and the code (`render_file_body`). An opened edit in the
+/// transcript draws its diff with this too.
+pub fn body(c: *ui.Context, k: theme.Colors, f: *const diff.File) void {
     const lang = host_view.langOf(f.path);
     var widest: u32 = 1;
     for (f.hunks) |h| for (h.lines) |l| {

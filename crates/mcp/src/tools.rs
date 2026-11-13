@@ -20,6 +20,7 @@ use harness_proto::{
 use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
 use crate::turn_replies::{REPLIES_TRUNCATED_NOTE, turn_replies};
 
+mod bots;
 mod graff_peer;
 mod peer_messages;
 mod relay_ledger;
@@ -51,6 +52,7 @@ pub struct Tools {
     harness: Arc<Harness>,
     peer: Arc<dyn graff_peer::PeerSend>,
     relay: relay_ledger::RelayLedger,
+    bots: Arc<dyn bots::BotCli>,
 }
 
 fn chat_key_schema(extra: Value) -> Value {
@@ -452,6 +454,7 @@ impl Tools {
             harness,
             peer: Arc::new(graff_peer::GraffCli),
             relay: relay_ledger::RelayLedger::on_device(),
+            bots: Arc::new(bots::GraffBots::default()),
         }
     }
 
@@ -463,11 +466,12 @@ impl Tools {
             tools.retain(|t| !matches!(t.name, "show_image" | "show_visual"));
         }
         tools.extend(rooms::catalog());
+        tools.extend(bots::catalog());
         tools
     }
 
     pub fn has(&self, name: &str) -> bool {
-        catalog().iter().any(|t| t.name == name) || rooms::handles(name)
+        catalog().iter().any(|t| t.name == name) || rooms::handles(name) || bots::handles(name)
     }
 
     /// `Ok` is the tool's structured result; `Err` is a message the model
@@ -493,6 +497,7 @@ impl Tools {
             "show_image" => self.show_image(parse(args)?).await,
             "show_visual" => self.show_visual(parse(args)?).await,
             other if rooms::handles(other) => return self.call_room_tool(other, args).await,
+            other if bots::handles(other) => return self.call_bot_tool(other, args).await,
             other => return Err(format!("unknown tool: {other}")),
         };
         result.map_err(|e| e.to_string())
@@ -1366,6 +1371,8 @@ mod tests {
         sessions: Mutex<Vec<Value>>,
         /// Transcript entries by chat id, in place of the shared two-message one.
         transcripts: Mutex<std::collections::HashMap<String, Value>>,
+        /// The engine's `BotsState`, for an engine that has the person's own bots.
+        own_bots: Mutex<Option<Value>>,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -1439,6 +1446,17 @@ mod tests {
                       "status": "complete",
                       "parts": [{ "kind": "text", "id": "t", "text": "hello back" }] }
                 ]})),
+                "BotsState" => match self.own_bots.lock().unwrap().clone() {
+                    Some(state) => RpcReply::Value(state),
+                    None => return Err(RpcError::UnknownMethod(method.into())),
+                },
+                "RunBot" => {
+                    self.writes
+                        .lock()
+                        .unwrap()
+                        .push((method.to_owned(), params.clone()));
+                    RpcReply::Value(json!({ "chatId": "chat-standing", "bot": params["bot"] }))
+                }
                 methods::MUTATE | methods::QUEUE_COMMAND | methods::QUEUE_MESSAGE => {
                     self.writes
                         .lock()
@@ -1552,6 +1570,7 @@ mod tests {
     async fn catalog_is_well_formed() {
         let mut defs = catalog();
         defs.extend(rooms::catalog());
+        defs.extend(bots::catalog());
         let mut names: Vec<&str> = defs.iter().map(|d| d.name).collect();
         names.sort_unstable();
         names.dedup();
@@ -1870,6 +1889,7 @@ mod tests {
             harness: Arc::new(Harness::with_client(memory_client(world), origin)),
             peer,
             relay: relay_ledger::RelayLedger::at(ledger),
+            bots: Arc::new(bots::GraffBots::default()),
         }
     }
 
@@ -2051,6 +2071,264 @@ mod tests {
             assert!(peer.sent.lock().unwrap().is_empty(), "{case}");
             assert_eq!(world.writes.lock().unwrap().len(), 1, "{case}");
         }
+    }
+
+    /// Stands in for `graff bot` in the comet project: two bots, one routine
+    /// each, and triage's is due. Records every command it is asked to run.
+    #[derive(Default)]
+    struct FakeBots {
+        calls: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl bots::BotCli for FakeBots {
+        async fn bot(&self, folder: &std::path::Path, args: &[&str]) -> anyhow::Result<String> {
+            assert_eq!(folder, std::path::Path::new("/repo/comet"));
+            self.calls.lock().unwrap().push(args.join(" "));
+            let due = json!([{
+                "bot": "triage", "id": "r1", "instruction": "label what came in", "at_ms": 1,
+                "system": "You are triage, a graff Bot.", "message": "[routine r1] label what came in"
+            }]);
+            let reply = match args {
+                ["list", "--json"] => json!([
+                    { "name": "notes", "job": "Draft release notes", "model": "made-up-model", "yolo": true },
+                    { "name": "triage", "job": "Label new issues", "model": "sonnet", "yolo": false }
+                ]),
+                ["routine", "list", ..] => json!([
+                    { "bot": "notes", "id": "r1", "instruction": "draft the notes", "when": "once at 2027-01-15 09:00Z",
+                      "paused": true, "done": false, "runs": 0, "message": "[routine r1] draft the notes" },
+                    { "bot": "triage", "id": "r1", "instruction": "label what came in", "when": "every 2h, next 2027-01-15 10:00Z",
+                      "paused": false, "done": false, "runs": 3, "message": "[routine r1] label what came in" }
+                ]),
+                ["due", "--json"] | ["due", "--claim", "--json"] => due,
+                ["prompt", name] => return Ok(format!("You are {name}, a graff Bot.\n")),
+                other => anyhow::bail!("unexpected: graff bot {}", other.join(" ")),
+            };
+            Ok(reply.to_string())
+        }
+    }
+
+    fn bot_tools(world: Arc<World>, origin: Origin) -> (Tools, Arc<FakeBots>) {
+        let fake = Arc::new(FakeBots::default());
+        let tools = Tools {
+            bots: fake.clone(),
+            ..tools(world, origin)
+        };
+        (tools, fake)
+    }
+
+    #[tokio::test]
+    async fn list_bots_shows_each_bots_routines_and_which_are_due() {
+        // No project named: the bots of the project the calling chat is in.
+        let origin = Origin {
+            chat_id: Some("chat-beta-2".into()),
+            device_id: None,
+        };
+        let (tools, fake) = bot_tools(Arc::new(World::default()), origin);
+        assert!(tools.list().iter().any(|t| t.name == "list_bots"));
+        let listed = tools.call("list_bots", json!({})).await.unwrap();
+        assert_eq!(listed["project"]["path"], "/repo/comet");
+        let bots = listed["bots"].as_array().unwrap();
+        assert_eq!(bots.len(), 2);
+        assert_eq!(bots[0]["name"], "notes");
+        assert_eq!(bots[0]["skipsApprovals"], true);
+        assert_eq!(bots[0]["routines"][0]["due"], false);
+        assert_eq!(bots[0]["routines"][0]["paused"], true);
+        assert_eq!(bots[1]["job"], "Label new issues");
+        assert_eq!(bots[1]["model"], "sonnet");
+        assert_eq!(
+            bots[1]["routines"][0]["when"],
+            "every 2h, next 2027-01-15 10:00Z"
+        );
+        assert_eq!(bots[1]["routines"][0]["due"], true);
+        // Listing reads; it must not claim a routine.
+        assert_eq!(
+            *fake.calls.lock().unwrap(),
+            ["list --json", "routine list --json", "due --json"]
+        );
+
+        let (tools, _) = bot_tools(Arc::new(World::default()), Origin::default());
+        let err = tools.call("list_bots", json!({})).await.unwrap_err();
+        assert!(err.contains("name the project"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn run_bot_starts_a_graff_chat_that_opens_with_the_bots_standing_text() {
+        let world = Arc::new(World::default());
+        let (tools, _) = bot_tools(world.clone(), Origin::default());
+        let run = tools
+            .call(
+                "run_bot",
+                json!({ "project": "comet", "bot": "triage", "message": "what is new?" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(run["bot"], "triage");
+        {
+            let writes = world.writes.lock().unwrap();
+            assert_eq!(writes.len(), 3, "createChat, renameChat, run");
+            assert_eq!(writes[0].1["chatId"], run["chatId"]);
+            assert_eq!(writes[0].1["spaceId"], "space-1");
+            assert_eq!(writes[0].1["config"]["harness"], "graff");
+            assert_eq!(writes[0].1["config"]["model"], "sonnet");
+            assert_eq!(writes[1].1["title"], "triage");
+            assert_eq!(
+                writes[2].1["command"]["request"]["prompt"],
+                "You are triage, a graff Bot.\n\nwhat is new?"
+            );
+        }
+
+        // A routine runs under its own title. A model this device does not
+        // offer is dropped and reported, not a reason to refuse the run.
+        world.writes.lock().unwrap().clear();
+        let run = tools
+            .call(
+                "run_bot",
+                json!({ "project": "comet", "bot": "notes", "routine": "r1" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(run["modelIgnored"], "made-up-model");
+        {
+            let writes = world.writes.lock().unwrap();
+            assert!(writes[0].1["config"]["model"].is_null());
+            assert_eq!(writes[1].1["title"], "notes: r1");
+            assert_eq!(
+                writes[2].1["command"]["request"]["prompt"],
+                "You are notes, a graff Bot.\n\n[routine r1] draft the notes"
+            );
+        }
+
+        world.writes.lock().unwrap().clear();
+        for (args, want) in [
+            (
+                json!({ "project": "comet", "bot": "triage" }),
+                "message or routine",
+            ),
+            (
+                json!({ "project": "comet", "bot": "triage", "message": "go", "routine": "r1" }),
+                "message or routine",
+            ),
+            (
+                json!({ "project": "comet", "bot": "triage", "routine": "r9" }),
+                "no routine",
+            ),
+            (
+                json!({ "project": "comet", "bot": "ghost", "message": "go" }),
+                "it has: notes, triage",
+            ),
+        ] {
+            let err = tools.call("run_bot", args).await.unwrap_err();
+            assert!(err.contains(want), "{err}");
+        }
+        assert!(
+            world.writes.lock().unwrap().is_empty(),
+            "a refused run starts no chat"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_due_bots_claims_each_due_routine_and_starts_its_chat() {
+        let world = Arc::new(World::default());
+        let (tools, fake) = bot_tools(world.clone(), Origin::default());
+        let ran = tools
+            .call("run_due_bots", json!({ "project": "comet" }))
+            .await
+            .unwrap();
+        assert_eq!(
+            *fake.calls.lock().unwrap(),
+            ["list --json", "due --claim --json"]
+        );
+        let started = ran["started"].as_array().unwrap();
+        assert_eq!(started.len(), 1);
+        assert_eq!(started[0]["bot"], "triage");
+        assert_eq!(started[0]["routine"], "r1");
+        assert!(ran.get("failed").is_none());
+        let writes = world.writes.lock().unwrap();
+        assert_eq!(writes.len(), 3, "createChat, renameChat, run");
+        assert_eq!(writes[0].1["chatId"], started[0]["chatId"]);
+        assert_eq!(writes[1].1["title"], "triage: r1");
+        assert_eq!(
+            writes[2].1["command"]["request"]["prompt"],
+            "You are triage, a graff Bot.\n\n[routine r1] label what came in"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_persons_own_bots_run_in_their_standing_chat_through_the_engine() {
+        let world = Arc::new(World::default());
+        *world.own_bots.lock().unwrap() = Some(json!({ "bots": [
+            { "name": "ada", "job": "Coordinate.", "primary": true, "routines": [] },
+            { "name": "triage", "job": "Label new issues (yours)", "project": "/repo/atlas", "routines": [] }
+        ]}));
+        // No chat to take a project from: the person's own bots still list.
+        let (tools, fake) = bot_tools(world.clone(), Origin::default());
+        let listed = tools.call("list_bots", json!({})).await.unwrap();
+        assert_eq!(listed["yours"][0]["name"], "ada");
+        assert!(listed.get("bots").is_none());
+        assert!(
+            fake.calls.lock().unwrap().is_empty(),
+            "no project, no graff"
+        );
+
+        // By name and no project, the engine runs it; nothing is created here.
+        let ran = tools
+            .call(
+                "run_bot",
+                json!({ "bot": "ada", "message": "draft the notes" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ran["chatId"], "chat-standing");
+        assert_eq!(ran["standingChat"], true);
+        {
+            let writes = world.writes.lock().unwrap();
+            assert_eq!(writes.len(), 1);
+            assert_eq!(writes[0].0, "RunBot");
+            assert_eq!(
+                writes[0].1,
+                json!({ "bot": "ada", "message": "draft the notes" })
+            );
+        }
+        let err = tools
+            .call("run_bot", json!({ "bot": "ada" }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("message or routine"), "{err}");
+
+        // A named project means that project's bot, even with the same name.
+        world.writes.lock().unwrap().clear();
+        let ran = tools
+            .call(
+                "run_bot",
+                json!({ "project": "comet", "bot": "triage", "message": "what is new?" }),
+            )
+            .await
+            .unwrap();
+        assert!(ran.get("standingChat").is_none());
+        assert_eq!(world.writes.lock().unwrap()[0].1["op"], "createChat");
+
+        // In a chat, both lists come back.
+        let origin = Origin {
+            chat_id: Some("chat-beta-2".into()),
+            device_id: None,
+        };
+        let (tools, _) = bot_tools(world, origin);
+        let listed = tools.call("list_bots", json!({})).await.unwrap();
+        assert_eq!(listed["bots"].as_array().unwrap().len(), 2);
+        assert_eq!(listed["yours"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_graff_without_the_bot_command_is_told_apart_by_its_help() {
+        let before = "usage: graff [options] [prompt]\n  graff peer list|send|inbox       talk with other agents\n";
+        let after = format!("{before}  graff bot create|run|routine     standing roles\n");
+        assert!(!bots::help_lists_bots(before));
+        assert!(bots::help_lists_bots(&after));
+        // A prompt that happens to mention the words is not the command.
+        assert!(!bots::help_lists_bots(
+            "  --model M   e.g. graff bot-friendly models\n"
+        ));
     }
 
     #[tokio::test]

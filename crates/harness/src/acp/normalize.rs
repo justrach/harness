@@ -527,7 +527,11 @@ pub(crate) fn map_update(update: &Value) -> Vec<AgentEvent> {
             }
             None => Vec::new(),
         },
-        "current_mode_update" | "session_info_update" => Vec::new(),
+        "current_mode_update" => Vec::new(),
+        "session_info_update" => super::graff_worktree::session_cwd(update)
+            .map(|cwd| AgentEvent::SessionCwdChanged { cwd })
+            .into_iter()
+            .collect(),
         // Stateful across frames: the session loop's CompactionTracker.
         "compaction_update" | "compaction_summary_chunk" => Vec::new(),
         _ => Vec::new(),
@@ -1027,6 +1031,43 @@ mod tests {
             .is_empty()
         );
         assert!(map_update(&json!({"sessionUpdate": "config_option_update"})).is_empty());
+    }
+
+    #[test]
+    fn session_info_update_emits_cwd_change_from_graff_meta() {
+        let graff_tree = json!({
+            "sessionUpdate": "session_info_update",
+            "_meta": {
+                "graff/cwd": "/repo/.graff/worktrees/feat-a",
+                "graff/worktree": { "path": "/repo/.graff/worktrees/feat-a" },
+            },
+        });
+        assert_eq!(
+            map_update(&graff_tree),
+            vec![AgentEvent::SessionCwdChanged {
+                cwd: "/repo/.graff/worktrees/feat-a".into(),
+            }]
+        );
+
+        let main_checkout = json!({
+            "sessionUpdate": "session_info_update",
+            "_meta": {
+                "graff/cwd": "/repo",
+                "graff/worktree": null,
+            },
+        });
+        assert_eq!(
+            map_update(&main_checkout),
+            vec![AgentEvent::SessionCwdChanged {
+                cwd: "/repo".into(),
+            }]
+        );
+
+        let title_only = json!({
+            "sessionUpdate": "session_info_update",
+            "title": "Renamed session",
+        });
+        assert!(map_update(&title_only).is_empty());
     }
 
     #[test]

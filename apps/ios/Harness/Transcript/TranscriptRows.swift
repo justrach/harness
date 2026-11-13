@@ -116,7 +116,14 @@ enum TranscriptRowBuilder {
         if completed.count > live.count {
             completed = completed.filter { live.contains($0.key) }
         }
+        var seenIDs = Set<String>()
+        seenIDs.reserveCapacity(rows.count)
         for ix in rows.indices {
+            if !seenIDs.insert(rows[ix].id).inserted {
+                let candidate = "\(rows[ix].id)#dup\(ix)"
+                rows[ix].id = candidate
+                seenIDs.insert(candidate)
+            }
             rows[ix].topGap = gap(for: rows[ix],
                                   previous: ix > 0 ? rows[ix - 1] : nil,
                                   isFirst: ix == 0)
@@ -224,6 +231,15 @@ enum TranscriptRowBuilder {
             switch part {
             case .tool(_, let call, let isError, let resolved):
                 pendingTools.append(ToolItem(call: call, isError: isError, resolved: resolved))
+                if ix == lastPartIx { flushTools(lastIx: ix) }
+
+            // Thinking rides the same group as the tools around it, as a
+            // "Thought process" chip (transcript.rs rows_for_entry). It is
+            // live only while it is the streaming tail.
+            case .reasoning(_, let text):
+                guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+                let live = streaming && ix == lastPartIx
+                pendingTools.append(ToolItem(call: .thought(text), isError: false, resolved: !live))
                 if ix == lastPartIx { flushTools(lastIx: ix) }
 
             case .text(let partId, let text):
@@ -365,6 +381,7 @@ extension RenderToolCall {
     var chipLabel: String {
         if let label = subagentControlLabel { return label }
         switch tag {
+        case Self.thoughtTag: return "Thought process"
         case "exec": return "Run"
         case "readFile": return "Read"
         case "writeFile": return "Write"
@@ -383,6 +400,7 @@ extension RenderToolCall {
     var chipDetail: String {
         if subagentControlLabel != nil { return "subagent" }
         switch tag {
+        case Self.thoughtTag: return string("text")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         case "exec": return string("command") ?? ""
         case "readFile", "writeFile", "editFile": return shortPath(string("path") ?? "")
         case "applyPatch":
@@ -414,6 +432,7 @@ extension RenderToolCall {
 
     var chipSymbol: String {
         switch tag {
+        case Self.thoughtTag: return "text.bubble"
         case "exec": return "terminal"
         case "readFile", "applyPatch": return "doc.text"
         case "writeFile": return "doc.badge.plus"
@@ -433,21 +452,35 @@ extension RenderToolCall {
     }
 }
 
-/// "Ran 3 commands · edited 2 files · 1 failed" (transcript.rs
-/// tool_group_summary).
+/// A collapsed thought's two preview lines: its first two while settled, its
+/// last two while live (the fresh thinking is the signal), skipping blank
+/// lines either way (transcript.rs thought_item keeps the same ends).
+func thoughtPreview(_ text: String, live: Bool, lines: Int = 2) -> String {
+    let rows = text.split(whereSeparator: \.isNewline)
+        .map { $0.trimmingCharacters(in: .whitespaces) }
+        .filter { !$0.isEmpty }
+    return (live ? Array(rows.suffix(lines)) : Array(rows.prefix(lines))).joined(separator: "\n")
+}
+
+/// "Thought process · ran 3 commands · edited 2 files · 1 failed"
+/// (transcript.rs tool_group_summary). Thoughts are named first and never
+/// counted as tools.
 func toolGroupSummary(_ tools: [ToolItem]) -> String {
     var segments: [String] = []
-    let runs = tools.filter { $0.call.tag == "exec" }.count
+    let thoughts = tools.filter(\.call.isThought).count
+    if thoughts > 0 { segments.append(thoughts == 1 ? "thought process" : "thought \(thoughts) times") }
+    let calls = tools.filter { !$0.call.isThought }
+    let runs = calls.filter { $0.call.tag == "exec" }.count
     if runs > 0 { segments.append(runs == 1 ? "ran 1 command" : "ran \(runs) commands") }
-    let edits = tools.filter { ["editFile", "writeFile", "applyPatch"].contains($0.call.tag) }.count
+    let edits = calls.filter { ["editFile", "writeFile", "applyPatch"].contains($0.call.tag) }.count
     if edits > 0 { segments.append(edits == 1 ? "edited 1 file" : "edited \(edits) files") }
-    let reads = tools.filter { $0.call.tag == "readFile" }.count
+    let reads = calls.filter { $0.call.tag == "readFile" }.count
     if reads > 0 { segments.append(reads == 1 ? "read 1 file" : "read \(reads) files") }
-    let searches = tools.filter { ["search", "glob", "webSearch", "webFetch"].contains($0.call.tag) }.count
+    let searches = calls.filter { ["search", "glob", "webSearch", "webFetch"].contains($0.call.tag) }.count
     if searches > 0 { segments.append(searches == 1 ? "1 search" : "\(searches) searches") }
-    let other = tools.count - runs - edits - reads - searches
+    let other = calls.count - runs - edits - reads - searches
     if other > 0 { segments.append(other == 1 ? "1 tool" : "\(other) tools") }
-    let failed = tools.filter(\.isError).count
+    let failed = calls.filter(\.isError).count
     if failed > 0 { segments.append("\(failed) failed") }
     guard var summary = segments.first else { return "\(tools.count) tools" }
     summary = summary.prefix(1).uppercased() + summary.dropFirst()

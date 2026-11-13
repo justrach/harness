@@ -32,6 +32,7 @@ pub const Dialogs = struct {
     space: bool = false,
 
     pub fn deinit(d: *Dialogs, gpa: std.mem.Allocator) void {
+        @import("text_buffer.zig").deinit(&d.name);
         if (d.rename) |*r| r.deinit(gpa);
         if (d.delete) |*r| r.deinit(gpa);
     }
@@ -78,6 +79,15 @@ pub fn removeSpace(a: *App, space_id: []const u8) void {
     if (a.view.dialogs.delete) |*old| old.deinit(a.gpa);
     a.view.dialogs.delete = id;
     a.view.dialogs.space = true;
+}
+
+/// History and the row menu share the same confirmed deletion flow.
+pub fn deleteChat(a: *App, chat_id: []const u8) void {
+    var id: std.ArrayList(u8) = .empty;
+    id.appendSlice(a.gpa, chat_id) catch return;
+    if (a.view.dialogs.delete) |*old| old.deinit(a.gpa);
+    a.view.dialogs.delete = id;
+    a.view.dialogs.space = false;
 }
 
 /// Escape: the dialog, else the menu.
@@ -128,11 +138,7 @@ fn menu(c: *ui.Context, a: *App, k: theme.Colors) void {
             separator(c, k, w);
             if (row(c, k, .@"trash-bin-minimalistic", "Delete…", k.danger, k.danger, false)) {
                 close(a);
-                var id: std.ArrayList(u8) = .empty;
-                id.appendSlice(a.gpa, ch.id) catch return;
-                if (a.view.dialogs.delete) |*old| old.deinit(a.gpa);
-                a.view.dialogs.delete = id;
-                a.view.dialogs.space = false;
+                deleteChat(a, ch.id);
             }
         },
         .copy => {
@@ -141,7 +147,7 @@ fn menu(c: *ui.Context, a: *App, k: theme.Colors) void {
             if (copyPath(ch)) |path| if (row(c, k, .copy, "Path", k.muted, k.text.alpha(0.9), false)) return copied(c, a, path, "Path copied");
             if (row(c, k, .copy, "Harness conversation link", k.muted, k.text.alpha(0.9), false)) {
                 var buf: [512]u8 = undefined;
-                const link = conversationLink(&buf, ch.id, a.device_id orelse "") orelse return close(a);
+                const link = a.external_navigation.conversationLink(&buf, a, ch.id) orelse return close(a);
                 return copied(c, a, link, "Harness conversation link copied");
             }
             if (ch.harness_session_id) |sid| if (std.mem.trim(u8, sid, " ").len > 0) {
@@ -253,14 +259,20 @@ fn startRename(a: *App, ch: workspace.Chat) void {
 /// focus when a menu drawn before it goes.
 pub fn scrim(c: *ui.Context, k: theme.Colors) ui.Div {
     ui.key(c, "dialog-scrim");
-    return ui.div(c).fixed().offset(0, 0).size(c.size.w, c.size.h).layer(6).bg(.{ .a = if (k.dark) 0.35 else 0.32 }).center();
+    const d = ui.div(c).fixed().offset(0, 0).size(c.size.w, c.size.h).layer(6).bg(.{ .a = if (k.dark) 0.35 else 0.32 }).center();
+    _ = d.interaction();
+    return d;
 }
 
 /// The dialog card (`dialog_card`): 360 wide, 20 in (and its border),
 /// rounded 16.
 pub fn dialog(c: *ui.Context, k: theme.Colors) ui.Div {
-    return kit.shadowLg(ui.div(c).w(360).p(21).column().rounded(16).bg(k.composer)
-        .border(if (k.dark) ui.Color{ .r = 1, .g = 1, .b = 1, .a = 0.10 } else ui.Color{ .a = 0.135 }).borderW(1));
+    var d = ui.div(c).w(360).p(21).column().rounded(16)
+        .bg(if (k.frosted) .transparent else k.composer)
+        .border(if (k.dark) ui.Color{ .r = 1, .g = 1, .b = 1, .a = 0.10 } else ui.Color{ .a = 0.135 }).borderW(1);
+    if (!k.frosted) d = kit.shadowLg(d);
+    if (k.frosted) @import("view_palette.zig").frostedBackdropInset(c, k, d, 20);
+    return d;
 }
 
 pub fn buttons(c: *ui.Context, k: theme.Colors, confirm: []const u8, danger: bool) enum { none, cancel, confirm } {

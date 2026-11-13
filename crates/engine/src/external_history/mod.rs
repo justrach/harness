@@ -21,7 +21,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use chrono::{TimeZone, Utc};
 use harness_doc::{MessagePart, MessageRole, MessageStatus, SessionDoc, SessionMessageEntry};
@@ -110,6 +110,29 @@ pub struct ImportSummary {
     pub errors: Vec<String>,
     /// Chat ids created by this call, in order.
     pub chat_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexConversationPreview {
+    pub id: String,
+    pub title: String,
+    pub cwd: Option<String>,
+    pub cwd_available: bool,
+    pub updated_at: i64,
+    pub archived: bool,
+    pub message_count: usize,
+    pub last_message: Option<String>,
+    pub already_imported: bool,
+    pub chat_id: Option<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexConversationImport {
+    pub chat_id: String,
+    pub already_imported: bool,
 }
 
 // ── neutral transcript ──────────────────────────────────────────────────────
@@ -251,6 +274,7 @@ struct Inner {
     device_id: String,
     store: Arc<DocsStore>,
     workspace: WorkspaceHost,
+    import_guard: Mutex<()>,
 }
 
 impl ExternalHistory {
@@ -266,6 +290,7 @@ impl ExternalHistory {
                 device_id: device_id.to_string(),
                 store,
                 workspace,
+                import_guard: Mutex::new(()),
             }),
         }
     }
@@ -308,6 +333,11 @@ impl ExternalHistory {
     /// Import the sessions named by `(source, id)` keys; `None` imports every
     /// session [`list`](Self::list) would show for `cwd`.
     pub fn import(&self, keys: Option<&[(Source, String)]>, cwd: Option<&str>) -> ImportSummary {
+        let _guard = self
+            .inner
+            .import_guard
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut roots = self.inner.roots.clone();
         roots.projects = self.projects(cwd);
         let known = self.known();
@@ -338,6 +368,125 @@ impl ExternalHistory {
             }
         }
         summary
+    }
+
+    /// Inspect a local Codex reference without starting a source agent or
+    /// creating a Harness conversation.
+    pub fn codex_preview(&self, reference: &str) -> Result<CodexConversationPreview, EngineError> {
+        let id = codex::reference_id(reference).map_err(EngineError::Other)?;
+        let chat_id = Source::Codex.chat_id(&id);
+        if let Some(chat) = self.inner.workspace.chat(&chat_id)? {
+            let entries = self
+                .inner
+                .store
+                .load_snapshot(&chat_id)?
+                .and_then(|bytes| {
+                    let doc = loro::LoroDoc::new();
+                    doc.import(&bytes).ok()?;
+                    SessionDoc::from_doc(doc).read_entries().ok()
+                })
+                .unwrap_or_default();
+            let cwd_available = usable_cwd(chat.cwd.as_deref());
+            let mut warnings = codex_warnings(cwd_available, false);
+            warnings.push("This conversation is already in Harness. Continuing uses its current Harness history.".into());
+            return Ok(CodexConversationPreview {
+                id: id.clone(),
+                title: chat.title.unwrap_or_else(|| "Codex conversation".into()),
+                cwd: chat.cwd,
+                cwd_available,
+                updated_at: chat
+                    .last_message_at
+                    .unwrap_or(chat.created_at)
+                    .timestamp_millis(),
+                archived: codex::resolve(&self.inner.roots.codex_home, &id)
+                    .map(|(_, archived)| archived)
+                    .unwrap_or(false),
+                message_count: entries.len(),
+                last_message: chat.last_message_preview,
+                already_imported: true,
+                chat_id: Some(chat_id),
+                warnings,
+            });
+        }
+        let (session, archived) =
+            codex::resolve(&self.inner.roots.codex_home, &id).map_err(EngineError::Other)?;
+        let msgs = load(&session).map_err(|e| EngineError::Other(e.to_string()))?;
+        if msgs.is_empty() {
+            return Err(EngineError::Other(
+                "That Codex conversation has no readable text or tool history to import.".into(),
+            ));
+        }
+        let cwd_available = usable_cwd(session.cwd.as_deref());
+        let text_bytes: usize = msgs
+            .iter()
+            .flat_map(|msg| &msg.blocks)
+            .map(|block| match block {
+                Block::Text(text) => text.len(),
+                Block::Tool { output, .. } => output.as_ref().map_or(0, String::len),
+            })
+            .sum();
+        let last_message = msgs
+            .iter()
+            .rev()
+            .flat_map(|msg| msg.blocks.iter().rev())
+            .find_map(|block| match block {
+                Block::Text(text) => Some(one_line(text, 320)),
+                _ => None,
+            });
+        Ok(CodexConversationPreview {
+            id,
+            title: session.title,
+            cwd: session.cwd,
+            cwd_available,
+            updated_at: session.updated_at,
+            archived,
+            message_count: msgs.len(),
+            last_message,
+            already_imported: false,
+            chat_id: None,
+            warnings: codex_warnings(cwd_available, text_bytes > SEED_CONVERSATION_BYTES),
+        })
+    }
+
+    /// Import one explicitly identified Codex conversation, or reopen its
+    /// previous import. The chosen working folder applies only to a new chat.
+    pub fn import_codex(
+        &self,
+        reference: &str,
+        cwd: Option<&str>,
+    ) -> Result<CodexConversationImport, EngineError> {
+        let _guard = self
+            .inner
+            .import_guard
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let id = codex::reference_id(reference).map_err(EngineError::Other)?;
+        let chat_id = Source::Codex.chat_id(&id);
+        if let Some(chat) = self.inner.workspace.chat(&chat_id)? {
+            if let Some(cwd) = cwd {
+                let selected = validated_cwd(Some(cwd))?;
+                let existing = chat
+                    .cwd
+                    .as_deref()
+                    .and_then(|path| fs::canonicalize(path).ok());
+                if existing.as_deref() != fs::canonicalize(&selected).ok().as_deref() {
+                    return Err(EngineError::Other("That conversation is already imported with a different working folder. Open it in Harness and change its working folder before continuing.".into()));
+                }
+            }
+            validated_cwd(chat.cwd.as_deref())?;
+            return Ok(CodexConversationImport {
+                chat_id,
+                already_imported: true,
+            });
+        }
+        let (mut session, _) =
+            codex::resolve(&self.inner.roots.codex_home, &id).map_err(EngineError::Other)?;
+        session.cwd = Some(validated_cwd(cwd.or(session.cwd.as_deref()))?);
+        let chat_id = self.import_one(&session)?;
+        Ok(CodexConversationImport {
+            chat_id,
+            already_imported: false,
+        })
     }
 
     fn known(&self) -> Known {
@@ -379,6 +528,32 @@ impl ExternalHistory {
         ))?;
         Ok(chat_id)
     }
+}
+
+fn usable_cwd(cwd: Option<&str>) -> bool {
+    cwd.is_some_and(|cwd| {
+        let path = Path::new(cwd);
+        path.is_absolute() && path.is_dir()
+    })
+}
+
+fn validated_cwd(cwd: Option<&str>) -> Result<String, EngineError> {
+    if usable_cwd(cwd) {
+        Ok(cwd.unwrap().to_owned())
+    } else {
+        Err(EngineError::Other("The working folder is unavailable. Choose an existing folder on this device before continuing.".into()))
+    }
+}
+
+fn codex_warnings(cwd_available: bool, shortened: bool) -> Vec<String> {
+    let mut warnings = vec!["Imports text messages and brief tool results. Images, attachments, and full tool output are not included.".into()];
+    if shortened {
+        warnings.push("The initial request and most recent conversation will be used to continue; some earlier content will be omitted.".into());
+    }
+    if !cwd_available {
+        warnings.push("The original working folder is unavailable. Choose an existing working folder before continuing.".into());
+    }
+    warnings
 }
 
 #[derive(Default)]
@@ -438,13 +613,45 @@ const SEED_CONVERSATION_CHARS: usize = 60_000;
 /// message stays raw in the doc, but the agent gets the earlier conversation
 /// as read-only context so it continues rather than restarts.
 pub fn seed_prompt(chat_id: &str, entries: &[SessionMessageEntry], prompt: &str) -> String {
-    seed_conversation(
-        entries,
-        prompt,
-        &format!(
-            "This conversation started in {} and continues here in graff. The earlier conversation is below as read-only context; don't redo work it shows as finished.",
-            source_label(chat_id),
-        ),
+    let mut lines: Vec<String> = Vec::new();
+    let mut initial_request = None;
+    for entry in entries {
+        let role = match entry.role {
+            MessageRole::User => "User",
+            MessageRole::Assistant => "Assistant",
+            _ => continue,
+        };
+        for part in &entry.parts {
+            match part {
+                MessagePart::Text { text, .. } if !text.trim().is_empty() => {
+                    if entry.role == MessageRole::User && initial_request.is_none() {
+                        initial_request = Some(lines.len());
+                    }
+                    lines.push(format!("{role}: {}", text.trim()));
+                }
+                MessagePart::Tool { call, output, .. } => {
+                    let kind = serde_json::to_value(call)
+                        .ok()
+                        .and_then(|v| v.get("kind").and_then(|k| k.as_str().map(str::to_owned)))
+                        .unwrap_or_else(|| "call".to_string());
+                    let result = output
+                        .as_deref()
+                        .map(|o| one_line(o, 120))
+                        .filter(|o| !o.is_empty())
+                        .unwrap_or_else(|| "…".to_string());
+                    lines.push(format!("Tool: {kind} — {result}"));
+                }
+                // Reasoning, images and system parts stay out of the seed.
+                _ => {}
+            }
+        }
+    }
+    let block = bounded_seed(&lines, initial_request);
+    format!(
+        "This conversation started in {} and continues here in graff. The earlier conversation is below as read-only context; don't redo work it shows as finished.\n\n<earlier-conversation>\n{}\n</earlier-conversation>\n\n{}",
+        source_label(chat_id),
+        block,
+        prompt
     )
 }
 
@@ -507,6 +714,87 @@ fn seed_conversation(entries: &[SessionMessageEntry], prompt: &str, introduction
         "{}\n\n<earlier-conversation>\n{}\n</earlier-conversation>\n\n{}",
         introduction, block, prompt
     )
+}
+
+const SEED_CONVERSATION_BYTES: usize = 60_000;
+
+fn utf8_prefix(text: &str, max_bytes: usize) -> &str {
+    let mut end = text.len().min(max_bytes);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+fn utf8_suffix(text: &str, max_bytes: usize) -> &str {
+    let mut start = text.len().saturating_sub(max_bytes);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    &text[start..]
+}
+
+fn bounded_seed(lines: &[String], initial_request: Option<usize>) -> String {
+    let total = lines.iter().map(String::len).sum::<usize>() + lines.len().saturating_sub(1);
+    if total <= SEED_CONVERSATION_BYTES {
+        return lines.join("\n");
+    }
+    // Leave room for omission notices and section labels as well as the
+    // separators. A giant newest message is shortened on UTF-8 boundaries;
+    // it must never make the entire imported context disappear.
+    let mut remaining = SEED_CONVERSATION_BYTES - 512;
+    let mut initial = String::new();
+    let mut shortened = 0;
+    let mut initial_shortened = false;
+    if let Some(index) = initial_request {
+        let line = &lines[index];
+        initial.push_str(utf8_prefix(line, 8_000));
+        if initial.len() < line.len() {
+            initial.push_str("\n[remainder of initial request omitted]");
+            shortened += 1;
+            initial_shortened = true;
+        }
+        remaining -= initial.len();
+    }
+    let mut kept = Vec::new();
+    let mut tail_has_initial = false;
+    for (index, line) in lines.iter().enumerate().rev() {
+        if Some(index) == initial_request && !initial_shortened {
+            continue;
+        }
+        if line.len() + 1 <= remaining {
+            remaining -= line.len() + 1;
+            kept.push(line.clone());
+            tail_has_initial |= Some(index) == initial_request;
+        } else {
+            let label = line.split_once(": ").map_or("Message", |(role, _)| role);
+            let notice = format!("{label}: [earlier text in this item omitted]\n");
+            if remaining > notice.len() + 4 {
+                kept.push(format!(
+                    "{notice}{}",
+                    utf8_suffix(line, remaining - notice.len() - 1)
+                ));
+                if Some(index) != initial_request {
+                    shortened += 1;
+                }
+                tail_has_initial |= Some(index) == initial_request;
+            }
+            break;
+        }
+    }
+    kept.reverse();
+    let omitted =
+        lines.len() - kept.len() - usize::from(initial_request.is_some() && !tail_has_initial);
+    let mut block =
+        format!("[{omitted} earlier conversation items omitted; {shortened} items shortened]\n");
+    if !initial.is_empty() {
+        block.push_str("[Initial request retained]\n");
+        block.push_str(&initial);
+        block.push_str("\n\n[Recent conversation]\n");
+    }
+    block.push_str(&kept.join("\n"));
+    debug_assert!(block.len() <= SEED_CONVERSATION_BYTES);
+    block
 }
 
 fn chat_row(session: &ExternalSession, chat_id: &str, msgs: &[Msg], device_id: &str) -> Chat {
@@ -848,7 +1136,7 @@ mod tests {
     }
 
     #[test]
-    fn seed_prompt_truncates_oldest_first_with_an_omitted_line() {
+    fn seed_prompt_retains_initial_request_and_recent_history_with_an_omission_notice() {
         let mut entries: Vec<SessionMessageEntry> = Vec::new();
         for i in 0..300 {
             entries.push(seed_entry(
@@ -867,7 +1155,7 @@ mod tests {
             .split("</earlier-conversation>")
             .next()
             .unwrap();
-        assert!(block.len() <= 61_000);
+        assert!(block.len() <= SEED_CONVERSATION_BYTES);
         let omitted: usize = block
             .trim_start()
             .strip_prefix('[')
@@ -879,6 +1167,75 @@ mod tests {
             .unwrap();
         assert!(omitted > 0);
         assert!(block.contains("message 299"), "newest lines are kept");
-        assert!(!block.contains("message 0 "), "oldest lines dropped");
+        assert!(
+            block.contains("message 0 "),
+            "the initial request is retained"
+        );
+        assert!(
+            !block.contains("message 1 "),
+            "older intermediate lines drop"
+        );
+    }
+
+    #[test]
+    fn seed_prompt_shortens_giant_unicode_messages_without_losing_recent_context() {
+        let entries = vec![
+            seed_entry(
+                MessageRole::User,
+                vec![MessagePart::Text {
+                    id: "objective".into(),
+                    text: "Implement the retry requested earlier".into(),
+                }],
+            ),
+            seed_entry(
+                MessageRole::Assistant,
+                vec![MessagePart::Text {
+                    id: "large".into(),
+                    text: format!(
+                        "{}Latest state: retry is implemented",
+                        "日本語".repeat(20_000)
+                    ),
+                }],
+            ),
+        ];
+        let out = seed_prompt("ext-codex-test", &entries, "verify it");
+        let block = out
+            .split("<earlier-conversation>\n")
+            .nth(1)
+            .unwrap()
+            .split("\n</earlier-conversation>")
+            .next()
+            .unwrap();
+        assert!(block.len() <= SEED_CONVERSATION_BYTES);
+        assert!(block.contains("Implement the retry requested earlier"));
+        assert!(block.contains("Latest state: retry is implemented"));
+        assert!(block.contains("earlier text in this item omitted"));
+        assert!(block.contains("items shortened"));
+    }
+
+    #[test]
+    fn seed_prompt_keeps_both_ends_of_a_single_giant_user_message() {
+        let entries = vec![seed_entry(
+            MessageRole::User,
+            vec![MessagePart::Text {
+                id: "single".into(),
+                text: format!(
+                    "Original objective: add retry. {} Latest detail: handle timeouts.",
+                    "日本語".repeat(20_000)
+                ),
+            }],
+        )];
+        let out = seed_prompt("ext-codex-test", &entries, "continue");
+        let block = out
+            .split("<earlier-conversation>\n")
+            .nth(1)
+            .unwrap()
+            .split("\n</earlier-conversation>")
+            .next()
+            .unwrap();
+        assert!(block.len() <= SEED_CONVERSATION_BYTES);
+        assert!(block.contains("Original objective: add retry."));
+        assert!(block.contains("Latest detail: handle timeouts."));
+        assert!(block.contains("0 earlier conversation items omitted; 1 items shortened"));
     }
 }

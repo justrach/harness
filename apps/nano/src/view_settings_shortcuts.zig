@@ -54,6 +54,7 @@ fn refuse(a: *App, why: []const u8) void {
 pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
     header(c, a, k);
     sendCard(c, a, k);
+    followUpCard(c, a, k);
     set.space(c, 28);
     completion(c, a, k);
     set.space(c, 28);
@@ -78,12 +79,12 @@ fn header(c: *ui.Context, a: *App, k: theme.Colors) void {
     const r = ui.div(c).row().wFull().gap(24);
     defer r.end();
     {
-        const left = ui.div(c).column().grow().w(0);
+        const left = ui.div(c).column().wFull();
         defer left.end();
         set.header(c, k, "Keyboard shortcuts", null);
         set.subtitle(c, k, "Click a binding, then press the key combination you want to use. Changes apply immediately and stay on this device.", true);
     }
-    const changed = a.settings.keymapChanged() or a.settings.get(.escape_stops_active_agent) or !sendsOnEnter(a);
+    const changed = a.settings.keymapChanged() or a.settings.get(.escape_stops_active_agent) or !sendsOnEnter(a) or queue_mod.followUpBehavior(a) != queue_mod.defaultFollowUp(a);
     const live = changed and a.view.recording == null;
     var b = ui.div(c).row().px(10).py(6).gap(6).itemsCenter().rounded(8);
     if (live) b = b.hover(k.ink(0.04)) else b = b.opacity(0.35);
@@ -95,6 +96,7 @@ fn header(c: *ui.Context, a: *App, k: theme.Colors) void {
         a.settings.resetKeymap();
         a.settings.set(.escape_stops_active_agent, false);
         a.settings.setText("composerSendBehavior", "enter");
+        a.settings.clearText("followUpBehavior");
         a.view.shortcut_notice.clearRetainingCapacity();
     }
 }
@@ -147,6 +149,33 @@ fn sendCard(c: *ui.Context, a: *App, k: theme.Colors) void {
         const hot = seg.hovered();
         ui.text(c, opt[0], .{ .size = 12, .line_height = 12 * 1.618, .mono = true, .color = if (selected or hot) k.text else k.muted });
         if (!selected and seg.clicked()) a.settings.setText("composerSendBehavior", opt[1]);
+    }
+}
+
+const queue_mod = @import("app_queue.zig");
+
+/// "Messages while the agent is working": Queue | Steer, 12 under the send
+/// card (`follow_up_behavior_row`).
+fn followUpCard(c: *ui.Context, a: *App, k: theme.Colors) void {
+    // `mt(12)` in place of the section card's own 24.
+    set.space(c, 12);
+    const cd = ui.div(c).column().wFull().p(1).rounded(12).border(k.border).borderW(1).bg(if (k.frosted) k.card else k.shell);
+    defer cd.end();
+    const copy = c.print("Queue waits until the current turn finishes. Steer adds your message to the current turn (default for Codex and GPT-6.0+ models). {s}", .{queue_mod.followUpHint(sendsOnEnter(a), @import("builtin").os.tag == .macos)});
+    const r = tallRow(c, k, "Messages while the agent is working", copy, 170);
+    defer r.end();
+    ui.spacer(c);
+    const now = queue_mod.followUpBehavior(a);
+    const track = ui.div(c).row().p(2).rounded(9).bg(k.ink(0.04));
+    defer track.end();
+    inline for (.{ .{ "Queue", queue_mod.FollowUp.queue }, .{ "Steer", queue_mod.FollowUp.steer } }) |opt| {
+        const selected = now == opt[1];
+        var seg = ui.div(c).row().minW(72).px(12).py(6).rounded(7).justifyCenter();
+        seg = if (selected) seg.bg(k.background).border(k.border.alpha(0.8)).borderW(1).p(1).px(13).py(7) else seg;
+        defer seg.end();
+        const hot = seg.hovered();
+        ui.text(c, opt[0], .{ .size = 12, .line_height = 12 * 1.618, .mono = true, .color = if (selected or hot) k.text else k.muted });
+        if (!selected and seg.clicked()) a.settings.setText("followUpBehavior", @tagName(opt[1]));
     }
 }
 

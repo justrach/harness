@@ -72,6 +72,15 @@ pub const Wizard = struct {
         w.gpa.destroy(w.arena);
     }
 
+    pub fn retire(w: *Wizard, a: *@import("app.zig").App) void {
+        for (w.picks) |*p| p.deinit(w.gpa);
+        for (w.typed) |*t| t.deinit(w.gpa);
+        w.gpa.free(w.picks);
+        w.gpa.free(w.typed);
+        a.retireArena(w.arena.*);
+        w.gpa.destroy(w.arena);
+    }
+
     pub fn question(w: *const Wizard) tr.Question {
         return w.questions[w.page];
     }

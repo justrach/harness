@@ -473,7 +473,8 @@ final class WorkspaceStore {
                         spaceId: f["spaceId"]?.stringValue,
                         lastSeenAt: f["lastSeenAt"]?.int64Value,
                         roomGen: f["roomGen"]?.int64Value.map(Int.init),
-                        lastPromptAt: f["lastPromptAt"]?.int64Value)
+                        lastPromptAt: f["lastPromptAt"]?.int64Value,
+                        parentChatId: f["parentChatId"]?.stringValue)
         }
 
         var rows: [String: SessionRow] = [:]
@@ -506,7 +507,7 @@ final class WorkspaceStore {
     /// attention-sorted.
     var overviewChats: [Chat] {
         let liveSpaceIds = Set(spaces.map(\.id))
-        let live = chats.filter { !$0.archived && ($0.spaceId.map(liveSpaceIds.contains) ?? true) }
+        let live = chats.filter { $0.isTopLevel && !$0.archived && ($0.spaceId.map(liveSpaceIds.contains) ?? true) }
         return sortPinnedFirst(live, pinnedSessionIds: pinnedSessionIds)
     }
 
@@ -518,7 +519,7 @@ final class WorkspaceStore {
     /// Sessions section — so it follows that list's ordering instead.
     func chats(in spaceId: String) -> [Chat] {
         sortPinnedFirst(
-            chats.filter { !$0.archived && $0.spaceId == spaceId },
+            chats.filter { $0.isTopLevel && !$0.archived && $0.spaceId == spaceId },
             pinnedSessionIds: pinnedSessionIds
         )
     }
@@ -528,7 +529,7 @@ final class WorkspaceStore {
     /// `overviewChats`, a live space is not required: an archived session of a
     /// deleted space should still be reachable for unarchive.
     func archivedChats(in spaceId: String? = nil) -> [Chat] {
-        sortActive(chats.filter { $0.archived && (spaceId == nil || $0.spaceId == spaceId) })
+        sortActive(chats.filter { $0.isTopLevel && $0.archived && (spaceId == nil || $0.spaceId == spaceId) })
     }
 
     func indicator(for chat: Chat) -> ChatIndicator {
@@ -697,6 +698,16 @@ final class WorkspaceStore {
     /// SetAutonomy; answers with the level the device kept.
     func setAutonomy(deviceId: String, _ autonomy: Autonomy) async throws -> AutonomySetting {
         try await relay(for: deviceId).call(method: "SetAutonomy", params: ["autonomy": autonomy.rawValue])
+    }
+
+    /// GetKeepAwake on the target device (Settings → Agents there).
+    func keepAwake(deviceId: String) async throws -> KeepAwakeSetting {
+        try await relay(for: deviceId).call(method: "GetKeepAwake", params: [:])
+    }
+
+    /// SetKeepAwake; answers with what the device kept.
+    func setKeepAwake(deviceId: String, enabled: Bool) async throws -> KeepAwakeSetting {
+        try await relay(for: deviceId).call(method: "SetKeepAwake", params: ["enabled": enabled])
     }
 
     /// SetHarnessEnabled: switch an agent on or off on that computer (Settings → Agents there).
@@ -873,6 +884,7 @@ final class WorkspaceStore {
             var description: String?
             var reasoningLevels: [String]?
             var options: [WireOption]?
+            var billing: String?
         }
         let wire: [WireModel]? = try? await relay(for: deviceId)
             .call(method: "ListModels", params: ["harness": harness])
@@ -889,7 +901,8 @@ final class WorkspaceStore {
                                   },
                                   defaultChoice: option.defaultChoice
                               )
-                          })
+                          },
+                          billing: $0.billing)
             }
         }
     }

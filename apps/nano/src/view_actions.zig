@@ -66,6 +66,80 @@ pub fn control(c: *ui.Context, a: *App, k: theme.Colors) void {
     ui.text(c, "Add action", .{ .size = 11.5, .color = k.text.alpha(0.9) });
 }
 
+const toolbar_h: f32 = 36;
+const dock_h: f32 = 280;
+
+/// The toolbar's height in the conversation panel: none until a project's
+/// actions are known.
+pub fn toolbarHeight(a: *const App) f32 {
+    const status = a.actions.status;
+    return if (status == .idle or status == .loading or status == .unsupported) 0 else toolbar_h;
+}
+
+/// The run dock's height under the chat, with its hairline: none while shut.
+pub fn dockHeight(a: *const App) f32 {
+    return if (!a.actions.dock_open or a.actions.runs.items.len == 0) 0 else dock_h + 1;
+}
+
+/// Release desktop keeps project actions inside the conversation panel.
+pub fn toolbar(c: *ui.Context, a: *App, k: theme.Colors) void {
+    const x = &a.actions;
+    if (toolbarHeight(a) == 0) return;
+    const bar = ui.div(c).column().wFull().h(toolbar_h);
+    defer bar.end();
+    {
+        const row_box = ui.div(c).row().wFull().grow().h(0).px(10).gap(6).itemsCenter();
+        defer row_box.end();
+        if (x.status == .unavailable) {
+            const button = ui.div(c).row().h(24).px(8).center().rounded(6).border(k.border).borderW(1).hover(k.hover);
+            defer button.end();
+            if (c.rects.get(c.node(button.index).id)) |r| x.anchor = r;
+            icons.icon(c, .@"danger-triangle", 13, k.danger, 0);
+            if (button.clicked()) x.menu = !x.menu;
+        } else {
+            const viewport = ui.div(c).grow().w(0).h(24).clip();
+            {
+                defer viewport.end();
+                const id = c.node(viewport.index).id;
+                const available = if (c.rects.get(id)) |r| r.w else 0;
+                var wanted: f32 = 14 + 13 + 5 + c.text.width("Add action", .{ .size = 11.5 });
+                for (x.list) |action| wanted += 6 + 14 + 13 + 5 + c.text.width(action.name, .{ .size = 11.5 });
+                const limit = @max(0, wanted - available);
+                var offset = std.math.clamp(c.scroll.get(id) orelse 0, 0, limit);
+                if (viewport.interaction().hovered and c.input.scroll.x != 0) {
+                    offset = std.math.clamp(offset - c.input.scroll.x, 0, limit);
+                    c.scroll.put(c.gpa, id, offset) catch {};
+                    c.input.scroll.x = 0;
+                    c.changed = true;
+                }
+                const list = ui.div(c).absolute().offset(-offset, 0).row().h(24).gap(6);
+                defer list.end();
+                for (x.list) |action| {
+                    ui.key(c, action.id);
+                    const button = segment(c, k).rounded(5);
+                    defer button.end();
+                    icons.icon(c, iconOf(action.icon), 13, k.muted, 0);
+                    ui.text(c, action.name, .{ .size = 11.5, .color = k.text });
+                    if (button.clicked()) actions.run(a, action);
+                }
+                const add = segment(c, k).rounded(5);
+                defer add.end();
+                icons.icon(c, .plus, 13, k.muted, 0);
+                ui.text(c, "Add action", .{ .size = 11.5, .color = k.text });
+                if (add.clicked()) actions.openEditor(a, null);
+            }
+            if (x.list.len > 0) {
+                const button = ui.div(c).row().w(23).h(24).center().rounded(5).hover(k.hover);
+                defer button.end();
+                if (c.rects.get(c.node(button.index).id)) |r| x.anchor = r;
+                icons.icon(c, .@"alt-arrow-down", 11, k.muted, 0);
+                if (button.clicked()) x.menu = !x.menu;
+            }
+        }
+    }
+    ui.div(c).wFull().h(1).bg(k.border).end();
+}
+
 fn segment(c: *ui.Context, k: theme.Colors) ui.Div {
     return ui.div(c).row().hFull().px(7).gap(5).itemsCenter().hover(k.ink(0.07));
 }
@@ -235,15 +309,19 @@ fn field(c: *ui.Context, k: theme.Colors, buf: *ui.TextBuffer, placeholder: []co
     const f = ui.div(c).column().wFull().px(12).py(8).rounded(8).bg(k.ink(0.04)).border(k.border).borderW(1).minW(0);
     const sized = if (command) f.h(88) else f;
     defer sized.end();
+    const field_id = c.peekId(null);
+    const field_index: u32 = @intCast(c.nodes.items.len);
     _ = ui.textField(c, buf, .{ .placeholder = placeholder, .width = .fill, .bare = true, .size = 14, .multiline = command, .max_lines = 4 });
+    c.node(field_index).style.scroll_bar = false;
+    _ = c.scrollbars.remove(field_id);
 }
 
 /// The dock under the chat: a tab per run, its output as a log.
 pub fn dock(c: *ui.Context, a: *App, k: theme.Colors) void {
     const x = &a.actions;
-    if (!x.dock_open or x.runs.items.len == 0) return;
+    if (dockHeight(a) == 0) return;
     _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
-    const d = ui.div(c).column().wFull().h(280).bg(k.background);
+    const d = ui.div(c).column().wFull().h(dock_h).bg(k.background);
     defer d.end();
     {
         const strip = ui.div(c).row().wFull().h(32).px(8).gap(4).itemsCenter();

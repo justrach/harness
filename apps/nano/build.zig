@@ -1,35 +1,80 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
+    // Match Windows' installed Rust/SDK toolchain by default. An explicit
+    // GNU target still selects the matching Rust target below, never MSVC.
+    const target = b.standardTargetOptions(.{ .default_target = if (b.graph.host.result.os.tag == .windows) .{ .abi = .msvc } else .{} });
     const optimize = b.standardOptimizeOption(.{});
-    const nanoui = b.dependency("nanoui", .{ .target = target, .optimize = optimize }).module("nanoui");
+    const loader = b.option([]const u8, "webview2-loader", "Path to the target's WebView2Loader.dll");
+    const portable = b.option(bool, "portable", "Use portable text and CPU rendering for cross-platform regression tests") orelse false;
+    const nanoui_dep = if (target.result.os.tag == .windows)
+        b.dependency("nanoui", .{ .target = target, .optimize = optimize, .portable = portable, .webview2 = if (loader != null) "none" else "sdk" })
+    else
+        b.dependency("nanoui", .{ .target = target, .optimize = optimize, .portable = portable });
+    const nanoui = nanoui_dep.module("nanoui");
+    if (target.result.os.tag == .windows) {
+        if (loader) |path| b.getInstallStep().dependOn(&b.addInstallBinFile(.{ .cwd_relative = path }, "WebView2Loader.dll").step);
+    }
     // HTTPS with ALPN h2 for what the app asks the network itself (releases,
     // the edge); the engine's own socket is a local WebSocket (src/ws.zig).
     const http_zig = b.dependency("http_zig", .{ .target = target, .optimize = optimize }).module("http_zig");
-    // The GPUI app's own fonts (crates/ui/assets/fonts), the same files,
-    // in a module that embeds them: Geist isn't installed on most Macs.
+    // Retain the original native TeX AST/box engine and its embedded STIX
+    // glyph outlines. Cargo is a child of this build (the enclosing
+    // scripts/heavy-build.sh lock covers both compilers; never nest locks).
+    const rust_target = rustTarget(target.result);
+    const math = b.addSystemCommand(&.{ "cargo", "build", "--quiet", "--locked", "--release", "-j2", "--manifest-path" });
+    math.addFileArg(b.path("native_math/Cargo.toml"));
+    math.addArgs(&.{ "--target", rust_target });
+    math.addFileInput(b.path("native_math/Cargo.lock"));
+    math.addFileInput(b.path("native_math/src/lib.rs"));
+    const math_target = math.addPrefixedOutputDirectoryArg("--target-dir=", "native-math");
+    const math_library = math_target.path(b, b.fmt("{s}/release/{s}", .{ rust_target, if (target.result.os.tag == .windows and target.result.abi == .msvc) "harness_native_math.lib" else "libharness_native_math.a" }));
+    var linked_math = math_library;
+    var math_index: ?*std.Build.Step.Run = null;
+    if (target.result.os.tag == .windows) {
+        const archive_tool = b.addExecutable(.{ .name = "math-archive", .root_module = b.createModule(.{
+            .root_source_file = b.path("math_archive.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+        }) });
+        const normalize = b.addRunArtifact(archive_tool);
+        normalize.addFileArg(math_library);
+        linked_math = normalize.addOutputFileArg("native-math.lib");
+        const index = b.addSystemCommand(&.{ b.graph.zig_exe, "ar", "s" });
+        index.addFileArg(linked_math);
+        math_index = index;
+    }
+    // Harness's bundled fonts (assets/fonts), in a module that embeds them:
+    // Geist isn't installed on most Macs.
     const font_files = b.addWriteFiles();
-    _ = font_files.addCopyDirectory(b.path("../../crates/ui/assets/fonts"), "fonts", .{ .include_extensions = &.{".ttf"} });
+    _ = font_files.addCopyDirectory(b.path("assets/fonts"), "fonts", .{ .include_extensions = &.{".ttf"} });
     const fonts_root = font_files.add("fonts.zig",
         \\//! Geist and Geist Mono, as the GPUI app bundles them.
         \\pub const all = [_][]const u8{
         \\    @embedFile("fonts/Geist.ttf"),
+        \\    @embedFile("fonts/Geist-Italic.ttf"),
         \\    @embedFile("fonts/Geist-Medium.ttf"),
+        \\    @embedFile("fonts/Geist-MediumItalic.ttf"),
         \\    @embedFile("fonts/Geist-SemiBold.ttf"),
+        \\    @embedFile("fonts/Geist-SemiBoldItalic.ttf"),
         \\    @embedFile("fonts/Geist-Bold.ttf"),
+        \\    @embedFile("fonts/Geist-BoldItalic.ttf"),
         \\    @embedFile("fonts/GeistMono.ttf"),
+        \\    @embedFile("fonts/GeistMono-Italic.ttf"),
         \\    @embedFile("fonts/GeistMono-Medium.ttf"),
+        \\    @embedFile("fonts/GeistMono-MediumItalic.ttf"),
         \\    @embedFile("fonts/GeistMono-SemiBold.ttf"),
+        \\    @embedFile("fonts/GeistMono-SemiBoldItalic.ttf"),
         \\    @embedFile("fonts/GeistMono-Bold.ttf"),
+        \\    @embedFile("fonts/GeistMono-BoldItalic.ttf"),
         \\};
         \\
     );
     const fonts = b.createModule(.{ .root_source_file = fonts_root });
-    // The same SVGs the GPUI app draws, rasterized at the screen's density,
+    // Harness's SVGs, rasterized at the screen's density,
     // not a second, pre-rendered copy of the icon set.
     const icon_files = b.addWriteFiles();
-    _ = icon_files.addCopyDirectory(b.path("../../crates/ui/assets/icons"), "icons", .{ .include_extensions = &.{".svg"} });
+    _ = icon_files.addCopyDirectory(b.path("assets/icons"), "icons", .{ .include_extensions = &.{".svg"} });
     const icons_root = icon_files.add("icons_svg.zig",
         \\pub fn get(comptime name: []const u8) []const u8 {
         \\    return @embedFile("icons/" ++ name ++ ".svg");
@@ -38,21 +83,42 @@ pub fn build(b: *std.Build) void {
     );
     const icons_svg = b.createModule(.{ .root_source_file = icons_root });
     const file_icons_data = @import("file_icons_build.zig").module(b);
-    // The built-in themes, the catalog the phones bundle (crates/theme keeps
-    // it in lockstep with the GPUI app's registry).
+    // The desktop catalog: GPUI deliberately recolors its Codegraff themes
+    // without changing the mobile palette. crates/theme checks this export.
     const theme_files = b.addWriteFiles();
-    _ = theme_files.addCopyFile(b.path("../ios/Harness/Theme/themes.json"), "themes.json");
+    _ = theme_files.addCopyFile(b.path("themes.json"), "themes.json");
     const themes_root = theme_files.add("themes_json.zig",
         \\//! The built-in theme catalog, as JSON.
         \\pub const json = @embedFile("themes.json");
         \\
     );
     const themes_json = b.createModule(.{ .root_source_file = themes_root });
-    // Harness's version, as the GPUI app has it: the workspace's.
-    const info = b.addOptions();
-    info.addOption([]const u8, "version", workspaceVersion(b));
+    // Harness's version, read directly from `../../Cargo.toml` via WriteFiles
+    // so Zig's build runner hashes `Cargo.toml` on every build and never
+    // reuses a stale cached version string across releases.
+    const info_files = b.addWriteFiles();
+    _ = info_files.addCopyFile(b.path("../../Cargo.toml"), "Cargo.toml");
+    const info_root = info_files.add("build_info.zig",
+        \\const std = @import("std");
+        \\pub const version: []const u8 = blk: {
+        \\    @setEvalBranchQuota(100_000);
+        \\    const text = @embedFile("Cargo.toml");
+        \\    const section = std.mem.indexOf(u8, text, "[workspace.package]") orelse break :blk "0.0.0";
+        \\    var lines = std.mem.splitScalar(u8, text[section..], '\n');
+        \\    while (lines.next()) |line| {
+        \\        const t = std.mem.trim(u8, line, " \r");
+        \\        if (!std.mem.startsWith(u8, t, "version")) continue;
+        \\        const q = std.mem.indexOfScalar(u8, t, '"') orelse continue;
+        \\        const end = std.mem.indexOfScalarPos(u8, t, q + 1, '"') orelse continue;
+        \\        break :blk t[q + 1 .. end];
+        \\    }
+        \\    break :blk "0.0.0";
+        \\};
+        \\
+    );
+    const info_mod = b.createModule(.{ .root_source_file = info_root });
     const imports: []const std.Build.Module.Import = &.{
-        .{ .name = "build_info", .module = info.createModule() },
+        .{ .name = "build_info", .module = info_mod },
         .{ .name = "nanoui", .module = nanoui },
         .{ .name = "http_zig", .module = http_zig },
         .{ .name = "fonts", .module = fonts },
@@ -65,27 +131,48 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .strip = optimize != .debug,
         .imports = imports,
     }) });
+    if (target.result.os.tag == .windows) {
+        exe.subsystem = .windows;
+        // Rust's native-math archive brings the MSVC CRT. Keep its normal
+        // main startup while suppressing the console window; the GUI CRT
+        // default would instead require a WinMain entry point.
+        if (target.result.abi == .msvc) exe.entry = .{ .symbol_name = "mainCRTStartup" };
+    }
     b.installArtifact(exe);
     const run = b.addRunArtifact(exe);
     run.addPassthruArgs();
     b.step("run", "Run harness-nano").dependOn(&run.step);
 
-    const tests = b.addTest(.{ .root_module = b.createModule(.{
+    const test_filter = b.option([]const u8, "test-filter", "Run only tests whose names contain this text");
+    const tests = b.addTest(.{ .filters = if (test_filter) |filter| &.{filter} else &.{}, .root_module = b.createModule(.{
         .root_source_file = b.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
+        .strip = optimize != .debug,
         .imports = imports,
     }) });
     // The vectors the Rust side runs too (protocol/desktop, at the repo root).
-    const protocol = b.root.joinString(b.allocator, "../../protocol/desktop") catch @panic("OOM");
+    const test_data = b.option([]const u8, "test-data-root", "Repository fixture root on a separate test runner");
+    const protocol = if (test_data) |root| b.pathJoin(&.{ root, "protocol/desktop" }) else b.root.joinString(b.allocator, "../../protocol/desktop") catch @panic("OOM");
     const opts = b.addOptions();
     opts.addOption([]const u8, "protocol_dir", protocol);
     // And the app rules the phones share (apps/parity/vectors).
-    opts.addOption([]const u8, "vectors_dir", b.root.joinString(b.allocator, "../parity/vectors") catch @panic("OOM"));
+    opts.addOption([]const u8, "vectors_dir", if (test_data) |root| b.pathJoin(&.{ root, "apps/parity/vectors" }) else b.root.joinString(b.allocator, "../parity/vectors") catch @panic("OOM"));
     tests.root_module.addOptions("parity_options", opts);
-    b.step("test", "Run harness-nano tests").dependOn(&b.addRunArtifact(tests).step);
+    const test_step = b.step("test", "Run harness-nano tests");
+    test_step.dependOn(&b.addRunArtifact(tests).step);
+    // Pure AST/box geometry, safety and native-ABI regressions from the
+    // original implementation remain part of the regular nano test gate.
+    const math_tests = b.addSystemCommand(&.{ "cargo", "test", "--quiet", "--locked", "-j2", "--manifest-path" });
+    math_tests.addFileArg(b.path("native_math/Cargo.toml"));
+    math_tests.addArgs(&.{ "--target", rust_target });
+    math_tests.addArg("--target-dir");
+    math_tests.addDirectoryArg(math_target);
+    test_step.dependOn(&math_tests.step);
+    b.step("test-build", "Build tests for a separate Windows or native runner").dependOn(&b.addInstallArtifact(tests, .{}).step);
 
     // `zig build snap -- scene.json out-dir`: the window drawn offscreen
     // from a made-up scene, a PNG per step asked for (src/snap.zig).
@@ -121,20 +208,29 @@ pub fn build(b: *std.Build) void {
     const write_vectors = b.addRunArtifact(vectors);
     write_vectors.addArg(b.pathJoin(&.{ protocol, "requests.json" }));
     b.step("vectors", "Write protocol/desktop/requests.json").dependOn(&write_vectors.step);
+    // Large UI artifacts must never use Zig's self-hosted backend.
+    inline for (.{ exe, tests, snap, profile, vectors }) |artifact| {
+        artifact.use_llvm = true;
+        artifact.root_module.addObjectFile(linked_math);
+        if (math_index) |index| artifact.step.dependOn(&index.step);
+        // Rust's catch_unwind boundary needs the platform unwinder. Zig
+        // supplies libunwind on Linux; libc alone does not export _Unwind_*.
+        if (target.result.os.tag == .linux) artifact.root_module.linkSystemLibrary("unwind", .{});
+        if (target.result.os.tag == .windows) {
+            // Rust's native-static-libs, in addition to the matching CRT.
+            for ([_][]const u8{ "kernel32", "ntdll", "userenv", "ws2_32", "dbghelp" }) |library| artifact.root_module.linkSystemLibrary(library, .{});
+        }
+    }
 }
 
-/// `version` under `[workspace.package]` in the repository's Cargo.toml.
-fn workspaceVersion(b: *std.Build) []const u8 {
-    const path = b.root.joinString(b.allocator, "../../Cargo.toml") catch return "0.0.0";
-    const text = std.Io.Dir.cwd().readFileAlloc(b.graph.io, path, b.allocator, .limited(1 << 20)) catch return "0.0.0";
-    const section = std.mem.indexOf(u8, text, "[workspace.package]") orelse return "0.0.0";
-    var lines = std.mem.splitScalar(u8, text[section..], '\n');
-    while (lines.next()) |line| {
-        const t = std.mem.trim(u8, line, " \r");
-        if (!std.mem.startsWith(u8, t, "version")) continue;
-        const q = std.mem.indexOfScalar(u8, t, '"') orelse continue;
-        const end = std.mem.indexOfScalarPos(u8, t, q + 1, '"') orelse continue;
-        return t[q + 1 .. end];
-    }
-    return "0.0.0";
+fn rustTarget(target: std.Target) []const u8 {
+    return switch (target.os.tag) {
+        .macos => if (target.cpu.arch == .aarch64) "aarch64-apple-darwin" else "x86_64-apple-darwin",
+        .linux => if (target.cpu.arch == .aarch64) "aarch64-unknown-linux-gnu" else "x86_64-unknown-linux-gnu",
+        .windows => if (target.abi == .msvc)
+            (if (target.cpu.arch == .aarch64) "aarch64-pc-windows-msvc" else "x86_64-pc-windows-msvc")
+        else
+            (if (target.cpu.arch == .aarch64) "aarch64-pc-windows-gnullvm" else "x86_64-pc-windows-gnu"),
+        else => @panic("native math needs a supported desktop Rust target"),
+    };
 }

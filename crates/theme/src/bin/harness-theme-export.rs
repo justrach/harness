@@ -17,11 +17,21 @@ struct Args {
     /// Where to write the catalog; stdout when omitted.
     #[arg(long)]
     output: Option<PathBuf>,
+    /// Export the desktop palette instead of the shared mobile catalog.
+    #[arg(long)]
+    desktop: bool,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let json = harness_theme::builtin_catalog_json()?;
+    let json = if args.desktop {
+        let mut json =
+            serde_json::to_string_pretty(harness_theme::ThemeRegistry::desktop_builtin())?;
+        json.push('\n');
+        json
+    } else {
+        harness_theme::builtin_catalog_json()?
+    };
     match args.output {
         Some(path) => {
             fs::write(&path, json).with_context(|| format!("writing {}", path.display()))?

@@ -105,7 +105,7 @@ def main() -> None:
         (out / d).mkdir(parents=True, exist_ok=True)
 
     fork = os.environ.get("NANOUI_FORK")
-    run(["zig", "build", *([f"--fork={fork}"] if fork else [])], cwd=NANO)
+    run(["zig", "build", "--release=safe", "-j1", *([f"--fork={fork}"] if fork else [])], cwd=NANO)
     for scene in scenes:
         # Files a scene reads (a theme to import, say), made up, where it says.
         for path, text in json.loads(pathlib.Path(scene).read_text()).get("files", {}).items():

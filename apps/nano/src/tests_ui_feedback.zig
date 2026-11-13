@@ -11,6 +11,8 @@ const Harness = struct {
     fn init(h: *Harness) !void {
         @import("theme.zig").registerFonts();
         h.a = .init(testing.allocator, testing.io, 1);
+        // Each step as its own row: these tests are about the detailed transcript.
+        h.a.settings.set(.transcript_compact_mode, false);
         h.a.offscreen = true;
         h.a.dark = false;
         h.a.view.sidebar_open = false;
@@ -28,6 +30,14 @@ const Harness = struct {
         h.a.deinit();
     }
 
+    /// Optional synthetic evidence for a regression report or PR.
+    fn snap(h: *Harness, name: []const u8) !void {
+        const dir = std.c.getenv("NANO_SNAP_DIR") orelse return;
+        var buf: [1024]u8 = undefined;
+        const path = try std.fmt.bufPrint(&buf, "{s}/{s}.png", .{ std.mem.span(dir), name });
+        try h.t.screenshot(path);
+    }
+
     fn apply(h: *Harness, text: []const u8) !void {
         const frame = try std.json.parseFromSlice(std.json.Value, testing.allocator, text, .{});
         defer frame.deinit();
@@ -35,6 +45,55 @@ const Harness = struct {
         h.t.frame();
     }
 };
+
+/// The message footer's 14-point glyph, not a sidebar/composer icon.
+fn messageCopyIcon(h: *Harness, message: ui.Rect) !usize {
+    for (h.t.ctx.nodes.items, 0..) |node, i| {
+        if (node.content != .image) continue;
+        const r = node.rect;
+        if (@abs(r.w - 14) < 0.1 and @abs(r.h - 14) < 0.1 and
+            r.y >= message.y + message.h and r.y < message.y + message.h + 60)
+            return i;
+    }
+    return error.CopyIconNotFound;
+}
+
+fn messageCopyFeedback(role: []const u8, reduced_motion: bool) !void {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.t.ctx.reduced_motion = reduced_motion;
+    const frame = try std.fmt.allocPrint(testing.allocator, "{{\"reset\":[{{\"id\":\"message\",\"role\":\"{s}\",\"status\":\"complete\",\"parts\":[{{\"id\":\"text\",\"kind\":\"text\",\"text\":\"Synthetic copy feedback\"}}]}}]}}", .{role});
+    defer testing.allocator.free(frame);
+    try h.apply(frame);
+    h.t.settle(1);
+    const message = h.t.findText("Synthetic copy feedback") orelse return error.MessageNotDrawn;
+    h.t.moveTo(message.x + message.w / 2, message.y + message.h / 2);
+    h.t.settle(0.2);
+    const before_ix = try messageCopyIcon(&h, message);
+    const before = h.t.ctx.nodes.items[before_ix].content.image;
+    const r = h.t.ctx.nodes.items[before_ix].rect;
+    h.t.click(r.x + r.w / 2, r.y + r.h / 2);
+    h.t.frame();
+    try testing.expectEqualStrings("Synthetic copy feedback", h.t.clipboard.items);
+    if (std.mem.eql(u8, role, "user") and !reduced_motion) try h.snap("message-copy-clicked");
+    const copied = h.t.ctx.nodes.items[try messageCopyIcon(&h, message)].content.image;
+    try testing.expect(!std.meta.eql(before, copied));
+    h.t.advance(0.8);
+    try testing.expect(std.meta.eql(copied, h.t.ctx.nodes.items[try messageCopyIcon(&h, message)].content.image));
+    // Clicking again restarts the original 1.2-second confirmation window.
+    h.t.click(r.x + r.w / 2, r.y + r.h / 2);
+    h.t.advance(0.5);
+    try testing.expect(std.meta.eql(copied, h.t.ctx.nodes.items[try messageCopyIcon(&h, message)].content.image));
+    h.t.advance(0.8);
+    try testing.expect(std.meta.eql(before, h.t.ctx.nodes.items[try messageCopyIcon(&h, message)].content.image));
+}
+
+test "message copy feedback changes to a tick then resets for prompts and replies" {
+    try messageCopyFeedback("user", false);
+    try messageCopyFeedback("assistant", false);
+    try messageCopyFeedback("assistant", true);
+}
 
 test "a send paints its prompt and activity next frame without waiting for the engine echo" {
     var h: Harness = undefined;
@@ -77,6 +136,52 @@ test "an authoritative echo replaces local feedback without duplicating or chang
         else => {},
     };
     try testing.expectEqual(@as(usize, 1), prompts);
+}
+
+/// The open chat's transcript: its scroll box's offset and how far it goes.
+fn transcriptScroll(h: *Harness) struct { offset: f32, max: f32 } {
+    for (h.t.ctx.nodes.items) |n| if (n.style.follow_end and n.style.scroll) {
+        return .{ .offset = h.t.ctx.scroll.get(n.id) orelse 0, .max = h.t.ctx.scroll_max.get(n.id) orelse 0 };
+    };
+    return .{ .offset = -1, .max = -1 };
+}
+
+test "Enter on a prompt takes a chat read far up back to its end, and it follows the reply" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(testing.allocator);
+    try body.appendSlice(testing.allocator, "{\"reset\":[");
+    for (0..30) |i| {
+        if (i > 0) try body.append(testing.allocator, ',');
+        try body.print(testing.allocator, "{{\"id\":\"m{d}\",\"role\":\"{s}\",\"status\":\"complete\",\"parts\":[{{\"id\":\"t\",\"kind\":\"text\",\"text\":\"Synthetic line {d}\\n\\nA second paragraph so the turn takes room.\"}}]}}", .{ i, if (i % 2 == 0) "user" else "assistant", i });
+    }
+    try body.appendSlice(testing.allocator, "]}");
+    try h.apply(body.items);
+    h.t.settle(1);
+    const start = transcriptScroll(&h);
+    try testing.expect(start.max > 400 and start.offset >= start.max - 1);
+    // Read far up.
+    h.t.moveTo(600, 300);
+    h.t.scroll(600, 300, 2000);
+    h.t.settle(1);
+    try testing.expect(transcriptScroll(&h).offset < start.max - 400);
+    h.a.view.focus_composer = true;
+    h.t.settle(1);
+    h.t.typeText("Synthetic prompt sent from far up");
+    h.t.key(.enter);
+    h.t.settle(1);
+    try testing.expectEqual(@as(usize, 1), h.a.pending_sends.items.len);
+    const sent = transcriptScroll(&h);
+    try testing.expect(sent.offset >= sent.max - 1);
+    const prompt = h.t.findText("Synthetic prompt sent from far up") orelse return error.PromptNotDrawn;
+    try testing.expect(prompt.y > 0 and prompt.y + prompt.h < 880);
+    // The reply grows under it, and the transcript stays at its end.
+    try h.apply("{\"upsert\":[{\"after\":\"m29\",\"entry\":{\"id\":\"reply\",\"role\":\"assistant\",\"status\":\"streaming\",\"parts\":[{\"id\":\"t\",\"kind\":\"text\",\"text\":\"Synthetic reply\\n\\nmore\\n\\nmore\\n\\nmore\\n\\nmore\\n\\nmore\"}]}}]}");
+    h.t.settle(1);
+    const after = transcriptScroll(&h);
+    try testing.expect(after.max > sent.max and after.offset >= after.max - 1);
 }
 
 test "a rejected send restores the draft and stops its local working state" {
@@ -141,6 +246,15 @@ test "completed historical tools never display active loading cells" {
     try h.t.clickText("Read 1 file");
     h.t.settle(0.3);
     const file = h.t.findText("synthetic.rs") orelse return error.MissingHistoricalTool;
+    // Legacy complete snapshots omit resolved. They must not reserve a
+    // running clock slot or scramble their path, even after reopening.
+    try testing.expectEqual(@as(usize, 0), h.a.view.tool_ui.rows.count());
+    try h.t.clickText("Read 1 file");
+    h.t.settle(0.3);
+    try h.t.clickText("Read 1 file");
+    h.t.settle(0.3);
+    try testing.expect(h.t.hasText("synthetic.rs"));
+    try testing.expectEqual(@as(usize, 0), h.a.view.tool_ui.rows.count());
     for (h.t.ctx.nodes.items) |node| {
         // The fixture's unlisted composer model has its own legitimate
         // catalog loader. Check the tool row, not unrelated window regions.
@@ -148,4 +262,131 @@ test "completed historical tools never display active loading cells" {
         if (node.rect.w == 2 and node.rect.h == 2 and node.style.background != null)
             return error.HistoricalToolStillLoading;
     }
+}
+
+test "a new chat in a git project runs in a fresh worktree unless its own checkout is picked (CheckoutPlan)" {
+    @import("theme.zig").registerFonts();
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    a.offscreen = true;
+    a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"QueueCommand":{},"Mutate":{}}
+    , .{});
+    a.engine.state = .connected;
+    var spaces = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"git","deviceId":"d","path":"/work/synthetic-repo","gitDetected":true},
+        \\ {"id":"plain","deviceId":"d","path":"/work/synthetic-notes","gitDetected":false}]
+    , .{});
+    defer spaces.deinit();
+    try a.spaces.replace(spaces.value);
+    const Case = struct { space: []const u8, local: bool, worktree: bool };
+    for ([_]Case{
+        .{ .space = "git", .local = false, .worktree = true },
+        .{ .space = "git", .local = true, .worktree = false },
+        .{ .space = "plain", .local = false, .worktree = false },
+    }) |case| {
+        a.select(null, case.space);
+        a.new_checkout_local = case.local;
+        a.composer.set("Synthetic first prompt");
+        const before = a.engine.sent.items.len;
+        a.send();
+        var run: ?[]const u8 = null;
+        for (a.engine.sent.items[before..]) |f| if (std.mem.indexOf(u8, f, "QueueCommand") != null) {
+            run = f;
+        };
+        const frame = run orelse return error.NoRun;
+        const spec = "\"worktree\":{\"repoPath\":\"/work/synthetic-repo\",\"base\":\"\",\"spaceId\":\"git\"}";
+        try testing.expectEqual(case.worktree, std.mem.indexOf(u8, frame, spec) != null);
+        if (!case.worktree) try testing.expect(std.mem.indexOf(u8, frame, "\"worktree\"") == null);
+    }
+}
+
+test "a plain chat goes out with no project, on Auto (low), its config saying chatMode (set_chat_mode)" {
+    @import("theme.zig").registerFonts();
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    a.offscreen = true;
+    a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"QueueCommand":{},"Mutate":{}}
+    , .{});
+    a.engine.state = .connected;
+    var spaces = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"git","deviceId":"d","path":"/work/synthetic-repo","gitDetected":true}]
+    , .{});
+    defer spaces.deinit();
+    try a.spaces.replace(spaces.value);
+    var models = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"codegraff/claude-opus-5-5","label":"Claude Opus 5.5"},{"id":"codegraff/auto-high","label":"x"},{"id":"codegraff/auto-low","label":"y"}]
+    , .{});
+    defer models.deinit();
+    try a.models.replace(models.value);
+    a.gpa.free(a.models_for);
+    a.models_for = try a.gpa.dupe(u8, "graff");
+    a.select(null, "git");
+    const agent = @import("app_agent.zig");
+    agent.setChatMode(&a, true);
+    try testing.expect(a.new_chat_mode and agent.newChatSpace(&a) == null);
+    try testing.expectEqualStrings("Auto (low)", agent.modelLabel(&a, agent.target(&a).model));
+    a.composer.set("Synthetic plain question");
+    const before = a.engine.sent.items.len;
+    a.send();
+    var create: ?[]const u8 = null;
+    var run: ?[]const u8 = null;
+    for (a.engine.sent.items[before..]) |f| {
+        if (std.mem.indexOf(u8, f, "createChat") != null) create = f;
+        if (std.mem.indexOf(u8, f, "QueueCommand") != null) run = f;
+    }
+    const c = create orelse return error.NoCreate;
+    try testing.expect(std.mem.indexOf(u8, c, "\"spaceId\"") == null);
+    try testing.expect(std.mem.indexOf(u8, c, "\"chatMode\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "\"model\":\"codegraff/auto-low\"") != null);
+    const r = run orelse return error.NoRun;
+    try testing.expect(std.mem.indexOf(u8, r, "\"cwd\":\"~\"") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "\"worktree\"") == null);
+}
+
+test "the first ⌘W asks; the answer is the default; only an idle chat is archived (archive_choice)" {
+    @import("theme.zig").registerFonts();
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    a.offscreen = true;
+    a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"Mutate":{},"QueueCommand":{},"WatchDocMessages":{},"WatchQueue":{}}
+    , .{});
+    a.engine.state = .connected;
+    var chats = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"idle","deviceId":"d","title":"Synthetic idle","archived":false},
+        \\ {"id":"busy","deviceId":"d","title":"Synthetic busy","archived":false}]
+    , .{});
+    defer chats.deinit();
+    try a.chats.replace(chats.value);
+    var sessions = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"chatId":"busy","status":"working","updatedAt":"2099-01-01T00:00:00Z"}]
+    , .{});
+    defer sessions.deinit();
+    try a.sessions.replace(sessions.value);
+    const archived = struct {
+        fn of(app: *App, id: []const u8) bool {
+            var buf: [96]u8 = undefined;
+            const want = std.fmt.bufPrint(&buf, "\"op\":\"setChatArchived\",\"chatId\":\"{s}\"", .{id}) catch return false;
+            for (app.engine.sent.items) |f| if (std.mem.indexOf(u8, f, want) != null) return true;
+            return false;
+        }
+    }.of;
+    // No choice yet: ⌘W asks and nothing closes.
+    a.openChat("idle", null);
+    a.closeByShortcut();
+    try testing.expect(a.view.close_choice);
+    try testing.expectEqualStrings("idle", a.selected.?);
+    // "Archive it": saved as the default, and this idle chat goes.
+    a.chooseCloseArchiving(true);
+    try testing.expect(!a.view.close_choice);
+    try testing.expect(a.settings.get(.archive_sessions_on_close) and a.settings.get(.archive_on_close_chosen));
+    try testing.expect(archived(&a, "idle"));
+    // Chosen: the next ⌘W doesn't ask; a working chat stays, with a note.
+    a.openChat("busy", null);
+    a.closeByShortcut();
+    try testing.expect(!a.view.close_choice);
+    try testing.expect(!archived(&a, "busy"));
+    try testing.expectEqualStrings(@import("archive_close.zig").running_notice, a.view.sidebar_notice[0..a.view.sidebar_notice_len]);
 }

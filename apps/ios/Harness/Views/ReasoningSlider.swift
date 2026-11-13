@@ -60,17 +60,19 @@ struct ReasoningTrack: View {
     @State private var dragging = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private static let overhang: CGFloat = 14
-    private static let trackHeight: CGFloat = 24
-    private static let height: CGFloat = 34
+    private static let overhang: CGFloat = 20
+    private static let trackHeight: CGFloat = 28
+    private static let height: CGFloat = 36
 
     var body: some View {
         let count = levels.count
         GeometryReader { proxy in
             let width = proxy.size.width
-            let thumb: CGFloat = dragging ? 30 : 28
+            let thumbW: CGFloat = dragging ? 42 : 40
+            let thumbH: CGFloat = dragging ? 32 : 30
             ZStack(alignment: .leading) {
                 Capsule().fill(Theme.surfaceRaised)
+                    .overlay(Capsule().strokeBorder(Theme.border.opacity(0.6), lineWidth: 1))
                     .frame(width: width + Self.overhang * 2, height: Self.trackHeight)
                     .offset(x: -Self.overhang)
                 Capsule().fill(Theme.accent)
@@ -79,16 +81,16 @@ struct ReasoningTrack: View {
                 ForEach(0..<count, id: \.self) { index in
                     let at = ReasoningSlider.fraction(of: index, count: count)
                     Circle()
-                        .fill(at <= position ? Theme.onAccent.opacity(0.55) : Theme.textMuted.opacity(0.4))
-                        .frame(width: 4, height: 4)
-                        .offset(x: CGFloat(at) * width - 2)
+                        .fill(at <= position ? Theme.onAccent.opacity(0.6) : Theme.textMuted.opacity(0.4))
+                        .frame(width: 4.5, height: 4.5)
+                        .offset(x: CGFloat(at) * width - 2.25)
                 }
-                Circle()
+                Capsule()
                     .fill(Color(red: 1, green: 0xFE / 255, blue: 0xFA / 255))
-                    .overlay(Circle().strokeBorder(Theme.border))
-                    .shadow(color: .black.opacity(0.12), radius: 2, y: 1)
-                    .frame(width: thumb, height: thumb)
-                    .offset(x: CGFloat(position) * width - thumb / 2)
+                    .overlay(Capsule().strokeBorder(Theme.border, lineWidth: 1))
+                    .shadow(color: .black.opacity(0.14), radius: 3, y: 1)
+                    .frame(width: thumbW, height: thumbH)
+                    .offset(x: CGFloat(position) * width - thumbW / 2)
             }
             .frame(height: Self.height)
             .contentShape(Rectangle())

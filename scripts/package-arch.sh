@@ -75,6 +75,10 @@ contents:
     dst: /usr/bin/harness
     file_info:
       mode: 0755
+  - src: $ROOT/apps/nano/zig-out/bin/harness-nano
+    dst: /usr/bin/harness-nano
+    file_info:
+      mode: 0755
   - src: $ROOT/dist/harness.desktop
     dst: /usr/share/applications/harness.desktop
   - src: $ROOT/dist/harness.png
@@ -90,7 +94,7 @@ contents:
   - src: $ROOT/third_party/licenses/CodeGraff-LICENSE.txt
     dst: /usr/share/licenses/harness/CodeGraff-LICENSE.txt
 YAML
-for f in "$ROOT"/crates/ui/assets/fonts/licenses/*; do
+for f in "$ROOT"/apps/nano/assets/fonts/licenses/*; do
   printf '  - src: %s\n    dst: /usr/share/licenses/harness/fonts/%s\n' \
     "$f" "$(basename "$f")" >>"$config"
 done

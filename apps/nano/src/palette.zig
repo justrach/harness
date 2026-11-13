@@ -17,6 +17,8 @@ pub const Entry = union(enum) {
     new_project,
     settings,
     theme: Appearance,
+    ui_mode: @import("motion_rules.zig").UiMode,
+    toggle_part: @import("motion_rules.zig").MovingPart,
     /// An unfocused split pane (its index): picking it moves focus there.
     pane: usize,
     /// A chat, by id.
@@ -37,6 +39,19 @@ pub const Entry = union(enum) {
                 .light => "Switch to light theme",
                 .dark => "Switch to dark theme",
             },
+            .ui_mode => |m| switch (m) {
+                .zen => "Switch to Zen mode (simple flat view)",
+                .developer => "Switch to Developer mode (full hierarchy)",
+            },
+            .toggle_part => |part| switch (part) {
+                .open_workspaces_tree => "Toggle open workspaces tree",
+                .multi_axis_filters => "Toggle project & activity filters",
+                .row_tech_badges => "Toggle row branch & agent badges",
+                .git_checkout_chrome => "Toggle git & branch controls",
+                .prompt_rail => "Toggle prompt rail",
+                .action_toolbar => "Toggle actions toolbar",
+                .grouped_sections => "Toggle grouped sidebar sections",
+            },
             else => null,
         };
     }
@@ -56,6 +71,8 @@ pub const Entry = union(enum) {
         if (std.meta.activeTag(x) != std.meta.activeTag(y)) return false;
         return switch (x) {
             .theme => |m| m == y.theme,
+            .ui_mode => |m| m == y.ui_mode,
+            .toggle_part => |part| part == y.toggle_part,
             .pane => |i| i == y.pane,
             .chat => |id| std.mem.eql(u8, id, y.chat),
             .external => |i| i == y.external,
@@ -78,16 +95,33 @@ pub fn matchesQuery(query: []const u8, text: []const u8) bool {
 /// appearance opposite the one showing (`actions_for`).
 pub fn actionsFor(query: []const u8, is_dark: bool) Actions {
     var out: Actions = .{};
-    const all = [_]Entry{ .new_chat, .new_project, .settings, .{ .theme = if (is_dark) .light else .dark } };
-    for (all) |e| if (matchesQuery(query, e.label().?)) {
+    const core = [_]Entry{ .new_chat, .new_project, .settings, .{ .theme = if (is_dark) .light else .dark } };
+    for (core) |e| if (matchesQuery(query, e.label().?)) {
         out.items[out.len] = e;
         out.len += 1;
     };
+    if (query.len > 0) {
+        const extra = [_]Entry{
+            .{ .ui_mode = .zen },
+            .{ .ui_mode = .developer },
+            .{ .toggle_part = .open_workspaces_tree },
+            .{ .toggle_part = .git_checkout_chrome },
+            .{ .toggle_part = .prompt_rail },
+            .{ .toggle_part = .action_toolbar },
+            .{ .toggle_part = .grouped_sections },
+            .{ .toggle_part = .row_tech_badges },
+            .{ .toggle_part = .multi_axis_filters },
+        };
+        for (extra) |e| if (matchesQuery(query, e.label().?)) {
+            out.items[out.len] = e;
+            out.len += 1;
+        };
+    }
     return out;
 }
 
 pub const Actions = struct {
-    items: [4]Entry = undefined,
+    items: [16]Entry = undefined,
     len: usize = 0,
 
     pub fn slice(x: *const Actions) []const Entry {

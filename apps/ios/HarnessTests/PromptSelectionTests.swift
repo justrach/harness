@@ -75,6 +75,25 @@ final class PromptSelectionTests: XCTestCase {
         XCTAssertEqual(UIPasteboard.general.string, "Hidden sixth line\nHidden seventh line")
     }
 
+    func testContentFittingPromptRespectsNarrowProposalsAfterCachingNaturalWidth() {
+        let text = NSAttributedString(string: "A long prompt that must wrap inside the available bubble width.",
+                                      attributes: [.font: UIFont.systemFont(ofSize: 17)])
+        let view = UITextView()
+        view.isScrollEnabled = false
+        let coordinator = SelectableText.Coordinator(openURL: OpenURLAction { _ in .handled })
+        coordinator.update(text, lineHeight: MD.lineHeight, in: view)
+        let proposal = ProposedViewSize(width: 120, height: nil)
+        for _ in 0..<3 {
+            let size = coordinator.sizeThatFits(proposal, text: text, wraps: true,
+                                               fitsContentWidth: true, view: view)
+            XCTAssertEqual(size.width, 120, "A cached natural width must still be capped to the bubble proposal")
+        }
+        XCTAssertEqual(coordinator.sizeThatFits(ProposedViewSize(width: 80, height: nil),
+            text: text, wraps: true, fitsContentWidth: true, view: view).width, 80)
+        XCTAssertGreaterThan(coordinator.sizeThatFits(proposal, text: text, wraps: false,
+            fitsContentWidth: true, view: view).width, 120, "Unwrapped output must retain its natural width")
+    }
+
     func testShortPromptKeepsContentWidthInsteadOfFillingTheBubble() async throws {
         let (window, host) = await mount(UserBubble(text: "Hi"))
         defer { window.isHidden = true; window.rootViewController = nil }

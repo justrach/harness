@@ -2053,6 +2053,30 @@ impl Inner {
         }
     }
 
+    async fn rehome_chat_cwd(&self, chat_id: &str, cwd: &str) {
+        let Some(ws) = self.workspace() else {
+            return;
+        };
+        if let Err(err) = ws.set_chat_cwd(chat_id, cwd) {
+            tracing::warn!(chat = %chat_id, error = %err, "session cwd stamp failed");
+        }
+        // The launch checkout's source identity must not follow the chat into
+        // a newly selected worktree or checkout (or retain its PR).
+        let context = match self.doc_host() {
+            Some(host) => host.capture_source_context(cwd).await,
+            None => None,
+        };
+        if let Some(context) = context {
+            if let Err(err) = ws.set_chat_source_context(chat_id, &context) {
+                tracing::warn!(chat = %chat_id, error = %err, "session source stamp failed");
+            }
+        } else if let Some(tree) = harness_proto::graff_worktree::GraffWorktree::from_path(cwd)
+            && let Err(err) = ws.set_chat_branch(chat_id, &tree.branch())
+        {
+            tracing::warn!(chat = %chat_id, error = %err, "graff worktree branch stamp failed");
+        }
+    }
+
     // NB: there is deliberately no `forget_harness_session` anymore. The old
     // tombstone fired on "run died before SessionStarted", which — since the
     // ACP conversion made stale ids a harness-internal fallback — only ever
@@ -2749,6 +2773,7 @@ async fn drive_run(
     let mut turn_origin = request.turn_origin;
     let mut carry_human_work = false;
     let mut run_cwd = request.cwd.clone();
+    let mut last_session_id = request.resume.clone();
     if request.resume.is_none() {
         let _ = doc.clear_context_usage();
     }
@@ -3771,6 +3796,21 @@ async fn drive_run(
             }
             continue;
         }
+        if let AgentEvent::SessionCwdChanged { cwd } = &event {
+            if std::path::Path::new(cwd).is_absolute() && *cwd != run_cwd {
+                run_cwd = cwd.clone();
+                if let Some(sid) = last_session_id.as_deref() {
+                    inner.remember_harness_session(&chat_id, sid, &run_cwd);
+                }
+                let current_run = lock(&inner.runs)
+                    .get(&chat_id)
+                    .is_some_and(|run| run.run_id == run_id);
+                if current_run {
+                    inner.rehome_chat_cwd(&chat_id, &run_cwd).await;
+                }
+            }
+            continue;
+        }
         // PARKED: a steer boundary, a terminal Done, or SELF-CONTINUED OUTPUT
         // re-opens the session; everything else stays gated. The ACP child
         // keeps forwarding `session/update` frames after a turn completes,
@@ -4107,33 +4147,29 @@ async fn drive_run(
                 session_id, cwd, ..
             } => {
                 saw_session_started = true;
+                last_session_id = Some(session_id.clone());
                 // The event's own cwd (where the harness actually created the
                 // session) scopes the stored id, not the request's.
                 inner.remember_harness_session(&chat_id, session_id, cwd);
-                // Graff ran the session in one of its own worktrees: re-home
-                // the chat there, so the next run, its resume, and the diff
-                // and files panels all follow the tree.
-                if *cwd != run_cwd
-                    && let Some(tree) = harness_proto::graff_worktree::GraffWorktree::from_path(cwd)
+                // Graff reports the checkout it runs the session in (one of
+                // its worktrees, a linked worktree, or the main checkout):
+                // re-home the chat there, so `show_image`, the next run, its
+                // resume, and the diff and files panels all follow.
+                let target_cwd = harness_proto::graff_worktree::GraffWorktree::from_path(cwd)
+                    .map(|tree| tree.path)
+                    .or_else(|| {
+                        (harness_id == HarnessId::Graff && std::path::Path::new(cwd).is_absolute())
+                            .then(|| cwd.clone())
+                    });
+                if let Some(target_cwd) = target_cwd
+                    && target_cwd != run_cwd
                 {
-                    run_cwd = cwd.clone();
-                    if let Some(ws) = inner.workspace() {
-                        if let Err(err) = ws.set_chat_cwd(&chat_id, &tree.path) {
-                            tracing::warn!(chat = %chat_id, error = %err, "graff worktree cwd stamp failed");
-                        }
-                        // The launch checkout's source identity must not follow
-                        // the chat into the adapter's tree (or retain its PR).
-                        let context = match inner.doc_host() {
-                            Some(host) => host.capture_source_context(&tree.path).await,
-                            None => None,
-                        };
-                        if let Some(context) = context {
-                            if let Err(err) = ws.set_chat_source_context(&chat_id, &context) {
-                                tracing::warn!(chat = %chat_id, error = %err, "graff worktree source stamp failed");
-                            }
-                        } else if let Err(err) = ws.set_chat_branch(&chat_id, &tree.branch()) {
-                            tracing::warn!(chat = %chat_id, error = %err, "graff worktree branch stamp failed");
-                        }
+                    run_cwd = target_cwd;
+                    let current_run = lock(&inner.runs)
+                        .get(&chat_id)
+                        .is_some_and(|run| run.run_id == run_id);
+                    if current_run {
+                        inner.rehome_chat_cwd(&chat_id, &run_cwd).await;
                     }
                 }
             }
@@ -4141,6 +4177,7 @@ async fn drive_run(
                 session_id: Some(session_id),
                 ..
             } => {
+                last_session_id = Some(session_id.clone());
                 inner.remember_harness_session(&chat_id, session_id, &run_cwd);
             }
             AgentEvent::InputRequested { .. } => {

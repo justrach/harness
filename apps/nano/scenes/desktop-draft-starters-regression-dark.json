@@ -1,0 +1,49 @@
+{
+  "width": 1200,
+  "height": 780,
+  "dark": true,
+  "workspaceScope": "local",
+  "spaces": [
+    {
+      "id": "synthetic-project",
+      "deviceId": "synthetic-device",
+      "path": "/work/synthetic-notes",
+      "gitDetected": false
+    }
+  ],
+  "steps": [
+    {
+      "expect": "Build something new"
+    },
+    {
+      "composer": "Synthetic draft remains editable while suggestions stay visible."
+    },
+    {
+      "expect": "Build something new"
+    },
+    {
+      "expectNot": "Working in"
+    },
+    {
+      "press": "cmd+shift+e"
+    },
+    {
+      "expect": "Save"
+    },
+    {
+      "expect": "Send now"
+    },
+    {
+      "snap": "write-toolbar"
+    },
+    {
+      "press": "escape"
+    },
+    {
+      "expect": "Build something new"
+    },
+    {
+      "snap": "docked-draft"
+    }
+  ]
+}

@@ -8,6 +8,9 @@ const App = @import("app.zig").App;
 const Browser = @import("app_browser.zig").Browser;
 
 pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, b: *Browser) void {
+    if (c.shortcut(.{ .key = '-', .cmd = true })) b.applyZoom(.out);
+    if (c.shortcut(.{ .key = '=', .cmd = true }) or c.shortcut(.{ .key = '+', .cmd = true, .shift = true })) b.applyZoom(.in);
+    if (c.shortcut(.{ .key = '0', .cmd = true })) b.applyZoom(.reset);
     {
         const bar = ui.div(c).row().wFull().h(38).px(8).gap(4).itemsCenter().border(k.border).borderW(1);
         defer bar.end();
@@ -35,6 +38,9 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, b: *Browser) void {
             if (r.submitted) b.navigate(b.address.text());
         }
         if (kit.iconButton(c, k, .copy, .{ .size = 24, .icon = 13, .tip = .{ .text = "Copy address" } }) and b.address.text().len > 0) c.clipboard.write(c.clipboard.ctx, b.address.text());
+        if (b.saved_view == null and b.url.len > 0 and @import("browser_url.zig").allowedNavigation(b.url)) {
+            if (kit.iconButton(c, k, .@"arrow-up-right", .{ .size = 24, .icon = 13, .tip = .{ .text = "Open in browser" } })) _ = @import("nanoui").shell.openUrl(b.url);
+        }
     }
     if (b.notice.text().len > 0) {
         const notice = ui.div(c).column().wFull().px(12).py(8);

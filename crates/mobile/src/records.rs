@@ -190,6 +190,11 @@ pub enum MessagePartRecord {
         id: String,
         text: String,
     },
+    /// Model thinking (doc kind `reasoning`, body in its `reasoning` field).
+    Reasoning {
+        id: String,
+        text: String,
+    },
     /// An image the agent produced, stored on the host.
     Image {
         id: String,

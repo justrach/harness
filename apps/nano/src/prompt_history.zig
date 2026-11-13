@@ -33,6 +33,14 @@ pub const Nav = struct {
         n.* = .{};
     }
 
+    pub fn retire(n: *Nav, a: *@import("app.zig").App) void {
+        for (n.prompts) |p| a.retireSlice(p);
+        a.gpa.free(n.prompts);
+        a.retireSlice(n.draft);
+        a.retireSlice(n.restored);
+        n.* = .{};
+    }
+
     /// What the composer holds as the person's own draft: the text from
     /// before recall while a recalled prompt shows unchanged.
     pub fn draftOf(n: *const Nav, text: []const u8) []const u8 {

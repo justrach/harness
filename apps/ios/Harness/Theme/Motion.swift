@@ -13,6 +13,7 @@ enum Motion {
     static let collapse = Animation.timingCurve(0, 0, 0.58, 1, duration: 0.18)
     static let resort = Animation.timingCurve(0.22, 1, 0.36, 1, duration: 0.26)
     static let hoverFade = Animation.timingCurve(0.4, 0, 0.2, 1, duration: 0.15)
+    static let press = Animation.easeOut(duration: 0.12)
 
     // WorkingIndicator wave period (GRADIENT_SPIN) and loader pulse.
     static let gradientSpinPeriod: Double = 0.75

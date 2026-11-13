@@ -50,7 +50,14 @@ pub const Agent = struct {
     }
 
     pub fn belongsTo(s: *const Agent, parent: ?[]const u8) bool {
-        return if (parent) |id| std.mem.eql(u8, s.parent, id) else false;
+        const id = parent orelse return false;
+        if (std.mem.eql(u8, s.parent, id)) return true;
+        if (s.app.selected) |sel| if (std.mem.eql(u8, sel, id)) {
+            if (s.app.tabs.layout()) |sp| for (sp.panes.items) |pane| if (pane) |p| {
+                if (std.mem.eql(u8, s.parent, p)) return true;
+            };
+        };
+        return false;
     }
 
     fn start(s: *Agent) void {
@@ -133,14 +140,15 @@ pub fn settleFrame(a: *App) void {
     const next = p.pending_agent orelse return;
     p.pending_agent = null;
     if (!next.belongsTo(a.selected)) return next.destroy();
-    for (p.tabs.items, 0..) |t, i| if (t.agent) |s| {
+    for (p.tabs.items, 0..) |*t, i| if (t.agent) |s| {
         if (!std.mem.eql(u8, s.doc, next.doc) or !std.mem.eql(u8, s.parent, next.parent)) continue;
         next.destroy();
         p.active = i;
+        t.shown = p.bumpShown();
         p.host_open = true;
         return;
     };
-    p.tabs.append(p.gpa, .{ .kind = .subagent, .agent = next }) catch return next.destroy();
+    p.tabs.append(p.gpa, .{ .kind = .subagent, .agent = next, .shown = p.bumpShown() }) catch return next.destroy();
     p.active = p.tabs.items.len - 1;
     p.host_open = true;
     next.start();

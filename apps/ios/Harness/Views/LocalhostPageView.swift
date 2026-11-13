@@ -179,7 +179,7 @@ struct LocalhostPageView: View {
                     .resizable()
                     .aspectRatio(contentMode: .fit)
                     .overlay { touchSurface }
-                    .accessibilityLabel(frame?.title.isEmpty == false ? frame!.title : "Page")
+                    .accessibilityLabel((frame?.title).flatMap { $0.isEmpty ? nil : $0 } ?? "Page")
                     .accessibilityIdentifier("localhost-page")
             }
             if let status {

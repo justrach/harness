@@ -41,7 +41,7 @@ pub(super) fn release_url() -> anyhow::Result<Option<String>> {
 }
 
 pub fn artifact(version: &str) -> String {
-    format!("harness-{version}-windows-{}.exe", std::env::consts::ARCH)
+    format!("harness-{version}-windows-{}.zip", std::env::consts::ARCH)
 }
 
 /// Download next to the installation, verifying its mandatory checksum.
@@ -73,9 +73,15 @@ pub async fn stage(
         .prefix(".harness-update-")
         .tempdir_in(directory)?;
     let staged = temporary.path().join("harness.exe");
-    super::download_release_file(edge_url, manifest, &file, &staged).await?;
-    std::fs::write(temporary.path().join("sha256"), expected)?;
+    let archive = temporary.path().join("portable.zip");
+    super::download_release_file(edge_url, manifest, &file, &archive).await?;
+    // The release checksum authenticates the whole package, including Nano.
+    // Updating only harness.exe left the actual desktop permanently stale.
+    verify_digest(&archive, expected)?;
+    super::windows_package::extract(&archive, temporary.path())?;
+    std::fs::remove_file(archive)?;
     verify(&staged)?;
+    verify(&staged.with_file_name("harness-nano.exe"))?;
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(15),
         tokio::process::Command::new(&staged)
@@ -96,8 +102,24 @@ pub async fn stage(
     Ok(staged)
 }
 
+fn checksum_path(staged: &Path) -> PathBuf {
+    let checksum = super::windows_package::FILES
+        .iter()
+        .find(|(name, _)| staged.file_name().is_some_and(|file| file == *name))
+        .map(|(_, checksum)| *checksum)
+        .unwrap_or("sha256");
+    staged.with_file_name(checksum)
+}
+
+fn backup_path(installed: &Path) -> PathBuf {
+    installed.with_file_name(format!(
+        "{}.old",
+        installed.file_name().unwrap().to_string_lossy()
+    ))
+}
+
 fn verify(staged: &Path) -> anyhow::Result<()> {
-    let expected = std::fs::read_to_string(staged.with_file_name("sha256"))?;
+    let expected = std::fs::read_to_string(checksum_path(staged))?;
     verify_digest(staged, expected.trim())
 }
 
@@ -135,9 +157,7 @@ pub fn apply(staged: &Path, directory: &Path, relaunch: bool) -> anyhow::Result<
         std::env::current_exe()?.canonicalize()? == installed.canonicalize()?,
         "update must run from its installation"
     );
-    verify(staged)?;
-    recover_from_backup(&installed)?;
-    swap_into_place(staged, &installed)?;
+    install_pair(staged, &installed)?;
     if relaunch {
         std::process::Command::new(&installed)
             .args(["--wait-for-exit", &std::process::id().to_string()])
@@ -148,10 +168,38 @@ pub fn apply(staged: &Path, directory: &Path, relaunch: bool) -> anyhow::Result<
             .spawn()
             .context("relaunching updated application")?;
     }
-    let _ = std::fs::remove_file(staged);
-    let _ = std::fs::remove_file(staged.with_file_name("sha256"));
+    for &(name, checksum) in super::windows_package::FILES {
+        let _ = std::fs::remove_file(staged.with_file_name(name));
+        let _ = std::fs::remove_file(staged.with_file_name(checksum));
+    }
     if let Some(parent) = staged.parent() {
         let _ = std::fs::remove_dir(parent);
+    }
+    Ok(())
+}
+
+/// Swap the frontend and loader before the engine, restoring earlier members
+/// on failure. Verify every staged member before touching the installation.
+fn install_pair(staged: &Path, installed: &Path) -> anyhow::Result<()> {
+    for &(name, _) in super::windows_package::FILES {
+        verify(&staged.with_file_name(name))?;
+        recover_from_backup(&installed.with_file_name(name))?;
+    }
+    let mut replaced: Vec<(PathBuf, bool)> = Vec::new();
+    for &(name, _) in super::windows_package::FILES {
+        let destination = installed.with_file_name(name);
+        let existed = destination.exists();
+        if let Err(error) = swap_into_place(&staged.with_file_name(name), &destination) {
+            for (path, had_previous) in replaced.into_iter().rev() {
+                std::fs::remove_file(&path).context("removing partially installed update")?;
+                if had_previous {
+                    std::fs::rename(backup_path(&path), &path)
+                        .context("restoring previous portable update member")?;
+                }
+            }
+            return Err(error);
+        }
+        replaced.push((destination, existed));
     }
     Ok(())
 }
@@ -160,10 +208,7 @@ pub fn apply(staged: &Path, directory: &Path, relaunch: bool) -> anyhow::Result<
 /// installation itself is missing (a crash between the two renames), or drop
 /// the backup when the installation is already in place.
 fn recover_from_backup(installed: &Path) -> anyhow::Result<()> {
-    let Some(directory) = installed.parent() else {
-        return Ok(());
-    };
-    let backup = directory.join(BACKUP);
+    let backup = backup_path(installed);
     if !backup.exists() {
         return Ok(());
     }
@@ -181,10 +226,20 @@ fn swap_into_place(staged: &Path, installed: &Path) -> anyhow::Result<()> {
     let directory = installed
         .parent()
         .context("installation has no parent directory")?;
-    let backup = directory.join(BACKUP);
-    let incoming = directory.join(INCOMING);
-    let expected = std::fs::read_to_string(staged.with_file_name("sha256"))
-        .context("reading the staged checksum")?;
+    let backup = backup_path(installed);
+    let incoming = if installed
+        .file_name()
+        .is_some_and(|name| name == "harness.exe")
+    {
+        directory.join(INCOMING)
+    } else {
+        directory.join(format!(
+            ".{}-update-incoming",
+            installed.file_name().unwrap().to_string_lossy()
+        ))
+    };
+    let expected =
+        std::fs::read_to_string(checksum_path(staged)).context("reading the staged checksum")?;
     let expected = expected.trim().to_owned();
 
     // Copy and re-verify before touching the installation: an error here, or
@@ -198,15 +253,19 @@ fn swap_into_place(staged: &Path, installed: &Path) -> anyhow::Result<()> {
 
     // The running image can be renamed but not deleted; move it aside only
     // now that the replacement is verified next to it.
-    if let Err(err) = std::fs::rename(installed, &backup) {
-        let _ = std::fs::remove_file(&incoming);
-        return Err(err).context("moving the running executable aside for replacement");
+    let had_installed = installed.exists();
+    if had_installed {
+        if let Err(err) = std::fs::rename(installed, &backup) {
+            let _ = std::fs::remove_file(&incoming);
+            return Err(err).context("moving the running executable aside for replacement");
+        }
     }
     if let Err(err) = std::fs::rename(&incoming, installed) {
-        // The installation must not be left missing: restore the backup or
-        // fail loudly about both errors.
-        std::fs::rename(&backup, installed)
-            .context("restoring the previous executable after a failed update")?;
+        // A missing frontend in an older package is installed without a backup.
+        if had_installed {
+            std::fs::rename(&backup, installed)
+                .context("restoring the previous executable after a failed update")?;
+        }
         return Err(err).context("installing the updated executable");
     }
     Ok(())
@@ -243,6 +302,8 @@ fn remove_own_backup() -> std::io::Result<()> {
     let Some(directory) = exe.parent() else {
         return Ok(());
     };
+    let _ = std::fs::remove_file(directory.join("harness-nano.exe.old"));
+    let _ = std::fs::remove_file(directory.join("WebView2Loader.dll.old"));
     std::fs::remove_file(directory.join(BACKUP))
 }
 
@@ -356,6 +417,43 @@ mod tests {
         assert_eq!(std::fs::read(&installed).unwrap(), b"new image");
         assert!(!incoming.exists());
         assert!(install.path().join(BACKUP).exists());
+    }
+
+    #[test]
+    fn engine_swap_failure_rolls_back_frontend_and_loader() {
+        let install = tempfile::tempdir().unwrap();
+        let stage = tempfile::tempdir().unwrap();
+        for &(name, checksum) in super::super::windows_package::FILES {
+            std::fs::write(install.path().join(name), b"old").unwrap();
+            std::fs::write(stage.path().join(name), b"new").unwrap();
+            std::fs::write(
+                stage.path().join(checksum),
+                format!("{:x}", Sha256::digest(b"new")),
+            )
+            .unwrap();
+        }
+        let incoming = install.path().join(INCOMING);
+        std::fs::write(&incoming, b"placeholder").unwrap();
+        let lock = NoDeleteHandle::open(&incoming);
+        assert!(
+            install_pair(
+                &stage.path().join("harness.exe"),
+                &install.path().join("harness.exe")
+            )
+            .is_err()
+        );
+        drop(lock);
+        for &(name, _) in super::super::windows_package::FILES {
+            assert_eq!(std::fs::read(install.path().join(name)).unwrap(), b"old");
+        }
+        install_pair(
+            &stage.path().join("harness.exe"),
+            &install.path().join("harness.exe"),
+        )
+        .unwrap();
+        for &(name, _) in super::super::windows_package::FILES {
+            assert_eq!(std::fs::read(install.path().join(name)).unwrap(), b"new");
+        }
     }
 
     #[test]

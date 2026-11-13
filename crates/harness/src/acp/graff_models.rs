@@ -719,6 +719,8 @@ mod tests {
         let models = models_from_schema(&schema, &providers, default.as_deref(), &advertised);
         let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, vec!["claude-sonnet-5", "gpt-5.6-sol"]);
+        assert_eq!(models[0].context, Some(1_000_000));
+        assert_eq!(models[1].context, Some(1_050_000));
         assert_eq!(
             models[1].description.as_deref(),
             Some("codex · 1.05M context")

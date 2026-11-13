@@ -13,6 +13,7 @@ const account = @import("app_account.zig");
 const workspace = @import("workspace.zig");
 const rpc = @import("rpc.zig");
 const dialogs = @import("view_chat_menu.zig");
+const updates_panel = @import("view_settings_devices_updates.zig");
 const App = @import("app.zig").App;
 const Allocator = std.mem.Allocator;
 
@@ -32,8 +33,12 @@ pub const Page = struct {
     confirm_remove: std.ArrayList(u8) = .empty,
     /// The strip under the version; a click clears it.
     failure: std.ArrayList(u8) = .empty,
+    /// The expanded host's update controls.
+    updates: updates_panel.State = .{},
 
     pub fn deinit(p: *Page, gpa: Allocator) void {
+        @import("text_buffer.zig").deinit(&p.name);
+        p.updates.deinit(gpa);
         p.rename.deinit(gpa);
         p.copied.deinit(gpa);
         p.confirm_remove.deinit(gpa);
@@ -147,22 +152,64 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
     const devices = a.devices.items;
     set.header(c, k, "Devices", if (devices.len > 0) devices.len else null);
     set.subtitle(c, k, subtitle(a.account.scope), false);
-    {
-        // This build's version: a row on the page, not in a card. Harness
-        // Nano doesn't update itself (`update_summary` without an updater).
+    const now = a.nowMs();
+    const upd = @import("view_updates.zig");
+    var summary_buf: [200]u8 = undefined;
+    const summary = upd.updateSummary(&summary_buf, a, now);
+    if (a.updates.desktop_update) {
+        const ucard = set.card(c, k);
+        defer ucard.end();
+        {
+            const r = set.row(c, k, true, false);
+            defer r.end();
+            set.tile(c, k, .refresh);
+            const reserve: f32 = switch (summary.action) {
+                .none => 0,
+                .check, .downloading => 148,
+                .update, .restart, .retry => 156,
+            };
+            set.words(c, k, c.print("Harness v{s}", .{@import("build_info").version}), c.print("{s}", .{summary.line}), reserve);
+            switch (summary.action) {
+                .none => {},
+                .check => if (updateButton(c, k, "check-for-updates", "Check for updates", false, false)) upd.checkForUpdates(a),
+                .downloading => _ = updateButton(c, k, "app-update-downloading", "Downloading…", false, true),
+                .update => |ver| if (updateButton(c, k, "start-app-update", c.print("Update to v{s}", .{ver}), true, false)) upd.triggerAppUpdate(a, ver),
+                .restart => |ver| if (updateButton(c, k, "restart-app-update", "Restart to update", true, false)) upd.triggerAppUpdate(a, ver),
+                .retry => |ver| if (updateButton(c, k, "retry-app-update", "Try again", true, false)) upd.triggerAppUpdate(a, ver),
+            }
+        }
+        {
+            ui.key(c, "restart-to-install-updates");
+            const r = set.row(c, k, false, true);
+            defer r.end();
+            set.tile(c, k, .restart);
+            set.words(
+                c,
+                k,
+                "Restart automatically to install updates",
+                "Once an update has downloaded, Harness restarts into it when no agent is running, nothing is unsaved and you've stepped away. Your windows, tabs and chats come back. Off, it installs when you quit.",
+                56,
+            );
+            if (set.toggle(c, k, a.settings.get(.restart_to_install_updates), true) or r.clicked()) {
+                a.settings.toggle(.restart_to_install_updates);
+                a.redraw();
+            }
+        }
+    } else {
         const r = set.row(c, k, true, false);
         defer r.end();
         set.tile(c, k, .refresh);
-        set.words(c, k, c.print("Harness v{s}", .{@import("build_info").version}), "This build doesn't update itself. Install the latest release to update.", 0);
+        set.words(c, k, c.print("Harness v{s}", .{@import("build_info").version}), c.print("{s}", .{summary.line}), 0);
     }
     const p = &a.view.devices;
     if (p.failure.items.len > 0) {
         if (@import("view_settings_accounts_rows.zig").errorStrip(c, k, p.failure.items, false)) p.failure.clearRetainingCapacity();
     }
     if (p.copied.items.len > 0) {
-        if (c.time >= p.copied_until) p.copied.clearRetainingCapacity() else c.frameIn(@floatCast(p.copied_until - c.time));
+        if (c.time >= p.copied_until) p.copied.clearRetainingCapacity() else c.frameIn(@floatCast(t_rem: {
+            break :t_rem p.copied_until - c.time;
+        }));
     }
-    defer renameDialog(c, a, k);
     const card = set.card(c, k);
     defer card.end();
     if (devices.len == 0) {
@@ -171,11 +218,11 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
         ui.text(c, "No devices registered", set.st(c, 14, .{ .color = k.muted.alpha(0.6) }));
         return;
     }
-    const now = a.nowMs();
     for (devices, 0..) |d, ix| {
         ui.key(c, d.id);
         const local = if (a.device_id) |me| std.mem.eql(u8, me, d.id) else false;
         const on = online(d.last_seen_ms, now);
+        defer updates_panel.panel(c, a, k, d, local, on);
         const r = set.row(c, k, ix == 0, false);
         defer r.end();
         presenceTile(c, k, platformIcon(d.platform), on);
@@ -204,7 +251,8 @@ fn presenceTile(c: *ui.Context, k: theme.Colors, icon: icons.Name, on: bool) voi
     const t = ui.div(c).row().size(36, 36).center().rounded(10).border(k.border).borderW(1).bg(k.ink(0.03));
     defer t.end();
     icons.icon(c, icon, 16, k.muted, 0);
-    var dot = ui.div(c).absolute().offset(36 - 9 + 3, 36 - 9 + 3).size(9, 9).roundedFull().border(k.shell).borderW(2);
+    // GPUI's bottom and right -3 count from inside the tile's border.
+    var dot = ui.div(c).absolute().offset(36 - 1 - 9 + 3, 36 - 1 - 9 + 3).size(9, 9).roundedFull().border(k.shell).borderW(2);
     dot = if (on) dot.bg(k.success).shadow(.{ .color = k.success.alpha(0.55), .blur = 6 }) else dot.bg(k.ink(0.22));
     dot.end();
 }
@@ -255,7 +303,7 @@ fn meta(c: *ui.Context, a: *App, k: theme.Colors, d: workspace.Device, on: bool,
 }
 
 /// "Rename device": the name in a field, Cancel and Rename.
-fn renameDialog(c: *ui.Context, a: *App, k: theme.Colors) void {
+pub fn dialog(c: *ui.Context, a: *App, k: theme.Colors) void {
     const p = &a.view.devices;
     if (!p.renaming) return;
     const back = dialogs.scrim(c, k);
@@ -282,6 +330,30 @@ fn renameDialog(c: *ui.Context, a: *App, k: theme.Colors) void {
         .cancel => p.renaming = false,
         .confirm => submitRename(a),
     }
+}
+
+/// Primary or ghost button on the top version row (`popover::btn_primary` /
+/// `popover::btn_ghost` in `crates/ui/src/settings/devices.rs`).
+fn updateButton(c: *ui.Context, k: theme.Colors, key: []const u8, label: []const u8, primary: bool, disabled: bool) bool {
+    ui.key(c, key);
+    var b = ui.div(c).row().px(12).py(6).itemsCenter().rounded(8);
+    b = if (primary)
+        b.bg(k.solid).border(k.solid).borderW(1)
+    else
+        b.border(k.border).borderW(1).bg(k.ink(0.03));
+    if (disabled) {
+        b = b.opacity(0.6);
+    } else if (primary) {
+        if (b.hovered()) b = b.opacity(0.9);
+    } else {
+        b = b.hover(k.hover);
+    }
+    defer b.end();
+    ui.text(c, label, set.st(c, 12, .{
+        .weight = .medium,
+        .color = if (primary) k.on_solid else k.text,
+    }));
+    return !disabled and b.clicked();
 }
 
 /// `ghost_action` at 70%, full under the pointer; red and full when it

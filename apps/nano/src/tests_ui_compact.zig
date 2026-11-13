@@ -22,6 +22,18 @@ const Harness = struct {
         h.t.settle(1);
     }
 
+    fn apply(h: *Harness, text: []const u8) !void {
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, text, .{});
+        defer parsed.deinit();
+        try h.a.transcript.apply(parsed.value);
+        h.t.settle(1);
+        h.t.advance(0.5);
+    }
+
+    fn liveLabel(h: *Harness, buf: []u8) []const u8 {
+        return @import("tools.zig").label(buf, h.a.transcript.entries.items[1].parts.items);
+    }
+
     fn deinit(h: *Harness) void {
         h.t.deinit();
         h.a.deinit();
@@ -87,4 +99,53 @@ test "without compact mode the answer starts under a Worked-for divider" {
     } else return error.MissingAnswer;
     // GPUI: the label, 12 under it the divider, 12 under that the answer.
     try testing.expect(answer.y > label.y + label.h + 20);
+}
+
+const live_turn =
+    \\{"reset":[
+    \\ {"id":"u","role":"user","parts":[{"id":"p","kind":"text","text":"Tidy the synthetic fixtures"}]},
+    \\ {"id":"a","role":"assistant","status":"streaming","parts":[
+    \\  {"id":"n","kind":"text","text":"Looking at the synthetic fixtures first."},
+    \\  {"id":"r","kind":"tool","resolved":true,"call":{"kind":"readFile","path":"fixtures/synthetic.json"}},
+    \\  {"id":"x","kind":"tool","resolved":false,"call":{"kind":"exec","command":"zig build test"}}]}]}
+;
+
+test "Nanoui request: live progress stays visible and finished work folds without hiding the reply" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try h.apply(live_turn);
+    try testing.expect(h.t.containsText("Looking at the synthetic fixtures first."));
+    try testing.expect(!h.t.containsText("The synthetic fixtures are tidy now."));
+    h.snap("work-live");
+    try h.apply(turn);
+    try testing.expect(!h.t.containsText("Looking at the synthetic fixtures first."));
+    try testing.expect(h.t.containsText("The synthetic fixtures are tidy now."));
+    try testing.expect(h.t.hasText("Worked for 2m 5s"));
+    h.snap("work-finished");
+    try h.t.clickText("Worked for 2m 5s");
+    h.t.advance(0.5);
+    try testing.expect(h.t.containsText("Looking at the synthetic fixtures first."));
+    try testing.expect(h.t.containsText("The synthetic fixtures are tidy now."));
+}
+
+test "Nanoui request: resumed work folds on completion even after a manual reopen" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try h.t.clickText("Worked for 2m 5s");
+    h.t.advance(0.5);
+    try testing.expect(h.t.containsText("Looking at the synthetic fixtures first."));
+    try h.apply(live_turn);
+    var buf: [160]u8 = undefined;
+    const label = h.liveLabel(&buf);
+    try h.t.clickText(label);
+    h.t.advance(0.5);
+    try testing.expect(!h.t.containsText("Looking at the synthetic fixtures first."));
+    try h.t.clickText(label);
+    h.t.advance(0.5);
+    try testing.expect(h.t.containsText("Looking at the synthetic fixtures first."));
+    try h.apply(turn);
+    try testing.expect(!h.t.containsText("Looking at the synthetic fixtures first."));
+    try testing.expect(h.t.containsText("The synthetic fixtures are tidy now."));
 }

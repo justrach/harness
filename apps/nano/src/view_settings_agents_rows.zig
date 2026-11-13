@@ -9,6 +9,7 @@ const ui = nanoui.ui;
 const theme = @import("theme.zig");
 const icons = @import("icons.zig");
 const set = @import("view_settings.zig");
+const kit = @import("view_kit.zig");
 const shots = @import("view_settings_appshots.zig");
 const agents = @import("agents.zig");
 const page = @import("view_settings_agents.zig");
@@ -298,5 +299,5 @@ fn spinner(c: *ui.Context, color: ui.Color) void {
             _ = c.leaf(.{ .width = .{ .px = 1.5 }, .height = .{ .px = 1.5 }, .background = color.alpha(lit) }, .none, null);
         }
     }
-    c.frameIn(1.0 / 15.0);
+    kit.loaderFrame(c, 1.0 / 15.0);
 }

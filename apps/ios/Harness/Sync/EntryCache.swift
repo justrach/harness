@@ -8,6 +8,12 @@ import Foundation
 import Loro
 
 final class EntryCache: @unchecked Sendable {
+    /// Serializes `read(_:)` calls (`FrameSchedule.lean`: `lockRankRead = 0`)
+    /// without ever being acquired by `observe(_:)`, so `importWith -> observe`
+    /// (`lockRankLoro = 1 -> lockRankStale = 2`) and `read` (`0 -> 1`, `0 -> 2`)
+    /// form a strictly acyclic lock order while preventing concurrent readers
+    /// from overwriting fresh decodes with stale `previous` snapshots.
+    private let readLock = NSLock()
     private let lock = NSLock()
     /// Keyed by each message's map container. `nil` records a message that
     /// failed to parse (a torn import); it is retried only once it changes.
@@ -52,6 +58,9 @@ final class EntryCache: @unchecked Sendable {
               parse: (LoroValue) -> MessageEntry?,
               parsePart: (LoroValue) -> MessagePart? = { _ in nil },
               assemble: ((LoroMap, [MessagePart]) -> MessageEntry?)? = nil) -> [MessageEntry] {
+        readLock.lock()
+        defer { readLock.unlock() }
+
         lock.lock()
         let changed = stale
         let changedParts = staleParts

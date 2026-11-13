@@ -8,6 +8,9 @@ on:
       - 'rust-toolchain.toml'
       - '.cargo/**'
       - 'apps/harness/**'
+      - 'apps/nano/**'
+      - 'apps/parity/**'
+      - 'protocol/desktop/**'
       - 'dist/windows/**'
       - 'crates/**'
       - 'vendor/zui/**'
@@ -23,6 +26,9 @@ on:
       - 'rust-toolchain.toml'
       - '.cargo/**'
       - 'apps/harness/**'
+      - 'apps/nano/**'
+      - 'apps/parity/**'
+      - 'protocol/desktop/**'
       - 'dist/windows/**'
       - 'crates/**'
       - 'vendor/zui/**'
@@ -59,24 +65,12 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/windows-rust
-      - uses: ./.github/actions/kache
+      - uses: mlugg/setup-zig@v2
         with:
-          access-key-id: ${{ secrets.KACHE_S3_ACCESS_KEY_ID }}
-          secret-access-key: ${{ secrets.KACHE_S3_SECRET_ACCESS_KEY }}
-          endpoint: ${{ secrets.KACHE_S3_ENDPOINT }}
-          manifest-key: ${{ github.job }}-${{ strategy.job-index }}
-      - name: UI tests
-        env:
-          RUST_BACKTRACE: '1'
-        run: |
-          # Native platform initialization runs in its own process. Keep the
-          # real-font assertion and the complete headless suite mandatory.
-          cargo test --release --locked -p harness-ui --lib native_diff_font_geometry -- --test-threads=1 --nocapture
-          $nativeResult = $LASTEXITCODE
-          cargo test --release --locked -p harness-ui --lib -- --test-threads=1 --skip native_diff_font_geometry --nocapture
-          $headlessResult = $LASTEXITCODE
-          if ($nativeResult -ne 0 -or $headlessResult -ne 0) { exit 1 }
+          version: 0.17.0
+      - name: Nano UI tests
+        working-directory: apps/nano
+        run: zig build test --summary all
 
   app:
     name: tests (app and packaging)
@@ -85,6 +79,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/windows-rust
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
       - uses: ./.github/actions/kache
         with:
           access-key-id: ${{ secrets.KACHE_S3_ACCESS_KEY_ID }}
@@ -95,24 +92,6 @@ jobs:
         run: cargo build --release --locked -p harness
       - name: Verify portable packaging
         run: ./scripts/package-windows.ps1 -ReleasesUrl "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download" -CargoProfile release
-      - name: Shader layout tests
-        run: cargo test --release --locked -p gpui_windows --lib layout
-      - name: Frame scheduling tests
-        run: cargo test --release --locked -p gpui_windows --lib --test frame_schedule frame_schedule
-      - name: Native frame lifecycle tests
-        run: |
-          # Real windows, mouse input and DXGI presents on the runner's desktop, one case per
-          # process, with DirectComposition on and off.
-          $failed = 0
-          foreach ($case in @('paint_race', 'input_restore')) {
-            foreach ($dcomp in @('1', '0')) {
-              $env:GPUI_NATIVE_CASE = $case
-              $env:GPUI_NATIVE_DCOMP = $dcomp
-              cargo test --release --locked -p gpui_windows --lib native_tests::interactive_frame_lifecycle -- --ignored --exact --nocapture --test-threads=1
-              if ($LASTEXITCODE -ne 0) { $failed++ }
-            }
-          }
-          if ($failed -ne 0) { throw "$failed native frame lifecycle case(s) failed" }
       - name: Application and updater tests
         run: cargo test --release --locked -p harness -p harness-update -p harness-observe
       - name: GUI subsystem and redirected CLI output
@@ -152,19 +131,6 @@ jobs:
           if (-not ($output -match '^Mode:\s+local only$')) {
             throw 'An isolated Windows startup must select local-only mode'
           }
-      - name: Build rendering fixture
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.native_gui }}
-        run: cargo build --release --locked -p harness-ui --example windows-render-fixture --features windows-render-fixture
-      - name: Upload GUI test binaries
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.native_gui }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-gui-binaries
-          path: |
-            target/release/harness.exe
-            target/release/examples/windows-render-fixture.exe
-          if-no-files-found: error
-          retention-days: 1
 
   engine:
     name: tests (engine and adapters)
@@ -190,6 +156,8 @@ jobs:
         run: cargo test --release --locked -p harness-engine --lib
       - name: Harness catalog and login tests
         run: cargo test --release --locked -p harness-engine --test codex_catalog --test codex_login_resolution
+      - name: Workspace-file authorization and read regressions
+        run: cargo test --release --locked -p harness-engine --test workspace_files
       - name: Auth integration tests
         run: cargo test --release --locked -p harness-engine --test auth
       - name: Native visual publication regressions

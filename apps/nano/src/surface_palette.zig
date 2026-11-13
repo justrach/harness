@@ -19,9 +19,8 @@ pub fn apply(k: theme.Colors, frosted: bool) theme.Colors {
     const adverse: Color = if (k.dark) .white else .black;
     const native = builtin.os.tag == .macos or builtin.os.tag == .windows;
     out.shell = k.shell.alpha(coverage(k, k.shell, if (native) 0.80 else 1, adverse));
-    // The sidebar is the shared window tint plus a wash, not a second
-    // opaque flattened copy of that tint.
-    out.sidebar = k.wash(0.05);
+    // Desktop's sidebar is transparent over the shared window tint.
+    out.sidebar = .transparent;
     const window = flatten(out.shell, adverse);
     out.composer = k.input_tint.alpha(coverage(k, k.input_tint, if (k.dark) k.input_tint.a else 0.30, window));
     out.overlay = k.overlay.alpha(coverage(k, k.overlay, if (k.dark) 0.50 else 0.85, adverse));
@@ -32,7 +31,7 @@ pub fn apply(k: theme.Colors, frosted: bool) theme.Colors {
 
 pub fn popup(k: theme.Colors) theme.Colors {
     var out = k;
-    if (k.frosted) {
+    if (k.frosted and !k.is_warm_harp) {
         out.muted = k.text.alpha(0.64);
         out.faint = k.text.alpha(0.48);
     }
@@ -93,8 +92,15 @@ test "opaque palettes are unchanged and glass preserves theme hues with checked 
         const bg = flatten(glass.shell, if (dark) .white else .black);
         try std.testing.expect(contrast(k.text, bg) >= 4.5);
         try std.testing.expect(contrast(k.muted, bg) >= 3);
-        try std.testing.expect(glass.composer.a < 1);
-        try std.testing.expectEqual(k.text.alpha(0.64), popup(glass).muted);
+        if (dark) {
+            try std.testing.expectEqual(@as(f32, 1), glass.composer.a);
+        } else {
+            try std.testing.expect(glass.composer.a > 0 and glass.composer.a < 1);
+        }
+        try std.testing.expectEqual(k.muted, popup(glass).muted);
+        var neutral = glass;
+        neutral.is_warm_harp = false;
+        try std.testing.expectEqual(k.text.alpha(0.64), popup(neutral).muted);
         try std.testing.expectEqualDeep(k, popup(k));
     }
 }

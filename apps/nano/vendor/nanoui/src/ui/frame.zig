@@ -1,0 +1,113 @@
+//! One frame of native UI, shared by windows (`Surface`) and the headless
+//! `Tester`: build the view (again while interactions change state), lay
+//! it out, paint it into instances, and update what the pointer is over.
+const std = @import("std");
+const types = @import("types.zig");
+const gpu = @import("gpu.zig");
+const text = @import("text.zig");
+const layout = @import("layout.zig");
+const paint = @import("paint.zig");
+const selection = @import("selection.zig");
+const Theme = @import("theme.zig").Theme;
+const Context = @import("context.zig").Context;
+const View = @import("ui.zig").View;
+const now = @import("clock.zig").now;
+const retain = @import("retain.zig");
+
+pub const Result = struct {
+    /// The box under a still pointer changed: another frame should follow.
+    hot_changed: bool,
+    /// The scene was the previous frame's, shifted by a scroll. The view
+    /// was not built and text was not shaped again.
+    retained: bool = false,
+};
+
+pub fn run(c: *Context, view: View, ts: *text.TextSystem, instances: *std.ArrayList(gpu.Instance), size: types.Size, scale: f32, theme: Theme, dt: f32, time: f64) Result {
+    if (retain.shift(c, instances, size, scale)) {
+        c.stats.retained = true;
+        c.stats.build_ms = 0;
+        c.stats.layout_ms = 0;
+        c.stats.paint_ms = 0;
+        c.dt = dt;
+        c.time = time;
+        return .{ .hot_changed = false, .retained = true };
+    }
+    c.dt = dt;
+    c.time = time;
+    c.size = size;
+    c.scale = scale;
+    c.theme = theme;
+    c.animating = false;
+    c.frame_in = null;
+    c.time_driven = .none;
+    c.painting_group = false;
+    ts.setFamilies(theme.font, theme.mono_font);
+    ts.beginFrame();
+    @import("scroll.zig").updateScrollbarDrag(c);
+
+    const t0 = now();
+    if (c.input.pressed and c.input.button == .left) c.selection.pressed = true;
+    c.copy_done = false;
+    c.copy_requested = false;
+    for (c.input.ops) |op| if (op == .command and op.command == .copy) {
+        c.copy_requested = true;
+    };
+    @import("scroll_x.zig").takeScrollX(c);
+    c.begin();
+    var passes: u32 = 0;
+    while (true) : (passes += 1) {
+        view.build(view.ptr, c);
+        @import("tooltip.zig").flush(c);
+        if (c.stack.items.len != 1)
+            std.debug.panic("nanoui: {d} box(es) left open: every column, row, card, scroll and pressable needs an end", .{c.stack.items.len - 1});
+        if (!c.changed or passes >= 3) break;
+        c.rebuild();
+    }
+
+    // Copy with no field's selection to take: the page's selection.
+    if (c.copy_requested and !c.copy_done and c.selection.text.items.len > 0) c.clipboard.write(c.clipboard.ctx, c.selection.text.items);
+
+    const t1 = now();
+    c.scroll_moved.clearRetainingCapacity();
+    _ = layout.measure(c, 0, size.w);
+    layout.arrange(c, 0, .{ .w = size.w, .h = size.h });
+    if (c.pixel_snap) layout.snapToPixels(c);
+    std.mem.swap(std.AutoHashMapUnmanaged(u64, types.Rect), &c.prev_rects, &c.rects);
+    c.rects.clearRetainingCapacity();
+    for (c.nodes.items) |n| {
+        if (n.layout_dependent) {
+            const previous = c.prev_rects.get(n.id);
+            if (previous == null or previous.?.w != n.rect.w or previous.?.h != n.rect.h) c.animating = true;
+        }
+        c.rects.put(c.gpa, n.id, n.rect) catch {};
+    }
+    for (c.stage_nodes[0..c.stage_count], 0..) |nidx, si| {
+        if (nidx < c.nodes.items.len) c.stage_rects[si] = c.nodes.items[nidx].rect;
+    }
+    const t2 = now();
+    ts.images.reset_during_frame = false;
+    selection.beginPaint(c);
+    paint.paint(c, instances);
+    if (ts.atlas.reset_during_frame or ts.images.reset_during_frame) {
+        // An atlas filled up and was reset: earlier sprites are stale.
+        c.next_hits.clearRetainingCapacity();
+        selection.beginPaint(c);
+        paint.paint(c, instances);
+    }
+    selection.afterPaint(c);
+    const t3 = now();
+    c.stats = .{
+        .build_ms = (t1 - t0) * 1000,
+        .layout_ms = (t2 - t1) * 1000,
+        .paint_ms = (t3 - t2) * 1000,
+        .passes = passes + 1,
+        .nodes = c.nodes.items.len,
+        .instances = instances.items.len,
+    };
+    const hot_before = c.hot;
+    c.commitHits();
+    c.finish();
+    c.stats.retained = false;
+    retain.store(c, instances);
+    return .{ .hot_changed = c.hot != hot_before };
+}

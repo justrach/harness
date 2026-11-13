@@ -1,10 +1,10 @@
-//! Recovery for older conversations that share a primary checkout. A fork
-//! moves only one chat; it never switches, stashes, or copies the shared tree.
+//! Answers to the "Shared checkout" question earlier versions saved in a chat.
+//! A fork moves only that chat; it never switches, stashes, or copies the
+//! shared tree. Nothing asks the question any more.
 
 use super::*;
 
 const STATE: &str = "checkout_isolation";
-const SHARED_CONSENT: &str = "shared_consent";
 const MOVE: &str = "move";
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -45,53 +45,6 @@ impl DocHost {
                     })
                     .is_some_and(|other| same_checkout(other, cwd))
         })
-    }
-
-    pub(super) fn unacknowledged_shared_checkout(
-        &self,
-        chat_id: &str,
-        current: &ConversationSourceContext,
-    ) -> bool {
-        // Existing independent worktrees keep their location and history.
-        if crate::workspace_host::linked_worktree_root(Path::new(&current.cwd)).is_some()
-            || !self.checkout_is_shared(chat_id, &current.cwd)
-        {
-            return false;
-        }
-        let Ok(handle) = self.open(chat_id) else {
-            return true;
-        };
-        let expected = serde_json::to_string(&(
-            &self.inner.config.device_id,
-            &current.checkout_id,
-            &current.branch,
-        ))
-        .ok();
-        let consent = handle.doc.doc().get_map(STATE).get(SHARED_CONSENT);
-        !matches!(consent,
-            Some(loro::ValueOrContainer::Value(loro::LoroValue::String(value)))
-                if Some(value.as_str()) == expected.as_deref())
-    }
-
-    pub(super) fn acknowledge_shared_checkout(
-        &self,
-        handle: &ChatDocHandle,
-        current: &ConversationSourceContext,
-    ) -> Result<(), EngineError> {
-        let consent = serde_json::to_string(&(
-            &self.inner.config.device_id,
-            &current.checkout_id,
-            &current.branch,
-        ))
-        .map_err(|error| EngineError::Other(error.to_string()))?;
-        handle
-            .doc
-            .doc()
-            .get_map(STATE)
-            .insert(SHARED_CONSENT, consent)
-            .map_err(DocError::from)?;
-        handle.doc.doc().commit();
-        Ok(())
     }
 
     fn checkout_move(&self, handle: &ChatDocHandle) -> Result<Option<CheckoutMove>, EngineError> {

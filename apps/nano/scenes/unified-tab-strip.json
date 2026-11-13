@@ -1,0 +1,44 @@
+{
+  "width": 1200, "height": 780, "dark": true, "scale": 2,
+  "devices": [{"id":"local","name":"Studio"},{"id":"remote","name":"Build box"}],
+  "spaces": [
+    {"id":"s","deviceId":"local","path":"/synthetic/fieldnotes","gitDetected":true},
+    {"id":"r","deviceId":"remote","path":"/synthetic/remote-project","gitDetected":true}
+  ],
+  "chats": [
+    {"id":"a","deviceId":"local","title":"Alpha","spaceId":"s","cwd":"/synthetic/fieldnotes","archived":false},
+    {"id":"b","deviceId":"remote","title":"Beta","spaceId":"r","cwd":"/synthetic/remote-project","archived":false}
+  ],
+  "open": "a",
+  "transcripts": {
+    "a": [{"id":"answer","role":"assistant","status":"complete","parts":[{"id":"p","kind":"text","text":"Synthetic first panel content."}]}],
+    "b": [{"id":"answer","role":"assistant","status":"complete","parts":[{"id":"p","kind":"text","text":"Synthetic remote panel content."}]}]
+  },
+  "steps": [
+    {"snap":"single-selected-contour"},
+    {"press":"cmd+t"},
+    {"click":"Beta"},
+    {"snap":"single-two-tabs"},
+    {"press":"cmd+d"},
+    {"press":"escape"},
+    {"expect":"New tab"},
+    {"snap":"aligned-split-slots"},
+    {"composer":"A synthetic draft parked in this panel"},
+    {"press":"cmd+t"},
+    {"snap":"panel-tab-count"},
+    {"press":"cmd+shift+enter"},
+    {"snap":"expanded-panel-keeps-strip"},
+    {"press":"cmd+alt+1"},
+    {"snap":"switch-expanded-panel"},
+    {"press":"cmd+shift+enter"},
+    {"press":"cmd+b"},
+    {"wait":0.3},
+    {"snap":"collapsed-sidebar-clearance"},
+    {"resize":[780,780]},
+    {"snap":"narrow-strip"},
+    {"press":"cmd+r"},
+    {"snap":"surface-shares-strip"},
+    {"press":"cmd+e"},
+    {"snap":"files-share-strip"}
+  ]
+}

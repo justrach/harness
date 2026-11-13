@@ -1,0 +1,38 @@
+{
+  "width":1200,"height":780,"dark":true,"scale":2,
+  "devices":[{"id":"d","name":"Studio"}],
+  "spaces":[
+    {"id":"alpha","deviceId":"d","path":"/synthetic/alpha"},
+    {"id":"beta","deviceId":"d","path":"/synthetic/beta"},
+    {"id":"gamma","deviceId":"d","path":"/synthetic/gamma"},
+    {"id":"delta","deviceId":"d","path":"/synthetic/delta"},
+    {"id":"epsilon","deviceId":"d","path":"/synthetic/epsilon"},
+    {"id":"zeta","deviceId":"d","path":"/synthetic/zeta"},
+    {"id":"eta","deviceId":"d","path":"/synthetic/eta"},
+    {"id":"theta","deviceId":"d","path":"/synthetic/theta"},
+    {"id":"iota","deviceId":"d","path":"/synthetic/iota"}
+  ],
+  "chats":[{"id":"a","deviceId":"d","title":"Synthetic folder search","spaceId":"alpha","cwd":"/synthetic/alpha","archived":false}],
+  "open":"a",
+  "steps":[
+    {"press":"cmd+d"},
+    {"expect":"Search folders…"},
+    {"snap":"split-asks-folder"},
+    {"type":"bet"},
+    {"expect":"beta"},
+    {"snap":"filtered-folder-menu"},
+    {"press":"enter"},
+    {"snap":"new-chat-in-beta"},
+    {"press":"cmd+w"},
+    {"snap":"one-close-restores-source"},
+    {"press":"cmd+d"},
+    {"type":"no such synthetic folder"},
+    {"expect":"No folders match"},
+    {"expect":"Don't work in a project"},
+    {"expect":"New project…"},
+    {"snap":"no-matches-safe-action"},
+    {"press":"escape"},
+    {"type":"A synthetic prompt after dismissing folder choice"},
+    {"snap":"escape-returns-to-composer"}
+  ]
+}

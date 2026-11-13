@@ -108,8 +108,8 @@ pub fn deviceMenu(c: *ui.Context, a: *App, k: theme.Colors, at: ui.Rect) void {
         ui.key(c, c.print("agents-device-{s}", .{d.id}));
         const active = eqlOpt(d.id, effective);
         const local = eqlOpt(d.id, a.device_id);
-        var r = ui.div(c).row().wFull().px(8).py(6).gap(10).itemsCenter().rounded(7);
-        r = if (active) r.bg(k.selected) else r.hover(k.selected);
+        var r = ui.div(c).row().wFull().px(8).py(5).gap(10).itemsCenter().rounded(7);
+        r = if (active) r.bg(if (k.is_harp) k.active else k.selected) else r.hover(k.hover);
         defer r.end();
         const hot = r.hovered();
         icons.icon(c, platformIcon(d.platform), 16, k.muted, 0);
@@ -195,6 +195,98 @@ pub fn draftCard(c: *ui.Context, a: *App, k: theme.Colors) void {
         subtitleIn(c, k, "Show live transcripts of Graff's foreground child agents while the parent turn runs. Background agents still show only in their parent's tool row. Needs Graff 0.0.302.5 or later; transcripts aren't restored when a session reloads yet.", w);
     }
     if (toggle(c, k, ready and p.draft_on, ready and !p.draft_saving)) loadDraft(a, !p.draft_on);
+}
+
+/// Bots, off until turned on here. The switch is graff's on this device
+/// (`graff bot enable`), so a terminal and this window agree.
+pub fn botsCard(c: *ui.Context, a: *App, k: theme.Colors) void {
+    const bots = @import("bots.zig");
+    const b = &a.bots;
+    // Another device's switch is not this window's to flip, and an engine
+    // from before bots has none.
+    if (a.view.agents.target != null or b.phase == .absent) return;
+    const ready = b.phase == .loaded;
+    const cd = card(c, k, 20);
+    defer cd.end();
+    const in = ui.div(c).column().wFull().p(16);
+    defer in.end();
+    {
+        const r = ui.div(c).row().wFull().gap(12).itemsCenter();
+        defer r.end();
+        const w = cardInner() - 12 - 32;
+        {
+            const col = ui.div(c).column().w(w);
+            defer col.end();
+            title(c, k, "Experimental: Bots", w);
+            subtitleIn(c, k, "Standing roles with one job, their own memory, and routines that start by themselves while Harness is open. They appear under your chats. Turning this off keeps every bot and runs nothing.", w);
+        }
+        ui.key(c, "bots-enabled");
+        if (toggle(c, k, ready and b.enabled, ready and !b.busy)) bots.act(a, .{ .action = if (b.enabled) "disable" else "enable" });
+    }
+    // Why the switch did not move: an old graff, most often.
+    if (b.notice.items.len > 0 and b.page == .none) {
+        set.space(c, 8);
+        const n = ui.div(c).column().w(cardInner());
+        defer n.end();
+        ui.text(c, b.notice.items, set.st(c, 12, .{ .wrap = true, .color = k.danger_muted.alpha(0.9) }));
+    }
+}
+
+/// The device's autonomy, three pills, and Replay setup under it
+/// (`render_autonomy`).
+pub fn autonomyCard(c: *ui.Context, a: *App, k: theme.Colors) void {
+    const setup = @import("view_setup.zig");
+    const p = &a.view.agents;
+    const w = cardInner();
+    const cd = card(c, k, 20);
+    defer cd.end();
+    {
+        const in = ui.div(c).column().wFull().p(16).gap(2);
+        defer in.end();
+        title(c, k, "Autonomy", w);
+        subtitleIn(c, k, "How much agents on this device can do without asking. Applies to new runs of Codex, Claude Code and ACP agents.", w);
+        set.space(c, 8);
+        const ready = p.autonomy == .ready;
+        const busy = !ready or p.autonomy_saving;
+        {
+            const pills = ui.div(c).row().gap(6).itemsCenter();
+            defer pills.end();
+            for (setup.Autonomy.all) |x| {
+                const selected = ready and p.autonomy_level == x;
+                ui.key(c, c.print("autonomy-level-{s}", .{x.wire()}));
+                var pill = ui.div(c).row().roundedFull();
+                pill = if (selected) pill.px(8).py(2).bg(k.success.alpha(0.12)) else pill.px(9).py(3).border(k.border).borderW(1);
+                if (busy) pill = pill.opacity(0.35);
+                defer pill.end();
+                const hot = !busy and !selected and pill.hovered();
+                ui.text(c, x.label(), set.st(c, 10.5, .{ .color = if (selected) k.success_muted.alpha(0.9) else if (hot) k.text else k.muted }));
+                if (!busy and !selected and pill.clicked()) page.loadAutonomy(a, x);
+            }
+        }
+        const note: []const u8 = switch (p.autonomy) {
+            .ready => if (p.autonomy_chosen) p.autonomy_level.blurb() else c.print("{s} The default until you pick one.", .{p.autonomy_level.blurb()}),
+            .failed => "Update Harness on that computer to set this.",
+            else => "",
+        };
+        if (note.len > 0) {
+            set.space(c, 6);
+            const n = ui.div(c).column().w(w);
+            defer n.end();
+            ui.text(c, note, set.st(c, 12, .{ .wrap = true, .color = k.muted }));
+        }
+    }
+    _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
+    const r = ui.div(c).row().wFull().p(16).gap(12).itemsCenter();
+    defer r.end();
+    const tw = w - 12 - actionW(c, "Replay setup");
+    {
+        const col = ui.div(c).column().w(tw);
+        defer col.end();
+        title(c, k, "First-run setup", tw);
+        subtitleIn(c, k, "Agent, effort, autonomy and notifications, one question at a time.", tw);
+    }
+    ui.key(c, "replay-setup");
+    if (shots.action(c, k, "Replay setup")) setup.open(a, 0);
 }
 
 /// The session-title agent and model (`render_titles`).

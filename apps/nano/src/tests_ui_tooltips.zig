@@ -91,8 +91,9 @@ fn sidebarViewOptions() !void {
     const box = h.t.tooltipRect().?;
     try testing.expectEqual(x + 1, box.x);
     try testing.expectEqual(y + 1, box.y);
-    // text_tooltip: 11-point text on an 18-point line, py 6 inside a 1-point border.
-    try testing.expectApproxEqAbs(@as(f32, 32), box.h, 0.01);
+    // Shared action bubble: 13-point app text on an 18-point line, py 5
+    // inside a 1-point border (rich project cards retain their own layout).
+    try testing.expectApproxEqAbs(@as(f32, 30), box.h, 0.01);
     h.snap("tooltip-view-options");
     // Leaving hides it at once.
     h.t.moveTo(600, 400);
@@ -115,6 +116,10 @@ fn projectIcon() !void {
     var h: Harness = undefined;
     try h.init();
     defer h.deinit();
+    // Project icons are off by default in0.2.172; explicitly exercise
+    // the enabled control rather than relying on the old display default.
+    h.a.settings.set(.sidebar_show_project_icon, true);
+    h.t.settle(1);
     // The row's monogram tile: "Home" has no project, so "H".
     var tile: ?ui.Rect = null;
     for (h.t.ctx.nodes.items) |n| switch (n.content) {
@@ -124,17 +129,27 @@ fn projectIcon() !void {
         else => {},
     };
     const r = tile orelse return error.NoTile;
-    try testing.expectEqual(@as(usize, 0), h.count("Unknown device"));
+    // The device instrument strip can already name this unknown device.
+    // The tooltip must add exactly one copy, independent of that chrome.
+    const before = h.count("Unknown device");
     h.t.moveTo(r.x + r.w / 2, r.y + r.h / 2);
     h.t.advance(0.3);
     try testing.expect(h.shown() == null);
     h.t.advance(0.1);
     // The app's own card: the project over its device.
     try testing.expectEqualStrings("", h.shown().?);
-    try testing.expectEqual(@as(usize, 1), h.count("Unknown device"));
-    const name = h.t.findText("Home").?;
-    const device = h.t.findText("Unknown device").?;
-    try testing.expect(device.y > name.y);
+    try testing.expectEqual(before + 1, h.count("Unknown device"));
+    const tooltip = h.t.tooltipRect() orelse return error.NoProjectTooltip;
+    var name: ?ui.Rect = null;
+    var device: ?ui.Rect = null;
+    for (h.t.ctx.nodes.items) |node| switch (node.content) {
+        .text => |text| if (tooltip.contains(.{ .x = node.rect.x, .y = node.rect.y })) {
+            if (std.mem.eql(u8, text.str, "Home")) name = node.rect;
+            if (std.mem.eql(u8, text.str, "Unknown device")) device = node.rect;
+        },
+        else => {},
+    };
+    try testing.expect((device orelse return error.NoTooltipDevice).y > (name orelse return error.NoTooltipProject).y);
     h.snap("tooltip-project-icon");
     h.t.moveTo(600, 400);
     try testing.expect(h.shown() == null);

@@ -1,0 +1,26 @@
+{
+  "width":1200,"height":780,"dark":false,"scale":2,
+  "devices":[{"id":"d","name":"Studio"}],
+  "spaces":[{"id":"s","deviceId":"d","path":"/synthetic/fieldnotes","gitDetected":true}],
+  "chats":[{"id":"a","deviceId":"d","title":"Synthetic release notes","spaceId":"s","cwd":"/synthetic/fieldnotes","archived":false}],
+  "open":"a",
+  "transcripts":{"a":[{"id":"a","role":"assistant","status":"complete","parts":[{"id":"p","kind":"text","text":"Synthetic content for the light writing plane."}]}]},
+  "steps":[
+    {"snap":"light-selected-contour"},
+    {"press":"cmd+shift+d"},
+    {"press":"escape"},
+    {"snap":"stacked-shared-slots"},
+    {"press":"cmd+alt+1"},
+    {"press":"cmd+t"},
+    {"composer":"A synthetic first-panel draft"},
+    {"snap":"stacked-panel-tab-count"},
+    {"press":"cmd+shift+enter"},
+    {"snap":"stacked-expand"},
+    {"press":"cmd+alt+2"},
+    {"snap":"stacked-switch-expanded"},
+    {"press":"cmd+shift+enter"},
+    {"press":"cmd+b"},
+    {"wait":0.3},
+    {"snap":"light-sidebar-collapsed"}
+  ]
+}

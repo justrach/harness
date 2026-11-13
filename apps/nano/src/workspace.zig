@@ -6,6 +6,7 @@ const std = @import("std");
 const json = std.json;
 const Allocator = std.mem.Allocator;
 const rules = @import("rules.zig");
+const alerts = @import("session_alert.zig");
 
 pub const Space = struct {
     id: []const u8,
@@ -47,6 +48,8 @@ pub const Chat = struct {
     harness: ?[]const u8,
     model: ?[]const u8,
     reasoning: ?[]const u8 = null,
+    /// A plain chat, not a coding session (`ChatConfig::chat_mode`).
+    chat_mode: bool = false,
     cwd: ?[]const u8,
     /// The harness's own id for the chat's latest run (`harnessSessionId`).
     harness_session_id: ?[]const u8 = null,
@@ -75,13 +78,17 @@ pub const Chat = struct {
     }
 };
 
-pub const Status = enum { idle, working, awaiting_input, errored };
+pub const Status = alerts.Status;
 
 pub const Session = struct {
     chat_id: []const u8,
     status: Status,
     started_ms: ?i64 = null,
     updated_ms: i64 = 0,
+    /// Durable success marker, retained while a queued follow-up runs.
+    last_completed_turn: ?[]const u8 = null,
+    /// A peer/room-only result is coordination, not a person's completion.
+    last_completed_peer_only: bool = false,
 };
 
 /// A computer on the account (`WatchDevices`): the header's "@ name".
@@ -100,13 +107,34 @@ pub fn List(comptime T: type, comptime parse: fn (Allocator, json.ObjectMap) ?T)
     return struct {
         const Self = @This();
         arena: std.heap.ArenaAllocator,
+        retired: std.ArrayList(std.heap.ArenaAllocator) = .empty,
         items: []T = &.{},
+        /// Session notification state must outlive whole-list arena replacement,
+        /// and die with this App rather than leak into other windows/accounts.
+        notification_baselines: if (T == Session) alerts.Observer else void = if (T == Session) .{} else {},
 
         pub fn init(gpa: Allocator) Self {
             return .{ .arena = .init(gpa) };
         }
 
+        pub fn retireArena(l: *Self, arena: std.heap.ArenaAllocator) void {
+            var ar = arena;
+            if (ar.queryCapacity() == 0) {
+                ar.deinit();
+                return;
+            }
+            l.retired.append(l.arena.child_allocator, ar) catch ar.deinit();
+        }
+
+        pub fn reap(l: *Self) void {
+            for (l.retired.items) |*ar| ar.deinit();
+            l.retired.clearRetainingCapacity();
+        }
+
         pub fn deinit(l: *Self) void {
+            if (T == Session) l.notification_baselines.deinit(l.arena.child_allocator);
+            l.reap();
+            l.retired.deinit(l.arena.child_allocator);
             l.arena.deinit();
         }
 
@@ -120,7 +148,7 @@ pub fn List(comptime T: type, comptime parse: fn (Allocator, json.ObjectMap) ?T)
             const a = next.allocator();
             var out: std.ArrayList(T) = try .initCapacity(a, arr.len);
             for (arr) |v| if (v == .object) if (parse(a, v.object)) |t| out.appendAssumeCapacity(t);
-            l.arena.deinit();
+            l.retireArena(l.arena);
             l.arena = next;
             l.items = out.items;
         }
@@ -134,8 +162,13 @@ pub const Harness = struct {
     /// Offered for new chats: enabled, or (from an engine that doesn't say)
     /// installed and one of graff, Codex, Claude Code.
     offered: bool,
+    /// On this device (first-run setup's extras).
+    installed: bool = false,
     /// Its reasoning ladder, for a model that lists none (`trait_ladder`).
     levels: []const []const u8 = &.{},
+    /// Takes a steer at the next step boundary of a live turn
+    /// (`HarnessDescriptor::steers_mid_turn`).
+    steers_mid_turn: bool = false,
 };
 
 /// A model an agent offers (`Model`, crates/proto/src/agent.rs).
@@ -149,6 +182,8 @@ pub const Model = struct {
     /// Its levels; a chat without one picked shows `rules.defaultReasoning`.
     reasoning_default: ?[]const u8 = null,
     levels: []const []const u8 = &.{},
+    /// Its context window in tokens, when the catalog says (`Model::context`).
+    context: ?u64 = null,
 };
 
 pub const Spaces = List(Space, parseSpace);
@@ -156,6 +191,18 @@ pub const Harnesses = List(Harness, parseHarness);
 pub const Models = List(Model, parseModel);
 pub const Chats = List(Chat, parseChat);
 pub const Sessions = List(Session, parseSession);
+
+/// Reflect a just-queued config edit while the engine's watch catches up.
+/// The strings live in the list's arena until its next whole replacement.
+pub fn setChatConfig(l: *Chats, id: []const u8, model: ?[]const u8, reasoning: ?[]const u8) bool {
+    const alloc = l.arena.allocator();
+    for (l.items) |*chat| if (std.mem.eql(u8, chat.id, id)) {
+        chat.model = if (model) |v| alloc.dupe(u8, v) catch chat.model else null;
+        chat.reasoning = if (reasoning) |v| alloc.dupe(u8, v) catch chat.reasoning else null;
+        return true;
+    };
+    return false;
+}
 pub const Devices = List(Device, parseDevice);
 
 fn ms(a: Allocator, o: json.ObjectMap, k: []const u8) i64 {
@@ -212,6 +259,7 @@ fn parseChat(a: Allocator, o: json.ObjectMap) ?Chat {
         .harness = if (config) |c| str(a, c, "harness") else null,
         .model = if (config) |c| str(a, c, "model") else null,
         .reasoning = if (config) |c| str(a, c, "reasoning") else null,
+        .chat_mode = if (config) |c| (if (c.get("chatMode")) |v| v == .bool and v.bool else false) else false,
         .cwd = str(a, o, "cwd"),
         .harness_session_id = str(a, o, "harnessSessionId"),
         .branch = currentBranch(a, o),
@@ -256,7 +304,11 @@ fn parseHarness(a: Allocator, o: json.ObjectMap) ?Harness {
     const installed = if (o.get("installed")) |v| v == .bool and v.bool else false;
     const offered = if (o.get("enabled")) |v| v == .bool and v.bool else installed and
         (std.mem.eql(u8, id, "graff") or std.mem.eql(u8, id, "codex") or std.mem.eql(u8, id, "claude-code"));
-    return .{ .id = id, .name = str(a, o, "name") orelse id, .offered = offered, .levels = stringList(a, o, "reasoningLevels") };
+    const steers = if (o.get("supportsSteering")) |v| v == .bool and v.bool else false;
+    const mode = if (o.get("steeringMode")) |v| v == .string and std.mem.eql(u8, v.string, "step-boundary") else false;
+    const default_steers = o.get("supportsSteering") == null and o.get("steeringMode") == null and
+        (std.mem.eql(u8, id, "graff") or std.mem.eql(u8, id, "codex") or std.mem.eql(u8, id, "claude-code") or std.mem.eql(u8, id, "pi"));
+    return .{ .id = id, .name = str(a, o, "name") orelse id, .offered = offered, .installed = installed, .levels = stringList(a, o, "reasoningLevels"), .steers_mid_turn = (steers and mode) or default_steers };
 }
 
 fn parseModel(a: Allocator, o: json.ObjectMap) ?Model {
@@ -270,6 +322,7 @@ fn parseModel(a: Allocator, o: json.ObjectMap) ?Model {
         .billing = str(a, o, "billing"),
         .reasoning_default = rules.defaultReasoning(levels),
         .levels = levels,
+        .context = if (o.get("context")) |v| (if (v == .integer and v.integer > 0) @as(u64, @intCast(v.integer)) else null) else null,
     };
 }
 
@@ -288,6 +341,8 @@ fn parseSession(a: Allocator, o: json.ObjectMap) ?Session {
     const started = ms(a, o, "startedAt");
     return .{
         .chat_id = str(a, o, "chatId") orelse return null,
+        .last_completed_turn = str(a, o, "lastCompletedTurn"),
+        .last_completed_peer_only = if (o.get("lastCompletedPeerOnly")) |v| v == .bool and v.bool else false,
         .updated_ms = ms(a, o, "updatedAt"),
         .started_ms = if (started == 0) null else started,
         .status = if (std.mem.eql(u8, s, "working"))
@@ -356,7 +411,92 @@ pub fn unseen(chat: Chat) bool {
     return chat.last_message_ms != 0 and chat.last_seen_ms < chat.last_message_ms;
 }
 
+/// The "By status" section a chat sits in (spaces.rs `status_group`):
+/// waiting on you (a question or a failure) first, then anything active
+/// today, then the rest. "Today" is the local calendar day, `offset_s` the
+/// local zone's distance from UTC.
+pub const StatusGroup = enum {
+    needs,
+    today,
+    earlier,
+
+    pub fn key(g: StatusGroup) []const u8 {
+        return @tagName(g);
+    }
+
+    pub fn label(g: StatusGroup) []const u8 {
+        return switch (g) {
+            .needs => "Needs you",
+            .today => "Today",
+            .earlier => "Earlier",
+        };
+    }
+
+    /// "Needs you" above "Today" above "Earlier" (`status_group_rank`).
+    pub fn fromKey(k: []const u8) ?StatusGroup {
+        return std.meta.stringToEnum(StatusGroup, k);
+    }
+};
+
+pub fn statusGroup(mark: Mark, at_ms: i64, now_ms: i64, offset_s: i64) StatusGroup {
+    if (mark == .awaiting_input or mark == .errored) return .needs;
+    const day = std.time.ms_per_day;
+    const shift = offset_s * std.time.ms_per_s;
+    return if (@divFloor(at_ms + shift, day) == @divFloor(now_ms + shift, day)) .today else .earlier;
+}
+
+const Tm = extern struct {
+    sec: c_int,
+    min: c_int,
+    hour: c_int,
+    mday: c_int,
+    mon: c_int,
+    year: c_int,
+    wday: c_int,
+    yday: c_int,
+    isdst: c_int,
+    gmtoff: c_long,
+    zone: ?[*:0]const u8,
+};
+extern "c" fn localtime_r(t: *const c_long, out: *Tm) ?*Tm;
+
+/// The local zone's offset from UTC at `now_ms`, in seconds.
+pub fn utcOffsetSeconds(now_ms: i64) i64 {
+    if (comptime @import("builtin").os.tag == .windows) {
+        const w = struct {
+            const SYSTEMTIME = extern struct { wYear: u16, wMonth: u16, wDayOfWeek: u16, wDay: u16, wHour: u16, wMinute: u16, wSecond: u16, wMilliseconds: u16 };
+            const TIME_ZONE_INFORMATION = extern struct { Bias: i32, StandardName: [32]u16, StandardDate: SYSTEMTIME, StandardBias: i32, DaylightName: [32]u16, DaylightDate: SYSTEMTIME, DaylightBias: i32 };
+            extern "kernel32" fn GetTimeZoneInformation(lpTimeZoneInformation: *TIME_ZONE_INFORMATION) callconv(.winapi) u32;
+        };
+        var tzi: w.TIME_ZONE_INFORMATION = undefined;
+        const r = w.GetTimeZoneInformation(&tzi);
+        const extra: i32 = if (r == 2) tzi.DaylightBias else if (r == 1) tzi.StandardBias else 0;
+        return -@as(i64, tzi.Bias + extra) * 60;
+    }
+    const t: c_long = @intCast(@divFloor(now_ms, std.time.ms_per_s));
+    var tm: Tm = undefined;
+    return if (localtime_r(&t, &tm) != null) tm.gmtoff else 0;
+}
+
 const testing = std.testing;
+
+test "status groups put needs-you first, then today, then earlier (status_groups_put_needs_you_first_then_today_then_earlier)" {
+    const now: i64 = 1_793_000_000_000;
+    const old = now - 3 * std.time.ms_per_day;
+    try testing.expectEqual(StatusGroup.needs, statusGroup(.awaiting_input, old, now, 0));
+    try testing.expectEqual(StatusGroup.needs, statusGroup(.errored, now, now, 0));
+    try testing.expectEqual(StatusGroup.today, statusGroup(.completed, now, now, 0));
+    try testing.expectEqual(StatusGroup.earlier, statusGroup(.idle, old, now, 0));
+    // Midnight is local: an hour before UTC midnight is yesterday at UTC+0
+    // and today at UTC+2.
+    const midnight = @divFloor(now, std.time.ms_per_day) * std.time.ms_per_day;
+    const before = midnight - std.time.ms_per_hour;
+    try testing.expectEqual(StatusGroup.earlier, statusGroup(.idle, before, midnight + std.time.ms_per_hour, 0));
+    try testing.expectEqual(StatusGroup.today, statusGroup(.idle, before, midnight + std.time.ms_per_hour, 2 * 3600));
+    try testing.expect(@backingInt(StatusGroup.needs) < @backingInt(StatusGroup.today));
+    try testing.expect(@backingInt(StatusGroup.today) < @backingInt(StatusGroup.earlier));
+    try testing.expectEqual(@as(?StatusGroup, .today), StatusGroup.fromKey("today"));
+}
 
 test "the sidebar orders by last called, and marks what finished unseen" {
     var chats = [_]Chat{
@@ -436,16 +576,31 @@ test "a chat's branch is its source context's while that says where it runs" {
     defer arena.deinit();
     const a = arena.allocator();
     const cases = [_]struct { []const u8, ?[]const u8 }{
-        .{ \\{"id":"a","cwd":"/w/x/","sourceContext":{"cwd":"/w/x","branch":"feat/one"}}
-        , "feat/one" },
-        .{ \\{"id":"a","cwd":"/w/y","sourceContext":{"cwd":"/w/x","branch":"feat/one"}}
-        , null },
-        .{ \\{"id":"a","cwd":"/w/x","sourceContextUnavailableAt":"2026-10-01T00:00:00Z","sourceContext":{"cwd":"/w/x","branch":"main"}}
-        , null },
-        .{ \\{"id":"a","cwd":"/w/x","sourceContext":{"cwd":"/w/x","branch":"  "}}
-        , null },
-        .{ \\{"id":"a","cwd":"/w/x"}
-        , null },
+        .{
+            \\{"id":"a","cwd":"/w/x/","sourceContext":{"cwd":"/w/x","branch":"feat/one"}}
+            ,
+            "feat/one",
+        },
+        .{
+            \\{"id":"a","cwd":"/w/y","sourceContext":{"cwd":"/w/x","branch":"feat/one"}}
+            ,
+            null,
+        },
+        .{
+            \\{"id":"a","cwd":"/w/x","sourceContextUnavailableAt":"2026-10-01T00:00:00Z","sourceContext":{"cwd":"/w/x","branch":"main"}}
+            ,
+            null,
+        },
+        .{
+            \\{"id":"a","cwd":"/w/x","sourceContext":{"cwd":"/w/x","branch":"  "}}
+            ,
+            null,
+        },
+        .{
+            \\{"id":"a","cwd":"/w/x"}
+            ,
+            null,
+        },
     };
     for (cases) |case| {
         const v = try json.parseFromSliceLeaky(json.Value, a, case[0], .{});
@@ -464,4 +619,21 @@ test "the row's own branch is kept apart from the source context's" {
     const ch = parseChat(a, v.object).?;
     try std.testing.expectEqualStrings("feat/footer", ch.row_branch.?);
     try std.testing.expect(ch.branch == null);
+}
+
+test "retention499 session decoding retains durable completion origin and old host defaults" {
+    var sessions: Sessions = .init(std.testing.allocator);
+    defer sessions.deinit();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const value = try json.parseFromSliceLeaky(json.Value, arena.allocator(),
+        \\[{"chatId":"peer","status":"idle","lastCompletedTurn":"result-a","lastCompletedPeerOnly":true},{"chatId":"human","status":"working","lastCompletedTurn":"result-b"},{"chatId":"old-host","status":"idle"}]
+    , .{});
+    try sessions.replace(value);
+    try std.testing.expectEqualStrings("result-a", sessions.items[0].last_completed_turn.?);
+    try std.testing.expect(sessions.items[0].last_completed_peer_only);
+    try std.testing.expectEqualStrings("result-b", sessions.items[1].last_completed_turn.?);
+    try std.testing.expect(!sessions.items[1].last_completed_peer_only);
+    try std.testing.expect(sessions.items[2].last_completed_turn == null);
+    try std.testing.expect(!sessions.items[2].last_completed_peer_only);
 }

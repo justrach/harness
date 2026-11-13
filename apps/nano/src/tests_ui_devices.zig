@@ -94,3 +94,93 @@ test "Settings › Devices: Rename sends the new name, Remove asks once more, th
     t.advance(1.6);
     try testing.expect(!t.hasText("Copied"));
 }
+
+test "Settings › Devices: only a remote computer has Updates, and only the open one is watched" {
+    @import("theme.zig").registerFonts();
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    a.dark = true;
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, devices, .{});
+    defer parsed.deinit();
+    try a.devices.replace(parsed.value);
+    a.device_id = try testing.allocator.dupe(u8, "studio-device-0001");
+    a.engine.state = .connected;
+    // A stream that has started and hasn't said anything yet.
+    a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{\"UpdateStatus\": {\"ok\": true}}", .{});
+    a.view.settings_open = true;
+    a.settings.section = .devices;
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 1200, .height = 780, .dark = true });
+    defer t.deinit();
+    t.settle(1);
+
+    // This device has none; the laptop does. It's offline: nothing to watch,
+    // and it says so.
+    try testing.expectEqual(@as(usize, 1), countText(&t, "Updates"));
+    try t.clickText("Updates");
+    t.settle(1);
+    try testing.expect(t.hasText("Hide updates"));
+    try testing.expect(t.containsText("Offline. Open Harness"));
+    try testing.expect(a.view.devices.updates.watch == null);
+    try testing.expect(!sentMethod(&a, "UpdateStatus"));
+    try t.clickText("Hide updates");
+    t.settle(1);
+    try testing.expect(t.hasText("Updates"));
+    try testing.expect(!t.containsText("Offline. Open Harness"));
+
+    // Online, it's watched while open, and no longer once the page is left.
+    a.devices.items[1].last_seen_ms = a.nowMs();
+    t.settle(0.1);
+    try t.clickText("Updates");
+    t.settle(0.1);
+    try testing.expect(sentMethod(&a, "UpdateStatus"));
+    try testing.expect(t.containsText("Reading this host's update status"));
+    try testing.expect(a.view.devices.updates.watch != null);
+    a.settings.section = .appearance;
+    t.settle(0.1);
+    try testing.expect(a.view.devices.updates.watch == null);
+    try testing.expectEqual(@as(usize, 0), a.view.devices.updates.device.items.len);
+}
+
+test "a press on nothing focusable hands the keys back to the composer; Escape's blur stays" {
+    @import("theme.zig").registerFonts();
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    a.dark = true;
+    a.engine.state = .connected;
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 1200, .height = 780, .dark = true });
+    defer t.deinit();
+    t.settle(1);
+    try testing.expectEqual(a.view.composer_id, t.ctx.focus);
+
+    // Empty canvas, well above the composer.
+    t.click(800, 60);
+    t.settle(0.1);
+    try testing.expectEqual(a.view.composer_id, t.ctx.focus);
+
+    _ = t.shortcut(.{ .key = ui.Shortcut.escape });
+    t.key(.escape);
+    t.settle(0.1);
+    try testing.expectEqual(@as(u64, 0), t.ctx.focus);
+}
+
+fn countText(t: *ui.Tester, s: []const u8) usize {
+    var n: usize = 0;
+    for (t.ctx.nodes.items) |node| switch (node.content) {
+        .text => |tx| {
+            if (std.mem.eql(u8, tx.str, s)) n += 1;
+        },
+        else => {},
+    };
+    return n;
+}
+
+fn sentMethod(a: *App, method: []const u8) bool {
+    var needle_buf: [64]u8 = undefined;
+    const needle = std.fmt.bufPrint(&needle_buf, "\"method\":\"{s}\"", .{method}) catch return false;
+    for (a.engine.sent.items) |frame| {
+        if (std.mem.indexOf(u8, frame, needle) != null) return true;
+    }
+    return false;
+}

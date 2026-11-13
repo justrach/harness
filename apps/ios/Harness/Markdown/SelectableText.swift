@@ -121,12 +121,18 @@ struct SelectableText: UIViewRepresentable {
             if wraps, !fitsContentWidth, let width = proposal.width {
                 proposedWidth = width
             } else {
-                if naturalWidth == nil {
-                    naturalWidth = ceil(text.boundingRect(
+                let measured: CGFloat
+                if let cached = naturalWidth {
+                    measured = cached
+                } else {
+                    measured = ceil(text.boundingRect(
                         with: CGSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude),
                         options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil).width)
+                    naturalWidth = measured
                 }
-                proposedWidth = wraps ? min(proposal.width ?? naturalWidth!, naturalWidth!) : naturalWidth!
+                // A content-fitting prompt must obey every wrapping proposal,
+                // including those served from the natural-width cache.
+                proposedWidth = wraps ? min(proposal.width ?? measured, measured) : measured
             }
             let width = max(1, proposedWidth)
             if let size = measurements[width] { return size }
