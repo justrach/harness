@@ -464,8 +464,6 @@ pub const App = struct {
     drafts: std.StringHashMapUnmanaged([]u8) = .empty,
     /// The settings shared with the GPUI app (`ui-settings.json`).
     settings: @import("settings.zig").Store,
-    /// Optional new-chat art; its VM and per-pane trees never read chat data.
-    wallpaper: @import("wallpaper.zig").State = .{},
     /// Settings › MCP servers, kept between visits.
     mcp: @import("view_settings_mcp.zig").Mcp,
     /// graff Bots: the user's standing roles, and the page shown for them.
@@ -531,7 +529,6 @@ pub const App = struct {
     }
 
     pub fn deinit(a: *App) void {
-        a.wallpaper.deinit();
         a.markdown_cache.deinit();
         @import("text_buffer.zig").deinit(&a.composer);
         @import("app_surface.zig").deinit(a);

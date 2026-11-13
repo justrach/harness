@@ -1,5 +1,4 @@
-//! Host-owned choices for bundled wallpaper scripts, not a plugin installer.
-const std = @import("std");
+//! Device-local choices for native new-chat wallpaper geometry.
 const ui = @import("nanoui").ui;
 const App = @import("app.zig").App;
 const theme = @import("theme.zig");

@@ -8,9 +8,9 @@ pub fn build(b: *std.Build) void {
     const loader = b.option([]const u8, "webview2-loader", "Path to the target's WebView2Loader.dll");
     const portable = b.option(bool, "portable", "Use portable text and CPU rendering for cross-platform regression tests") orelse false;
     const nanoui_dep = if (target.result.os.tag == .windows)
-        b.dependency("nanoui", .{ .target = target, .optimize = optimize, .portable = portable, .luau = true, .webview2 = if (loader != null) "none" else "sdk" })
+        b.dependency("nanoui", .{ .target = target, .optimize = optimize, .portable = portable, .webview2 = if (loader != null) "none" else "sdk" })
     else
-        b.dependency("nanoui", .{ .target = target, .optimize = optimize, .portable = portable, .luau = true });
+        b.dependency("nanoui", .{ .target = target, .optimize = optimize, .portable = portable });
     const nanoui = nanoui_dep.module("nanoui");
     if (target.result.os.tag == .windows) {
         if (loader) |path| b.getInstallStep().dependOn(&b.addInstallBinFile(.{ .cwd_relative = path }, "WebView2Loader.dll").step);
@@ -120,7 +120,6 @@ pub fn build(b: *std.Build) void {
     const imports: []const std.Build.Module.Import = &.{
         .{ .name = "build_info", .module = info_mod },
         .{ .name = "nanoui", .module = nanoui },
-        .{ .name = "nanoui_luau", .module = nanoui_dep.module("nanoui_luau") },
         .{ .name = "http_zig", .module = http_zig },
         .{ .name = "fonts", .module = fonts },
         .{ .name = "icons_svg", .module = icons_svg },

@@ -1,10 +1,15 @@
-//! Synthetic, offscreen acceptance tests for bundled Luau wallpapers.
+//! Synthetic, offscreen acceptance tests for native wallpapers.
 const std = @import("std");
 const ui = @import("nanoui").ui;
 const App = @import("app.zig").App;
 const wall = @import("wallpaper.zig");
-const luau = @import("nanoui_luau");
 const testing = std.testing;
+
+fn hasScene(t: *ui.Tester, which: wall.Scene, dark: bool) bool {
+    const sky = ui.Color.hex(wall.layers(which, 1, 1, dark)[0].color);
+    for (t.ctx.nodes.items) |n| if (std.meta.eql(n.style.background, sky)) return true;
+    return false;
+}
 
 const Harness = struct {
     a: App,
@@ -35,28 +40,23 @@ test "wallpaper is opt-in, new-chat-only, preserves composer input and becomes q
     try h.init(true);
     defer h.deinit();
     try testing.expectEqual(wall.Scene.none, wall.scene(&h.a.settings));
-    try testing.expect(h.a.wallpaper.vm == null);
+    try testing.expect(!hasScene(&h.t, .dusk, true));
     try h.snap("before");
     h.a.settings.setText("newChatWallpaper", "dusk");
     h.t.settle(1);
-    try testing.expect(!h.a.wallpaper.failed);
-    try testing.expect(h.a.wallpaper.vm != null);
-    try testing.expect(h.a.wallpaper.evaluations > 0);
+    try testing.expect(hasScene(&h.t, .dusk, true));
     try testing.expect(h.t.hasText("What should Graff do?"));
     try h.snap("after");
-    const evaluations = h.a.wallpaper.evaluations;
     h.t.settle(1);
-    try testing.expectEqual(evaluations, h.a.wallpaper.evaluations);
     try testing.expect(!h.t.ctx.animating);
     _ = h.t.shortcut(.{ .key = 'l', .cmd = true });
     h.t.typeText("Synthetic wallpaper draft");
     try testing.expectEqualStrings("Synthetic wallpaper draft", h.a.composer.text());
     h.a.openChat("synthetic-conversation", null);
     h.t.settle(1);
-    const hidden = h.a.wallpaper.evaluations;
     h.t.moveTo(900, 200);
     h.t.settle(1);
-    try testing.expectEqual(hidden, h.a.wallpaper.evaluations);
+    try testing.expect(!hasScene(&h.t, .dusk, true));
 }
 
 test "wallpaper scenes render in both schemes and parallax stops with reduced motion" {
@@ -78,11 +78,9 @@ test "wallpaper scenes render in both schemes and parallax stops with reduced mo
             try h.snap(try std.fmt.bufPrint(&buf, "{s}-{s}", .{ @tagName(scene), if (dark) "dark" else "light" }));
             h.a.settings.setText("reduceMotion", "on");
             h.t.settle(1);
-            const count = h.a.wallpaper.evaluations;
             h.t.moveTo(1000, 210);
             h.t.settle(0.03);
             try testing.expect(!h.t.ctx.animating);
-            try testing.expectEqual(count, h.a.wallpaper.evaluations);
             h.a.settings.setText("reduceMotion", "off");
         }
     }
@@ -99,27 +97,23 @@ test "wallpaper pointer leaves to center and parallax off always holds still" {
     try testing.expectApproxEqAbs(@as(f32, 0.6125), p.y, 0.0001);
 }
 
-test "wallpaper failure shows a fallback, does not retry, and another choice recovers" {
+test "wallpaper unknown preferences stay plain and valid scene changes apply" {
     var h: Harness = undefined;
     try h.init(true);
     defer h.deinit();
-    h.a.settings.setText("newChatWallpaper", "dusk");
-    h.a.wallpaper.prepare(testing.allocator, .dusk);
-    h.a.wallpaper.vm.?.destroy();
-    h.a.wallpaper.vm = try luau.Runtime.create(testing.allocator, "return function() error('synthetic failure') end");
+    h.a.settings.setText("newChatWallpaper", "unknown-scene");
+    h.a.settings.setText("wallpaperParallax", "unknown-reach");
     h.t.settle(1);
-    try testing.expect(h.a.wallpaper.failed);
-    try testing.expect(h.t.containsText("Wallpaper unavailable"));
-    const count = h.a.wallpaper.evaluations;
-    h.t.settle(1);
-    try testing.expectEqual(count, h.a.wallpaper.evaluations);
+    try testing.expectEqual(wall.Scene.none, wall.scene(&h.a.settings));
+    try testing.expectEqual(wall.Reach.subtle, wall.reach(&h.a.settings));
+    try testing.expect(!hasScene(&h.t, .dusk, true));
+    try testing.expect(!hasScene(&h.t, .dunes, true));
     h.a.settings.setText("newChatWallpaper", "dunes");
     h.t.settle(1);
-    try testing.expect(!h.a.wallpaper.failed);
-    try testing.expect(!h.t.containsText("Wallpaper unavailable"));
+    try testing.expect(hasScene(&h.t, .dunes, true));
     h.a.settings.setText("newChatWallpaper", "none");
     h.t.settle(1);
-    try testing.expect(h.a.wallpaper.vm == null);
+    try testing.expect(!hasScene(&h.t, .dunes, true));
 }
 
 test "wallpaper settings use the actual choice controls and leave unrelated preferences alone" {

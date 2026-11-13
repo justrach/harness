@@ -50,17 +50,6 @@ teardown uses `destroyNow` after close decisions have been resolved, matching
 Windows' forced-disposal path and avoiding a vetoed-close teardown loop.
 This supplies the same dirty-document veto contract to all desktop windows.
 
-## Optional Luau bridge
-
-The new `src/luau/` module is copied unchanged from nanoui commit
-`70c33843078c64951ff526ffd5ab739a5d74ef84`, proposed in
-https://github.com/justrach/nanoui/pull/175. The corresponding opt-in build
-hook, lazy Luau dependency and Luau/Lua MIT notices are included. This is a
-narrow addition, not an upgrade of the upstream base pinned above; all local
-renderer, selection and termination changes remain in place. Harness opts
-in explicitly; NanoUI's default graph stays VM-free. The initial bridge is
-desktop-only and accepts inert trees, not host callbacks or application APIs.
-
 These changes live in this checked-in package, not an ignored download cache.
 
 To update: start with the pinned upstream distribution, retain the notices,
