@@ -36,6 +36,8 @@ pub const Edit = struct {
     base_hash: []u8,
     renew_at: f64,
     saving: bool = false,
+    finish_call: ?u64 = null,
+    renew_call: ?u64 = null,
 
     fn deinit(e: *Edit, gpa: std.mem.Allocator) void {
         gpa.free(e.row);
@@ -65,8 +67,17 @@ pub fn watch(a: *App) void {
 pub fn stop(a: *App) void {
     if (a.w_queue.id) |id| a.engine.cancel(id);
     a.w_queue = .{};
+    if (a.queue_begin_call) |id| a.engine.cancel(id);
+    a.queue_begin_call = null;
+    if (a.queue_begin) |row| a.gpa.free(row);
+    a.queue_begin = null;
     a.queue.replace(.{ .array = .init(a.gpa) }) catch {};
     if (a.queue_edit) |*e| {
+        // Replies still in flight belong to this editor, never the next
+        // chat's editor. Release the host lease without a global notice.
+        if (e.finish_call) |id| a.engine.cancel(id);
+        if (e.renew_call) |id| a.engine.cancel(id);
+        if (a.selected) |chat| a.request(requests.finishEdit(chat, e.row, e.lease, "cancel", null, null, host(a)), .of(App, a, onReleased));
         @import("app_attachments.zig").clear(a);
         e.deinit(a.gpa);
         a.queue_edit = null;
@@ -86,7 +97,10 @@ pub fn deinit(a: *App) void {
 fn onQueue(a: *App, id: u64, r: rpc.Reply) void {
     if (a.w_queue.id != id) return;
     switch (r) {
-        .item => |v| a.queue.replace(@import("queue.zig").items(v)) catch {},
+        .item => |v| {
+            a.queue.replace(@import("queue.zig").items(v)) catch {};
+            if (a.selected) |chat| @import("app_send_feedback.zig").syncRemote(a, chat, v);
+        },
         .done, .err => a.w_queue = .{ .retry_at = a.now + 2 },
         .ok => {},
     }
@@ -368,6 +382,13 @@ fn onRemoved(a: *App, _: u64, r: rpc.Reply) void {
 /// "Send now": interrupts the turn and sends the row.
 pub fn sendNow(a: *App, row: []const u8) void {
     const chat = a.selected orelse return;
+    // Keyboard shortcuts and stale row callbacks share the same authority
+    // checks as the tray. Never skip a held newest row for an older one.
+    if (!a.caps.actions) return;
+    const queued = for (a.queue.items) |item| {
+        if (std.mem.eql(u8, item.id, row)) break item;
+    } else return;
+    if (queued.gate != .none) return;
     a.request(requests.sendQueuedNow(chat, row, host(a)), .of(App, a, onSent));
 }
 
@@ -386,14 +407,24 @@ fn acked(v: std.json.Value, field: []const u8) bool {
     return f == .bool and f.bool;
 }
 
+fn peerRow(a: *const App, row: []const u8) bool {
+    for (a.queue.items) |queued| {
+        if (std.mem.eql(u8, queued.id, row)) return !@import("peer_message.zig").editable(queued.text, queued.agent);
+    }
+    return false;
+}
+
 pub fn beginEdit(a: *App, row: []const u8) void {
     const chat = a.selected orelse return;
+    // Defend stale click handlers too, not only the current row's hidden
+    // Edit affordance. No draft/question/attachment state is touched.
+    if (peerRow(a, row)) return a.setNotice("Agent messages stay in the queue, not your composer");
     if (!a.caps.edit_lease) return a.setNotice("Update the chat host to edit queued messages safely");
     if (a.queue_edit != null or a.queue_begin != null) return;
     a.queue_begin = a.gpa.dupe(u8, row) catch return;
     var buf: [36]u8 = undefined;
     const instance = a.instanceId(&buf);
-    a.request(requests.beginEdit(chat, row, a.device_id orelse "", instance, host(a)), .of(App, a, onBegun));
+    a.queue_begin_call = a.send_(requests.beginEdit(chat, row, a.device_id orelse "", instance, host(a)), .of(App, a, onBegun));
     a.redraw();
 }
 
@@ -402,6 +433,7 @@ fn onBegun(a: *App, _: u64, r: rpc.Reply) void {
     defer {
         a.gpa.free(row);
         a.queue_begin = null;
+        a.queue_begin_call = null;
     }
     const v = switch (r) {
         .ok => |v| v,
@@ -416,14 +448,27 @@ fn onBegun(a: *App, _: u64, r: rpc.Reply) void {
     const lease = str(o, "leaseId") orelse return;
     const hash = str(o, "baseTextHash") orelse return;
     const text = str(o, "text") orelse "";
+    const typed_peer = if (str(o, "turnOrigin")) |origin| !std.mem.eql(u8, origin, "human") else false;
+    // Acquired text is authoritative and the row may have changed while
+    // the request was in flight. Release its lease before suspending the
+    // question or stashing/replacing a person's draft.
+    if (peerRow(a, row) or !@import("peer_message.zig").editable(text, typed_peer)) {
+        if (a.selected) |chat| a.request(requests.finishEdit(chat, row, lease, "cancel", null, null, host(a)), .of(App, a, App.onNotice));
+        a.setNotice("Agent messages stay in the queue, not your composer");
+        return;
+    }
+    // The question's page and answer stay parked under its request while
+    // the lease editor exclusively owns the composer.
+    @import("app_question.zig").suspendQuestion(a);
+    a.draft_stash.clearRetainingCapacity();
+    a.draft_stash.appendSlice(a.gpa, a.prompt_nav.draftOf(a.composer.text())) catch {};
+    a.prompt_nav.retire(a);
     a.queue_edit = .{
         .row = a.gpa.dupe(u8, row) catch return,
         .lease = a.gpa.dupe(u8, lease) catch return,
         .base_hash = a.gpa.dupe(u8, hash) catch return,
         .renew_at = a.now + renew_s,
     };
-    a.draft_stash.clearRetainingCapacity();
-    a.draft_stash.appendSlice(a.gpa, a.composer.text()) catch {};
     // The acquired lease text is authoritative; metadata may also carry
     // refs for rows queued by another client. Never reupload committed refs.
     const paths = for (a.queue.items) |queued| {
@@ -441,6 +486,8 @@ fn str(o: std.json.ObjectMap, k: []const u8) ?[]const u8 {
     return if (v == .string) v.string else null;
 }
 
+fn onReleased(_: *App, _: u64, _: rpc.Reply) void {}
+
 pub const Finish = enum { commit, cancel, discard };
 
 /// Ends the edit: saves the composer's text (or, emptied, removes the
@@ -448,6 +495,7 @@ pub const Finish = enum { commit, cancel, discard };
 pub fn finishEdit(a: *App, action: Finish) void {
     const chat = a.selected orelse return;
     const e = if (a.queue_edit) |*e| e else return;
+    if (e.saving) return;
     const attachments = @import("app_attachments.zig");
     const body = std.mem.trim(u8, a.composer.text(), " \n\t");
     const attached = if (action == .commit) attachments.prompt(a, body) catch {
@@ -458,10 +506,15 @@ pub fn finishEdit(a: *App, action: Finish) void {
     const text = attached orelse body;
     const act: Finish = if (action == .commit and text.len == 0) .discard else action;
     e.saving = true;
-    a.request(requests.finishEdit(chat, e.row, e.lease, @tagName(act), if (act == .commit) text else null, if (act == .commit) e.base_hash else null, host(a)), .of(App, a, onFinished));
+    e.finish_call = 0; // synchronous not-connected callback
+    const id = a.send_(requests.finishEdit(chat, e.row, e.lease, @tagName(act), if (act == .commit) text else null, if (act == .commit) e.base_hash else null, host(a)), .of(App, a, onFinished));
+    if (a.queue_edit) |*live| live.finish_call = id;
 }
 
-fn onFinished(a: *App, _: u64, r: rpc.Reply) void {
+fn onFinished(a: *App, id: u64, r: rpc.Reply) void {
+    const edit = if (a.queue_edit) |*e| e else return;
+    if (edit.finish_call != id) return;
+    edit.finish_call = null;
     const outcome: []const u8 = switch (r) {
         .ok => |v| if (v == .object) (str(v.object, "outcome") orelse "") else "",
         .err => {
@@ -482,6 +535,7 @@ fn onFinished(a: *App, _: u64, r: rpc.Reply) void {
             "The edit lease changed; your text is still in the editor");
     }
     @import("app_attachments.zig").clear(a);
+    if (edit.renew_call) |call| a.engine.cancel(call);
     if (a.queue_edit) |*e| e.deinit(a.gpa);
     a.queue_edit = null;
     a.composer.set(a.draft_stash.items);
@@ -495,11 +549,16 @@ pub fn tick(a: *App, now: f64) ?f64 {
     if (now < e.renew_at) return e.renew_at;
     e.renew_at = now + renew_s;
     const chat = a.selected orelse return null;
-    a.request(requests.renewEdit(chat, e.row, e.lease, host(a)), .of(App, a, onRenewed));
+    if (e.renew_call) |id| a.engine.cancel(id);
+    e.renew_call = 0;
+    e.renew_call = a.send_(requests.renewEdit(chat, e.row, e.lease, host(a)), .of(App, a, onRenewed));
     return e.renew_at;
 }
 
-fn onRenewed(a: *App, _: u64, r: rpc.Reply) void {
+fn onRenewed(a: *App, id: u64, r: rpc.Reply) void {
+    const e = if (a.queue_edit) |*edit| edit else return;
+    if (e.renew_call != id) return;
+    e.renew_call = null;
     switch (r) {
         .ok => |v| if (v == .object) {
             const o = str(v.object, "outcome") orelse "";

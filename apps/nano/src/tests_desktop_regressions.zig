@@ -39,6 +39,7 @@ fn fileUrl(tmp: *std.testing.TmpDir, gpa: std.mem.Allocator) ![]u8 {
     defer gpa.free(relative);
     const base = try std.Io.Dir.cwd().realPathFileAlloc(testing.io, relative, gpa);
     defer gpa.free(base);
+    if (@import("builtin").os.tag == .windows) return std.fs.path.join(gpa, &.{ base, "synthetic image.png" });
     return std.fmt.allocPrint(gpa, "file://{s}/synthetic%20image.png", .{base});
 }
 
@@ -285,15 +286,18 @@ test "desktop issues currency-safe math delimiters and native equation formattin
     try testing.expectEqualStrings("Plans cost $5 and $10 per seat, or $a + b$ in code.", prose[0].paragraph.text);
 
     const inline_math = md.parse(arena.allocator(), "Energy is $E = mc^2$ and $\\frac{a+b}{2} \\le \\sqrt{\\alpha}$.", pal);
-    try testing.expectEqualStrings("Energy is E = mc² and (a+b)/2 ≤ √α.", inline_math[0].paragraph.text);
+    try testing.expectEqualStrings("Energy is $E = mc^2$ and $\\frac{a+b}{2} \\le \\sqrt{\\alpha}$.", inline_math[0].paragraph.text);
+    try testing.expectEqual(@as(usize, 2), inline_math[0].paragraph.maths.len);
+    try testing.expectEqualStrings("E = mc^2", inline_math[0].paragraph.maths[0].source);
 
     const display_math = md.parse(arena.allocator(), "$$\n\\int_0^\\infty x^2 dx\n$$", pal);
     try testing.expectEqual(@as(usize, 1), display_math.len);
     try testing.expect(display_math[0] == .math);
-    try testing.expectEqualStrings("∫₀^∞ x² dx", display_math[0].math.text);
+    try testing.expectEqualStrings("\\int_0^\\infty x^2 dx", display_math[0].math.maths[0].source);
+    try testing.expect(display_math[0].math.maths[0].display);
 }
 
-test "desktop issues startup restoreTabs fences dirty boot draft and skips archived chats (#797)" {
+test "desktop issues startup restoreTabs fences dirty boot draft and preserves saved archived references (#797, #523)" {
     var h: Harness = undefined;
     try h.init();
     defer h.deinit();
@@ -317,12 +321,14 @@ test "desktop issues startup restoreTabs fences dirty boot draft and skips archi
     try testing.expect(h.a.selected == null);
     try testing.expectEqualStrings("Draft typed before WatchChats arrived", h.a.composer.text());
 
-    // 2. Clean boot canvas restores only non-archived chats.
+    // 2. Explicitly saved references include archived chats (#523), without
+    // unarchiving them. Only an automatic recent-chat fallback is live-only.
     h.a.composer.clear();
     h.a.tabs_ready = false;
     h.a.restoreTabs();
-    try testing.expectEqual(@as(usize, 1), h.a.tabs.items.items.len);
-    try testing.expectEqualStrings("chat-b", h.a.selected.?);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+    try testing.expectEqualStrings("chat-archived", h.a.selected.?);
+    try testing.expect(h.a.findChat("chat-archived").?.archived);
 }
 
 test "desktop issues project picker, model picker, reopenClosedTab shortcuts and sidebar tooltips (#792, #793, #794)" {

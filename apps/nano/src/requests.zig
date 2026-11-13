@@ -131,6 +131,22 @@ pub fn listModels(harness: []const u8) Request(struct { harness: []const u8 }) {
     return .{ .method = "ListModels", .params = .{ .harness = harness } };
 }
 
+/// Scope is the engine's existing catalog_root contract, not a local guessed cwd.
+pub const CatalogScope = struct {
+    harness: []const u8,
+    chatId: ?[]const u8 = null,
+    spaceId: ?[]const u8 = null,
+    path: ?[]const u8 = null,
+};
+
+pub fn listCommands(scope: CatalogScope) Request(CatalogScope) {
+    return .{ .method = "ListCommands", .params = scope };
+}
+
+pub fn listSkills(scope: CatalogScope) Request(CatalogScope) {
+    return .{ .method = "ListSkills", .params = scope };
+}
+
 // ── commands ─────────────────────────────────────────────────────────
 
 pub const RunRequest = struct {
@@ -179,6 +195,10 @@ pub fn dismissInput(chat_id: []const u8, request_id: []const u8) Request(struct 
 
 pub fn watchQueue(chat_id: []const u8) Request(struct { chatId: []const u8 }) {
     return .{ .method = "WatchQueue", .params = .{ .chatId = chat_id } };
+}
+
+pub fn watchToolProgress(chat_id: []const u8) Request(struct { chatId: []const u8 }) {
+    return .{ .method = "WatchToolProgress", .params = .{ .chatId = chat_id } };
 }
 
 pub fn queueMessage(chat_id: []const u8, text: []const u8) Request(struct { chatId: []const u8, text: []const u8, holdForTurnEnd: bool }) {
@@ -237,6 +257,33 @@ pub fn searchFiles(chat_id: []const u8, query: []const u8, include_ignored: bool
 
 pub fn readFile(chat_id: []const u8, path: []const u8, host: ?[]const u8) Request(struct { chatId: []const u8, path: []const u8, targetDeviceId: ?[]const u8 }) {
     return .{ .method = "ReadWorkspaceFile", .params = .{ .chatId = chat_id, .path = path, .targetDeviceId = host } };
+}
+
+pub const WorkspaceFileRead = struct {
+    chatId: ?[]const u8 = null,
+    spaceId: ?[]const u8 = null,
+    checkoutPath: ?[]const u8 = null,
+    targetDeviceId: ?[]const u8 = null,
+    path: []const u8,
+};
+pub fn readWorkspaceFile(params: WorkspaceFileRead) Request(WorkspaceFileRead) {
+    return .{ .method = "ReadWorkspaceFile", .params = params };
+}
+
+pub const WorkspaceFileWrite = struct {
+    chatId: ?[]const u8 = null,
+    spaceId: ?[]const u8 = null,
+    checkoutPath: ?[]const u8 = null,
+    targetDeviceId: ?[]const u8 = null,
+    path: []const u8,
+    text: []const u8,
+    expectedCheckoutId: []const u8,
+    expectedContentHash: []const u8,
+    encoding: []const u8,
+    lineEnding: []const u8,
+};
+pub fn writeWorkspaceFile(params: WorkspaceFileWrite) Request(WorkspaceFileWrite) {
+    return .{ .method = "WriteWorkspaceFile", .params = params };
 }
 
 pub fn watchGit(space_id: []const u8, checkout: []const u8, host: ?[]const u8) Request(struct { spaceId: []const u8, checkoutPath: []const u8, targetDeviceId: ?[]const u8 }) {

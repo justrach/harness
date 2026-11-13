@@ -5,7 +5,16 @@ pub fn build(b: *std.Build) void {
     // GNU target still selects the matching Rust target below, never MSVC.
     const target = b.standardTargetOptions(.{ .default_target = if (b.graph.host.result.os.tag == .windows) .{ .abi = .msvc } else .{} });
     const optimize = b.standardOptimizeOption(.{});
-    const nanoui = b.dependency("nanoui", .{ .target = target, .optimize = optimize }).module("nanoui");
+    const loader = b.option([]const u8, "webview2-loader", "Path to the target's WebView2Loader.dll");
+    const portable = b.option(bool, "portable", "Use portable text and CPU rendering for cross-platform regression tests") orelse false;
+    const nanoui_dep = if (target.result.os.tag == .windows)
+        b.dependency("nanoui", .{ .target = target, .optimize = optimize, .portable = portable, .webview2 = if (loader != null) "none" else "sdk" })
+    else
+        b.dependency("nanoui", .{ .target = target, .optimize = optimize, .portable = portable });
+    const nanoui = nanoui_dep.module("nanoui");
+    if (target.result.os.tag == .windows) {
+        if (loader) |path| b.getInstallStep().dependOn(&b.addInstallBinFile(.{ .cwd_relative = path }, "WebView2Loader.dll").step);
+    }
     // HTTPS with ALPN h2 for what the app asks the network itself (releases,
     // the edge); the engine's own socket is a local WebSocket (src/ws.zig).
     const http_zig = b.dependency("http_zig", .{ .target = target, .optimize = optimize }).module("http_zig");
@@ -125,6 +134,13 @@ pub fn build(b: *std.Build) void {
         .strip = optimize != .debug,
         .imports = imports,
     }) });
+    if (target.result.os.tag == .windows) {
+        exe.subsystem = .windows;
+        // Rust's native-math archive brings the MSVC CRT. Keep its normal
+        // main startup while suppressing the console window; the GUI CRT
+        // default would instead require a WinMain entry point.
+        if (target.result.abi == .msvc) exe.entry = .{ .symbol_name = "mainCRTStartup" };
+    }
     b.installArtifact(exe);
     const run = b.addRunArtifact(exe);
     run.addPassthruArgs();
@@ -135,14 +151,16 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
+        .strip = optimize != .debug,
         .imports = imports,
     }) });
     // The vectors the Rust side runs too (protocol/desktop, at the repo root).
-    const protocol = b.root.joinString(b.allocator, "../../protocol/desktop") catch @panic("OOM");
+    const test_data = b.option([]const u8, "test-data-root", "Repository fixture root on a separate test runner");
+    const protocol = if (test_data) |root| b.pathJoin(&.{ root, "protocol/desktop" }) else b.root.joinString(b.allocator, "../../protocol/desktop") catch @panic("OOM");
     const opts = b.addOptions();
     opts.addOption([]const u8, "protocol_dir", protocol);
     // And the app rules the phones share (apps/parity/vectors).
-    opts.addOption([]const u8, "vectors_dir", b.root.joinString(b.allocator, "../parity/vectors") catch @panic("OOM"));
+    opts.addOption([]const u8, "vectors_dir", if (test_data) |root| b.pathJoin(&.{ root, "apps/parity/vectors" }) else b.root.joinString(b.allocator, "../parity/vectors") catch @panic("OOM"));
     tests.root_module.addOptions("parity_options", opts);
     const test_step = b.step("test", "Run harness-nano tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
@@ -154,6 +172,7 @@ pub fn build(b: *std.Build) void {
     math_tests.addArg("--target-dir");
     math_tests.addDirectoryArg(math_target);
     test_step.dependOn(&math_tests.step);
+    b.step("test-build", "Build tests for a separate Windows or native runner").dependOn(&b.addInstallArtifact(tests, .{}).step);
 
     // `zig build snap -- scene.json out-dir`: the window drawn offscreen
     // from a made-up scene, a PNG per step asked for (src/snap.zig).

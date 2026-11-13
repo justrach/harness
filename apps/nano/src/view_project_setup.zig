@@ -137,6 +137,9 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
     });
     const card = kit.shadowLg(ui.div(c).w(@min(460, @max(0, c.size.w - 32))).maxH(@max(0, c.size.h - 32)).p(20).column().rounded(16).bg(k.overlay).border(k.border).borderW(1).scrollY()).motion(reveal);
     defer card.end();
+    // A title, padding or other non-control child belongs to the card,
+    // not the full-window scrim. Register the card before hit testing it.
+    _ = card.interaction();
     if (s.step == .details) details(c, a, k) else browser(c, a, k);
     // Match modal dismissal: outside the browser returns to the draft;
     // outside Details cancels, and nothing dismisses an in-flight create.
@@ -225,8 +228,8 @@ fn browser(c: *ui.Context, a: *App, k: theme.Colors) void {
     {
         const bar = ui.div(c).row().wFull().gap(4).itemsCenter();
         defer bar.end();
-        if (button(c, k, "Back", true, false, null)) {
-            flow.details(a);
+        if (button(c, k, if (s.purpose == .starting_folder) "Cancel" else "Back", true, false, null)) {
+            if (s.purpose == .starting_folder) flow.dismiss(a) else flow.details(a);
             return;
         }
         if (button(c, k, "Devices", true, false, null)) {
@@ -241,7 +244,7 @@ fn browser(c: *ui.Context, a: *App, k: theme.Colors) void {
         }
     }
     gap(c, 8);
-    ui.text(c, "Add folder", .{ .size = 15, .weight = .semibold, .color = k.text });
+    ui.text(c, if (s.purpose == .starting_folder) "New project starting folder" else "Add folder", .{ .size = 15, .weight = .semibold, .color = k.text });
     if (s.step == .folders) {
         gap(c, 8);
         if (flow.ready(s)) |l| text(c, k, l.path) else if (s.requested_path) |p| text(c, k, p);
@@ -349,8 +352,12 @@ fn browser(c: *ui.Context, a: *App, k: theme.Colors) void {
     gap(c, 12);
     const actions = ui.div(c).row().wFull().justifyEnd().gap(8);
     defer actions.end();
+    if (s.purpose == .starting_folder and button(c, k, "Use automatic", s.device != null, false, null)) {
+        flow.resetStartingFolder(a);
+        return;
+    }
     if (button(c, k, "Cancel", true, false, null)) {
-        flow.details(a);
+        if (s.purpose == .starting_folder) flow.dismiss(a) else flow.details(a);
         return;
     }
     if (button(c, k, "Use this folder", s.step == .folders and flow.ready(s) != null, true, null)) flow.useFolder(a);

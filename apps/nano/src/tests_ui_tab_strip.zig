@@ -105,7 +105,8 @@ test "unified strip: one panel has top folder tabs and a 42px content boundary" 
         try testing.expectEqual(@as(f32, 730), h.a.view.chrome.height);
         try testing.expect(!h.a.view.chrome.strip);
         const computer = h.topText(@import("strip_device.zig").localLabel()) orelse return error.MissingDeviceLabel;
-        try testing.expect(computer.x > 1000);
+        try testing.expect(computer.x > 1000 - @import("window_chrome.zig").trailing);
+        try testing.expect(computer.x + computer.w <= 1200 - @import("window_chrome.zig").trailing);
         var surface = false;
         for (h.t.ctx.nodes.items) |node| {
             if (node.style.radius == 10 and @abs(node.rect.y - 42) < 0.1 and node.rect.x >= h.a.view.sidebar_width) surface = true;

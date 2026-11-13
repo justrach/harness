@@ -61,7 +61,7 @@ fn look(a: *App, env: *const std.process.Environ.Map) void {
         .helper = a.gpa.dupe(u8, found.helper) catch return s.probed.store(2, .release),
     };
     s.probed.store(1, .release);
-    if (!a.offscreen) nanoui.App.after(0, a, redraw);
+    if (!a.offscreen) _ = nanoui.App.onMain(a, redraw);
 }
 
 fn redraw(ctx: ?*anyopaque) callconv(.c) void {
@@ -112,7 +112,10 @@ fn sink(ctx: *anyopaque, e: dictation.Event) void {
         .partial, .segment, .failed => |t| d.text = std.heap.page_allocator.dupe(u8, t) catch &.{},
         else => {},
     }
-    nanoui.App.after(0, d, deliver);
+    if (!nanoui.App.onMain(d, deliver)) {
+        std.heap.page_allocator.free(d.text);
+        std.heap.page_allocator.destroy(d);
+    }
 }
 
 fn deliver(ctx: ?*anyopaque) callconv(.c) void {

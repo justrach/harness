@@ -4,6 +4,10 @@ const App = @import("app.zig").App;
 const attachments = @import("app_attachments.zig");
 const testing = std.testing;
 
+test {
+    _ = @import("tests_native_drop.zig");
+}
+
 fn connected(a: *App, replies: []const u8) !void {
     a.* = .init(testing.allocator, testing.io, 1);
     a.offscreen = true;
