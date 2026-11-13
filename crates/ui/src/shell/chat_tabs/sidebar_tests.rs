@@ -462,6 +462,12 @@ fn many_tabs_scroll_instead_of_hiding_the_project_filter(cx: &mut gpui::TestAppC
         filter.top() <= sidebar_bottom * MAX_SIDEBAR_SHARE + px(40.0),
         "{filter:?}"
     );
+    // The gap belongs to the fixed chrome, not the scrolling rows.
+    let viewport = cx.debug_bounds("chat-tab-rows").unwrap();
+    assert!(
+        filter.top() - viewport.bottom() >= px(24.0),
+        "Tabs and Sessions need a persistent empty gap: {viewport:?} vs {filter:?}"
+    );
     // The active (last) tab was scrolled into view above the filter.
     let last = cx.debug_bounds("chat-tab-24").unwrap();
     assert!(
@@ -481,4 +487,9 @@ fn many_tabs_scroll_instead_of_hiding_the_project_filter(cx: &mut gpui::TestAppC
     cx.run_until_parked();
     let first = cx.debug_bounds("chat-tab-0").unwrap();
     assert!(first.top() >= px(0.0), "{first:?}");
+    let scrolled_viewport = cx.debug_bounds("chat-tab-rows").unwrap();
+    assert_eq!(
+        scrolled_viewport, viewport,
+        "scrolling must not consume the gap"
+    );
 }

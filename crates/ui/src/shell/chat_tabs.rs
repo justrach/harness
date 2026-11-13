@@ -1004,6 +1004,7 @@ impl Shell {
         // active row.
         let rows = div()
             .id("chat-tab-rows")
+            .debug_selector(|| "chat-tab-rows".into())
             .min_h_0()
             .overflow_y_scroll()
             .track_scroll(&self.chat_tab_scroll)
@@ -1020,7 +1021,9 @@ impl Shell {
                 .max_h(gpui::relative(MAX_SIDEBAR_SHARE))
                 .mx(px(10.0))
                 .mt(px(4.0))
-                .mb(px(6.0))
+                // Keep an empty gap above the Sessions filter, outside the
+                // scrolling/fading viewport so rows can never fill it.
+                .mb(px(24.0))
                 .flex()
                 .flex_col()
                 .gap(px(2.0))
