@@ -1070,6 +1070,7 @@ fn settleSelectionPostTree(a: *App, c: *ui.Context) void {
                 }
             }
         }
+        advanceSelectionScroll(a, c, owner);
         if (c.selection.dragging and c.selection.anchor != null and !anySelectableLeafContains(c, c.input.mouse)) {
             if (findNearestSelectableLeaf(c, c.input.mouse)) |leaf| {
                 c.selection.focus = .{
@@ -1115,6 +1116,47 @@ fn settleSelectionPostTree(a: *App, c: *ui.Context) void {
             c.copy_done = true;
         }
     }
+}
+
+/// Move only the scroll surface that accepted this selection. Pointer
+/// capture can carry the drag below the composer or above the window;
+/// scheduling frames keeps it moving without more mouse-move events.
+fn advanceSelectionScroll(a: *App, c: *ui.Context, owner: *@import("selection_owner.zig").State) void {
+    if (!c.window_focused or !c.selection.dragging or c.selection.anchor == null or owner.surface == 0) return;
+    const dx = c.input.mouse.x - c.selection.drag_press.x;
+    const dy = c.input.mouse.y - c.selection.drag_press.y;
+    if (!c.selection.moved and dx * dx + dy * dy < 9) return;
+    if (owner.scroll_time != null and owner.scroll_time.? == c.time) return;
+    const viewport = for (c.nodes.items, 0..) |n, index| {
+        if (n.id != owner.surface or !n.style.scroll) continue;
+        var visible = c.rects.get(n.id) orelse return;
+        var ix: u32 = @intCast(index);
+        while (ix != 0) {
+            ix = c.nodes.items[ix].parent;
+            const parent = c.nodes.items[ix];
+            if (parent.style.scroll or parent.style.clip or ix == 0) {
+                if (c.rects.get(parent.id)) |clip| visible = intersectRect(visible, clip);
+            }
+        }
+        break visible;
+    } else return;
+    const at = c.scroll.get(owner.surface) orelse 0;
+    const maximum = c.scroll_max.get(owner.surface) orelse return;
+    const next = @import("selection_owner.zig").nextScroll(viewport, c.input.mouse, at, maximum, c.frame_time);
+    if (next == at) return;
+    owner.scroll_time = c.time;
+    c.scroll.put(c.gpa, owner.surface, next) catch return;
+    c.scroll_follow.put(c.gpa, owner.surface, false) catch {};
+    // Selection must not re-enable follow-end when it reaches the bottom,
+    // or race a rail/streaming glide that was targeting the same surface.
+    c.scroll_seen.put(c.gpa, owner.surface, next) catch {};
+    _ = c.scroll_cap.remove(owner.surface);
+    if (a.view.rail.glide) |glide| if (glide.box == owner.surface) {
+        a.view.rail.glide = null;
+    };
+    c.selection.moved = true;
+    c.changed = true;
+    c.frameIn(1.0 / 60.0);
 }
 
 /// Paint intentionally skips offscreen lines. Keep the gesture's reading
