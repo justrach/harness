@@ -5,6 +5,7 @@ test {
     _ = @import("workspace.zig");
     _ = @import("transcript.zig");
     _ = @import("engine.zig");
+    _ = @import("window_chrome.zig");
     _ = @import("app.zig");
     _ = @import("rules.zig");
     _ = @import("motion_rules.zig");
@@ -15,6 +16,8 @@ test {
     _ = @import("prompt_history.zig");
     _ = @import("engine_start.zig");
     _ = @import("diff.zig");
+    _ = @import("tests_diff_availability.zig");
+    _ = @import("tests_link_actions.zig");
     _ = @import("wizard.zig");
     _ = @import("termlog.zig");
     _ = @import("parity.zig");

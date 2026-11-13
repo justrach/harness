@@ -276,6 +276,16 @@ try {
     ]);
     assert.equal(await fs.readFile(path.join(project, 'notes.txt'), 'utf8'), 'SYNTHETIC_EXPLICIT_FILE_EDIT', 'Explicit editor Save did not publish the intended file through the real engine');
   });
+  await checked('plain-folder working-tree diff stops loading and explains Git is unavailable (#750)', async () => {
+    await assert.rejects(fs.stat(path.join(project, '.git')), { code: 'ENOENT' }, 'The fixture must remain a plain folder');
+    await assert.rejects(rpc.call('GetCheckoutDiff', { cwd: project, mode: 'workingTree' }), /not a git repository/i);
+    await ui('plain-folder-diff-unavailable', alpha, [
+      'chord:cmd+l', 'type:/diff', 'click:Open changes', 'live:2',
+      'click:This folder is not a Git repository. Working-tree diffs require a Git checkout.',
+    ]);
+    await assert.rejects(fs.stat(path.join(project, '.git')), { code: 'ENOENT' }, 'Reviewing changes must not initialize Git');
+    assert.equal(await fs.readFile(path.join(project, 'notes.txt'), 'utf8'), 'SYNTHETIC_EXPLICIT_FILE_EDIT', 'The plain-folder edit must be preserved');
+  });
   await fs.writeFile(path.join(out, 'results.json'), JSON.stringify({ passed: true, engine: 'real local IPC', agent: 'mock', personalData: false, checks }, null, 2) + '\n');
   console.log(`Synthetic end-to-end evidence: ${path.relative(root, out)}`);
 } catch (error) {

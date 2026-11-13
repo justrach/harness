@@ -163,15 +163,35 @@ pub const Browser = struct {
     }
 };
 
+pub const LinkOwner = Source;
+
+pub fn linkOwner(a: *const App, parent: []const u8, url: []const u8) ?LinkOwner {
+    if (!web.allowedNavigation(url)) return null;
+    return source(a, parent);
+}
+
+/// Injectable OS boundary; tests record the destination without opening a browser.
+pub var open_external_url: *const fn ([]const u8) bool = nanoui.shell.openUrl;
+
+pub fn openInternalLink(a: *App, parent: []const u8, url: []const u8) void {
+    if (linkOwner(a, parent, url) == null) return;
+    open(a, parent, url, null);
+}
+
+pub fn openExternalLink(a: *App, parent: []const u8, url: []const u8) void {
+    if (linkOwner(a, parent, url) == null) return;
+    _ = open_external_url(url);
+}
+
 /// Transcript links are explicit HTTP(S), not address-bar guesses. A bad
 /// link never falls through to an OS opener or a privileged URL scheme.
 pub fn openLink(a: *App, parent: []const u8, url: []const u8) void {
-    if (!web.allowedNavigation(url) or source(a, parent) == null) return;
+    if (linkOwner(a, parent, url) == null) return;
     if (!builtin.is_test and a.window != null and !a.offscreen) {
-        _ = nanoui.shell.openUrl(url);
+        openExternalLink(a, parent, url);
         return;
     }
-    open(a, parent, url, null);
+    openInternalLink(a, parent, url);
 }
 
 pub fn openBlank(a: *App) void {

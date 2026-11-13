@@ -294,3 +294,75 @@ test "desktop issues failed tool keeps red title and expandable error details" {
     try testing.expect(h.t.containsText("1 failed"));
     try testing.expect(h.a.transcript.entries.items[1].parts.items[1].is_error);
 }
+
+test "agent rows use task labels and leave room for descenders in narrow panes" {
+    const Fixture = struct {
+        a: App,
+        dark: bool = true,
+        fn view(f: *@This(), c: *ui.Context) void {
+            const k = @import("theme.zig").colors(f.dark);
+            const box = ui.div(c).column().sizeFull().bg(k.background).p(8);
+            defer box.end();
+            const entry = &f.a.transcript.entries.items[0];
+            for (entry.parts.items, 0..) |*part, i| {
+                @import("view_tool_tree.zig").row(c, &f.a, k, entry, part, i + 1 == entry.parts.items.len, "synthetic-parent");
+            }
+        }
+    };
+    @import("theme.zig").registerFonts();
+    var f: Fixture = .{ .a = .init(testing.allocator, testing.io, 1) };
+    defer f.a.deinit();
+    f.a.offscreen = true;
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"reply","role":"assistant","status":"complete","parts":[
+        \\ {"id":"spawn","kind":"tool","resolved":true,"subagentRef":"synthetic-child","subagentStatus":"running","call":{"kind":"unknown","name":"Agent: ## Context\nSynthetic background","input":{"description":"Check glyphs"}}},
+        \\ {"id":"wait","kind":"tool","resolved":true,"isError":true,"call":{"kind":"unknown","name":"Wait for agent 7: ## Context","input":{"description":"Check glyphs"}}}]}]}
+    , .{});
+    defer parsed.deinit();
+    try f.a.transcript.apply(parsed.value);
+    for ([_]bool{ true, false }) |dark| {
+        f.dark = dark;
+        var t: ui.Tester = undefined;
+        try t.init(testing.allocator, .init(&f, Fixture.view), .{ .width = 300, .height = 110, .dark = dark });
+        defer t.deinit();
+        t.settle(0.2);
+        if (dark) if (std.c.getenv("NANO_AGENT_ROWS_SNAPSHOT")) |path| try t.screenshot(std.mem.span(path));
+        try testing.expect(!t.containsText("## Context"));
+        try testing.expect(t.hasText("Check glyphs"));
+        for (t.ctx.nodes.items) |node| switch (node.content) {
+            .text => |text| {
+                if (std.mem.eql(u8, text.str, "Agent") or std.mem.eql(u8, text.str, "Waiting on")) {
+                    try testing.expect(text.style.line_height >= 20);
+                    try testing.expect(node.rect.h >= 20);
+                }
+            },
+            else => {},
+        };
+        t.resize(240, 110);
+        t.settle(0.2);
+        try testing.expect(!t.containsText("## Context"));
+        try testing.expect(t.hasText("Waiting on"));
+        var elided = false;
+        for (t.ctx.nodes.items) |node| switch (node.content) {
+            .text => |text| if (std.mem.endsWith(u8, text.str, "…")) {
+                elided = true;
+            },
+            else => {},
+        };
+        try testing.expect(elided);
+    }
+}
+
+test "a newly mounted agent title settles to its actual available width" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"wide-answer","role":"assistant","status":"complete","parts":[
+        \\ {"id":"wide-worker","kind":"tool","resolved":true,"subagentRef":"synthetic-wide-child","subagentStatus":"done","call":{"kind":"mcp","server":"synthetic","tool":"Agent","input":{"description":"Review synthetic glyph clipping"}}}]}]}
+    , .{});
+    defer parsed.deinit();
+    try h.a.transcript.apply(parsed.value);
+    h.t.settle(0.3);
+    try testing.expect(h.t.hasText("Review synthetic glyph clipping"));
+}

@@ -268,7 +268,7 @@ test "composer multiline geometry stays bottom anchored on every frame in drafts
             },
             else => {},
         }
-        if (scenario == .narrow_docked or scenario == .narrow_draft) h.t.resize(600, 320);
+        if (scenario == .narrow_docked or scenario == .narrow_draft) h.t.resize(600 + @import("window_chrome.zig").trailing, 320);
         h.t.settle(1);
         h.t.textOps(&.{.{ .insert = "one suffix" }});
         h.t.settle(1);

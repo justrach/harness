@@ -180,6 +180,7 @@ fn rich(c: *ui.Context, in: md.Inline, style: ui.TextStyle) void {
             const hit = @import("view_tooltip.zig").on(ui.div(c).absolute().offset(rect.x - origin.x + x, rect.y - origin.y + @as(f32, @floatFromInt(row)) * line_h).size(@max(right - x, 1), line_h), k, .{ .text = link.url });
             defer hit.end();
             const action = c.interact(hit.index, .{ .focusable = true });
+            if (link_owner) |owner| @import("view_link_menu.zig").track(c, owner.app, owner.parent, link.url, hit.index, action.right_clicked or action.secondary_clicked);
             const activate = action.clicked or (action.focused and (c.shortcut(.{ .key = ui.Shortcut.enter }) or c.shortcut(.{ .key = ' ' })));
             if (activate) {
                 if (link_owner) |owner| {

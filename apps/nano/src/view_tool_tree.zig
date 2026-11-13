@@ -141,19 +141,24 @@ fn rowImpl(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
         if (has_detail and head.clicked()) a.view.toggleGroup(a.gpa, detail_key, p.kind == .reasoning);
         if (c.rects.get(c.node(head.index).id)) |rect| chrome.wash(c, k, result, rect.w, rules.row_height - 4, arrival.row.wash(c.time, c.reduced_motion));
         const color = if (p.is_error) k.danger else if (has_detail and head.hovered()) k.text else k.muted;
-        ui.text(c, if (p.kind == .reasoning) "Thought process" else p.chip, kit.style(c, 15, 18, .{ .weight = if (p.agent) .medium else .regular, .color = color }));
+        ui.text(c, if (p.kind == .reasoning) "Thought process" else p.chip, kit.style(c, 15, 20, .{ .weight = if (p.agent) .medium else .regular, .color = color }));
         {
-            const detail = ui.div(c).row().grow().w(0).clip().itemsCenter();
+            const detail = ui.div(c).row().grow().w(0).h(rules.row_height - 4).clip().itemsCenter();
             c.node(detail.index).id = header_text_id;
             c.node(detail.index).layout_dependent = true;
             defer detail.end();
             const rect = c.rects.get(c.node(detail.index).id);
+            // The first frame only has an estimate. Schedule the measured
+            // frame even for settled rows, or a wide pane keeps a 160pt title.
+            if (rect == null) c.animationFrame();
             const room = if (rect) |b| b.w else 160;
-            const raw = if (p.agent and p.text.items.len == 0) p.subagent_title else firstLine(p.text.items);
+            const raw = if (p.agent) (if (p.subagent_title.len > 0) p.subagent_title else "subagent") else firstLine(p.text.items);
             if (p.path.len > 0) {
                 const name = file_icons.basename(p.path);
                 fileBadge(c, a, k, p.path, name, room, parent);
-            } else kit.fadeText(c, raw, kit.style(c, if (ordinary) 12 else 15, 18, .{ .mono = ordinary, .color = k.muted }), @max(room, 0));
+            } else if (p.agent) {
+                kit.ellipsisText(c, raw, kit.style(c, 15, 20, .{ .color = k.muted }), @max(room, 0));
+            } else kit.fadeText(c, raw, kit.style(c, if (ordinary) 12 else 15, if (ordinary) 18 else 20, .{ .mono = ordinary, .color = k.muted }), @max(room, 0));
             if (running and !c.reduced_motion) kit.loaderFrame(c, 0.080);
         }
         // Reserving a real end column prevents a long command/path from
@@ -282,6 +287,7 @@ fn textLineWithLinks(c: *ui.Context, a: ?*App, parent: ?[]const u8, k: theme.Col
         );
         defer hit.end();
         const action = c.interact(hit.index, .{ .focusable = true });
+        if (a) |app| @import("view_link_menu.zig").track(c, app, parent, url, hit.index, action.right_clicked or action.secondary_clicked);
         const activate = action.clicked or (action.focused and (c.shortcut(.{ .key = ui.Shortcut.enter }) or c.shortcut(.{ .key = ' ' })));
         if (activate) {
             if (a) |app| {

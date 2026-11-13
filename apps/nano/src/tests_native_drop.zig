@@ -67,6 +67,9 @@ fn fileUrl(tmp: *std.testing.TmpDir) ![]u8 {
     defer testing.allocator.free(relative);
     const path = try std.Io.Dir.cwd().realPathFileAlloc(testing.io, relative, testing.allocator);
     defer testing.allocator.free(path);
+    // Windows native drops supply absolute paths, not file://C:\\... URLs
+    // (which would incorrectly name C: as a remote authority).
+    if (@import("builtin").os.tag == .windows) return testing.allocator.dupe(u8, path);
     return std.fmt.allocPrint(testing.allocator, "file://{s}", .{path});
 }
 
@@ -159,7 +162,7 @@ test "native drop activates stable inactive chat and uploads files and images ex
     h.a.engine.state = .connected;
     h.a.composer.set("Keep the outgoing draft");
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "synthetic.txt", .data = "Synthetic dropped file" });
-    const text_url = try std.fmt.allocPrint(testing.allocator, "{s}/synthetic.txt", .{url[0..std.mem.lastIndexOfScalar(u8, url, '/').?]});
+    const text_url = try std.fmt.allocPrint(testing.allocator, "{s}/synthetic.txt", .{std.fs.path.dirname(url) orelse return error.MissingDropParent});
     defer testing.allocator.free(text_url);
     h.t.drop(1000, 600, &.{ url, text_url }, "");
     h.t.frame();

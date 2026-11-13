@@ -50,7 +50,7 @@ test "retention selection fully masked horizontal text cannot capture a gutter d
 }
 
 /// Where the title bar's buttons start: right of the traffic lights.
-const cluster_x: f32 = 88;
+const cluster_x: f32 = @import("window_chrome.zig").leading;
 /// Three 24-point buttons, 8 then 2 points apart.
 const cluster_w: f32 = 24 * 3 + 8 + 2;
 
@@ -261,6 +261,7 @@ pub fn view(a: *App, c: *ui.Context) void {
     }
     strip.draw(c, a, k);
     titlebar(c, a, k);
+    @import("window_chrome.zig").draw(c, a, k);
     if (c.input.released) a.view.sidebar_press_focus = false;
     const popup = surfaces.popup(k);
     trailing(c, a, popup);
@@ -272,6 +273,7 @@ pub fn view(a: *App, c: *ui.Context) void {
     @import("view_context.zig").overlay(c, a, popup);
     @import("view_drag.zig").overlay(c, a, popup);
     @import("view_chat_menu.zig").overlays(c, a, popup);
+    @import("view_link_menu.zig").overlay(c, a, popup);
     closeChoice(c, a, popup);
     @import("app_file_editor.zig").dialog(c, a, popup);
     @import("view_updates.zig").overlayCard(c, a, popup);
@@ -303,7 +305,7 @@ pub fn view(a: *App, c: *ui.Context) void {
 /// no focus of its own, so it isn't one.
 pub fn menuKeepsKeys(a: *const App) bool {
     const v = &a.view;
-    return v.project_setup.open or v.open_chooser.open or v.strip.menu != null or v.more_menu or v.filter_menu or v.space_menu or v.checkout_menu or v.ref_menu or v.chat_menu.open or
+    return v.project_setup.open or v.open_chooser.open or v.strip.menu != null or v.more_menu or v.filter_menu or v.space_menu or v.checkout_menu or v.ref_menu or v.chat_menu.open or v.link_menu.open or
         v.menus.ctx_at != null or v.palette.open or v.search.focus or a.picker != .none;
 }
 
@@ -712,7 +714,9 @@ fn keys(c: *ui.Context, a: *App) void {
         }
     }
     // A session menu or its dialog, over everything, takes Escape first.
-    if (@import("view_chat_menu.zig").anyOpen(a) and c.shortcut(.{ .key = S.escape })) {
+    if (a.view.link_menu.open and c.shortcut(.{ .key = S.escape })) {
+        a.view.link_menu.open = false;
+    } else if (@import("view_chat_menu.zig").anyOpen(a) and c.shortcut(.{ .key = S.escape })) {
         @import("view_chat_menu.zig").dismiss(a);
     } else if (a.view.write_open and !a.view.palette.open and a.picker == .none and c.shortcut(.{ .key = S.escape })) {
         // The global fallback must not swallow Write's Save/back gesture.
@@ -922,7 +926,7 @@ fn trailing(c: *ui.Context, a: *App, k: theme.Colors) void {
     // apart (`PANEL_TOGGLE_GAP`), 6 from the edge
     // (`TITLEBAR_ACTION_EDGE_INSET`).
     const w: f32 = 28 * 2 + 4 + (if (actions_w > 0) actions_w + 8 else 0);
-    const bar = ui.div(c).fixed().offset(c.size.w - 6 - w, 4 + (34 - 28) / 2).row().itemsCenter().layer(3);
+    const bar = ui.div(c).fixed().offset(c.size.w - @import("window_chrome.zig").trailing - 6 - w, 4 + (34 - 28) / 2).row().itemsCenter().layer(3);
     defer bar.end();
     if (actions_w > 0) {
         va.control(c, a, k);

@@ -213,7 +213,7 @@ pub fn stripLeftInset(sidebar_w: f32, side_max: f32, settings_open: bool, has_up
     const collapsed = 1 - std.math.clamp(sidebar_w / side, 0, 1);
     const history: f32 = if (settings_open) 28 else 28 * collapsed;
     const updates: f32 = if (!settings_open and has_update) 26 else 0;
-    return @max(0, 88 + 24 + history + updates + 14 - sidebar_w);
+    return @max(0, @import("window_chrome.zig").leading + 24 + history + updates + 14 - sidebar_w);
 }
 
 pub const CloseSurface = enum { chat, host, files };
@@ -671,7 +671,7 @@ test "lean ScrollFollow and Tween kernels: stickEndScroll quiescence and C0 reta
     try std.testing.expectEqual(@as(f32, 40), chips.pick_text_max);
 
     // Update button (`🔄`, x <= 166) never overlaps the first slot (`x = 180`).
-    try std.testing.expectEqual(@as(f32, 180), stripLeftInset(0, 224, false, true));
+    try std.testing.expectEqual(@as(f32, @import("window_chrome.zig").leading + 92), stripLeftInset(0, 224, false, true));
 
     // Cmd+W hierarchy & single-pass coalescing.
     try std.testing.expectEqual(@as(usize, 1), closeRedrawPasses(true, true));
@@ -1175,7 +1175,7 @@ pub fn sidebarTitlebarLayout(sidebar_w_in: f32) SidebarTitlebarLayout {
     const sidebar_w = @max(0, sidebar_w_in);
     const group_gap: f32 = if (sidebar_w >= 240) 8 else 4;
     const right_margin: f32 = if (sidebar_w >= 240) 8 else 4;
-    const toggle_end: f32 = 88 + 24;
+    const toggle_end: f32 = @import("window_chrome.zig").leading + 24;
     const back_x = toggle_end + group_gap;
     const forward_x = back_x + 24 + 2;
     const plus_x = forward_x + 24 + group_gap;

@@ -131,6 +131,7 @@ pub const View = struct {
     /// A session row's menu and the dialogs it leads to.
     chat_menu: @import("view_chat_menu.zig").Menu = .{},
     chat_menu_h: ?f32 = null,
+    link_menu: @import("view_link_menu.zig").Menu = .{},
     dialogs: @import("view_chat_menu.zig").Dialogs = .{},
     shortcut_notice: std.ArrayList(u8) = .empty,
     space_anchor: ?nanoui.ui.Rect = null,
@@ -251,6 +252,7 @@ pub const View = struct {
         v.refs.deinit(gpa);
         v.drag.deinit(gpa);
         v.chat_menu.id.deinit(gpa);
+        v.link_menu.deinit(gpa);
         v.dialogs.deinit(gpa);
         v.menus.deinit(gpa);
         if (v.filter) |f| gpa.free(f);
