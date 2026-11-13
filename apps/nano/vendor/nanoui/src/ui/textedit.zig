@@ -8,8 +8,8 @@ const EditState = ctx_mod.EditState;
 const tf = @import("textfield.zig");
 const keymap = @import("keymap.zig");
 
-pub const Granularity = enum { char, word, line, paragraph, all };
-/// Prompt editors use logical paragraphs and the complete draft; ordinary
+pub const Granularity = enum { char, word, line, prose_word, sentence, paragraph };
+/// Prompt editors share output's word/sentence/paragraph gestures; ordinary
 /// fields retain the platform's word/line gestures.
 pub const SelectionMode = enum { standard, prompt };
 pub const UndoOp = enum { none, undo, redo };
@@ -48,8 +48,12 @@ pub fn pointerSelect(c: *Context, e: *EditState, s: []const u8, at: usize, multi
     e.undo.group = false;
     c.caret_moved_at = c.time;
     if (mode == .prompt and c.input.click_count >= 2) {
-        c.select_granularity = if (c.input.click_count >= 3) .all else .paragraph;
-        const range = if (c.select_granularity == .all) [2]usize{ 0, s.len } else @import("text_selection.zig").paragraphRange(s, at);
+        c.select_granularity = switch (c.input.click_count) {
+            2 => .prose_word,
+            3 => .sentence,
+            else => .paragraph,
+        };
+        const range = @import("text_selection.zig").proseRange(s, at, c.input.click_count);
         e.anchor = range[0];
         e.caret = range[1];
         c.select_origin = range;
@@ -83,12 +87,13 @@ pub fn pointerDrag(c: *Context, e: *EditState, s: []const u8, at: usize, multili
     const orig1 = @min(c.select_origin[1], s.len);
     switch (c.select_granularity) {
         .char => e.caret = at,
-        .all => {
-            e.anchor = 0;
-            e.caret = s.len;
-        },
-        .paragraph => {
-            const range = @import("text_selection.zig").paragraphRange(s, at);
+        .prose_word, .sentence, .paragraph => {
+            const clicks: u32 = switch (c.select_granularity) {
+                .prose_word => 2,
+                .sentence => 3,
+                else => 4,
+            };
+            const range = @import("text_selection.zig").proseRange(s, at, clicks);
             if (range[0] < orig0) {
                 e.anchor = orig1;
                 e.caret = range[0];

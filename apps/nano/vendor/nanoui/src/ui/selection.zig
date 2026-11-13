@@ -125,9 +125,9 @@ pub fn line(c: anytype, out: *std.ArrayList(gpu.Instance), id: u64, index: u32, 
         const prose = c.nodes.items[index].content.text.style.prose_selection;
         if (c.input.click_count == 2) {
             const word_at = start + text_selection.glyphClusterAt(lay.glyphs, lay.width, m.x - x);
-            s.hit_word = if (prose) text_selection.sentenceRange(str, word_at) else text_selection.wordRange(str, word_at);
+            s.hit_word = text_selection.proseRange(str, word_at, c.input.click_count);
         }
-        s.hit_line = if (prose and c.input.click_count >= 3) text_selection.paragraphRange(str, at) else .{ start, end };
+        s.hit_line = if (prose and c.input.click_count >= 3) text_selection.proseRange(str, at, c.input.click_count) else .{ start, end };
         s.hit_str = str;
         // Over text that selects: the text cursor, as over a text field.
         c.cursor_text = true;

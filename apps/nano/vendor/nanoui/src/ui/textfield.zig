@@ -124,7 +124,7 @@ pub const Options = struct {
     /// Wraps, and grows to `max_lines` before it scrolls; Shift-Return
     /// (or Option-Return) starts a new line, Return still submits.
     multiline: bool = false,
-    /// Opt prompt editors into paragraph / full-draft multi-click selection.
+    /// Opt prompt editors into word / sentence / paragraph multi-clicks.
     selection_mode: textedit.SelectionMode = .standard,
     max_lines: u16 = 8,
     /// Its lines' height in points (`TextStyle.line_height`); 0 is the font's.
@@ -377,7 +377,11 @@ pub fn textField(c: *Context, buffer: *TextBuffer, opts: Options) Result {
             const local_x = c.input.mouse.x - r.x - pad_x + e.scroll_x;
             const local_y = c.input.mouse.y - r.y - pad_y + e.scroll_y;
             if (multi and ((c.input.pressed and c.input.button == .left and !c.input.ctrl and it.hovered) or (e.selecting and c.input.down))) {
-                const at = lines_mod.indexAtPoint(c, buffer.text(), style, lines_mod.layout(c, buffer.text(), style, wrap_w), c.input.mouse.x - r.x - pad_x, local_y, lh_);
+                const lines = lines_mod.layout(c, buffer.text(), style, wrap_w);
+                const at = if (opts.selection_mode == .prompt and c.input.click_count >= 2)
+                    lines_mod.clusterAtPoint(c, buffer.text(), style, lines, c.input.mouse.x - r.x - pad_x, local_y, lh_)
+                else
+                    lines_mod.indexAtPoint(c, buffer.text(), style, lines, c.input.mouse.x - r.x - pad_x, local_y, lh_);
                 if (c.input.pressed) {
                     textedit.pointerSelect(c, e, buffer.text(), at, true, opts.selection_mode);
                 } else {

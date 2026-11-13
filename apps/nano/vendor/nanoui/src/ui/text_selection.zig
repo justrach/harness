@@ -183,6 +183,32 @@ pub fn sentenceRange(s: []const u8, at: usize) [2]usize {
     return .{ start, end };
 }
 
+/// Shared prompt/output gesture policy. Four or more clicks stay at the
+/// paragraph; selecting the complete document is a keyboard command only.
+pub fn proseRange(s: []const u8, at: usize, clicks: u32) [2]usize {
+    return switch (clicks) {
+        0, 1 => .{ @min(at, s.len), @min(at, s.len) },
+        2 => wordRange(s, at),
+        3 => sentenceRange(s, at),
+        else => paragraphRange(s, at),
+    };
+}
+
+test "selection prose clicks select word sentence paragraph but never all" {
+    const text = "First sentence. Café 👩‍💻 works! Last sentence.\nAnother paragraph.";
+    const at = std.mem.indexOf(u8, text, "Café").?;
+    for (0..32) |clicks| {
+        const range = proseRange(text, at, @intCast(clicks));
+        const expected = switch (clicks) {
+            0, 1 => "",
+            2 => "Café",
+            3 => "Café 👩‍💻 works!",
+            else => "First sentence. Café 👩‍💻 works! Last sentence.",
+        };
+        try std.testing.expectEqualStrings(expected, text[range[0]..range[1]]);
+    }
+}
+
 /// A word click uses the glyph cell under the pointer, not its nearest
 /// insertion caret (the latter jumps across half a glyph/emoji). Shared by
 /// native and reference shaping; their glyph indices remain source bytes.

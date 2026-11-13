@@ -80,6 +80,16 @@ pub fn indexAtPoint(c: *Context, s: []const u8, style: types.TextStyle, lines: [
     return indexAt(c, s, style, lines[row], x);
 }
 
+/// Multi-clicks own the glyph under the pointer, not the nearest caret.
+/// This keeps the right half of a word's last glyph (or an emoji) in that
+/// same word/cluster, matching selectable output text.
+pub fn clusterAtPoint(c: *Context, s: []const u8, style: types.TextStyle, lines: []const Line, x: f32, y: f32, lh: f32) usize {
+    const row: usize = @intFromFloat(@max(0, @min(@as(f32, @floatFromInt(lines.len - 1)), @floor(y / lh))));
+    const l = lines[row];
+    const lay = c.text.layout(s[l.start..l.end], style);
+    return l.start + @import("text_selection.zig").glyphClusterAt(lay.glyphs, lay.width, x);
+}
+
 /// The selection's ends, for a field whose lines start at (x, y): the text's
 /// own place on the screen, its scroll taken off.
 pub fn ends(c: *Context, s: []const u8, style: types.TextStyle, lines: []const Line, lo: usize, hi: usize, x: f32, y: f32, lh: f32) [2]types.Rect {
