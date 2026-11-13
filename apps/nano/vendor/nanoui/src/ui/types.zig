@@ -480,7 +480,7 @@ pub const TextStyle = struct {
     color: ?Color = null,
     /// Break lines to fit the width the parent gives.
     wrap: bool = false,
-    /// Readable prose selects sentences/paragraphs on double/triple click;
+    /// Readable prose selects word/sentence/paragraph on two/three/four clicks;
     /// code and ordinary labels retain word/visual-line selection.
     prose_selection: bool = false,
     mono: bool = false,

@@ -140,6 +140,7 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
             .line_height = line_h,
             .placeholder_color = k.muted,
             .multiline = true,
+            .selection_mode = .prompt,
             .max_lines = lines,
             .caret = @import("view_composer.zig").message_caret,
             .caret_color = k.accent,

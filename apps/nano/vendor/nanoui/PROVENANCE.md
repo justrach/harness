@@ -51,8 +51,8 @@ Windows' forced-disposal path and avoiding a vetoed-close teardown loop.
 This supplies the same dirty-document veto contract to all desktop windows.
 
 Harness-local prose selection adds `TextStyle.prose_selection`: Markdown
-selects a logical sentence on double-click and a paragraph on triple-click,
-independent of visual wraps and styled spans. Code and ordinary labels keep
+selects a word on double-click, a logical sentence on triple-click, and a
+paragraph on four or more clicks, independent of visual wraps and styled spans. Code and ordinary labels keep
 word/line selection. Multi-click ranges survive stationary held frames and
 small pointer jitter, and dragging extends in whole units in either direction.
 Pure UTF-8 sentence/paragraph rules live in `text_selection.zig`; native
@@ -68,6 +68,19 @@ notifications follow ownership/range changes, not every repaint. The
 `native speech` Harness tests exercise real hidden NSViews, native queries,
 Option-Escape delivery, Unicode ranges, replacement and window isolation.
 They do not assert audible system speech or change Spoken Content settings.
+
+Harness-local prompt selection (#839) routes multiline `textField` pointer
+presses and held drags through `textedit.zig` rather than overwriting the
+caret each frame. `Options.selection_mode = .prompt` opts the composer and
+expanded Write editor into the same word / sentence / paragraph gestures
+as output. Both use the pure `proseRange` policy in `text_selection.zig`;
+four or more clicks never escalate to selecting the full buffer. Cmd+A
+remains the prompt's Select All gesture. Multi-click hit testing uses glyph
+cells in `textfield_lines.zig`, matching output's Unicode boundaries.
+Selections retain logical units while held or dragged. Ordinary fields and
+text areas retain word/line selection. Synthetic Harness regressions run
+with the `composer selection` filter and check Copy, replacement, undo,
+click-count saturation and keyboard-only Select All.
 
 These changes live in this checked-in package, not an ignored download cache.
 

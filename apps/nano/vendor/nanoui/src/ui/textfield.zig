@@ -124,6 +124,8 @@ pub const Options = struct {
     /// Wraps, and grows to `max_lines` before it scrolls; Shift-Return
     /// (or Option-Return) starts a new line, Return still submits.
     multiline: bool = false,
+    /// Opt prompt editors into word / sentence / paragraph multi-clicks.
+    selection_mode: textedit.SelectionMode = .standard,
     max_lines: u16 = 8,
     /// Its lines' height in points (`TextStyle.line_height`); 0 is the font's.
     line_height: f32 = 0,
@@ -375,22 +377,20 @@ pub fn textField(c: *Context, buffer: *TextBuffer, opts: Options) Result {
             const local_x = c.input.mouse.x - r.x - pad_x + e.scroll_x;
             const local_y = c.input.mouse.y - r.y - pad_y + e.scroll_y;
             if (multi and ((c.input.pressed and c.input.button == .left and !c.input.ctrl and it.hovered) or (e.selecting and c.input.down))) {
-                const at = lines_mod.indexAtPoint(c, buffer.text(), style, lines_mod.layout(c, buffer.text(), style, wrap_w), c.input.mouse.x - r.x - pad_x, local_y, lh_);
-                e.caret = at;
+                const lines = lines_mod.layout(c, buffer.text(), style, wrap_w);
+                const at = if (opts.selection_mode == .prompt and c.input.click_count >= 2)
+                    lines_mod.clusterAtPoint(c, buffer.text(), style, lines, c.input.mouse.x - r.x - pad_x, local_y, lh_)
+                else
+                    lines_mod.indexAtPoint(c, buffer.text(), style, lines, c.input.mouse.x - r.x - pad_x, local_y, lh_);
                 if (c.input.pressed) {
-                    if (!c.input.shift) e.anchor = at;
-                    if (c.input.click_count >= 2) {
-                        e.anchor = prevWord(buffer.text(), at);
-                        e.caret = nextWord(buffer.text(), at);
-                    }
-                    e.marked = null;
-                    c.selection.blocked = true;
-                    e.selecting = true;
+                    textedit.pointerSelect(c, e, buffer.text(), at, true, opts.selection_mode);
+                } else {
+                    textedit.pointerDrag(c, e, buffer.text(), at, true);
                 }
             } else if (c.input.pressed and c.input.button == .left and !c.input.ctrl and it.hovered) {
                 const idx = c.text.indexAt(shownOf(buffer.text(), opts.password, bullets), style, local_x);
                 const at = if (opts.password) lines_mod.byteOfCodepoint(buffer.text(), idx / 3) else idx;
-                textedit.pointerSelect(c, e, buffer.text(), at, false);
+                textedit.pointerSelect(c, e, buffer.text(), at, false, opts.selection_mode);
             } else if (e.selecting and c.input.down) {
                 const idx = c.text.indexAt(shownOf(buffer.text(), opts.password, bullets), style, local_x);
                 const at = if (opts.password) lines_mod.byteOfCodepoint(buffer.text(), idx / 3) else idx;

@@ -285,6 +285,7 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
         .line_height = 22.75,
         .placeholder_color = k.muted,
         .multiline = true,
+        .selection_mode = .prompt,
         .max_lines = if (shape == .compact) 1 else max_lines,
         .caret = message_caret,
         .caret_color = k.accent,

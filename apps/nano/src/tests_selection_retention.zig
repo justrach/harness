@@ -260,11 +260,15 @@ fn multiClick(h: *Harness, count: u32, hold: bool) !void {
     h.t.settle(0.2);
     const n = textNode(&h.t.ctx, multi_click_prose) orelse return error.TextNodeMissing;
     const node = h.t.ctx.nodes.items[n];
-    const line = node.content.text.lines[1];
+    const at = std.mem.indexOf(u8, multi_click_prose, "pointer").?;
+    const lines = node.content.text.lines;
+    const row = for (lines, 0..) |line, i| {
+        if (line.start <= at and at < line.end) break i;
+    } else return error.SyntheticWordMissing;
     const style = node.content.text.style;
-    const x = node.rect.x + 35;
-    const y = node.rect.y + h.t.ctx.text.lineHeight(style) * 1.5;
-    try testing.expect(line.start > 0);
+    const x = node.rect.x + h.t.ctx.text.width(multi_click_prose[lines[row].start..at], style) + 2;
+    const y = node.rect.y + h.t.ctx.text.lineHeight(style) * (@as(f32, @floatFromInt(row)) + 0.5);
+    try testing.expect(row > 0);
     h.t.moveTo(x, y);
     h.t.ctx.input.click_count = count;
     h.t.ctx.pointerDown();
@@ -277,32 +281,40 @@ fn multiClick(h: *Harness, count: u32, hold: bool) !void {
     h.t.up();
     h.t.settle(0.1);
     copy(h);
-    try h.snap(if (count == 2) "double-click-sentence" else "triple-click-paragraph");
+    try h.snap(if (count == 2) "output-double-click-word" else if (count == 3) "output-triple-click-sentence" else "output-four-click-paragraph");
 }
 
-test "retention selection double click selects the complete wrapped sentence" {
+test "retention selection double click selects the word under the pointer" {
     var h: Harness = undefined;
     try h.init();
     defer h.deinit();
     try multiClick(&h, 2, false);
-    try testing.expectEqualStrings(multi_click_prose[26 .. multi_click_prose.len - " Final sentence.".len], h.t.clipboard.items);
+    try testing.expectEqualStrings("pointer", h.t.clipboard.items);
 }
 
-test "retention selection triple click selects the complete wrapped paragraph" {
+test "retention selection triple click selects the complete wrapped sentence" {
     var h: Harness = undefined;
     try h.init();
     defer h.deinit();
     try multiClick(&h, 3, false);
+    try testing.expectEqualStrings(multi_click_prose[26 .. multi_click_prose.len - " Final sentence.".len], h.t.clipboard.items);
+}
+
+test "retention selection four clicks select the complete wrapped paragraph" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    try multiClick(&h, 4, false);
     try testing.expectEqualStrings(multi_click_prose, h.t.clipboard.items);
 }
 
 test "retention selection held multi click does not collapse to the pointer" {
-    for ([_]u32{ 2, 3 }) |count| {
+    for ([_]u32{ 2, 3, 4, 5, 8 }) |count| {
         var h: Harness = undefined;
         try h.init();
         defer h.deinit();
         try multiClick(&h, count, true);
-        const expected = if (count == 3) multi_click_prose else multi_click_prose[26 .. multi_click_prose.len - " Final sentence.".len];
+        const expected = if (count == 2) "pointer" else if (count == 3) multi_click_prose[26 .. multi_click_prose.len - " Final sentence.".len] else multi_click_prose;
         try testing.expectEqualStrings(expected, h.t.clipboard.items);
     }
 }
@@ -312,7 +324,7 @@ test "retention selection sentence drag extends complete units in both direction
         var h: Harness = undefined;
         try h.init();
         defer h.deinit();
-        try multiClick(&h, 2, false);
+        try multiClick(&h, 3, false);
         h.t.ctx.pointerDown();
         h.t.frame();
         const n = textNode(&h.t.ctx, multi_click_prose) orelse return error.TextNodeMissing;
@@ -849,7 +861,7 @@ test "deep interface collapsed prompt does not capture reply doubleclick" {
     h.t.doubleClick(node.rect.x + h.t.ctx.text.width("Visible syn", node.content.text.style), node.rect.y + node.rect.h / 2);
     h.t.settle(0.1);
     copy(&h);
-    try testing.expectEqualStrings("Visible synthetic reply.", h.t.clipboard.items);
+    try testing.expectEqualStrings("synthetic", h.t.clipboard.items);
 }
 
 test "deep interface thinking folds fit fractional zoom and narrow wrapping" {
