@@ -35,12 +35,19 @@ enum DuoChat {
     }
 
     /// Room the session bar keeps before its title. Folded on the cover display the back button is in the
-    /// side bar, so the title starts at the edge. Lying flat the session is pushed onto the list's stack: its
-    /// bar has the back button and the list's toggle, which the folded inset let the title slide under.
+    /// side bar, so the title starts at the edge. Lying flat the session draws its own pane header strip below
+    /// the status bar and Dynamic Island instead of sharing `UINavigationBar` (which evicted the title into `…`).
     static func headerInset(duoChat: Bool, compactWidth: Bool, flat: Bool, listToggle: Bool,
                             chrome: CGFloat, hitTarget: CGFloat) -> CGFloat {
         if flat { return chrome + (listToggle ? hitTarget + 8 : 0) }
         return duoChat && compactWidth ? 32 : chrome
+    }
+
+    /// Which poses draw `SessionView`'s own pane header strip instead of putting the title in `UINavigationBar`.
+    /// Max split columns, Duo laptop pose, and a flat Duo all share or narrow the bar row enough that UIKit
+    /// either clips the title under the back arrow or evicts the entire header into `…` beside the status bar.
+    static func usesPaneHeader(splitScreen: Bool, foldPaneHeader: Bool, flatSplit: Bool) -> Bool {
+        splitScreen || foldPaneHeader || flatSplit
     }
 
     /// Rig (DEBUG): `-demo-duo-flat` lays home and a session out as on a Duo lying flat (one stack, the list

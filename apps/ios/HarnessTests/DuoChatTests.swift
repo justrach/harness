@@ -77,6 +77,16 @@ final class DuoChatTests: XCTestCase {
                                            chrome: 100, hitTarget: 44), 100)
     }
 
+    /// Lying flat, `UINavigationBar` shares its row with the right-side status bar and Dynamic Island (~240pt),
+    /// which evicted the session header into UIKit's `…` overflow button. Drawing the pane header strip keeps
+    /// the title and folder subtitle below the status bar across the full pane width.
+    func testFlatDuoUsesPaneHeaderStripInsteadOfNavigationBar() {
+        XCTAssertTrue(DuoChat.usesPaneHeader(splitScreen: false, foldPaneHeader: false, flatSplit: true))
+        XCTAssertTrue(DuoChat.usesPaneHeader(splitScreen: true, foldPaneHeader: false, flatSplit: false))
+        XCTAssertTrue(DuoChat.usesPaneHeader(splitScreen: false, foldPaneHeader: true, flatSplit: false))
+        XCTAssertFalse(DuoChat.usesPaneHeader(splitScreen: false, foldPaneHeader: false, flatSplit: false))
+    }
+
     // MARK: Cover display (466 x 678 pt; the system's vertical bar column is an 84pt trailing inset)
 
     private let coverWidth: CGFloat = 466

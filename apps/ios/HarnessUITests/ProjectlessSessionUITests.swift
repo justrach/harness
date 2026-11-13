@@ -11,7 +11,7 @@ final class ProjectlessSessionUITests: XCTestCase {
     }
 
     private func launch(_ arguments: [String] = [], filter: String = "") {
-        app.launchArguments = ["-demo", "-sethomefilter", filter] + arguments
+        app.launchArguments = ["-demo", "-sethomefilter", filter, "-homeUiMode", "developer", "-phoneSplit", "off"] + arguments
         app.launch()
     }
 
@@ -99,6 +99,8 @@ final class ProjectlessSessionUITests: XCTestCase {
         composer.typeText("Inspect this project.")
         app.buttons["composer-send"].tap()
         XCTAssertTrue(app.otherElements["transcript"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["harness @ MacBook Pro"].exists)
+        let header = app.descendants(matching: .any)["session-header"].firstMatch
+        XCTAssertTrue(header.waitForExistence(timeout: 5))
+        XCTAssertTrue(header.label.contains("~/harness @ MacBook Pro"), header.label)
     }
 }

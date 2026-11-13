@@ -69,10 +69,13 @@ struct SessionView: View {
     /// On a Max (split screen available) every session draws its own compact header strip and the navigation
     /// bar is hidden. The bar's fixed-width header kept being evicted into the "…" menu in the narrow columns a
     /// Max uses (a session beside the list, or two panes of about 478pt), and on a landscape Max the bar is also
-    /// a lot of lost height. Everywhere else the bar and its header are exactly as before.
-    /// iPhone Duo in laptop pose draws the strip too: the bar shares its row with the status bar there and
-    /// clipped the title under the back arrow.
-    private var paneChrome: Bool { splitScreen != nil || foldPaneHeader != nil }
+    /// a lot of lost height. iPhone Duo in laptop pose or lying flat draws the strip too: the bar shares its row
+    /// with the status bar and Dynamic Island there, which clipped the title or evicted the whole header into "…".
+    private var paneChrome: Bool {
+        DuoChat.usesPaneHeader(splitScreen: splitScreen != nil,
+                               foldPaneHeader: foldPaneHeader != nil,
+                               flatSplit: flatSplit)
+    }
 
     /// Rename and paging are sibling controls: tapping an arrow must never rename.
     private func headerTitle(_ chat: Chat) -> some View {
@@ -123,7 +126,7 @@ struct SessionView: View {
                             .lineLimit(duoChat ? 2 : 1)
                             .truncationMode(.tail)
                             .fixedSize(horizontal: false, vertical: duoChat)
-                        projectLocation(chat: chat, model: model)
+                        sessionHeaderLocation(chat: chat, model: model)
                             .font(Theme.sans(duoChat ? DuoType.small : 12))
                             .foregroundStyle(Theme.textMuted.opacity(0.6))
                             .lineLimit(1)
@@ -180,7 +183,7 @@ struct SessionView: View {
     /// Swipe it to page to a neighbouring session.
     private func paneHeader(_ chat: Chat, controls: SplitScreenControls) -> some View {
         HStack(spacing: 8) {
-            if foldPaneHeader != nil {
+            if foldPaneHeader != nil || flatSplit {
                 Button { dismiss() } label: {
                     Image(systemName: "chevron.left")
                         .frame(width: Theme.hitTarget, height: Theme.hitTarget)
@@ -190,7 +193,19 @@ struct SessionView: View {
                 .foregroundStyle(Theme.text)
                 .buttonStyle(.plain)
                 .accessibilityLabel("Back")
-                .accessibilityIdentifier("fold-back")
+                .accessibilityIdentifier(flatSplit && foldPaneHeader == nil ? "duo-flat-back" : "fold-back")
+            }
+            if flatSplit, let toggleFlatList {
+                Button(action: toggleFlatList) {
+                    Image(systemName: "sidebar.leading")
+                        .frame(width: Theme.hitTarget, height: Theme.hitTarget)
+                        .contentShape(Rectangle())
+                }
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Theme.textMuted)
+                .buttonStyle(.plain)
+                .accessibilityLabel("Show or hide the session list")
+                .accessibilityIdentifier("duo-flat-toggle-list")
             }
             if duoLaptop == nil, let showList = foldPaneHeader?.showList {
                 Button(action: showList) {
@@ -324,7 +339,7 @@ struct SessionView: View {
         .toolbarBackground(.hidden, for: .navigationBar)
         .toolbar(paneChrome ? .hidden : .automatic, for: .navigationBar)  // a Max draws its own header
         .toolbar {
-            if let toggleFlatList {
+            if !paneChrome, let toggleFlatList {
                 ToolbarItem(placement: .topBarLeading) {
                     Button(action: toggleFlatList) {
                         Image(systemName: "sidebar.leading")
@@ -334,7 +349,7 @@ struct SessionView: View {
                     .accessibilityIdentifier("duo-flat-toggle-list")
                 }
             }
-            if let chat {
+            if !paneChrome, let chat {
                 // Tap the session header to rename — model/effort changes
                 // moved into the composer's picker chips.
                 ToolbarItem(placement: .topBarTrailing) {
