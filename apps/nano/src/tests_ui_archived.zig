@@ -104,3 +104,71 @@ test "Settings › Archived: Delete all deletes the chats confirmed and still ar
     t.settle(1);
     try testing.expect(!t.hasText("Couldn\u{2019}t delete 1 archived session. Try again."));
 }
+
+fn replaceFixture(list: anytype, text: []const u8) !void {
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, text, .{});
+    defer parsed.deinit();
+    try list.replace(parsed.value);
+}
+
+fn screenshot(t: *ui.Tester, name: []const u8) !void {
+    const dir = std.c.getenv("NANO_SNAP_DIR") orelse return;
+    var buf: [4096]u8 = undefined;
+    const path = try std.fmt.bufPrint(&buf, "{s}/{s}.png", .{ std.mem.span(dir), name });
+    try t.screenshot(path);
+}
+
+test "archived sidebar navigation preserves the current workspace on open and close" {
+    for ([_]bool{ false, true }) |split| {
+        var h: @import("tests_ui_tab_strip.zig").Harness = undefined;
+        try h.init(true);
+        defer h.deinit();
+        try replaceFixture(&h.a.chats,
+            \\[{"id":"a","deviceId":"local","title":"Alpha","spaceId":"local-project","archived":false},
+            \\ {"id":"c","deviceId":"local","title":"Archived example","spaceId":"local-project","archived":true}]
+        );
+        if (split) {
+            h.a.splitPane(.horizontal);
+            h.a.composer.set("Keep this synthetic draft");
+        }
+        h.a.settings.set(.sidebar_show_archived, true);
+        h.a.settings.set(.archive_on_close_chosen, true);
+        h.a.view.archived_open = true;
+        h.t.settle(1);
+        try h.t.clickText("Archived example");
+        h.t.settle(1);
+        if (!split) try screenshot(&h.t, "archived-open");
+        try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+        try testing.expectEqualStrings("c", h.a.selected.?);
+        try testing.expect(h.a.tabs.layout() == null);
+        try testing.expectEqual(@as(usize, 0), h.a.tabs.find("a").?.tab);
+        h.a.closeByShortcut();
+        h.t.settle(1);
+        try testing.expectEqual(@as(usize, 1), h.a.tabs.items.items.len);
+        try testing.expect(h.a.findChat("c").?.archived);
+        if (split) {
+            try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
+            try testing.expectEqualStrings("Keep this synthetic draft", h.a.composer.text());
+        } else try testing.expectEqualStrings("a", h.a.selected.?);
+    }
+}
+
+test "archived sidebar close never warns that an already archived chat was not archived" {
+    var h: @import("tests_ui_tab_strip.zig").Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try replaceFixture(&h.a.chats,
+        \\[{"id":"a","deviceId":"local","title":"Alpha","spaceId":"local-project","archived":true}]
+    );
+    try replaceFixture(&h.a.sessions,
+        \\[{"chatId":"a","status":"working"}]
+    );
+    h.a.settings.set(.archive_on_close_chosen, true);
+    h.a.settings.set(.archive_sessions_on_close, true);
+    h.a.closeByShortcut();
+    h.t.settle(1);
+    try screenshot(&h.t, "archived-close");
+    try testing.expect(h.a.selected == null);
+    try testing.expect(h.a.findChat("a").?.archived);
+    try testing.expectEqual(@as(usize, 0), h.a.view.sidebar_notice_len);
+}

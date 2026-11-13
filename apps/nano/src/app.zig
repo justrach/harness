@@ -983,7 +983,16 @@ pub const App = struct {
             if (at.panel_tab) |ix| a.showPaneTab(ix);
             return;
         }
-        const project = a.findChat(chat_id).?.space_id;
+        const chat = a.findChat(chat_id).?;
+        const project = chat.space_id;
+        // Reading history is not a project-pane replacement. Keep the live
+        // workspace (including its split and drafts) visible in its own tab.
+        if (chat.archived) {
+            a.newWorkspaceSession();
+            a.tabs.setCurrent(chat_id);
+            a.select(chat_id, project);
+            return;
+        }
         const destination: ?usize = if (sameProject(a.workspaceProject(a.tabs.active), project))
             a.tabs.active
         else for (0..a.tabs.items.items.len) |ix| {
@@ -1408,6 +1417,9 @@ pub const App = struct {
     }
 
     fn archiveClosedAfter(a: *App, id: []const u8, may_archive: bool, queued: bool) void {
+        // Closing an archived view cannot archive it again, nor did a busy
+        // status prevent archival. Do not show the live-session warning.
+        if (a.findChat(id)) |chat| if (chat.archived) return;
         const ac = @import("archive_close.zig");
         const st = workspace.statusOf(a.sessions.items, id);
         var sending = false;
