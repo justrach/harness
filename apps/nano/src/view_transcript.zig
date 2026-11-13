@@ -252,14 +252,15 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     _ = loading;
     const scroll_rect = c.rects.get(drawn.box);
     const has_selection = c.selection.anchor != null or c.selection.dragging;
-    // A working sidebar row also animates a completed open transcript.
-    // Use its existing height spacers on those frames, not just while the
-    // selected reply streams. Keep selection and rail navigation intact.
-    const working = for (a.sessions.items) |session| {
-        if (session.status == .working) break true;
-    } else false;
-    const cull_offscreen = !has_selection and (!a.offscreen or tweening or resizing) and @import("motion_rules.zig").shouldCullOffscreen(tweening, resizing, streaming or working, a.view.rail.glide != null);
-    const cull: Cull = .{ .on = cull_offscreen, .loose = tweening or resizing, .pad = if (tweening or resizing) 220 else 380, .view = scroll_rect, .col = col };
+    // The column's required clip prevents NanoUI's retained-scroll fast
+    // path. A settled conversation therefore rebuilds too: keep measured
+    // offscreen rows as spacers on ordinary wheel frames, not only while
+    // a reply streams. Selection and prompt-rail navigation still mount
+    // the full content, and a new width must earn its own measurements.
+    const cull_offscreen = !has_selection and (!a.offscreen or tweening or resizing) and a.view.rail.glide == null;
+    const offset = c.scroll.get(drawn.box) orelse 0;
+    const previous_offset = c.scroll_seen.get(drawn.box) orelse offset;
+    const cull: Cull = .{ .on = cull_offscreen, .loose = tweening or resizing, .pad = if (tweening or resizing) 220 else 380, .view = scroll_rect, .col = col, .offset_delta = offset - previous_offset };
     // A message sent while its turn works is drawn where it arrived, and
     // what the reply gains after it under it (steer_order.zig).
     const steer = &a.view.steer;
@@ -323,6 +324,9 @@ const Cull = struct {
     pad: f32,
     view: ?ui.Rect,
     col: f32,
+    /// Rects belong to the preceding layout. Project them through this
+    /// wheel delta so a large jump mounts its destination immediately.
+    offset_delta: f32 = 0,
 };
 
 /// For the row keyed just before: its last rect when it is off screen and
@@ -338,7 +342,7 @@ fn spacer(c: *ui.Context, cull: Cull, settled: bool, h: *f32, w: *f32, m: *f32) 
     const width_ok = cull.loose or @abs(w.* - cull.col) <= 1.0;
     if (cull.on and settled and h.* > 0 and width_ok) {
         if (cull.view) |view| if (prev) |r| {
-            if (@import("motion_rules.zig").skipOffscreenRow(true, r.y, r.y + r.h, view.y, view.y + view.h, cull.pad)) {
+            if (@import("motion_rules.zig").skipOffscreenRow(true, r.y - cull.offset_delta, r.y + r.h - cull.offset_delta, view.y, view.y + view.h, cull.pad)) {
                 m.* = 0;
                 _ = c.leaf(.{ .width = .fill, .height = .{ .px = h.* } }, .none, null);
                 return r;
