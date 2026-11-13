@@ -1,0 +1,368 @@
+{
+  "version": 1,
+  "encode": [
+    {
+      "name": "goal",
+      "link": "[/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d)"
+    },
+    {
+      "name": "compact",
+      "link": "[/compact](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22636f6d70616374227d)"
+    },
+    {
+      "name": "目標🚀",
+      "link": "[/目標🚀](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22e79baee6a899f09f9a80227d)"
+    },
+    {
+      "name": "review[ui]",
+      "link": "[/review\\[ui\\]](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a227265766965775b75695d227d)"
+    },
+    {
+      "name": "review\\ui",
+      "link": "[/review\\\\ui](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a227265766965775c5c7569227d)"
+    },
+    {
+      "name": "review`ui",
+      "link": "[/review\\`ui](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22726576696577607569227d)"
+    },
+    {
+      "name": "say\"hi",
+      "link": "[/say\"hi](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a227361795c226869227d)"
+    },
+    {
+      "name": "plugin:review",
+      "link": "[/plugin:review](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22706c7567696e3a726576696577227d)"
+    },
+    {
+      "name": "path/name",
+      "link": "[/path/name](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22706174682f6e616d65227d)"
+    },
+    {
+      "name": "",
+      "link": null
+    },
+    {
+      "name": "two words",
+      "link": null
+    },
+    {
+      "name": "two\twords",
+      "link": null
+    },
+    {
+      "name": "two\nwords",
+      "link": null
+    },
+    {
+      "name": "two words",
+      "link": null
+    },
+    {
+      "name": "two words",
+      "link": null
+    },
+    {
+      "name": "go\u0000al",
+      "link": null
+    },
+    {
+      "name": "goal",
+      "link": null
+    }
+  ],
+  "cases": [
+    {
+      "id": "selected-goal",
+      "text": "[/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d)",
+      "visibleText": "/goal",
+      "commands": [
+        {
+          "name": "goal",
+          "source": "[/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d)",
+          "utf16Location": 0,
+          "utf16Length": 88
+        }
+      ]
+    },
+    {
+      "id": "selected-goal-with-arguments",
+      "text": "[/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d) ship a small synthetic demo",
+      "visibleText": "/goal ship a small synthetic demo",
+      "commands": [
+        {
+          "name": "goal",
+          "source": "[/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d)",
+          "utf16Location": 0,
+          "utf16Length": 88
+        }
+      ]
+    },
+    {
+      "id": "selected-goal-preserves-newline-arguments",
+      "text": "[/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d)\nfirst step\nsecond step",
+      "visibleText": "/goal\nfirst step\nsecond step",
+      "commands": [
+        {
+          "name": "goal",
+          "source": "[/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d)",
+          "utf16Location": 0,
+          "utf16Length": 88
+        }
+      ]
+    },
+    {
+      "id": "selected-compact",
+      "text": "[/compact](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22636f6d70616374227d)",
+      "visibleText": "/compact",
+      "commands": [
+        {
+          "name": "compact",
+          "source": "[/compact](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22636f6d70616374227d)",
+          "utf16Location": 0,
+          "utf16Length": 97
+        }
+      ]
+    },
+    {
+      "id": "multiple-commands-and-utf16-prefix",
+      "text": "👋🏽 [/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d) then [/compact](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22636f6d70616374227d) now",
+      "visibleText": "👋🏽 /goal then /compact now",
+      "commands": [
+        {
+          "name": "goal",
+          "source": "[/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d)",
+          "utf16Location": 5,
+          "utf16Length": 88
+        },
+        {
+          "name": "compact",
+          "source": "[/compact](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22636f6d70616374227d)",
+          "utf16Location": 99,
+          "utf16Length": 97
+        }
+      ]
+    },
+    {
+      "id": "unicode-name",
+      "text": "[/目標🚀](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22e79baee6a899f09f9a80227d) arguments",
+      "visibleText": "/目標🚀 arguments",
+      "commands": [
+        {
+          "name": "目標🚀",
+          "source": "[/目標🚀](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22e79baee6a899f09f9a80227d)",
+          "utf16Location": 0,
+          "utf16Length": 100
+        }
+      ]
+    },
+    {
+      "id": "escaped-brackets",
+      "text": "[/review\\[ui\\]](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a227265766965775b75695d227d) arguments",
+      "visibleText": "/review[ui] arguments",
+      "commands": [
+        {
+          "name": "review[ui]",
+          "source": "[/review\\[ui\\]](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a227265766965775b75695d227d)",
+          "utf16Location": 0,
+          "utf16Length": 108
+        }
+      ]
+    },
+    {
+      "id": "escaped-backslash",
+      "text": "[/review\\\\ui](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a227265766965775c5c7569227d) arguments",
+      "visibleText": "/review\\ui arguments",
+      "commands": [
+        {
+          "name": "review\\ui",
+          "source": "[/review\\\\ui](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a227265766965775c5c7569227d)",
+          "utf16Location": 0,
+          "utf16Length": 106
+        }
+      ]
+    },
+    {
+      "id": "escaped-backtick",
+      "text": "[/review\\`ui](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22726576696577607569227d) arguments",
+      "visibleText": "/review`ui arguments",
+      "commands": [
+        {
+          "name": "review`ui",
+          "source": "[/review\\`ui](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22726576696577607569227d)",
+          "utf16Location": 0,
+          "utf16Length": 104
+        }
+      ]
+    },
+    {
+      "id": "json-escaping",
+      "text": "[/say\"hi](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a227361795c226869227d) arguments",
+      "visibleText": "/say\"hi arguments",
+      "commands": [
+        {
+          "name": "say\"hi",
+          "source": "[/say\"hi](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a227361795c226869227d)",
+          "utf16Location": 0,
+          "utf16Length": 96
+        }
+      ]
+    },
+    {
+      "id": "plugin-name",
+      "text": "[/plugin:review](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22706c7567696e3a726576696577227d) arguments",
+      "visibleText": "/plugin:review arguments",
+      "commands": [
+        {
+          "name": "plugin:review",
+          "source": "[/plugin:review](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22706c7567696e3a726576696577227d)",
+          "utf16Location": 0,
+          "utf16Length": 115
+        }
+      ]
+    },
+    {
+      "id": "literal-slash",
+      "text": "/goal keep this literal",
+      "visibleText": "/goal keep this literal",
+      "commands": []
+    },
+    {
+      "id": "literal-plugin-slash",
+      "text": "/plugin:review tests",
+      "visibleText": "/plugin:review tests",
+      "commands": []
+    },
+    {
+      "id": "malformed-hex",
+      "text": "[/goal](harness-invoke:not-hex)",
+      "visibleText": "[/goal](harness-invoke:not-hex)",
+      "commands": []
+    },
+    {
+      "id": "odd-hex",
+      "text": "[/goal](harness-invoke:123)",
+      "visibleText": "[/goal](harness-invoke:123)",
+      "commands": []
+    },
+    {
+      "id": "uppercase-hex",
+      "text": "[/goal](harness-invoke:7B226B696E64223A22636F6D6D616E64222C226E616D65223A22676F616C227D)",
+      "visibleText": "[/goal](harness-invoke:7B226B696E64223A22636F6D6D616E64222C226E616D65223A22676F616C227D)",
+      "commands": []
+    },
+    {
+      "id": "noncanonical-key-order",
+      "text": "[/goal](harness-invoke:7b226e616d65223a22676f616c222c226b696e64223a22636f6d6d616e64227d)",
+      "visibleText": "[/goal](harness-invoke:7b226e616d65223a22676f616c222c226b696e64223a22636f6d6d616e64227d)",
+      "commands": []
+    },
+    {
+      "id": "noncanonical-json-whitespace",
+      "text": "[/goal](harness-invoke:7b226b696e64223a2022636f6d6d616e64222c20226e616d65223a2022676f616c227d)",
+      "visibleText": "[/goal](harness-invoke:7b226b696e64223a2022636f6d6d616e64222c20226e616d65223a2022676f616c227d)",
+      "commands": []
+    },
+    {
+      "id": "noncanonical-extra-field",
+      "text": "[/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c222c226578747261223a747275657d)",
+      "visibleText": "[/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c222c226578747261223a747275657d)",
+      "commands": []
+    },
+    {
+      "id": "mismatched-label",
+      "text": "[/compact](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d)",
+      "visibleText": "[/compact](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d)",
+      "commands": []
+    },
+    {
+      "id": "missing-slash-label",
+      "text": "[goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d)",
+      "visibleText": "[goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d)",
+      "commands": []
+    },
+    {
+      "id": "empty-name",
+      "text": "[/](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22227d)",
+      "visibleText": "[/](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22227d)",
+      "commands": []
+    },
+    {
+      "id": "whitespace-name",
+      "text": "[/two words](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a2274776f20776f726473227d)",
+      "visibleText": "[/two words](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a2274776f20776f726473227d)",
+      "commands": []
+    },
+    {
+      "id": "control-name",
+      "text": "[/go\u0001al](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f5c7530303031616c227d)",
+      "visibleText": "[/go\u0001al](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f5c7530303031616c227d)",
+      "commands": []
+    },
+    {
+      "id": "malformed-unclosed-link",
+      "text": "[/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d",
+      "visibleText": "[/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d",
+      "commands": []
+    },
+    {
+      "id": "escaped-link",
+      "text": "\\[/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d)",
+      "visibleText": "\\[/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d)",
+      "commands": []
+    },
+    {
+      "id": "inline-code",
+      "text": "`[/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d)`",
+      "visibleText": "`[/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d)`",
+      "commands": []
+    },
+    {
+      "id": "fenced-code",
+      "text": "```markdown\n[/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d)\n```",
+      "visibleText": "```markdown\n[/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d)\n```",
+      "commands": []
+    },
+    {
+      "id": "tilde-fenced-code",
+      "text": "~~~\n[/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d)\n~~~",
+      "visibleText": "~~~\n[/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d)\n~~~",
+      "commands": []
+    },
+    {
+      "id": "indented-code",
+      "text": "    [/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d)",
+      "visibleText": "    [/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d)",
+      "commands": []
+    },
+    {
+      "id": "image-not-command",
+      "text": "![/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d)",
+      "visibleText": "![/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d)",
+      "commands": []
+    },
+    {
+      "id": "image-alt-link",
+      "text": "![example [/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d)](example.png)",
+      "visibleText": "![example [/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d)](example.png)",
+      "commands": []
+    },
+    {
+      "id": "html-comment",
+      "text": "<!-- [/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d) -->",
+      "visibleText": "<!-- [/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d) -->",
+      "commands": []
+    },
+    {
+      "id": "html-code-block",
+      "text": "<pre>\n[/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d)\n</pre>",
+      "visibleText": "<pre>\n[/goal](harness-invoke:7b226b696e64223a22636f6d6d616e64222c226e616d65223a22676f616c227d)\n</pre>",
+      "commands": []
+    },
+    {
+      "id": "ordinary-markdown-link",
+      "text": "[/goal](https://example.invalid/goal)",
+      "visibleText": "[/goal](https://example.invalid/goal)",
+      "commands": []
+    }
+  ]
+}

@@ -10,6 +10,7 @@ import SwiftUI
 
 struct NewSessionView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.composerWorkspaceCommandAction) private var workspaceCommandAction
     let destination: NewSessionDestination
     @Binding var path: [Route]
 
@@ -527,7 +528,20 @@ struct NewSessionView: View {
                     attachments.append(contentsOf: staged)
                     attachError = StagedAttachment.failureMessage(failed)
                 },
-                onRemoveAttachment: { id in attachments.removeAll { $0.id == id } }
+                onRemoveAttachment: { id in attachments.removeAll { $0.id == id } },
+                commandContext: deviceId.map {
+                    ComposerCommandContext(deviceId: $0, harness: runHarness, spaceId: space?.id,
+                                           path: checkoutKind == .local ? selectedRefRow?.worktreePath : nil)
+                },
+                onWorkspaceCommand: { command in
+                    if command == .model {
+                        showPicker = true
+                    } else if let deviceId {
+                        workspaceCommandAction?(command, ComposerCommandContext(
+                            deviceId: deviceId, harness: runHarness, spaceId: space?.id,
+                            path: checkoutKind == .local ? selectedRefRow?.worktreePath : nil))
+                    }
+                }
             ) {
                 // Zeron-style unified model + thinking-tier capsule, keeping
                 // independent button accessibility identities for both parts.

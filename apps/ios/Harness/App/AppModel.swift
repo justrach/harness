@@ -177,6 +177,14 @@ final class AppModel {
         }
         if args.contains("-demo") {
             enterDemoMode()
+            if args.contains("-demo-command-catalog"), var fixture = demo {
+                // The command preview must use the same agent as its catalog.
+                for index in fixture.chats.indices {
+                    fixture.chats[index].config = ChatConfig(harness: "graff", model: ChatMode.tiers[0].id,
+                                                            reasoning: nil, sandbox: "workspace-write")
+                }
+                demo = fixture
+            }
             if let index = args.firstIndex(of: "-header-status-count"), index + 1 < args.count,
                let count = Int(args[index + 1]) {
                 demo?.configureHeaderStatusFixture(count: count, allIdle: args.contains("-header-status-idle"))
@@ -761,7 +769,8 @@ final class AppModel {
             try? await Task.sleep(for: .seconds(ProcessInfo.processInfo.arguments.contains("-slow-catalog") ? 15 : 0.1))
             let args = ProcessInfo.processInfo.arguments
             // `-demo-graff`: the demo device also runs graff (chat mode's agent).
-            let graff = args.contains("-demo-graff") ? [HarnessInfo(id: ChatMode.harness, label: "Graff")] : []
+            let graff = args.contains("-demo-graff") || args.contains("-demo-command-catalog")
+                ? [HarnessInfo(id: ChatMode.harness, label: "Graff")] : []
             return DeviceCatalog(items: args.contains("-no-agents") ? [] : HarnessCatalog.harnesses + graff, isLive: true)
         }
         if let live = await workspace?.listHarnesses(deviceId: deviceId) {
@@ -819,6 +828,22 @@ final class AppModel {
             return DeviceCatalog(items: normalized, isLive: true)
         }
         return DeviceCatalog(items: DocDisk.loadModels(deviceId: deviceId, harness: harness) ?? [], isLive: false)
+    }
+
+    func listCommands(_ context: ComposerCommandContext) async throws -> [ComposerCommand] {
+        if demo != nil {
+            if context.harness == "graff" {
+                return try DemoCommandCatalog.graff()
+            }
+            return [ComposerCommand(name: "review", description: "Review the current changes")]
+        }
+        guard let workspace else { throw RelayError.notConnected }
+        return try await workspace.listCommands(context)
+    }
+
+    func hostSupportsComposerReferences(deviceId: String) -> Bool {
+        if demo != nil { return true }
+        return workspace?.deviceSupports(deviceId, "composer-references-v1") ?? false
     }
 
     @ObservationIgnored private var demoRefFailuresRemaining = 1

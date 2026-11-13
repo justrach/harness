@@ -283,6 +283,96 @@ pub fn leading_command(text: &str) -> Option<(&str, &str)> {
 mod tests {
     use super::*;
 
+    #[derive(Deserialize)]
+    struct ComposerCommandVectors {
+        encode: Vec<ComposerCommandEncoding>,
+        cases: Vec<ComposerCommandCase>,
+    }
+
+    #[derive(Deserialize)]
+    struct ComposerCommandEncoding {
+        name: String,
+        link: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ComposerCommandCase {
+        id: String,
+        text: String,
+        visible_text: String,
+        commands: Vec<ComposerCommandToken>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ComposerCommandToken {
+        name: String,
+        source: String,
+        utf16_location: usize,
+        utf16_length: usize,
+    }
+
+    fn composer_command_vectors() -> ComposerCommandVectors {
+        serde_json::from_str(include_str!(
+            "../../../apps/parity/vectors/composer-commands.json"
+        ))
+        .expect("shared composer command vectors must decode")
+    }
+
+    #[test]
+    fn composer_commands_match_shared_encoding_vectors() {
+        for case in composer_command_vectors().encode {
+            assert_eq!(
+                valid_invocation_name(&case.name),
+                case.link.is_some(),
+                "{:?}",
+                case.name
+            );
+            if let Some(expected) = case.link {
+                let command = Invocation::Command { name: case.name };
+                assert_eq!(command.link(), expected, "{:?}", command.name());
+            }
+        }
+    }
+
+    #[test]
+    fn composer_commands_match_shared_text_vectors() {
+        for case in composer_command_vectors().cases {
+            assert_eq!(
+                invocation_prompt(&case.text),
+                case.visible_text,
+                "{}",
+                case.id
+            );
+            let links = invocation_links(&case.text);
+            assert_eq!(links.len(), case.commands.len(), "{}", case.id);
+            for ((range, invocation), expected) in links.iter().zip(&case.commands) {
+                assert_eq!(
+                    invocation,
+                    &Invocation::Command {
+                        name: expected.name.clone()
+                    },
+                    "{}",
+                    case.id
+                );
+                assert_eq!(&case.text[range.clone()], expected.source, "{}", case.id);
+                assert_eq!(
+                    case.text[..range.start].encode_utf16().count(),
+                    expected.utf16_location,
+                    "{}",
+                    case.id
+                );
+                assert_eq!(
+                    case.text[range.clone()].encode_utf16().count(),
+                    expected.utf16_length,
+                    "{}",
+                    case.id
+                );
+            }
+        }
+    }
+
     fn skill(name: &str, path: &str) -> Invocation {
         Invocation::Skill {
             name: name.into(),
