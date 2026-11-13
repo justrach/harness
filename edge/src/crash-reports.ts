@@ -64,7 +64,12 @@ const hex = async (data: string): Promise<string> => {
 
 /** Same wording as the phone's list (CrashReports.crashHeadline). */
 export const crashHeadline = (m: Json): string => {
-  const reason = typeof m.terminationReason === "string" ? m.terminationReason.split(/\r?\n/)[0].trim() : "";
+  const lines = typeof m.terminationReason === "string"
+    ? m.terminationReason.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
+    : [];
+  const reason = lines[0]
+    ? (/^Namespace SIGNAL\b/i.test(lines[0]) && lines[1] ? `${lines[0]} · ${lines[1]}` : lines[0])
+    : "";
   if (reason) return "Crash: " + (reason.length > 90 ? reason.slice(0, 89) + "…" : reason);
   const exception = typeof m.exceptionType === "number" ? (EXCEPTIONS[m.exceptionType] ?? `exception ${m.exceptionType}`) : null;
   const signal = typeof m.signal === "number" ? (SIGNALS[m.signal] ?? `signal ${m.signal}`) : null;
@@ -76,11 +81,15 @@ export const crashHeadline = (m: Json): string => {
 export const topFrames = (diagnostic: Json | undefined, count = SIGNATURE_FRAMES): string[] => {
   const tree = diagnostic?.callStackTree as Json | undefined;
   const stacks = tree ? list(tree, "callStacks") : [];
-  const stack = stacks.find((s) => s.threadAttributed === true) ?? stacks[0];
+  const stack =
+    stacks.find((s) => s.threadAttributed === true && list(s, "callStackRootFrames").length > 0) ??
+    stacks.find((s) => s.threadAttributed === true) ??
+    stacks.find((s) => list(s, "callStackRootFrames").length > 0);
   const out: string[] = [];
   let frame = stack ? list(stack, "callStackRootFrames")[0] : undefined;
   while (frame && out.length < count) {
-    out.push(`${String(frame.binaryName ?? "?")}+${String(frame.offsetIntoBinaryImage ?? "?")}`);
+    const offset = frame.offsetIntoBinaryTextSegment ?? frame.offsetIntoBinaryImage ?? "?";
+    out.push(`${String(frame.binaryName ?? "?")}+${String(offset)}`);
     frame = list(frame, "subFrames")[0];
   }
   return out;

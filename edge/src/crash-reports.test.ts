@@ -11,7 +11,7 @@ import {
 const frame = (binaryName: string, offset: number, subFrames: unknown[] = []) => ({
   binaryUUID: "6E1F1A2B-0000-4000-8000-000000000001",
   binaryName,
-  offsetIntoBinaryImage: offset,
+  offsetIntoBinaryTextSegment: offset,
   address: 0x100000000 + offset,
   sampleCount: 1,
   subFrames
@@ -86,6 +86,30 @@ describe("crash reports: summarizing a MetricKit payload", () => {
     (p.crashDiagnostics[0].diagnosticMetaData as Record<string, unknown>).terminationReason =
       "Namespace FRONTBOARD, Code 0x8badf00d\nmore";
     expect((await summarize(p)).headline).toBe("Crash: Namespace FRONTBOARD, Code 0x8badf00d");
+  });
+
+  it("keeps the second line of a SIGNAL termination reason when iOS puts the trap detail there", async () => {
+    const p = crashPayload();
+    (p.crashDiagnostics[0].diagnosticMetaData as Record<string, unknown>).terminationReason =
+      "Namespace SIGNAL, Code 0x5\nSwift runtime failure: precondition failed";
+    expect((await summarize(p)).headline).toBe(
+      "Crash: Namespace SIGNAL, Code 0x5 · Swift runtime failure: precondition failed"
+    );
+  });
+
+  it("falls back to non-empty thread stacks and legacy offsetIntoBinaryImage keys", () => {
+    const diagnostic = {
+      callStackTree: {
+        callStacks: [
+          { threadAttributed: false, callStackRootFrames: [] },
+          {
+            threadAttributed: false,
+            callStackRootFrames: [{ binaryName: "Harness", offsetIntoBinaryImage: 2048, subFrames: [] }]
+          }
+        ]
+      }
+    };
+    expect(topFrames(diagnostic)).toEqual(["Harness+2048"]);
   });
 
   it("names hangs, slow launches and empty payloads", async () => {

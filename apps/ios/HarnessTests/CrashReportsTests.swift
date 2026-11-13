@@ -29,6 +29,22 @@ final class CrashReportsTests: XCTestCase {
         XCTAssertEqual(summary.headline, "Crash: Namespace FRONTBOARD, Code 0x8BADF00D scene-update watchdog transgression")
     }
 
+    func testSignalTerminationReasonIncludesSecondLineTrapDetail() {
+        let report = json([
+            "crashDiagnostics": [[
+                "diagnosticMetaData": [
+                    "appBuildVersion": "83",
+                    "exceptionType": 6,
+                    "signal": 5,
+                    "terminationReason": "Namespace SIGNAL, Code 0x5\nSwift runtime failure: precondition failed",
+                ],
+                "callStackTree": ["callStacks": []],
+            ]],
+        ])
+        let summary = CrashReports.summary(of: report)
+        XCTAssertEqual(summary.headline, "Crash: Namespace SIGNAL, Code 0x5 · Swift runtime failure: precondition failed")
+    }
+
     func testOtherReportsSayWhatTheyAre() {
         let crash = json(["crashDiagnostics": [["diagnosticMetaData": ["exceptionType": 1, "signal": 11]]]])
         XCTAssertEqual(CrashReports.summary(of: crash).headline, "Crash: EXC_BAD_ACCESS · SIGSEGV")

@@ -220,9 +220,15 @@ final class CrashReports: NSObject, MXMetricManagerSubscriber, @unchecked Sendab
     /// The watchdog's own words when there are some (`0x8badf00d` and its
     /// explanation), otherwise the exception and signal.
     static func crashHeadline(_ meta: [String: Any]) -> String {
-        if let reason = meta["terminationReason"] as? String,
-           let line = reason.split(whereSeparator: \.isNewline).first.map(String.init), !line.isEmpty {
-            return "Crash: " + (line.count > 90 ? String(line.prefix(89)) + "…" : line)
+        if let reason = meta["terminationReason"] as? String {
+            let lines = reason.split(whereSeparator: \.isNewline)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            if let first = lines.first {
+                let combined = first.range(of: #"^Namespace SIGNAL\b"#, options: [.regularExpression, .caseInsensitive]) != nil
+                    && lines.count > 1 ? "\(first) · \(lines[1])" : first
+                return "Crash: " + (combined.count > 90 ? String(combined.prefix(89)) + "…" : combined)
+            }
         }
         let signal = (meta["signal"] as? NSNumber).map { signalName($0.intValue) }
         let exception = (meta["exceptionType"] as? NSNumber).map { exceptionName($0.intValue) }
