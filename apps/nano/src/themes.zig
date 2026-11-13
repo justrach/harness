@@ -207,6 +207,14 @@ fn derive(o: json.ObjectMap, dark: bool, curated: bool) ?theme.Colors {
         .faint = col.get(cs, "textFaint"),
         .subline = over(shell, muted.alpha(0.5)),
         .accent = col.get(acc, "primary"),
+        .accent_strong = blk: {
+            const strong = col.get(acc, "strong");
+            break :blk if (strong.a > 0) strong else col.get(acc, "primary");
+        },
+        .on_accent = blk: {
+            const on = col.get(acc, "on");
+            break :blk if (on.a > 0) on else white;
+        },
         .accent_wash = col.get(acc, "wash"),
         .glyph = glyph,
         .danger = col.get(cs, "danger"),

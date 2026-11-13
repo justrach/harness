@@ -594,7 +594,7 @@ fn part(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *const 
         .tool => treeRow(c, a, k, e, p, true, at.chat_id),
         .@"error" => errorPart(c, a, k, e, p, at),
         .image => @import("view_reply_images.zig").draw(c, a, k, at.chat_id, p.path, p.text.items, null),
-        .visual => attachment(c, k, .widget, p.text.items),
+        .visual => @import("view_visual.zig").draw(c, a, k, e, p),
         .delegation => attachment(c, k, .widget, "Delegated to a subagent"),
         .input => {
             const q = if (p.questions.len > 0) p.questions[0] else null;

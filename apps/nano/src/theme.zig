@@ -34,6 +34,8 @@ pub const Colors = struct {
     /// A session row's time and the header's "project @ device".
     subline: Color,
     accent: Color,
+    accent_strong: Color,
+    on_accent: Color,
     /// Accent behind inline code and selections.
     accent_wash: Color,
     /// The snake spinner's three rows: accent lighter, accent, deeper.
@@ -169,6 +171,8 @@ pub fn fallback(dark: bool) Colors {
             .faint = .hex(0x5c564b),
             .subline = .hex(0x5d584d),
             .accent = accent,
+            .accent_strong = accent,
+            .on_accent = black,
             .accent_wash = accent.alpha(0.22),
             .glyph = .{ .hex(0xeebd73), accent, .hex(0xbe8632) },
             .danger = .hex(0xd2674f),
@@ -209,6 +213,8 @@ pub fn fallback(dark: bool) Colors {
         .faint = .hex(0xa8a090),
         .subline = .hex(0xada89d),
         .accent = accent,
+        .accent_strong = accent,
+        .on_accent = black,
         .accent_wash = accent.alpha(0.12),
         .glyph = .{ .hex(0xd09346), accent, .hex(0x935d18) },
         .danger = .hex(0xb14228),

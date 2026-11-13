@@ -117,7 +117,30 @@ pub fn build(b: *std.Build) void {
         \\
     );
     const info_mod = b.createModule(.{ .root_source_file = info_root });
+    const luau = b.dependency("luau", .{});
+    const luau_lib = buildLuau(b, luau, target, optimize);
+    const luau_h_files = b.addWriteFiles();
+    const luau_shim = luau_h_files.add("luau_shim.h",
+        \\#define LUA_USE_LONGJMP 1
+        \\#define LUAI_MAXCSTACK 1000000
+        \\#define LUA_VECTOR_SIZE 3
+        \\#include "lua.h"
+        \\#include "lualib.h"
+        \\#include "luacode.h"
+        \\
+    );
+    const luau_tc = b.addTranslateC(.{
+        .root_source_file = luau_shim,
+        .target = target,
+        .optimize = optimize,
+    });
+    luau_tc.addIncludePath(luau.path("VM/include"));
+    luau_tc.addIncludePath(luau.path("Compiler/include"));
+    const luau_c = luau_tc.createModule();
+    luau_c.linkLibrary(luau_lib);
+
     const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "luau_c", .module = luau_c },
         .{ .name = "build_info", .module = info_mod },
         .{ .name = "nanoui", .module = nanoui },
         .{ .name = "http_zig", .module = http_zig },
@@ -233,4 +256,121 @@ fn rustTarget(target: std.Target) []const u8 {
             (if (target.cpu.arch == .aarch64) "aarch64-pc-windows-gnullvm" else "x86_64-pc-windows-gnu"),
         else => @panic("native math needs a supported desktop Rust target"),
     };
+}
+
+fn buildLuau(
+    b: *std.Build,
+    luau: *std.Build.Dependency,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
+    const lib = b.addLibrary(.{
+        .name = "luau",
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libcpp = true,
+        }),
+    });
+    lib.root_module.addIncludePath(luau.path("Common/include"));
+    lib.root_module.addIncludePath(luau.path("Ast/include"));
+    lib.root_module.addIncludePath(luau.path("Bytecode/include"));
+    lib.root_module.addIncludePath(luau.path("Compiler/include"));
+    lib.root_module.addIncludePath(luau.path("VM/include"));
+    const flags: []const []const u8 = if (optimize == .debug) &.{
+        "-std=c++17",
+        "-fexceptions",
+        "-DLUA_USE_LONGJMP=1",
+        "-DLUAI_MAXCSTACK=1000000",
+        "-DLUA_VECTOR_SIZE=3",
+        "-DLUA_API=extern \"C\"",
+        "-DLUACODE_API=extern \"C\"",
+    } else &.{
+        "-std=c++17",
+        "-fexceptions",
+        "-fno-math-errno",
+        "-DLUA_USE_LONGJMP=1",
+        "-DLUAI_MAXCSTACK=1000000",
+        "-DLUA_VECTOR_SIZE=3",
+        "-DLUA_API=extern \"C\"",
+        "-DLUACODE_API=extern \"C\"",
+    };
+    const common_files = [_][]const u8{
+        "Common/src/BytecodeWire.cpp",
+        "Common/src/StringUtils.cpp",
+        "Common/src/TimeTrace.cpp",
+    };
+    const ast_files = [_][]const u8{
+        "Ast/src/Allocator.cpp",
+        "Ast/src/Ast.cpp",
+        "Ast/src/Confusables.cpp",
+        "Ast/src/Cst.cpp",
+        "Ast/src/Lexer.cpp",
+        "Ast/src/Location.cpp",
+        "Ast/src/Parser.cpp",
+        "Ast/src/PrettyPrinter.cpp",
+    };
+    const bytecode_files = [_][]const u8{
+        "Bytecode/src/BytecodeBuilder.cpp",
+        "Bytecode/src/BytecodeDump.cpp",
+        "Bytecode/src/BytecodeGraph.cpp",
+        "Bytecode/src/Sccp.cpp",
+    };
+    const compiler_files = [_][]const u8{
+        "Compiler/src/BuiltinFolding.cpp",
+        "Compiler/src/Builtins.cpp",
+        "Compiler/src/Compiler.cpp",
+        "Compiler/src/ConstantFolding.cpp",
+        "Compiler/src/CostModel.cpp",
+        "Compiler/src/TableShape.cpp",
+        "Compiler/src/Types.cpp",
+        "Compiler/src/ValueTracking.cpp",
+        "Compiler/src/lcode.cpp",
+    };
+    const vm_files = [_][]const u8{
+        "VM/src/lapi.cpp",
+        "VM/src/laux.cpp",
+        "VM/src/lbaselib.cpp",
+        "VM/src/lbitlib.cpp",
+        "VM/src/lbuffer.cpp",
+        "VM/src/lbuflib.cpp",
+        "VM/src/lbuiltins.cpp",
+        "VM/src/lclass.cpp",
+        "VM/src/lclasslib.cpp",
+        "VM/src/lcorolib.cpp",
+        "VM/src/ldblib.cpp",
+        "VM/src/ldebug.cpp",
+        "VM/src/ldo.cpp",
+        "VM/src/lfunc.cpp",
+        "VM/src/lgc.cpp",
+        "VM/src/lgcdebug.cpp",
+        "VM/src/linit.cpp",
+        "VM/src/lintlib.cpp",
+        "VM/src/lmathlib.cpp",
+        "VM/src/lmem.cpp",
+        "VM/src/lnumprint.cpp",
+        "VM/src/lobject.cpp",
+        "VM/src/loslib.cpp",
+        "VM/src/lperf.cpp",
+        "VM/src/lstate.cpp",
+        "VM/src/lstring.cpp",
+        "VM/src/lstrlib.cpp",
+        "VM/src/ltable.cpp",
+        "VM/src/ltablib.cpp",
+        "VM/src/ltm.cpp",
+        "VM/src/ludata.cpp",
+        "VM/src/lutf8lib.cpp",
+        "VM/src/lveclib.cpp",
+        "VM/src/lvector.cpp",
+        "VM/src/lvmexecute.cpp",
+        "VM/src/lvmload.cpp",
+        "VM/src/lvmutils.cpp",
+    };
+    lib.root_module.addCSourceFiles(.{
+        .root = luau.path("."),
+        .files = &(common_files ++ ast_files ++ bytecode_files ++ compiler_files ++ vm_files),
+        .flags = flags,
+    });
+    return lib;
 }
