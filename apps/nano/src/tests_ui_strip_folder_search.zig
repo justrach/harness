@@ -1,15 +1,31 @@
-//! release/v0.2.172's split → search folder → type flow, on made-up data.
+//! Explicit folder changes after splitting, on made-up data.
 const std = @import("std");
 const ui = @import("nanoui").ui;
 const testing = std.testing;
 const Harness = @import("tests_ui_tab_strip.zig").Harness;
 const strip = @import("view_tab_strip.zig");
 
-test "release folder menu: Cmd D opens a focused searchable folder menu under its new slot" {
+pub fn openFolderMenu(h: *Harness) !void {
+    const pane = h.a.tabs.layout().?.focus;
+    const name = strip.folder(&h.a, .{ .chat = pane }).?.name;
+    const right_pane_x = h.a.view.chrome.x + h.a.view.chrome.chat_width * 0.5;
+    for (h.t.ctx.nodes.items) |node| switch (node.content) {
+        .text => |text| if (std.mem.eql(u8, text.str, name) and node.rect.y < 42 and node.rect.x >= right_pane_x) {
+            h.t.click(node.rect.x + node.rect.w / 2, node.rect.y + node.rect.h / 2);
+            h.t.settle(1);
+            return;
+        },
+        else => {},
+    };
+    return error.MissingFolderChip;
+}
+
+test "release folder menu: clicking the folder chip opens a focused searchable menu under its slot" {
     var h: Harness = undefined;
     try h.init(true);
     defer h.deinit();
     h.press(.{ .key = 'd', .cmd = true });
+    try openFolderMenu(&h);
     try testing.expect(h.a.view.strip.menu == .folder);
     const right_pane_x = h.a.view.chrome.x + h.a.view.chrome.chat_width * 0.5;
     try testing.expect((h.a.view.strip.anchor orelse return error.MissingFolderAnchor).x >= right_pane_x);
@@ -35,6 +51,7 @@ test "release folder menu: text-field Enter confirms the filtered project and re
     try h.init(true);
     defer h.deinit();
     h.press(.{ .key = 'd', .cmd = true });
+    try openFolderMenu(&h);
     h.t.typeText("field notes");
     h.t.settle(1);
     h.t.key(.enter);
@@ -80,6 +97,7 @@ test "release folder menu: Escape accepts the inherited folder and returns typin
     try h.init(true);
     defer h.deinit();
     h.press(.{ .key = 'd', .cmd = true });
+    try openFolderMenu(&h);
     try testing.expect(h.a.view.strip.menu == .folder);
     const right_pane_x = h.a.view.chrome.x + h.a.view.chrome.chat_width * 0.5;
     try testing.expect((h.a.view.strip.anchor orelse return error.MissingFolderAnchor).x >= right_pane_x);
@@ -98,6 +116,7 @@ test "release folder menu: one Cmd W closes the panel Cmd D made even while sear
     try h.init(true);
     defer h.deinit();
     h.press(.{ .key = 'd', .cmd = true });
+    try openFolderMenu(&h);
     try testing.expect(h.a.view.strip.menu == .folder);
     const right_pane_x = h.a.view.chrome.x + h.a.view.chrome.chat_width * 0.5;
     try testing.expect((h.a.view.strip.anchor orelse return error.MissingFolderAnchor).x >= right_pane_x);
@@ -118,6 +137,7 @@ test "release folder menu: pane navigation dismisses search and preserves each c
     h.a.composer.set("Original draft");
     h.t.settle(1);
     h.press(.{ .key = 'd', .cmd = true });
+    try openFolderMenu(&h);
     try testing.expect(h.a.view.strip.menu == .folder);
     const right_pane_x = h.a.view.chrome.x + h.a.view.chrome.chat_width * 0.5;
     try testing.expect((h.a.view.strip.anchor orelse return error.MissingFolderAnchor).x >= right_pane_x);
@@ -140,6 +160,7 @@ test "release folder menu: Cmd L accepts the inherited folder and focuses its co
     try h.init(true);
     defer h.deinit();
     h.press(.{ .key = 'd', .cmd = true });
+    try openFolderMenu(&h);
     try testing.expect(h.a.view.strip.menu == .folder);
     const right_pane_x = h.a.view.chrome.x + h.a.view.chrome.chat_width * 0.5;
     try testing.expect((h.a.view.strip.anchor orelse return error.MissingFolderAnchor).x >= right_pane_x);
@@ -156,6 +177,7 @@ test "release folder menu: no matches retains both actions and never selects pro
     try h.init(true);
     defer h.deinit();
     h.press(.{ .key = 'd', .cmd = true });
+    try openFolderMenu(&h);
     h.t.typeText("no such synthetic folder");
     h.t.settle(1);
     try testing.expect(h.t.hasText("No folders match"));
@@ -232,6 +254,7 @@ test "release folder menu: only seven folders scroll while search and actions st
     }
     try h.a.spaces.replace(.{ .array = rows });
     h.press(.{ .key = 'd', .cmd = true });
+    try openFolderMenu(&h);
     const list = h.t.ctx.rects.get(h.a.view.strip.search_scroll) orelse return error.MissingFolderScroller;
     try testing.expectApproxEqAbs(@as(f32, 224), list.h, 0.1);
     const actions = h.t.findText("Don't work in a project") orelse return error.MissingPersistentAction;

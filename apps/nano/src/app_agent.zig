@@ -211,6 +211,9 @@ fn storeChatConfigLive(a: *App, model: ?[]const u8, reasoning: ?[]const u8, focu
 pub fn newChatSpace(a: *const App) ?workspace.Space {
     if (a.selected == null) {
         if (a.new_chat_mode or a.new_no_project) return null;
+        // An explicit project can arrive before its metadata. Keep its
+        // identity rather than silently running in another folder.
+        if (a.space != null and a.findSpace(a.space) == null) return null;
         if (a.new_device) |device| {
             if (a.findSpace(a.space)) |space| if (std.mem.eql(u8, space.device_id orelse a.device_id orelse "", device)) return space;
             for (a.spaces.items) |space| if (std.mem.eql(u8, space.device_id orelse a.device_id orelse "", device)) return space;

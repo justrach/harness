@@ -138,6 +138,7 @@ test {
     _ = @import("view_attachment_drop.zig");
     _ = @import("tests_ui_project_setup.zig");
     _ = @import("tests_ui_open_chooser.zig");
+    _ = @import("tests_ui_project_shortcuts.zig");
     _ = @import("tests_ui_resize.zig");
     _ = @import("tests_ui_strip_folder_search.zig");
     _ = @import("tests_tab_layout.zig");

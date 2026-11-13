@@ -382,15 +382,17 @@ pub fn keys(c: *ui.Context, a: *App) void {
     } else if (view_mod.boundShortcut(c, a, "newSession") or c.shortcut(.{ .key = 'n', .cmd = true })) {
         state.menu = null;
         state.pending_folder = null;
-        a.newTab();
+        @import("app_open_chooser.zig").open(a, .new_workspace_tab);
     } else if (c.shortcut(.{ .key = 'w', .cmd = true })) {
         state.menu = null;
         state.pending_folder = null;
         a.closeByShortcut();
     } else if (view_mod.boundShortcut(c, a, "splitTerminal")) {
+        if (!a.tabs.canSplit(.horizontal)) return;
         state.menu = null;
         splitChoosingFolder(a, .horizontal);
     } else if (view_mod.boundShortcut(c, a, "splitTerminalDown")) {
+        if (!a.tabs.canSplit(.vertical)) return;
         state.menu = null;
         splitChoosingFolder(a, .vertical);
     } else if (state.rows > 0) {
@@ -412,8 +414,8 @@ pub fn keys(c: *ui.Context, a: *App) void {
     }
 }
 
-/// ⌘D keeps the release flow: split now, then choose the new pane's folder
-/// from the menu under its slot.
+/// ⌘D inherits the source pane's destination and is ready for typing.
+/// Choosing a project belongs to the new-tab flow, not a split.
 pub fn splitChoosingFolder(a: *App, axis: tabs.Axis) void {
     @import("frame_profile.zig").note(a, if (axis == .horizontal) "cmd-d" else "cmd-shift-d");
     const before = chatCount(a);
@@ -421,8 +423,10 @@ pub fn splitChoosingFolder(a: *App, axis: tabs.Axis) void {
     if (chatCount(a) <= before) return;
     const pane = a.tabs.layout().?.focus;
     a.view.strip.focused = .{ .chat = pane };
-    a.view.strip.pending_folder = pane;
+    a.view.strip.pending_folder = null;
+    a.view.strip.menu = null;
     a.view.strip.expanded = null;
+    a.view.focus_composer = true;
     a.redraw();
 }
 
