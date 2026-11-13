@@ -611,16 +611,19 @@ fn push_unique(values: &mut Vec<String>, value: String) {
 }
 
 #[derive(Clone)]
-struct GitCheckoutInspector {
+pub(crate) struct GitCheckoutInspector {
     runner: Arc<dyn ProcessRunner>,
 }
 
 impl GitCheckoutInspector {
-    fn new(runner: Arc<dyn ProcessRunner>) -> Self {
+    pub(crate) fn new(runner: Arc<dyn ProcessRunner>) -> Self {
         Self { runner }
     }
 
-    async fn inspect(&self, cwd: &Path) -> Result<CheckoutSourceContext, ChangeRequestError> {
+    pub(crate) async fn inspect(
+        &self,
+        cwd: &Path,
+    ) -> Result<CheckoutSourceContext, ChangeRequestError> {
         let checkout_root_value = self
             .git_required(cwd, &["rev-parse", "--show-toplevel"])
             .await?;
@@ -888,7 +891,7 @@ fn to_summary(
     })
 }
 
-fn classify_github_failure(stderr: &[u8]) -> ChangeRequestError {
+pub(crate) fn classify_github_failure(stderr: &[u8]) -> ChangeRequestError {
     let stderr = String::from_utf8_lossy(stderr).to_ascii_lowercase();
     if stderr.contains("rate limit") || stderr.contains("secondary rate") {
         ChangeRequestError::RateLimited
@@ -904,7 +907,7 @@ fn classify_github_failure(stderr: &[u8]) -> ChangeRequestError {
     }
 }
 
-fn classify_run_error(error: ProcessRunError) -> ChangeRequestError {
+pub(crate) fn classify_run_error(error: ProcessRunError) -> ChangeRequestError {
     match error {
         ProcessRunError::Spawn(io::ErrorKind::NotFound) => ChangeRequestError::CliUnavailable,
         ProcessRunError::Timeout => ChangeRequestError::Timeout,
@@ -913,36 +916,36 @@ fn classify_run_error(error: ProcessRunError) -> ChangeRequestError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ProcessRequest {
-    program: String,
-    args: Vec<String>,
-    cwd: PathBuf,
-    env: Vec<(String, String)>,
-    timeout: Duration,
-    output_limit: usize,
+pub(crate) struct ProcessRequest {
+    pub(crate) program: String,
+    pub(crate) args: Vec<String>,
+    pub(crate) cwd: PathBuf,
+    pub(crate) env: Vec<(String, String)>,
+    pub(crate) timeout: Duration,
+    pub(crate) output_limit: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ProcessOutput {
-    success: bool,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-    stdout_truncated: bool,
+pub(crate) struct ProcessOutput {
+    pub(crate) success: bool,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
+    pub(crate) stdout_truncated: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProcessRunError {
+pub(crate) enum ProcessRunError {
     Spawn(io::ErrorKind),
     Timeout,
     Io,
 }
 
 #[async_trait]
-trait ProcessRunner: Send + Sync {
+pub(crate) trait ProcessRunner: Send + Sync {
     async fn run(&self, request: ProcessRequest) -> Result<ProcessOutput, ProcessRunError>;
 }
 
-struct SystemProcessRunner;
+pub(crate) struct SystemProcessRunner;
 
 #[async_trait]
 impl ProcessRunner for SystemProcessRunner {

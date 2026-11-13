@@ -106,10 +106,17 @@ pub fn sessionPullRequests(a: *const App, allocator: std.mem.Allocator) ![]PullR
 }
 
 pub fn github(c: *ui.Context, a: *App, k: theme.Colors) void {
+    if (a.panels.github_repository.open) return @import("view_github_repository.zig").view(c, a, k);
     {
         const title = ui.div(c).column().wFull().p(14).gap(5);
         defer title.end();
-        ui.text(c, "Session pull requests", .{ .size = 15, .weight = .semibold, .color = k.text });
+        {
+            const row = ui.div(c).row().wFull().gap(8).itemsCenter();
+            defer row.end();
+            ui.text(c, "Session pull requests", .{ .size = 15, .weight = .semibold, .color = k.text });
+            ui.spacer(c);
+            if (button(c, k, "Repository", true)) @import("app_github_repository.zig").show(a);
+        }
         ui.text(c, "Branches used by this repository’s sessions—not every PR on GitHub.", .{ .size = 11.5, .wrap = true, .color = k.muted });
     }
     rule(c, k);
