@@ -12,6 +12,53 @@ pub const wash_width: f32 = 112;
 pub const footer_height: f32 = 24;
 pub const footer_gap: f32 = 6;
 
+/// Whether expansion would reveal anything beyond the header. The original
+/// invocation stays on Part for the access map; this is only a presentation rule.
+/// `header_fits` comes from the actual header width, never the serialized JSON's
+/// length (wire formatting is not visible information).
+pub fn hasVisibleBody(a: Allocator, p: *const tr.Part, header_fits: bool) bool {
+    if (p.kind == .reasoning or p.output.len > 0 or p.output_ref.len > 0 or p.diff_new != null or p.stats.len > 0 or p.is_error) return true;
+    if (p.invocation.len == 0) return false;
+    return !header_fits or !headerRepresentsInvocation(a, p);
+}
+
+fn headerRepresentsInvocation(a: Allocator, p: *const tr.Part) bool {
+    // Fetches, patches, writes, unknown/MCP payloads and linked tools can carry
+    // information their summary does not describe. Be conservative with them.
+    const field: []const u8 = switch (p.tool) {
+        .exec => "command",
+        .readFile => "path",
+        .glob, .search => "pattern",
+        .webSearch => "query",
+        else => return false,
+    };
+    const parsed = std.json.parseFromSlice(std.json.Value, a, p.invocation, .{}) catch return false;
+    defer parsed.deinit();
+    if (parsed.value != .object) return false;
+    const count = parsed.value.object.count();
+    const search_path = if (p.tool == .search) parsed.value.object.get("path") else null;
+    if (count != 2 and !(count == 3 and search_path != null)) return false;
+    const kind = parsed.value.object.get("kind") orelse return false;
+    if (kind != .string or !std.mem.eql(u8, kind.string, @tagName(p.tool))) return false;
+    const value = parsed.value.object.get(field) orelse return false;
+    if (value != .string or value.string.len == 0 or value.string.len > 120 or std.mem.indexOfAny(u8, value.string, "\r\n\t") != null) return false;
+    if (p.text.items.len > 120) return false;
+    // Headers are plain labels; a URL in the body is an actionable transcript
+    // link, so its expansion is useful even when the label contains that URL.
+    const web = @import("browser_url.zig");
+    if (web.findBareUrl(value.string, 0) != null) return false;
+    if (search_path) |path| {
+        if (path != .string or std.mem.indexOfAny(u8, path.string, "\r\n\t") != null or web.findBareUrl(path.string, 0) != null) return false;
+        const full = std.fmt.allocPrint(a, "{s} in {s}", .{ value.string, path.string }) catch return false;
+        defer a.free(full);
+        return std.mem.eql(u8, full, p.text.items);
+    }
+    if (!std.mem.eql(u8, value.string, p.text.items)) return false;
+    // File headers show a basename badge, not the full path.
+    if (p.path.len > 0 and !std.mem.eql(u8, @import("file_icons.zig").basename(p.path), value.string)) return false;
+    return true;
+}
+
 pub const Result = union(enum) {
     running: ?u64,
     settled,
@@ -21,7 +68,7 @@ pub const Result = union(enum) {
     passed: []const u8,
 
     pub fn washed(r: Result) bool {
-        return r == .failed or r == .passed;
+        return r == .passed;
     }
 };
 
@@ -216,6 +263,46 @@ pub fn workspacePath(a: Allocator, root: []const u8, path: []const u8) ?[]const 
     }
     if (components.items.len == 0) return null;
     return std.mem.join(a, "/", components.items) catch null;
+}
+
+test "retention 309 body suppression is semantic and never discards arguments or results" {
+    var p: tr.Part = .{ .id = @constCast("synthetic"), .kind = .tool, .tool = .exec, .text = .empty, .invocation = @constCast("{\"kind\":\"exec\",\"command\":\"echo synthetic\"}") };
+    p.text.items = @constCast("echo synthetic");
+    const a = std.testing.allocator;
+    try std.testing.expect(!hasVisibleBody(a, &p, true));
+    try std.testing.expect(hasVisibleBody(a, &p, false));
+    // Pretty JSON is multiline, but its argument is still one short line.
+    p.invocation = @constCast("{\n  \"command\": \"echo synthetic\",\n  \"kind\": \"exec\"\n}");
+    try std.testing.expect(!hasVisibleBody(a, &p, true));
+    p.invocation = @constCast("{\"kind\":\"exec\",\"command\":\"echo synthetic\",\"cwd\":\"/synthetic\"}");
+    try std.testing.expect(hasVisibleBody(a, &p, true));
+    p.invocation = @constCast("{\"kind\":\"exec\",\"command\":\"echo\\nsynthetic\"}");
+    try std.testing.expect(hasVisibleBody(a, &p, true));
+    p.invocation = @constCast("{\"kind\":\"exec\",\"command\":\"echo synthetic\"}");
+    p.output = @constCast("<script>synthetic()</script> https://example.invalid/synthetic");
+    try std.testing.expect(hasVisibleBody(a, &p, true));
+    p.output = &.{};
+    p.output_ref = @constCast("synthetic-sidecar");
+    try std.testing.expect(hasVisibleBody(a, &p, true));
+    p.output_ref = &.{};
+    p.diff_new = @constCast("synthetic diff");
+    try std.testing.expect(hasVisibleBody(a, &p, true));
+    p.diff_new = null;
+    p.stats = @constCast(&[_]tr.Stat{.{ .path = "synthetic.zig", .additions = 1, .deletions = 0 }});
+    try std.testing.expect(hasVisibleBody(a, &p, true));
+    p.stats = &.{};
+    p.text.items = @constCast("echo https://example.invalid");
+    p.invocation = @constCast("{\"kind\":\"exec\",\"command\":\"echo https://example.invalid\"}");
+    try std.testing.expect(hasVisibleBody(a, &p, true));
+    p.tool = .search;
+    p.text.items = @constCast("synthetic in src");
+    p.invocation = @constCast("{\"kind\":\"search\",\"pattern\":\"synthetic\",\"path\":\"src\"}");
+    try std.testing.expect(!hasVisibleBody(a, &p, true));
+    p.invocation = @constCast("{\"kind\":\"search\",\"pattern\":\"synthetic\",\"path\":\"src\",\"maxResults\":10}");
+    try std.testing.expect(hasVisibleBody(a, &p, true));
+    p.tool = .webFetch;
+    p.invocation = @constCast("{\"kind\":\"webFetch\",\"url\":\"https://example.invalid\"}");
+    try std.testing.expect(hasVisibleBody(a, &p, true));
 }
 
 test "tool file links stay within the containing checkout" {

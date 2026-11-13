@@ -153,6 +153,20 @@ pub const Entry = struct {
     cached_w: f32 = 0,
     measured_w: f32 = 0,
 
+    /// Deployed adapters retain coordination as user-role text. Project
+    /// sender/body without rewriting the stored envelope or transport role.
+    pub fn peer(e: *const Entry) ?@import("peer_message.zig").Message {
+        if (e.role != .user) return null;
+        for (e.parts.items) |*p| if (p.kind == .text) {
+            return @import("peer_message.zig").parse(p.text.items);
+        };
+        return null;
+    }
+
+    pub fn isHumanPrompt(e: *const Entry) bool {
+        return e.role == .user and e.peer() == null;
+    }
+
     pub fn deinit(e: *Entry, gpa: Allocator) void {
         gpa.free(e.id);
         for (e.parts.items) |*p| p.deinit(gpa);
@@ -391,7 +405,10 @@ fn parsePart(gpa: Allocator, o: json.ObjectMap) !Part {
             p.resolved = if (o.get("resolved")) |r| r == .bool and r.bool else false;
             try parseQuestions(gpa, &p, o);
         },
-        .image => try p.text.appendSlice(gpa, string(o.get("name")) orelse ""),
+        .image => {
+            try p.text.appendSlice(gpa, string(o.get("name")) orelse "");
+            p.path = try gpa.dupe(u8, string(o.get("path")) orelse "");
+        },
         .visual => try p.text.appendSlice(gpa, string(o.get("title")) orelse ""),
         .delegation, .other => {},
     }

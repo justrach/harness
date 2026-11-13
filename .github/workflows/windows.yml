@@ -8,6 +8,9 @@ on:
       - 'rust-toolchain.toml'
       - '.cargo/**'
       - 'apps/harness/**'
+      - 'apps/nano/**'
+      - 'apps/parity/**'
+      - 'protocol/desktop/**'
       - 'dist/windows/**'
       - 'crates/**'
       - 'vendor/zui/**'
@@ -23,6 +26,9 @@ on:
       - 'rust-toolchain.toml'
       - '.cargo/**'
       - 'apps/harness/**'
+      - 'apps/nano/**'
+      - 'apps/parity/**'
+      - 'protocol/desktop/**'
       - 'dist/windows/**'
       - 'crates/**'
       - 'vendor/zui/**'
@@ -150,6 +156,8 @@ jobs:
         run: cargo test --release --locked -p harness-engine --lib
       - name: Harness catalog and login tests
         run: cargo test --release --locked -p harness-engine --test codex_catalog --test codex_login_resolution
+      - name: Workspace-file authorization and read regressions
+        run: cargo test --release --locked -p harness-engine --test workspace_files
       - name: Auth integration tests
         run: cargo test --release --locked -p harness-engine --test auth
       - name: Native visual publication regressions

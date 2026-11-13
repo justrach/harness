@@ -61,43 +61,54 @@ pub fn checkoutOf(chat: workspace.Chat, space: workspace.Space) Checkout {
 pub fn footer(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
     const row = ui.div(c).row().w(w).h(height).px(10).gap(4).itemsCenter().clip();
     defer row.end();
-    @import("view_composer.zig").chip(c, a, k);
-    @import("view_composer.zig").followUpChip(c, a, k);
+    const model_w = @import("view_composer.zig").chip(c, a, k);
+    @import("view_composer.zig").followUpChip(c, a, k, false);
     {
         const slot = ui.div(c).row().grow().w(0).hFull().itemsCenter().clip();
         defer slot.end();
-        session(c, a, k);
+        const slot_w = if (c.rects.get(c.node(slot.index).id)) |sr| sr.w else @max(0, w - 20 - model_w - 64);
+        session(c, a, k, slot_w);
     }
     @import("view_context.zig").indicator(c, a, k);
 }
 
-fn session(c: *ui.Context, a: *App, k: theme.Colors) void {
+fn session(c: *ui.Context, a: *App, k: theme.Colors, slot_w: f32) void {
+    if (!a.settings.hierarchyProfile().shows_git_checkout_chrome) return;
     const id = a.selected orelse return;
     const chat = a.findChat(id) orelse return;
     const space = a.findSpace(chat.space_id) orelse return;
     if (!space.git) return;
+    const fl = @import("motion_rules.zig").sessionFooterLayout(slot_w);
+    if (!fl.show_checkout and !fl.show_branch) return;
     const kind = checkoutOf(chat, space);
     // The slot's `workspace_footer_row().px(10)`.
     const row = ui.div(c).row().grow().w(0).hFull().px(10).gap(4).itemsCenter().clip();
     defer row.end();
-    label(c, k, kind.icon(), kind.label());
-    label(c, k, .@"git-branch", chat.row_branch orelse "No ref");
-    if (kind == .graff) if (chat.cwd) |cwd| if (graff_worktree.GraffWorktree.fromPath(cwd)) |tree| card(c, a, k, chat.id, tree);
+    if (fl.show_checkout) label(c, k, kind.icon(), kind.label(), fl.checkout_words, fl.label_cap);
+    if (fl.show_branch) label(c, k, .@"git-branch", chat.row_branch orelse "No ref", fl.branch_words, fl.label_cap);
+    if (kind == .graff and slot_w >= 340) if (chat.cwd) |cwd| if (graff_worktree.GraffWorktree.fromPath(cwd)) |tree| card(c, a, k, chat.id, tree);
     // PR and merge are the trailing group, whatever the branch's length.
     const spring = ui.div(c).grow().w(0);
     spring.end();
+    if (slot_w < 240) return;
     const pr = @import("app_change_requests.zig").forChat(a, chat) orelse return;
     prs.mergeControls(c, a, k, chat, pr[0]);
     prs.badge(c, k, pr[0], pr[1], .composer, true);
 }
 
-/// `footer_label`: a 12-point glyph and words, quiet, 20 tall.
-fn label(c: *ui.Context, k: theme.Colors, icon: icons.Name, text: []const u8) void {
+/// `footer_label`: a 12-point glyph and words (or 28px icon-only when tight), quiet, 20 tall.
+fn label(c: *ui.Context, k: theme.Colors, icon: icons.Name, text: []const u8, show_words: bool, word_cap: f32) void {
     const color = k.muted.alpha(0.6);
+    if (!show_words or word_cap < 18) {
+        const b = @import("view_tooltip.zig").on(ui.div(c).row().size(28, 20).center(), k, .{ .text = text });
+        defer b.end();
+        icons.icon(c, icon, 12, color, 0);
+        return;
+    }
     const b = ui.div(c).row().h(20).px(8).gap(6).itemsCenter().minW(label_min_w);
     defer b.end();
     icons.icon(c, icon, 12, color, 0);
-    kit.ellipsisText(c, text, .{ .size = 12, .line_height = 12 * phi, .weight = theme.ui_medium_weight, .color = color }, label_max_w - label_min_w);
+    kit.ellipsisText(c, text, .{ .size = 12, .line_height = 12 * phi, .weight = theme.ui_medium_weight, .color = color }, @min(label_max_w - label_min_w, word_cap));
 }
 
 /// `render_graff_worktree_actions`: after a hairline, Merge back, Archive

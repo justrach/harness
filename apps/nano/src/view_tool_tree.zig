@@ -42,7 +42,7 @@ pub fn group(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, parts
         arrival.next = arrivals[i + 1].connector;
     };
     {
-        const h = kit.pressFeedback(ui.div(c).row().h(26).gap(6).pr(4).itemsCenter().rounded(4).control().hover(k.wash(0.04)));
+        const h = kit.pressFeedback(ui.div(c).row().wFull().h(26).gap(6).pr(4).itemsCenter().rounded(4).clip().control().hover(k.wash(0.04)));
         defer h.end();
         if (h.clicked()) a.view.toggleGroup(a.gpa, key, open);
         const slot = ui.div(c).row().size(22, 18).center();
@@ -52,7 +52,11 @@ pub fn group(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, parts
         const active = e.status == .streaming and for (parts) |p| {
             if (p.kind == .reasoning or (p.kind == .tool and !p.resolved)) break true;
         } else false;
-        chrome.title(c, k, tools.label(buf, parts), active, h.hovered());
+        const col_est = @import("view_composer.zig").dockedWidth(transcript_view.paneWidth(c, a), transcript_view.column_w);
+        const max_title_w = if (c.rects.get(c.node(h.index).id)) |hr| @import("motion_rules.zig").toolGroupTitleCap(hr.w, 28, 8) else @import("motion_rules.zig").toolGroupTitleCap(col_est, 28, 8);
+        const title_slot = ui.div(c).row().grow().w(0).clip();
+        defer title_slot.end();
+        chrome.title(c, k, tools.label(buf, parts), active, h.hovered(), max_title_w);
     }
     const fold_id = state.key(parent, key, "group-fold");
     const initial_height = 2 + @as(f32, @floatFromInt(parts.len)) * rules.row_height + rules.footer_gap + rules.footer_height;
@@ -71,7 +75,7 @@ pub fn group(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, parts
         rowImpl(c, a, k, e, p, parent, arrival);
         if ((arrival.progress < 1 or arrival.connector < 1) and !c.reduced_motion) c.frameIn(1.0 / 30.0);
     }
-    const footer = ui.div(c).row().wFull().h(rules.footer_height + rules.footer_gap).pt(rules.footer_gap).pl(56).gap(12).itemsCenter();
+    const footer = ui.div(c).row().wFull().h(rules.footer_height + rules.footer_gap).pt(rules.footer_gap).pl(56).gap(12).itemsCenter().control();
     defer footer.end();
     {
         const summary = ui.div(c).row().grow().w(0).clip();
@@ -97,8 +101,6 @@ fn rowImpl(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
     const linked = agent_linked or view_linked;
     const ordinary = p.kind == .tool and !p.agent and !view_linked;
     const detail_key = c.print("detail/{s}/{s}/{s}", .{ parent orelse "", e.id, p.id });
-    const has_detail = !linked and (p.kind == .reasoning or p.invocation.len > 0 or p.output.len > 0 or p.output_ref.len > 0 or p.diff_new != null or p.stats.len > 0);
-    const open = has_detail and a.view.groupOpen(detail_key, p.kind == .reasoning);
     // Older snapshots can omit resolved, but a finished turn cannot still
     // be running. Keep any real result without inventing a start time.
     var effective = p.*;
@@ -124,25 +126,39 @@ fn rowImpl(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
     _ = c.leaf(.{ .width = .{ .px = rules.gutter }, .height = .{ .px = rules.row_height } }, .none, null);
     const content = ui.div(c).column().grow().w(0).py(2).motion(.{ .opacity = rules.connectorParts(arrival.connector, arrival.predecessor).branch, .y = -2 * (1 - arrival.progress) });
     defer content.end();
+    // Use the actual text slot, after chip/result/disclosure columns have
+    // taken their room. A clipped command still needs its expandable body.
+    const header_text_id = std.hash.Wyhash.hash(c.node(content.index).id, "header-text");
+    const header_room = if (c.rects.get(header_text_id)) |rect| @max(0, rect.w) else 0;
+    const header_fits = c.text.width(p.text.items, kit.style(c, 12, 18, .{ .mono = true })) <= header_room;
+    const has_detail = !linked and rules.hasVisibleBody(c.alloc(), p, header_fits);
+    const open = has_detail and a.view.groupOpen(detail_key, p.kind == .reasoning);
     {
-        var head = ui.div(c).row().wFull().h(rules.row_height - 4).px(6).gap(8).itemsCenter().rounded(if (running) 8 else 4);
+        var head = ui.div(c).row().wFull().h(rules.row_height - 4).px(6).gap(8).itemsCenter().rounded(if (running) 8 else 4).control();
         if (running) head = head.bg(k.ink(0.06));
-        if (has_detail) head = kit.pressFeedback(head.control().hover(k.ink(0.04)));
+        if (has_detail) head = kit.pressFeedback(head.hover(k.ink(0.04)));
         defer head.end();
         if (has_detail and head.clicked()) a.view.toggleGroup(a.gpa, detail_key, p.kind == .reasoning);
         if (c.rects.get(c.node(head.index).id)) |rect| chrome.wash(c, k, result, rect.w, rules.row_height - 4, arrival.row.wash(c.time, c.reduced_motion));
         const color = if (p.is_error) k.danger else if (has_detail and head.hovered()) k.text else k.muted;
-        ui.text(c, if (p.kind == .reasoning) "Thought process" else p.chip, kit.style(c, 15, 18, .{ .weight = if (p.agent) .medium else .regular, .color = color }));
+        ui.text(c, if (p.kind == .reasoning) "Thought process" else p.chip, kit.style(c, 15, 20, .{ .weight = if (p.agent) .medium else .regular, .color = color }));
         {
-            const detail = ui.div(c).row().grow().w(0).clip().itemsCenter();
+            const detail = ui.div(c).row().grow().w(0).h(rules.row_height - 4).clip().itemsCenter();
+            c.node(detail.index).id = header_text_id;
+            c.node(detail.index).layout_dependent = true;
             defer detail.end();
             const rect = c.rects.get(c.node(detail.index).id);
+            // The first frame only has an estimate. Schedule the measured
+            // frame even for settled rows, or a wide pane keeps a 160pt title.
+            if (rect == null) c.animationFrame();
             const room = if (rect) |b| b.w else 160;
-            const raw = if (p.agent and p.text.items.len == 0) p.subagent_title else firstLine(p.text.items);
+            const raw = if (p.agent) (if (p.subagent_title.len > 0) p.subagent_title else "subagent") else firstLine(p.text.items);
             if (p.path.len > 0) {
                 const name = file_icons.basename(p.path);
                 fileBadge(c, a, k, p.path, name, room, parent);
-            } else kit.fadeText(c, raw, kit.style(c, if (ordinary) 12 else 15, 18, .{ .mono = ordinary, .color = k.muted }), @max(room, 0));
+            } else if (p.agent) {
+                kit.ellipsisText(c, raw, kit.style(c, 15, 20, .{ .color = k.muted }), @max(room, 0));
+            } else kit.fadeText(c, raw, kit.style(c, if (ordinary) 12 else 15, if (ordinary) 18 else 20, .{ .mono = ordinary, .color = k.muted }), @max(room, 0));
             if (running and !c.reduced_motion) kit.loaderFrame(c, 0.080);
         }
         // Reserving a real end column prevents a long command/path from
@@ -166,12 +182,12 @@ fn rowImpl(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
     rememberHeight(c, a, fold_id, body.index);
     if (is_animating) c.frameIn(1.0 / 30.0);
     if (p.kind == .reasoning) return transcript_view.streamMarkdown(c, a, k, e, p, parent);
-    if (p.invocation.len > 0) textDetail(c, k, p.invocation, false);
+    if (p.invocation.len > 0) textDetailLinked(c, a, parent, k, p.invocation, false, 24);
     if (p.diff_new) |new| return transcript_view.editDiff(c, k, p, new);
     if (p.stats.len > 0) return transcript_view.statRows(c, k, p.stats);
     const blob = a.tool_blobs.get(p.output_ref);
     const text = if (blob) |b| (if (b.status == .ready) b.text else p.output) else p.output;
-    if (text.len > 0) textDetailLimit(c, k, text, p.is_error, if (blob != null and blob.?.status == .ready) 400 else 24);
+    if (text.len > 0) textDetailLinked(c, a, parent, k, text, p.is_error, if (blob != null and blob.?.status == .ready) 400 else 24);
     if (p.output_ref.len > 0 and (blob == null or blob.?.status != .ready)) {
         const loading = blob != null and blob.?.status == .loading;
         const action = ui.div(c).row().py(4).control();
@@ -199,8 +215,13 @@ pub fn textDetail(c: *ui.Context, k: theme.Colors, text: []const u8, failed: boo
 }
 
 pub fn textDetailLimit(c: *ui.Context, k: theme.Colors, text: []const u8, failed: bool, limit: usize) void {
+    textDetailLinked(c, null, null, k, text, failed, limit);
+}
+
+pub fn textDetailLinked(c: *ui.Context, a: ?*App, parent: ?[]const u8, k: theme.Colors, text: []const u8, failed: bool, limit: usize) void {
     if (text.len == 0) return;
     const box = ui.div(c).column().wFull().py(4).clip();
+    c.node(box.index).style.selectable = true;
     defer box.end();
     // Desktop's 24-line preview / 400-line expanded sidecar, with an
     // honest counted tail. Diffs have their separate 600-line ceiling.
@@ -208,13 +229,78 @@ pub fn textDetailLimit(c: *ui.Context, k: theme.Colors, text: []const u8, failed
     const total = std.mem.count(u8, trimmed, "\n") + 1;
     var lines = std.mem.splitScalar(u8, trimmed, '\n');
     var n: usize = 0;
+    const st = kit.style(c, 12, 18, .{ .mono = true, .color = if (failed) k.danger else k.muted });
     while (lines.next()) |line| {
         if (n == limit) {
             ui.text(c, c.print("… {d} more lines", .{total - n}), .{ .size = 12, .color = k.faint });
             break;
         }
+        const row_ix = n;
         n += 1;
-        ui.text(c, if (line.len == 0) " " else line, kit.style(c, 12, 18, .{ .mono = true, .color = if (failed) k.danger else k.muted }));
+        textLineWithLinks(c, a, parent, k, line, st, row_ix);
+    }
+}
+
+fn textLineWithLinks(c: *ui.Context, a: ?*App, parent: ?[]const u8, k: theme.Colors, line: []const u8, st: ui.TextStyle, row_ix: usize) void {
+    const web = @import("browser_url.zig");
+    const first_url = web.findBareUrl(line, 0) orelse {
+        ui.text(c, if (line.len == 0) " " else line, st);
+        return;
+    };
+    var spans: std.ArrayList(ui.Span) = .empty;
+    var urls: std.ArrayList(web.Range) = .empty;
+    var cur: ?web.Range = first_url;
+    while (cur) |r| {
+        spans.append(c.alloc(), .{
+            .start = @intCast(r.start),
+            .end = @intCast(r.end),
+            .mono = true,
+            .color = st.color,
+            .underline = true,
+        }) catch break;
+        urls.append(c.alloc(), r) catch break;
+        cur = web.findBareUrl(line, r.end);
+    }
+    const area = ui.div(c).column().wFull();
+    defer area.end();
+    const at = c.nodes.items.len;
+    ui.richText(c, line, spans.items, st);
+    const rect = c.rects.get(c.node(@intCast(at)).id) orelse {
+        if (a) |app| {
+            if (app.window == null or app.offscreen) c.changed = true else c.frameIn(0);
+        } else {
+            c.changed = true;
+        }
+        return;
+    };
+    const origin = c.rects.get(c.node(area.index).id) orelse return;
+    const line_h = c.text.lineHeight(st);
+    for (urls.items, 0..) |r, li| {
+        const url = line[r.start..r.end];
+        const x = c.text.width(line[0..r.start], st);
+        const right = c.text.width(line[0..r.end], st);
+        ui.key(c, c.print("tool-link-{d}-{d}", .{ row_ix, li }));
+        const hit = @import("view_tooltip.zig").on(
+            ui.div(c).absolute().offset(rect.x - origin.x + x, rect.y - origin.y).size(@max(right - x, 1), line_h),
+            k,
+            .{ .text = url },
+        );
+        defer hit.end();
+        const action = c.interact(hit.index, .{ .focusable = true });
+        if (a) |app| @import("view_link_menu.zig").track(c, app, parent, url, hit.index, action.right_clicked or action.secondary_clicked);
+        const activate = action.clicked or (action.focused and (c.shortcut(.{ .key = ui.Shortcut.enter }) or c.shortcut(.{ .key = ' ' })));
+        if (activate) {
+            if (a) |app| {
+                if (parent) |pid| {
+                    @import("app_browser.zig").openLink(app, pid, url);
+                } else {
+                    _ = @import("nanoui").shell.openUrl(url);
+                }
+            } else {
+                _ = @import("nanoui").shell.openUrl(url);
+            }
+            c.changed = true;
+        }
     }
 }
 

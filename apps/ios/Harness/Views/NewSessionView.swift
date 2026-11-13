@@ -73,6 +73,17 @@ struct NewSessionView: View {
 
     private var space: Space? { effectiveDestination.space(in: model.spaces) }
 
+    @AppStorage(HomeUiMode.storageKey) private var uiModeRaw = HomeUiMode.zen.rawValue
+    @AppStorage(HomeMovingPart.overridesStorageKey) private var uiPartOverridesRaw = ""
+
+    private var hierarchyProfile: HomeHierarchyProfile {
+        HomeHierarchyProfile.resolved(baseModeRaw: uiModeRaw, overridesRaw: uiPartOverridesRaw)
+    }
+
+    private var showsGitChrome: Bool {
+        hierarchyProfile.showsGitCheckoutChrome
+    }
+
     private var deviceId: String? {
         effectiveDestination.deviceId(spaces: model.spaces, devices: model.devices)
     }
@@ -177,11 +188,11 @@ struct NewSessionView: View {
                 Theme.bg
                 VStack(spacing: 16) {
                     ZStack {
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
                             .fill(Theme.surface)
                             .frame(width: 48, height: 48)
                             .overlay(
-                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                RoundedRectangle(cornerRadius: 16, style: .continuous)
                                     .strokeBorder(Theme.border, lineWidth: 1)
                             )
                         HarnessBadge(harness: runHarness, size: 22)
@@ -212,9 +223,8 @@ struct NewSessionView: View {
                                                 .lineLimit(1)
                                         }
                                         .padding(.horizontal, 12)
-                                        .frame(height: 32)
-                                        .background(Theme.surface, in: Capsule())
-                                        .overlay(Capsule().strokeBorder(Theme.border, lineWidth: 1))
+                                        .frame(height: 34)
+                                        .glassEffect(.regular.interactive(), in: Capsule())
                                     }
                                     .buttonStyle(ChipPressButtonStyle())
                                     .accessibilityIdentifier("new-session-starter-\(starter.id)")
@@ -256,8 +266,9 @@ struct NewSessionView: View {
             }
 
             // Where-it-runs scope row (checkout + base ref), left-aligned
-            // above the composer — the composer pill keeps only the agent chip.
-            if space?.gitDetected == true {
+            // above the composer in Developer mode — Zen mode keeps only the
+            // prompt and model picker.
+            if showsGitChrome, space?.gitDetected == true {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         chip(icon: checkoutIcon, label: checkoutLabel) {
@@ -308,6 +319,27 @@ struct NewSessionView: View {
             }
             // Bare text on the bar, not a glass capsule.
             .sharedBackgroundVisibility(.hidden)
+            ToolbarItem(placement: .topBarTrailing) {
+                let mode = hierarchyProfile.effectiveMode
+                Button {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    withAnimation(Motion.resort) {
+                        let preset = HomeListControls.applyPreset(mode.flipped)
+                        uiModeRaw = preset.modeRaw
+                        uiPartOverridesRaw = preset.overridesRaw
+                    }
+                } label: {
+                    Image(systemName: mode.symbol)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(mode == .developer ? Theme.text : Theme.textMuted)
+                }
+                .contextMenu {
+                    HomeExperienceMenuContent(uiModeRaw: $uiModeRaw, uiPartOverridesRaw: $uiPartOverridesRaw)
+                }
+                .accessibilityLabel("Toggle Zen or Developer mode")
+                .accessibilityValue(mode.label)
+                .accessibilityIdentifier("new-session-ui-mode")
+            }
         }
         .sheet(isPresented: $showHostPicker) {
             SessionHostPickerSheet(selectedDeviceId: deviceId) { selectedHostId = $0 }
@@ -554,8 +586,7 @@ struct NewSessionView: View {
             }
             .padding(.horizontal, 12)
             .frame(height: 40)
-            .background(ink(0.08), in: Capsule())
-            .overlay(Capsule().strokeBorder(hairline(0.08), lineWidth: 1))
+            .glassEffect(.regular.interactive(), in: Capsule())
         }
         .buttonStyle(ChipPressButtonStyle())
     }
@@ -823,8 +854,7 @@ struct ComposerChip: View {
             }
             .padding(.horizontal, 13)
             .frame(height: 40)
-            .background(ink(0.08), in: Capsule())
-            .overlay(Capsule().strokeBorder(hairline(0.08), lineWidth: 1))
+            .glassEffect(.regular.interactive(), in: Capsule())
         }
         .buttonStyle(ChipPressButtonStyle())
     }
@@ -883,8 +913,7 @@ struct ZeronModelTierPill: View {
                 .buttonStyle(ChipPressButtonStyle())
             }
         }
-        .background(ink(0.08), in: Capsule())
-        .overlay(Capsule().strokeBorder(hairline(0.08), lineWidth: 1))
+        .glassEffect(.regular.interactive(), in: Capsule())
     }
 }
 
@@ -906,8 +935,7 @@ struct ComposerSteerChip: View {
             }
             .padding(.horizontal, 12)
             .frame(height: 40)
-            .background(ink(0.08), in: Capsule())
-            .overlay(Capsule().strokeBorder(hairline(0.08), lineWidth: 1))
+            .glassEffect(.regular.interactive(), in: Capsule())
         }
         .buttonStyle(ChipPressButtonStyle())
         .accessibilityIdentifier("composer-steer-mode")

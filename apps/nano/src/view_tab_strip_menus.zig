@@ -127,10 +127,33 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
 }
 
 fn row(c: *ui.Context, a: *App, k: theme.Colors, glyph: icons.Name, label: []const u8, selected: bool) bool {
+    return rowImpl(c, a, k, glyph, label, selected, null);
+}
+
+fn folderRow(c: *ui.Context, a: *App, k: theme.Colors, glyph: icons.Name, label: []const u8, selected: bool, cursor_node: *?u32) bool {
+    return rowImpl(c, a, k, glyph, label, selected, cursor_node);
+}
+
+fn rowImpl(c: *ui.Context, a: *App, k: theme.Colors, glyph: icons.Name, label: []const u8, selected: bool, cursor_node: ?*?u32) bool {
     const index = a.view.strip.rows;
     a.view.strip.rows += 1;
-    const box = ui.div(c).row().wFull().h(32).px(8).gap(10).itemsCenter().rounded(7).hover(k.selected).control();
-    if (a.view.strip.cursor == index) _ = box.bg(k.selected);
+    var box = ui.div(c).row().wFull().h(32).px(8).gap(10).itemsCenter().rounded(7).control();
+    if (cursor_node) |painted| {
+        // Keyboard modality suppresses hover until a real pointer move.
+        // Mouse and Enter must then share one pending row, not two fills.
+        if (box.hovered() and a.view.strip.cursor != index) {
+            if (painted.*) |previous| c.node(previous).style.background = null;
+            a.view.strip.cursor = index;
+            c.changed = true;
+        }
+        if (a.view.strip.cursor == index) {
+            box = box.bg(k.selected);
+            painted.* = box.index;
+        }
+    } else {
+        box = box.hover(k.selected);
+        if (a.view.strip.cursor == index) box = box.bg(k.selected);
+    }
     defer box.end();
     icons.icon(c, glyph, 16, k.muted, 0);
     kit.ellipsisText(c, label, .{ .size = 13, .color = k.text }, if (a.view.strip.footer_folder) 216 else 170);
@@ -146,6 +169,7 @@ fn folderMenu(c: *ui.Context, a: *App, k: theme.Colors, anchor: ui.Rect) void {
     const search = @import("strip_folder_search.zig");
     const state = &a.view.strip;
     const target = state.target;
+    var cursor_node: ?u32 = null;
     const device = strip.device(a, target);
     var matches = search.indices(c.alloc(), a.spaces.items, device, state.query.text()) catch return;
     const footer = state.footer_folder;
@@ -187,6 +211,9 @@ fn folderMenu(c: *ui.Context, a: *App, k: theme.Colors, anchor: ui.Rect) void {
             state.reveal = true;
             if (state.search_scroll != 0) c.scroll.put(c.gpa, state.search_scroll, 0) catch {};
         }
+        // Plain Return arrives through NSTextInputClient as a field submission,
+        // not a shortcut. Activate the same row and deferred action as a click.
+        if (result.submitted) state.activate = true;
     }
     ui.div(c).h(4).wFull().end();
     const current = strip.folder(a, target);
@@ -224,15 +251,15 @@ fn folderMenu(c: *ui.Context, a: *App, k: theme.Colors, anchor: ui.Rect) void {
         for (matches) |ix| {
             const space = a.spaces.items[ix];
             const selected = if (current) |folder| std.mem.eql(u8, folder.name, space.name) else false;
-            if (row(c, a, k, if (selected) .check else .folder, space.name, false)) strip.queue(a, .{ .folder = .{ .panel = target, .index = ix } });
+            if (folderRow(c, a, k, if (selected) .check else .folder, space.name, false, &cursor_node)) strip.queue(a, .{ .folder = .{ .panel = target, .index = ix } });
         }
     }
     separator(c, k);
     if (footer) {
-        if (row(c, a, k, .plus, "New project…", false)) strip.queue(a, .{ .add_folder = target });
-        if (row(c, a, k, .close, "Don't work in a project", a.new_no_project)) strip.queue(a, .{ .folder = .{ .panel = target, .index = null } });
+        if (folderRow(c, a, k, .plus, "New project…", false, &cursor_node)) strip.queue(a, .{ .add_folder = target });
+        if (folderRow(c, a, k, .close, "Don't work in a project", a.new_no_project, &cursor_node)) strip.queue(a, .{ .folder = .{ .panel = target, .index = null } });
     } else {
-        if (row(c, a, k, .close, "Don't work in a project", false)) strip.queue(a, .{ .folder = .{ .panel = target, .index = null } });
-        if (row(c, a, k, .plus, "New project…", false)) strip.queue(a, .{ .add_folder = target });
+        if (folderRow(c, a, k, .close, "Don't work in a project", false, &cursor_node)) strip.queue(a, .{ .folder = .{ .panel = target, .index = null } });
+        if (folderRow(c, a, k, .plus, "New project…", false, &cursor_node)) strip.queue(a, .{ .add_folder = target });
     }
 }

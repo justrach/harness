@@ -17,6 +17,34 @@ pub fn none(method: []const u8) Request(Empty) {
     return .{ .method = method, .params = rpc.empty };
 }
 
+// ── bots ─────────────────────────────────────────────────────────────
+
+/// One change to the user's bots (`BotAction`). Which fields count depends
+/// on the action: `text` is the job, the instruction, a memory entry or the
+/// about text.
+pub const BotAction = struct {
+    action: []const u8,
+    bot: ?[]const u8 = null,
+    routine: ?[]const u8 = null,
+    text: ?[]const u8 = null,
+    when: ?[]const u8 = null,
+    project: ?[]const u8 = null,
+    primary: ?bool = null,
+};
+
+pub fn botAction(p: BotAction) Request(BotAction) {
+    return .{ .method = "BotAction", .params = p };
+}
+
+pub fn botDetail(bot: []const u8) Request(struct { bot: []const u8 }) {
+    return .{ .method = "BotDetail", .params = .{ .bot = bot } };
+}
+
+/// One run of a bot in its standing chat: a message, or one of its routines.
+pub fn runBot(bot: []const u8, message: ?[]const u8, routine: ?[]const u8) Request(struct { bot: []const u8, message: ?[]const u8, routine: ?[]const u8 }) {
+    return .{ .method = "RunBot", .params = .{ .bot = bot, .message = message, .routine = routine } };
+}
+
 // ── chats ────────────────────────────────────────────────────────────
 
 pub const Config = struct {
@@ -103,6 +131,22 @@ pub fn listModels(harness: []const u8) Request(struct { harness: []const u8 }) {
     return .{ .method = "ListModels", .params = .{ .harness = harness } };
 }
 
+/// Scope is the engine's existing catalog_root contract, not a local guessed cwd.
+pub const CatalogScope = struct {
+    harness: []const u8,
+    chatId: ?[]const u8 = null,
+    spaceId: ?[]const u8 = null,
+    path: ?[]const u8 = null,
+};
+
+pub fn listCommands(scope: CatalogScope) Request(CatalogScope) {
+    return .{ .method = "ListCommands", .params = scope };
+}
+
+pub fn listSkills(scope: CatalogScope) Request(CatalogScope) {
+    return .{ .method = "ListSkills", .params = scope };
+}
+
 // ── commands ─────────────────────────────────────────────────────────
 
 pub const RunRequest = struct {
@@ -151,6 +195,10 @@ pub fn dismissInput(chat_id: []const u8, request_id: []const u8) Request(struct 
 
 pub fn watchQueue(chat_id: []const u8) Request(struct { chatId: []const u8 }) {
     return .{ .method = "WatchQueue", .params = .{ .chatId = chat_id } };
+}
+
+pub fn watchToolProgress(chat_id: []const u8) Request(struct { chatId: []const u8 }) {
+    return .{ .method = "WatchToolProgress", .params = .{ .chatId = chat_id } };
 }
 
 pub fn queueMessage(chat_id: []const u8, text: []const u8) Request(struct { chatId: []const u8, text: []const u8, holdForTurnEnd: bool }) {
@@ -211,6 +259,33 @@ pub fn readFile(chat_id: []const u8, path: []const u8, host: ?[]const u8) Reques
     return .{ .method = "ReadWorkspaceFile", .params = .{ .chatId = chat_id, .path = path, .targetDeviceId = host } };
 }
 
+pub const WorkspaceFileRead = struct {
+    chatId: ?[]const u8 = null,
+    spaceId: ?[]const u8 = null,
+    checkoutPath: ?[]const u8 = null,
+    targetDeviceId: ?[]const u8 = null,
+    path: []const u8,
+};
+pub fn readWorkspaceFile(params: WorkspaceFileRead) Request(WorkspaceFileRead) {
+    return .{ .method = "ReadWorkspaceFile", .params = params };
+}
+
+pub const WorkspaceFileWrite = struct {
+    chatId: ?[]const u8 = null,
+    spaceId: ?[]const u8 = null,
+    checkoutPath: ?[]const u8 = null,
+    targetDeviceId: ?[]const u8 = null,
+    path: []const u8,
+    text: []const u8,
+    expectedCheckoutId: []const u8,
+    expectedContentHash: []const u8,
+    encoding: []const u8,
+    lineEnding: []const u8,
+};
+pub fn writeWorkspaceFile(params: WorkspaceFileWrite) Request(WorkspaceFileWrite) {
+    return .{ .method = "WriteWorkspaceFile", .params = params };
+}
+
 pub fn watchGit(space_id: []const u8, checkout: []const u8, host: ?[]const u8) Request(struct { spaceId: []const u8, checkoutPath: []const u8, targetDeviceId: ?[]const u8 }) {
     return .{ .method = "WatchWorkspaceGitStatus", .params = .{ .spaceId = space_id, .checkoutPath = checkout, .targetDeviceId = host } };
 }
@@ -262,4 +337,30 @@ pub fn watchChangeRequest(p: @import("change_requests.zig").WatchParams) Request
 /// `MergeChangeRequest` (pickers.rs `run_change_request_merge`).
 pub fn mergeChangeRequest(p: @import("change_requests.zig").MergeParams) Request(@import("change_requests.zig").MergeParams) {
     return .{ .method = "MergeChangeRequest", .params = p };
+}
+
+// ── agent CLI updates ────────────────────────────────────────────────
+
+pub fn watchHarnessUpdates(host: ?[]const u8) Request(struct { targetDeviceId: ?[]const u8 }) {
+    return .{ .method = "WatchHarnessUpdates", .params = .{ .targetDeviceId = host } };
+}
+
+pub fn checkHarnessUpdates(harness: ?[]const u8, host: ?[]const u8) Request(struct { harness: ?[]const u8, targetDeviceId: ?[]const u8 }) {
+    return .{ .method = "CheckHarnessUpdates", .params = .{ .harness = harness, .targetDeviceId = host } };
+}
+
+pub fn applyHarnessUpdate(harness: []const u8, host: ?[]const u8) Request(struct { harness: []const u8, targetDeviceId: ?[]const u8 }) {
+    return .{ .method = "ApplyHarnessUpdate", .params = .{ .harness = harness, .targetDeviceId = host } };
+}
+
+pub fn cancelHarnessUpdate(harness: []const u8, host: ?[]const u8) Request(struct { harness: []const u8, targetDeviceId: ?[]const u8 }) {
+    return .{ .method = "CancelHarnessUpdate", .params = .{ .harness = harness, .targetDeviceId = host } };
+}
+
+pub fn dismissHarnessUpdate(harness: []const u8, version: ?[]const u8, host: ?[]const u8) Request(struct { harness: []const u8, version: ?[]const u8, targetDeviceId: ?[]const u8 }) {
+    return .{ .method = "DismissHarnessUpdate", .params = .{ .harness = harness, .version = version, .targetDeviceId = host } };
+}
+
+pub fn setHarnessUpdatePolicy(harness: []const u8, auto_update: bool, host: ?[]const u8) Request(struct { harness: []const u8, autoUpdate: bool, targetDeviceId: ?[]const u8 }) {
+    return .{ .method = "SetHarnessUpdatePolicy", .params = .{ .harness = harness, .autoUpdate = auto_update, .targetDeviceId = host } };
 }

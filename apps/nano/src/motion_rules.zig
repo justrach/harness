@@ -6,6 +6,8 @@
 //! - `Nano/ScrollFollow.lean`  (200-cell scroll-follow & stick-end quiescence cube)
 //! - `Nano/Tween.lean`         (30-cell C⁰ retarget continuity & viewport culling cube)
 //! - `Nano/StripMenu.lean`     (slot chip width conservation, scrim top, menu focus cube)
+//! - `Nano/FooterChips.lean`   (4806-cell draft footer chip allocation & split-window cube)
+//! - `Nano/QuestionPanel.lean` (15025-cell agent question panel height split & transcript chip cube)
 //!
 //! Designed with zero `App` dependency so the motion and scroll kernels can be
 //! shared directly with `nanoui`.
@@ -211,7 +213,7 @@ pub fn stripLeftInset(sidebar_w: f32, side_max: f32, settings_open: bool, has_up
     const collapsed = 1 - std.math.clamp(sidebar_w / side, 0, 1);
     const history: f32 = if (settings_open) 28 else 28 * collapsed;
     const updates: f32 = if (!settings_open and has_update) 26 else 0;
-    return @max(0, 88 + 24 + history + updates + 14 - sidebar_w);
+    return @max(0, @import("window_chrome.zig").leading + 24 + history + updates + 14 - sidebar_w);
 }
 
 pub const CloseSurface = enum { chat, host, files };
@@ -306,6 +308,175 @@ pub fn capShadowDownwardBleed(foot: f32, r: f32, blur_reach: f32, interior_maske
     return (foot + blur_reach) - foot;
 }
 
+/// Two 8px insets around a 12px glyph (`Nano.FooterChips.iconW`).
+pub const footer_icon_w: f32 = 28;
+pub const footer_chip_gap: f32 = 4;
+/// A label is never ellipsized below this; the control drops to its glyph.
+pub const footer_min_label: f32 = 96;
+pub const footer_rank_count: usize = 6;
+/// Controls ranked below this give up their words before any label is
+/// shortened (`Nano.FooterChips.freeCollapse`).
+pub const footer_free_collapse: usize = 2;
+/// The composer width from which the draft footer centers its row.
+pub const footer_wide_w: f32 = 540;
+
+/// A draft footer control (`Nano.FooterChips.Chip`).
+pub const FooterChip = struct {
+    /// Everything but its words: insets, glyph, gaps, chevron.
+    chrome: f32,
+    /// Its words' natural width.
+    text: f32,
+    /// How soon it gives way, lowest first.
+    rank: usize,
+};
+
+/// Where a control lands (`Nano.FooterChips.Slot`).
+pub const FooterSlot = struct {
+    /// 0 leaves the control out.
+    w: f32 = 0,
+    /// The width its words may take; 0 draws its glyph alone.
+    label: f32 = 0,
+};
+
+/// One candidate layout (`Nano.FooterChips.layout`), returning its
+/// `totalW`: the drawn controls and the gaps between them.
+fn footerLayout(collapse: usize, hide: usize, cap: f32, chips: []const FooterChip, out: []FooterSlot) f32 {
+    var total: f32 = 0;
+    var shown: f32 = 0;
+    for (chips, out) |chip, *slot| {
+        const label = @min(@max(0, @ceil(chip.text)), cap);
+        slot.* = if (chip.rank < hide)
+            .{}
+        else if (chip.rank < collapse)
+            .{ .w = footer_icon_w }
+        else
+            .{ .w = chip.chrome + label, .label = label };
+        if (slot.w > 0) {
+            total += slot.w;
+            shown += 1;
+        }
+    }
+    return total + @max(0, shown - 1) * footer_chip_gap;
+}
+
+/// Width allocation for the controls after the model chip in a new chat's
+/// footer (`Nano.FooterChips.footerChipWidths`), into `out`. The first
+/// layout that fits `room` wins: every label whole; the
+/// `footer_free_collapse` lowest-ranked controls reduced to glyphs, one by
+/// one; the remaining labels ellipsized to a shared cap no shorter than
+/// `footer_min_label`; the same with the next lowest-ranked reduced to
+/// glyphs, one by one; then glyphs only, leaving out the lowest-ranked.
+///
+/// Guarantees (`never_overflows`, `footer_conservation_holds`,
+/// `footer_split_windows_hold` in `Nano/FooterChips.lean`):
+/// 1. What is drawn never exceeds `room`, at any width.
+/// 2. When the natural widths fit, nothing is shortened.
+/// 3. A control is whole, a bare glyph, or left out. Never partly cut.
+/// 4. While the glyphs alone fit, no control is left out.
+pub fn footerChipWidths(room_in: f32, chips: []const FooterChip, out: []FooterSlot) void {
+    std.debug.assert(out.len == chips.len);
+    const room = @max(0, @floor(room_in));
+    var top: f32 = 0;
+    for (chips) |chip| top = @max(top, @ceil(chip.text));
+    const low = @min(footer_min_label, top);
+    var collapse: usize = 0;
+    while (collapse < footer_free_collapse) : (collapse += 1) {
+        if (footerLayout(collapse, 0, top, chips, out) <= room) return;
+    }
+    while (collapse <= footer_rank_count) : (collapse += 1) {
+        // The total only grows with the cap: a stage whose shortest labels
+        // overflow has no cap that fits.
+        if (footerLayout(collapse, 0, low, chips, out) > room) continue;
+        var cap = top;
+        while (cap > low) : (cap -= 1) {
+            if (footerLayout(collapse, 0, cap, chips, out) <= room) return;
+        }
+        _ = footerLayout(collapse, 0, low, chips, out);
+        return;
+    }
+    var hide: usize = 0;
+    while (hide <= footer_rank_count) : (hide += 1) {
+        if (footerLayout(footer_rank_count, hide, 0, chips, out) <= room) return;
+    }
+    for (out) |*slot| slot.* = .{};
+}
+
+/// The draft footer row's gap (`Nano.FooterChips.rowGap`).
+pub fn footerRowGap(w: f32) f32 {
+    return if (w >= footer_wide_w) 6 else 4;
+}
+
+/// The width left for the controls in a composer `w` wide
+/// (`Nano.FooterChips.footerRoom`): less the row's two 10px insets, the
+/// model chip and its gap, the wide row's 3px separator, and a chat note.
+/// Proven (`footer_row_within_composer`) to keep the row inside `w`.
+pub fn footerRoom(w: f32, model_w: f32, note_w: f32) f32 {
+    const gap = footerRowGap(w);
+    const lead = model_w + gap + (if (w >= footer_wide_w) 3 + gap else 0);
+    const tail = if (note_w > 0) gap + note_w else 0;
+    return @max(0, w - (20 + lead + tail));
+}
+
+/// What an agent's question keeps before its options are shortened
+/// (`Nano.QuestionPanel.floorH`).
+pub const question_floor: f32 = 120;
+/// The gap between the question panel and the bar over the conversation.
+pub const question_top_gap: f32 = 12;
+
+/// The height an agent's question panel may take (`Nano.QuestionPanel.panelMax`)
+/// in the `room` its pane gives the composer dock, which holds `around`
+/// besides the panel (its foot padding, the queue tray, dictation status).
+pub fn questionPanelMax(room: f32, around: f32) f32 {
+    return @max(0, @floor(room) - @ceil(around) - question_top_gap);
+}
+
+pub const QuestionSplit = struct {
+    question: f32,
+    options: f32,
+};
+
+/// How the height the panel's pinned parts leave (`budget`) is shared
+/// between the question, `question_h` tall, and its options, each scrolling
+/// in what it gets (`Nano.QuestionPanel.split`).
+///
+/// Guarantees (`split_within_budget`, `split_whole_when_fits`,
+/// `split_question_yields_first`, `panel_ends_inside_pane`):
+/// 1. The two never take more than `budget`, so the options, the answer
+///    box and Submit end inside the pane.
+/// 2. When both fit, neither is shortened.
+/// 3. A long question gives way first: the options are whole until it is
+///    down to `question_floor` (half of a budget under twice that).
+pub fn questionPanelSplit(budget_in: f32, question_h: f32, options_h: f32) QuestionSplit {
+    const budget = @max(0, @floor(budget_in));
+    const keep = @min(question_floor, @floor(budget / 2));
+    const options = @min(@max(0, options_h), budget - @min(@max(0, question_h), keep));
+    return .{ .question = @min(@max(0, question_h), budget - options), .options = options };
+}
+
+/// The widest a question's transcript chip draws it (GPUI's 420-point label).
+pub const question_chip_cap: f32 = 420;
+/// "Waiting for you" is drawn while the question keeps this much.
+pub const question_chip_min_label: f32 = 96;
+
+pub const QuestionChip = struct {
+    /// The width the question may take, fading at its end.
+    label: f32,
+    /// Whether "Waiting for you" is drawn after it.
+    waiting: bool,
+};
+
+/// A question's transcript chip in a column `col` wide
+/// (`Nano.QuestionPanel.chipFit`): `lead` is everything but the question
+/// (insets, tile, "Question" and their gaps), `waiting_w` "Waiting for you"
+/// with its gap (0 once answered). Proven (`chip_within_column`) to end
+/// inside the column at every width.
+pub fn questionChipFit(col: f32, lead: f32, question_w: f32, waiting_w: f32) QuestionChip {
+    const room = @max(0, @floor(col) - lead);
+    if (waiting_w > 0 and waiting_w + @min(question_w, question_chip_min_label) <= room)
+        return .{ .label = @min(question_chip_cap, room - waiting_w), .waiting = true };
+    return .{ .label = @min(question_chip_cap, room), .waiting = false };
+}
+
 pub const BillingTier = enum { plan, local, credits, api };
 
 /// Model picker billing tier rank (`Nano.FrameSchedule.billingRank`):
@@ -327,6 +498,72 @@ pub fn retainStoreOk(virtual_list: bool, animating: bool, changed: bool) bool {
 /// Active sidebar row fill policy (`Nano.FrameSchedule.sidebarActiveOpaqueCard`).
 pub fn sidebarActiveOpaqueCard(frosted: bool) bool {
     return !frosted;
+}
+
+/// Multiline editor scrollbar policy (`Nano.FrameSchedule.multilineFieldScrollbar`).
+pub fn multilineFieldScrollbar(focused: bool, caret_visible: bool, has_overflow: bool) bool {
+    _ = focused;
+    _ = caret_visible;
+    _ = has_overflow;
+    return false;
+}
+
+pub const SelectionOwner = enum { none, editor, page };
+pub const SelectionEvent = enum { page_select, editor_select_or_edit, noop_undo_redo, clear_all };
+
+/// Exclusive selection ownership transition (`Nano.FrameSchedule.stepSelectionOwner`).
+pub fn stepSelectionOwner(cur: SelectionOwner, ev: SelectionEvent) SelectionOwner {
+    return switch (ev) {
+        .page_select => .page,
+        .editor_select_or_edit => .editor,
+        .noop_undo_redo => cur,
+        .clear_all => .none,
+    };
+}
+
+pub const CopyTarget = enum { none, editor_slice, page_slice };
+
+/// `Cmd+C` copy target resolution (`Nano.FrameSchedule.decideCopyTarget`).
+pub fn decideCopyTarget(editor_focused: bool, editor_has_range: bool, page_has_text: bool) CopyTarget {
+    if (editor_focused and editor_has_range) return .editor_slice;
+    if (page_has_text) return .page_slice;
+    return .none;
+}
+
+/// Selection survival across scope transitions and unmounted sources (`Nano.FrameSchedule.selectionSurvivesFrame`, `#745`).
+pub fn selectionSurvivesFrame(same_scope: bool, source_mounted: bool) bool {
+    return same_scope and source_mounted;
+}
+
+/// Startup tab restoration fencing (`Nano.FrameSchedule.shouldRestoreSavedTabs`, `#797`).
+pub fn shouldRestoreSavedTabs(tabs_ready: bool, has_selected_chat: bool, single_empty_tab: bool, has_dirty_boot_draft: bool) bool {
+    return !tabs_ready and !has_selected_chat and single_empty_tab and !has_dirty_boot_draft;
+}
+
+/// Restorable tab chat eligibility (`Nano.FrameSchedule.restorableTabChat`, `#797`).
+pub fn restorableTabChat(chat_exists: bool, is_archived: bool, already_open: bool) bool {
+    return chat_exists and !is_archived and !already_open;
+}
+
+/// Sidebar `Open workspaces` visibility (`Nano.FrameSchedule.workspaceVisibleInSidebarFixed`).
+pub fn workspaceVisibleInSidebar(has_multiple_workspaces: bool, is_singleton_listed_chat: bool) bool {
+    _ = is_singleton_listed_chat;
+    return has_multiple_workspaces;
+}
+
+/// Currency-safe inline `$ ... $` delimiter rule (`Nano.FrameSchedule.isInlineMathDelimiterPair`, `#795`).
+pub fn isInlineMathDelimiterPair(
+    in_code_span: bool,
+    open_escaped: bool,
+    close_escaped: bool,
+    space_after_open: bool,
+    space_before_close: bool,
+    alnum_before_open: bool,
+    alnum_after_close: bool,
+) bool {
+    return !in_code_span and !open_escaped and !close_escaped and
+        !space_after_open and !space_before_close and
+        !alnum_before_open and !alnum_after_close;
 }
 
 test "lean StripMenu kernel: screenshot slot chevron unclipped and conservation cube holds" {
@@ -434,7 +671,7 @@ test "lean ScrollFollow and Tween kernels: stickEndScroll quiescence and C0 reta
     try std.testing.expectEqual(@as(f32, 40), chips.pick_text_max);
 
     // Update button (`🔄`, x <= 166) never overlaps the first slot (`x = 180`).
-    try std.testing.expectEqual(@as(f32, 180), stripLeftInset(0, 224, false, true));
+    try std.testing.expectEqual(@as(f32, @import("window_chrome.zig").leading + 92), stripLeftInset(0, 224, false, true));
 
     // Cmd+W hierarchy & single-pass coalescing.
     try std.testing.expectEqual(@as(usize, 1), closeRedrawPasses(true, true));
@@ -459,4 +696,565 @@ test "lean ScrollFollow and Tween kernels: stickEndScroll quiescence and C0 reta
     try std.testing.expect(billingRank(.credits) < billingRank(.api));
     try std.testing.expect(!retainStoreOk(true, false, false));
     try std.testing.expect(!sidebarActiveOpaqueCard(true));
+    try std.testing.expect(!multilineFieldScrollbar(true, true, true));
+    try std.testing.expectEqual(SelectionOwner.page, stepSelectionOwner(.editor, .page_select));
+    try std.testing.expectEqual(SelectionOwner.editor, stepSelectionOwner(.page, .editor_select_or_edit));
+    try std.testing.expectEqual(SelectionOwner.page, stepSelectionOwner(.page, .noop_undo_redo));
+    try std.testing.expectEqual(CopyTarget.page_slice, decideCopyTarget(false, false, true));
+    try std.testing.expectEqual(CopyTarget.editor_slice, decideCopyTarget(true, true, true));
+    try std.testing.expect(!selectionSurvivesFrame(false, true));
+    try std.testing.expect(!selectionSurvivesFrame(true, false));
+    try std.testing.expect(selectionSurvivesFrame(true, true));
+    try std.testing.expect(!shouldRestoreSavedTabs(false, false, true, true));
+    try std.testing.expect(shouldRestoreSavedTabs(false, false, true, false));
+    try std.testing.expect(!restorableTabChat(true, true, false));
+    try std.testing.expect(restorableTabChat(true, false, false));
+    try std.testing.expect(workspaceVisibleInSidebar(true, true));
+    try std.testing.expect(!isInlineMathDelimiterPair(false, false, false, false, true, false, true));
+    try std.testing.expect(isInlineMathDelimiterPair(false, false, false, false, false, false, false));
+}
+
+const footer_mode: FooterChip = .{ .chrome = 34, .text = 30, .rank = 4 };
+const footer_follow: FooterChip = .{ .chrome = 33, .text = 33, .rank = 1 };
+const footer_computer: FooterChip = .{ .chrome = 52, .text = 98, .rank = 0 };
+const footer_project: FooterChip = .{ .chrome = 52, .text = 45, .rank = 2 };
+const footer_checkout: FooterChip = .{ .chrome = 52, .text = 79, .rank = 3 };
+const footer_branch: FooterChip = .{ .chrome = 52, .text = 60, .rank = 5 };
+const footer_long_project: FooterChip = .{ .chrome = 52, .text = 228, .rank = 2 };
+const footer_long_branch: FooterChip = .{ .chrome = 52, .text = 228, .rank = 5 };
+const footer_screenshot = [_]FooterChip{ footer_mode, footer_follow, footer_computer, footer_project, footer_checkout, footer_branch };
+/// `Nano.FooterChips.chipSets`.
+const footer_sets = [_][]const FooterChip{
+    &.{ footer_mode, footer_computer },
+    &.{ footer_mode, footer_computer, footer_project },
+    &.{ footer_mode, footer_follow, footer_computer, footer_project },
+    &.{ footer_mode, footer_computer, footer_project, footer_checkout, footer_branch },
+    &footer_screenshot,
+    &.{ footer_mode, footer_follow, footer_computer, footer_long_project, footer_checkout, footer_long_branch },
+};
+
+fn footerTotal(slots: []const FooterSlot) f32 {
+    var total: f32 = 0;
+    var shown: f32 = 0;
+    for (slots) |s| if (s.w > 0) {
+        total += s.w;
+        shown += 1;
+    };
+    return total + @max(0, shown - 1) * footer_chip_gap;
+}
+
+test "lean FooterChips kernel: the reported split pane keeps all six controls whole" {
+    var out: [6]FooterSlot = undefined;
+    footerChipWidths(415, &footer_screenshot, &out);
+    const want = [_][2]f32{ .{ 64, 30 }, .{ 28, 0 }, .{ 28, 0 }, .{ 28, 0 }, .{ 131, 79 }, .{ 112, 60 } };
+    for (want, out) |w, s| {
+        try std.testing.expectEqual(w[0], s.w);
+        try std.testing.expectEqual(w[1], s.label);
+    }
+    try std.testing.expectEqual(@as(f32, 411), footerTotal(&out));
+
+    // `long_ref_is_whole_before_the_computer_keeps_its_words`.
+    const long_ref = [_]FooterChip{ footer_mode, .{ .chrome = 52, .text = 140, .rank = 0 }, footer_project, footer_checkout, .{ .chrome = 52, .text = 170, .rank = 5 } };
+    footerChipWidths(622, &long_ref, out[0..5]);
+    try std.testing.expectEqual(FooterSlot{ .w = 28 }, out[1]);
+    try std.testing.expectEqual(FooterSlot{ .w = 222, .label = 170 }, out[4]);
+
+    // `split_1440_keeps_every_control`: two panes beside the sidebar, three without it.
+    try std.testing.expectEqual(@as(f32, 371), footerRoom(566, 160, 0));
+    try std.testing.expectEqual(@as(f32, 264), footerRoom(448, 160, 0));
+    footerChipWidths(264, &footer_screenshot, &out);
+    for (out) |s| try std.testing.expectEqual(footer_icon_w, s.w);
+
+    // Past the computer and the follow-up switch, long labels share one
+    // cap before another control gives up its words.
+    const long = footer_sets[5];
+    footerChipWidths(700, long, &out);
+    try std.testing.expectEqual(@as(f32, 162), out[3].label);
+    try std.testing.expectEqual(@as(f32, 162), out[5].label);
+    try std.testing.expectEqual(@as(f32, 28), out[1].w);
+    try std.testing.expectEqual(@as(f32, 28), out[2].w);
+    try std.testing.expectEqual(@as(f32, 79), out[4].label);
+
+    // Too narrow for the glyphs: the ref is the last to go.
+    footerChipWidths(30, &footer_screenshot, &out);
+    for (out[0..5]) |s| try std.testing.expectEqual(@as(f32, 0), s.w);
+    try std.testing.expectEqual(footer_icon_w, out[5].w);
+    footerChipWidths(0, &footer_screenshot, &out);
+    try std.testing.expectEqual(@as(f32, 0), footerTotal(&out));
+}
+
+test "lean FooterChips kernel: conservation, widening and rank order hold over every slot width" {
+    var buf: [6]FooterSlot = undefined;
+    var next_buf: [6]FooterSlot = undefined;
+    for (footer_sets) |chips| {
+        const out = buf[0..chips.len];
+        const next = next_buf[0..chips.len];
+        var natural: f32 = 0;
+        for (chips) |chip| natural += chip.chrome + chip.text;
+        natural += @as(f32, @floatFromInt(chips.len - 1)) * footer_chip_gap;
+        const icons = @as(f32, @floatFromInt(chips.len)) * footer_icon_w + @as(f32, @floatFromInt(chips.len - 1)) * footer_chip_gap;
+        var room: f32 = 0;
+        while (room <= 800) : (room += 1) {
+            footerChipWidths(room, chips, out);
+            footerChipWidths(room + 1, chips, next);
+            try std.testing.expect(footerTotal(out) <= room);
+            var shown: usize = 0;
+            var labelled: usize = 0;
+            var next_shown: usize = 0;
+            var next_labelled: usize = 0;
+            for (chips, out, next) |chip, s, n| {
+                if (natural <= room) try std.testing.expectEqual(FooterSlot{ .w = chip.chrome + chip.text, .label = chip.text }, s);
+                // Whole, a bare glyph, or left out.
+                if (s.w != 0 and s.label == 0) try std.testing.expectEqual(footer_icon_w, s.w);
+                if (s.label != 0) {
+                    try std.testing.expectEqual(chip.chrome + s.label, s.w);
+                    try std.testing.expect(s.label == chip.text or (s.label >= footer_min_label and s.label < chip.text));
+                }
+                if (icons <= room) try std.testing.expect(s.w > 0);
+                shown += @intFromBool(s.w > 0);
+                labelled += @intFromBool(s.label > 0);
+                next_shown += @intFromBool(n.w > 0);
+                next_labelled += @intFromBool(n.label > 0);
+                for (chips, out) |lower, t| if (lower.rank < chip.rank) {
+                    if (s.w == 0) try std.testing.expectEqual(@as(f32, 0), t.w);
+                    if (s.label == 0) try std.testing.expectEqual(@as(f32, 0), t.label);
+                };
+            }
+            try std.testing.expect(shown <= next_shown);
+            try std.testing.expect(labelled <= next_labelled);
+        }
+    }
+}
+
+test "lean FooterChips kernel: the footer row ends inside the composer in every split" {
+    var buf: [6]FooterSlot = undefined;
+    for ([_]f32{ 1024, 1200, 1280, 1440, 1512, 1728, 1920 }) |window_w| {
+        for ([_]f32{ 0, 244 }) |sidebar_w| {
+            for ([_]f32{ 1, 2, 3 }) |panes| {
+                const pane = @floor((window_w - sidebar_w) / panes);
+                const w = @max(@min(736 + 32, pane) - 32, 0);
+                for ([_]f32{ 34, 79, 120, 160, 200, 248 }) |model_natural| {
+                    const model_w = @min(model_natural, @min(248, @max(80, pane - 132)));
+                    const room = footerRoom(w, model_w, 0);
+                    const lead = model_w + footerRowGap(w) + (if (w >= footer_wide_w) 3 + footerRowGap(w) else 0);
+                    for (footer_sets) |chips| {
+                        const out = buf[0..chips.len];
+                        footerChipWidths(room, chips, out);
+                        try std.testing.expect(20 + lead + footerTotal(out) <= w);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// UI Experience Mode State Machine (`FrameSchedule.lean`: `UiMode`, `UiState`,
+/// `UiEvent`, `stepUiState`, `HierarchyProfile`).
+/// - `.zen` (**Default** — "for normies"): 1 level of hierarchy (`hierarchyDepth == 1`),
+///   0 auxiliary moving parts (`movingPartsCount == 0`).
+/// - `.developer` (Power-user / Developer Mode): 4 levels of hierarchy
+///   (`hierarchyDepth == 4`) and all 6 developer moving parts (`movingPartsCount == 6`).
+pub const UiMode = enum {
+    zen,
+    developer,
+
+    pub fn key(m: UiMode) []const u8 {
+        return switch (m) {
+            .zen => "zen",
+            .developer => "developer",
+        };
+    }
+
+    pub fn label(m: UiMode) []const u8 {
+        return switch (m) {
+            .zen => "Zen",
+            .developer => "Developer",
+        };
+    }
+
+    pub fn flip(m: UiMode) UiMode {
+        return switch (m) {
+            .zen => .developer,
+            .developer => .zen,
+        };
+    }
+};
+
+pub const UiState = struct {
+    mode: UiMode = .zen,
+
+    pub const initial: UiState = .{ .mode = .zen };
+};
+
+pub const UiEvent = union(enum) {
+    toggle_mode,
+    set_mode: UiMode,
+    reset_to_default,
+};
+
+pub fn stepUiState(s: UiState, e: UiEvent) UiState {
+    return switch (e) {
+        .toggle_mode => .{ .mode = s.mode.flip() },
+        .set_mode => |target| .{ .mode = target },
+        .reset_to_default => UiState.initial,
+    };
+}
+
+pub const MovingPart = enum {
+    open_workspaces_tree,
+    multi_axis_filters,
+    row_tech_badges,
+    git_checkout_chrome,
+    prompt_rail,
+    action_toolbar,
+    grouped_sections,
+
+    pub const all = std.enums.values(MovingPart);
+
+    pub fn key(p: MovingPart) []const u8 {
+        return switch (p) {
+            .open_workspaces_tree => "zenPart.openWorkspacesTree",
+            .multi_axis_filters => "zenPart.multiAxisFilters",
+            .row_tech_badges => "zenPart.rowTechBadges",
+            .git_checkout_chrome => "zenPart.gitCheckoutChrome",
+            .prompt_rail => "zenPart.promptRail",
+            .action_toolbar => "zenPart.actionToolbar",
+            .grouped_sections => "zenPart.groupedSections",
+        };
+    }
+
+    pub fn label(p: MovingPart) []const u8 {
+        return switch (p) {
+            .open_workspaces_tree => "Open workspaces",
+            .multi_axis_filters => "Project & status filters",
+            .row_tech_badges => "Row agent & branch badges",
+            .git_checkout_chrome => "Git & branch footer",
+            .prompt_rail => "Prompt rail",
+            .action_toolbar => "Actions bar",
+            .grouped_sections => "Project groups",
+        };
+    }
+};
+
+pub const HierarchyProfile = struct {
+    shows_open_workspaces_tree: bool,
+    shows_multi_axis_filters: bool,
+    shows_row_tech_badges: bool,
+    shows_git_checkout_chrome: bool,
+    shows_prompt_rail: bool,
+    shows_action_toolbar: bool,
+    flat_session_list: bool,
+
+    pub fn ofMode(m: UiMode) HierarchyProfile {
+        return switch (m) {
+            .zen => .{
+                .shows_open_workspaces_tree = false,
+                .shows_multi_axis_filters = false,
+                .shows_row_tech_badges = false,
+                .shows_git_checkout_chrome = false,
+                .shows_prompt_rail = false,
+                .shows_action_toolbar = false,
+                .flat_session_list = true,
+            },
+            .developer => .{
+                .shows_open_workspaces_tree = true,
+                .shows_multi_axis_filters = true,
+                .shows_row_tech_badges = true,
+                .shows_git_checkout_chrome = true,
+                .shows_prompt_rail = true,
+                .shows_action_toolbar = true,
+                .flat_session_list = false,
+            },
+        };
+    }
+
+    pub fn partEnabled(p: HierarchyProfile, part: MovingPart) bool {
+        return switch (part) {
+            .open_workspaces_tree => p.shows_open_workspaces_tree,
+            .multi_axis_filters => p.shows_multi_axis_filters,
+            .row_tech_badges => p.shows_row_tech_badges,
+            .git_checkout_chrome => p.shows_git_checkout_chrome,
+            .prompt_rail => p.shows_prompt_rail,
+            .action_toolbar => p.shows_action_toolbar,
+            .grouped_sections => !p.flat_session_list,
+        };
+    }
+
+    pub fn setPart(p: HierarchyProfile, part: MovingPart, on: bool) HierarchyProfile {
+        var next = p;
+        switch (part) {
+            .open_workspaces_tree => next.shows_open_workspaces_tree = on,
+            .multi_axis_filters => next.shows_multi_axis_filters = on,
+            .row_tech_badges => next.shows_row_tech_badges = on,
+            .git_checkout_chrome => next.shows_git_checkout_chrome = on,
+            .prompt_rail => next.shows_prompt_rail = on,
+            .action_toolbar => next.shows_action_toolbar = on,
+            .grouped_sections => next.flat_session_list = !on,
+        }
+        return next;
+    }
+
+    pub fn togglePart(p: HierarchyProfile, part: MovingPart) HierarchyProfile {
+        return p.setPart(part, !p.partEnabled(part));
+    }
+
+    pub fn effectiveMode(p: HierarchyProfile) UiMode {
+        return if (std.meta.eql(p, ofMode(.zen))) .zen else .developer;
+    }
+};
+
+pub fn hierarchyDepth(p: HierarchyProfile) usize {
+    return 1 +
+        @as(usize, @intFromBool(p.shows_multi_axis_filters)) +
+        @as(usize, @intFromBool(p.shows_open_workspaces_tree)) +
+        @as(usize, @intFromBool(!p.flat_session_list));
+}
+
+pub fn movingPartsCount(p: HierarchyProfile) usize {
+    return @as(usize, @intFromBool(p.shows_open_workspaces_tree)) +
+        @as(usize, @intFromBool(p.shows_multi_axis_filters)) +
+        @as(usize, @intFromBool(p.shows_row_tech_badges)) +
+        @as(usize, @intFromBool(p.shows_git_checkout_chrome)) +
+        @as(usize, @intFromBool(p.shows_prompt_rail)) +
+        @as(usize, @intFromBool(p.shows_action_toolbar));
+}
+
+test "lean UiMode state machine: default is zen, toggle is involutive, and zen flattens hierarchy" {
+    try std.testing.expectEqual(UiMode.zen, UiState.initial.mode);
+    for ([_]UiMode{ .zen, .developer }) |m| {
+        const s: UiState = .{ .mode = m };
+        try std.testing.expectEqual(s, stepUiState(stepUiState(s, .toggle_mode), .toggle_mode));
+        try std.testing.expectEqual(UiMode.zen, stepUiState(s, .reset_to_default).mode);
+        try std.testing.expectEqual(
+            stepUiState(s, .{ .set_mode = m }),
+            stepUiState(stepUiState(s, .{ .set_mode = m }), .{ .set_mode = m }),
+        );
+    }
+    const zen = HierarchyProfile.ofMode(.zen);
+    const dev = HierarchyProfile.ofMode(.developer);
+    try std.testing.expectEqual(@as(usize, 1), hierarchyDepth(zen));
+    try std.testing.expectEqual(@as(usize, 4), hierarchyDepth(dev));
+    try std.testing.expect(hierarchyDepth(zen) < hierarchyDepth(dev));
+    try std.testing.expectEqual(@as(usize, 0), movingPartsCount(zen));
+    try std.testing.expectEqual(@as(usize, 6), movingPartsCount(dev));
+    try std.testing.expect(movingPartsCount(zen) < movingPartsCount(dev));
+
+    for (MovingPart.all) |part| {
+        try std.testing.expect(!zen.partEnabled(part));
+        try std.testing.expect(dev.partEnabled(part));
+        try std.testing.expectEqual(zen, zen.togglePart(part).togglePart(part));
+        try std.testing.expect(zen.togglePart(part).partEnabled(part));
+        for (MovingPart.all) |other| if (other != part) {
+            try std.testing.expectEqual(zen.partEnabled(other), zen.togglePart(part).partEnabled(other));
+            try std.testing.expectEqual(dev.partEnabled(other), dev.togglePart(part).partEnabled(other));
+        };
+    }
+}
+
+test "lean QuestionPanel kernel: the question and its options share the budget, the question yielding first" {
+    // `screenshot_question_scrolls_over_whole_options`.
+    try std.testing.expectEqual(QuestionSplit{ .question = 550, .options = 150 }, questionPanelSplit(700, 1400, 150));
+    try std.testing.expectEqual(@as(f32, 628), questionPanelMax(680, 40));
+    try std.testing.expectEqual(@as(f32, 0), questionPanelMax(40, 80));
+    // A height not yet measured counts as unbounded.
+    const unknown = std.math.inf(f32);
+    try std.testing.expectEqual(QuestionSplit{ .question = 120, .options = 380 }, questionPanelSplit(500, unknown, unknown));
+
+    const heights_q = [_]f32{ 0, 40, 120, 300, 900 };
+    const heights_o = [_]f32{ 0, 60, 150, 400, 900 };
+    var budget: f32 = 0;
+    while (budget <= 600) : (budget += 1) {
+        const keep = @min(question_floor, @floor(budget / 2));
+        for (heights_q) |q| for (heights_o) |o| {
+            const s = questionPanelSplit(budget, q, o);
+            const next = questionPanelSplit(budget + 1, q, o);
+            try std.testing.expect(s.question + s.options <= budget);
+            try std.testing.expect(s.question <= q and s.options <= o);
+            if (q + o <= budget) try std.testing.expectEqual(QuestionSplit{ .question = q, .options = o }, s);
+            try std.testing.expect(@min(q, keep) <= s.question);
+            if (s.options < o) try std.testing.expect(s.question <= keep);
+            try std.testing.expect(s.question <= next.question and s.options <= next.options);
+        };
+    }
+}
+
+test "lean QuestionPanel kernel: a question's transcript chip ends inside its column" {
+    // `screenshot_chip_keeps_waiting`.
+    try std.testing.expectEqual(QuestionChip{ .label = 314, .waiting = true }, questionChipFit(520, 108, 700, 98));
+    // Too narrow for both: the status goes, the question keeps what is left.
+    try std.testing.expectEqual(QuestionChip{ .label = 172, .waiting = false }, questionChipFit(280, 108, 700, 98));
+    try std.testing.expectEqual(QuestionChip{ .label = 420, .waiting = false }, questionChipFit(736, 108, 700, 0));
+    var col: f32 = 0;
+    while (col <= 800) : (col += 1) {
+        for ([_]f32{ 0, 60, 200, 700 }) |qw| for ([_]f32{ 0, 98 }) |ww| {
+            const chip = questionChipFit(col, 108, qw, ww);
+            const drawn = 108 + @min(qw, chip.label) + (if (chip.waiting) ww else 0);
+            if (col >= 108) try std.testing.expect(drawn <= col);
+            try std.testing.expect(chip.label <= question_chip_cap);
+            if (chip.waiting) try std.testing.expect(@min(qw, question_chip_min_label) <= chip.label);
+        };
+    }
+}
+
+/// Width bound for folded tool-group headers (`Nano.FrameSchedule.toolGroupTitleCap`).
+pub fn toolGroupTitleCap(col: f32, chevron_w: f32, trailing_pad: f32) f32 {
+    return @max(0, col - (chevron_w + trailing_pad));
+}
+
+pub const SessionFooterLayout = struct {
+    show_checkout: bool,
+    checkout_words: bool,
+    show_branch: bool,
+    branch_words: bool,
+    label_cap: f32,
+};
+
+/// Adaptive degradation for the active-chat session footer (`Nano.FrameSchedule.sessionFooterLayout`).
+/// Proven (`session_footer_never_overflows_slot`) never to clip the `⑂` branch glyph against
+/// the trailing context ring in narrow 3-pane splits.
+pub fn sessionFooterLayout(slot_w_in: f32) SessionFooterLayout {
+    const slot_w = @max(0, slot_w_in);
+    if (slot_w >= 260) {
+        return .{
+            .show_checkout = true,
+            .checkout_words = true,
+            .show_branch = true,
+            .branch_words = true,
+            .label_cap = @min(126, @max(0, (slot_w - 92) * 0.5)),
+        };
+    }
+    if (slot_w >= 156) {
+        return .{
+            .show_checkout = true,
+            .checkout_words = false,
+            .show_branch = true,
+            .branch_words = true,
+            .label_cap = @min(126, @max(0, slot_w - 86)),
+        };
+    }
+    if (slot_w >= 80) {
+        return .{
+            .show_checkout = true,
+            .checkout_words = false,
+            .show_branch = true,
+            .branch_words = false,
+            .label_cap = 0,
+        };
+    }
+    if (slot_w >= 48) {
+        return .{
+            .show_checkout = false,
+            .checkout_words = false,
+            .show_branch = true,
+            .branch_words = false,
+            .label_cap = 0,
+        };
+    }
+    return .{
+        .show_checkout = false,
+        .checkout_words = false,
+        .show_branch = false,
+        .branch_words = false,
+        .label_cap = 0,
+    };
+}
+
+pub const SidebarTitlebarLayout = struct {
+    toggle_end: f32,
+    back_x: f32,
+    forward_x: f32,
+    plus_x: f32,
+    cluster_end: f32,
+    more_x: f32,
+    more_end: f32,
+};
+
+/// Zeron sidebar titlebar cluster geometry (`Nano.FrameSchedule.sidebarTitlebarLayout`).
+/// Proven (`sidebar_titlebar_disjoint_and_bounded`) disjoint and within `sidebar_w >= 224`.
+pub fn sidebarTitlebarLayout(sidebar_w_in: f32) SidebarTitlebarLayout {
+    const sidebar_w = @max(0, sidebar_w_in);
+    const group_gap: f32 = if (sidebar_w >= 240) 8 else 4;
+    const right_margin: f32 = if (sidebar_w >= 240) 8 else 4;
+    const toggle_end: f32 = @import("window_chrome.zig").leading + 24;
+    const back_x = toggle_end + group_gap;
+    const forward_x = back_x + 24 + 2;
+    const plus_x = forward_x + 24 + group_gap;
+    const cluster_end = plus_x + 24;
+    const natural_more = @max(0, sidebar_w - right_margin - 24);
+    const more_x = @max(cluster_end + group_gap, natural_more);
+    return .{
+        .toggle_end = toggle_end,
+        .back_x = back_x,
+        .forward_x = forward_x,
+        .plus_x = plus_x,
+        .cluster_end = cluster_end,
+        .more_x = more_x,
+        .more_end = more_x + 24,
+    };
+}
+
+/// Zeron sidebar disclosure body opacity (`Nano.FrameSchedule.disclosureOpacityPct`).
+pub fn disclosureOpacity(reveal_in: f32) f32 {
+    const r = std.math.clamp(reveal_in, 0, 1);
+    return 0.35 + 0.65 * r;
+}
+
+/// Staged sub-range ramp (`Nano.FrameSchedule.updateStagePct`, Zeron `composer_dock::stage`).
+pub fn updateStage(p: f32, start: f32, finish: f32) f32 {
+    const span = finish - start;
+    if (span <= 0.0001) return if (p >= finish) 1 else 0;
+    return std.math.clamp((p - start) / span, 0, 1);
+}
+
+pub const UpdateIslandTarget = struct {
+    w: f32,
+    h: f32,
+};
+
+/// Zeron Home Agent-Update Island target size (`Nano.FrameSchedule.updateIslandTarget`).
+/// Proven (`update_island_fits_bounds`, `update_island_expands_taller`) bounded and monotonic.
+pub fn updateIslandTarget(expanded: bool, compact_w: f32, max_w_in: f32, rows: usize, max_h_in: f32) UpdateIslandTarget {
+    const max_w = @max(0, max_w_in);
+    const max_h = @max(38, max_h_in);
+    const pill_w = @min(@max(0, compact_w), max_w);
+    const list_w = @min(360, max_w);
+    const rows_h = @min(@as(f32, @floatFromInt(rows)) * 64, 224);
+    const list_h = @min(38 + rows_h, max_h);
+    return if (expanded) .{ .w = list_w, .h = list_h } else .{ .w = pill_w, .h = 38 };
+}
+
+test "lean FrameSchedule split containment, Zeron sidebar titlebar, and Agent-Update Island kernels" {
+    for ([_]f32{ 180, 260, 340, 420, 736 }) |col| {
+        const tool_cap = toolGroupTitleCap(col, 28, 12);
+        try std.testing.expect(tool_cap + 40 <= col + 0.001);
+    }
+
+    for ([_]f32{ 0, 40, 60, 100, 180, 280, 400 }) |sw| {
+        const fl = sessionFooterLayout(sw);
+        const inner = (if (fl.show_checkout) (if (fl.checkout_words) 34 + fl.label_cap else @as(f32, 28)) else @as(f32, 0)) +
+            (if (fl.show_checkout and fl.show_branch) @as(f32, 4) else @as(f32, 0)) +
+            (if (fl.show_branch) (if (fl.branch_words) 34 + fl.label_cap else @as(f32, 28)) else @as(f32, 0));
+        if (fl.show_checkout or fl.show_branch) try std.testing.expect(20 + inner <= sw + 0.001);
+    }
+
+    for ([_]f32{ 224, 240, 256, 320 }) |side_w| {
+        const tl = sidebarTitlebarLayout(side_w);
+        try std.testing.expect(tl.toggle_end < tl.back_x);
+        try std.testing.expect(tl.back_x + 24 < tl.forward_x);
+        try std.testing.expect(tl.forward_x + 24 < tl.plus_x);
+        try std.testing.expect(tl.cluster_end < tl.more_x);
+        try std.testing.expect(tl.more_end <= side_w + 0.001);
+    }
+
+    try std.testing.expectApproxEqAbs(@as(f32, 0.35), disclosureOpacity(0), 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), disclosureOpacity(1), 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), updateStage(0.2, 0.3, 0.72), 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), updateStage(0.8, 0.3, 0.72), 0.001);
+
+    const pill = updateIslandTarget(false, 268, 720, 3, 600);
+    const card = updateIslandTarget(true, 268, 720, 3, 600);
+    try std.testing.expectEqual(@as(f32, 38), pill.h);
+    try std.testing.expectEqual(@as(f32, 360), card.w);
+    try std.testing.expectEqual(@as(f32, 230), card.h);
+    try std.testing.expect(card.h >= pill.h);
 }

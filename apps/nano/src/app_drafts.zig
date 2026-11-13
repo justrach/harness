@@ -20,16 +20,17 @@ fn live(a: *const App) []const u8 {
 /// Before the selection changes: the prompt kept under the chat it was
 /// written in. A question or a queued edit in progress stays with it.
 pub fn leave(a: *App) void {
+    @import("composer_completion.zig").park(a, live(a));
     put(a, a.selected orelse canvas_key, live(a));
     a.prompt_nav.retire(a);
-    if (a.wizard) |*w| w.retire(a);
-    a.wizard = null;
+    @import("app_question.zig").suspendQuestion(a);
     a.draft_stash.clearRetainingCapacity();
 }
 
 /// After: the selected chat's prompt, or the new chat's, in the composer.
 pub fn enter(a: *App) void {
     a.composer.set(a.drafts.get(a.selected orelse canvas_key) orelse "");
+    @import("composer_completion.zig").enter(a);
 }
 
 fn put(a: *App, key: []const u8, text: []const u8) void {
@@ -71,12 +72,15 @@ pub fn canvas(a: *App) !Draft {
     const text = if (a.selected == null) live(a) else a.drafts.get(canvas_key) orelse "";
     var d: Draft = .{ .text = try a.gpa.dupe(u8, text), .harness = &.{} };
     errdefer d.deinit(a.gpa);
+    d.completion = try @import("composer_completion.zig").canvas(a, text);
     d.harness = try a.gpa.dupe(u8, a.new_harness);
     d.model = try dupe(a, a.new_model);
     d.reasoning = try dupe(a, a.new_reasoning);
     d.space = try dupe(a, a.space);
     d.device = try dupe(a, a.new_device);
     d.no_project = a.new_no_project;
+    d.checkout_local = a.new_checkout_local;
+    d.ref = try dupe(a, a.new_ref);
     return d;
 }
 
@@ -87,14 +91,21 @@ pub fn adopt(a: *App, d: Draft) void {
     a.retireSlice(a.new_harness);
     a.new_harness = d.harness;
     a.new_no_project = d.no_project;
-    inline for (.{ .{ "new_model", "model" }, .{ "new_reasoning", "reasoning" }, .{ "space", "space" }, .{ "new_device", "device" } }) |f| {
+    a.new_checkout_local = d.checkout_local;
+    inline for (.{ .{ "new_model", "model" }, .{ "new_reasoning", "reasoning" }, .{ "space", "space" }, .{ "new_device", "device" }, .{ "new_ref", "ref" } }) |f| {
         if (@field(a, f[0])) |old| a.retireSlice(old);
         @field(a, f[0]) = @field(d, f[1]);
     }
     a.ensureModels(a.target().harness);
+    @import("composer_completion.zig").adopt(a, d.completion);
+    if (d.completion) |v| a.gpa.free(v);
 }
 
 const testing = std.testing;
+test {
+    _ = @import("tests_question_retention.zig");
+    _ = @import("tests_engine_lifecycle_deep.zig");
+}
 
 test "a projectless draft stays projectless when parked and restored" {
     var a: App = .init(testing.allocator, testing.io, 1);

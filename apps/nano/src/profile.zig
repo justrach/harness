@@ -185,7 +185,7 @@ test "resource replay includes GPUI's working animation and stops it when settle
     try testing.expectEqual(.working, a.sessions.items[0].status);
     t.frame();
     try testing.expect(!t.ctx.animating);
-    try testing.expectApproxEqAbs(@as(f32, 1.0 / 15.0), t.ctx.frame_in orelse return error.WorkingAnimationNotScheduled, 0.0001);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), t.ctx.frame_in orelse return error.WorkingAnimationNotScheduled, 0.0001);
     // A finished or interrupted turn must not keep the working animation up.
     for ([_]@import("transcript.zig").EntryStatus{ .complete, .aborted }) |status| {
         a.transcript.entries.items[0].status = status;

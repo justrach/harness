@@ -65,10 +65,10 @@ const Harness = struct {
         h.t.settle(1);
     }
 
-    /// The filter row's magnifier: right of the project trigger, 4 along.
+    /// The sidebar's session search trigger (`Search sessions`).
     fn clickMagnifier(h: *Harness) void {
-        const r = h.a.view.filter_anchor.?;
-        h.t.click(r.x + r.w + 4 + 14.5, r.y + r.h / 2);
+        const r = h.a.view.search_anchor.?;
+        h.t.click(r.x + r.w / 2, r.y + r.h / 2);
     }
 
     /// How many times `s` is drawn (the sidebar's New chat and the

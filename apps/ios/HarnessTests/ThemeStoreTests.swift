@@ -11,9 +11,11 @@ final class ThemeStoreTests: XCTestCase {
 
     func testBundledCatalogIsTheDesktopRegistry() {
         let catalog = ThemeCatalog.builtin
-        XCTAssertEqual(catalog.families.count, 19)
-        XCTAssertEqual(catalog.variants.count, 31)
-        XCTAssertEqual(Set(catalog.variants.map(\.id)).count, 31, "variant ids are unique")
+        XCTAssertEqual(catalog.families.count, 20)
+        XCTAssertEqual(catalog.variants.count, 33)
+        XCTAssertEqual(Set(catalog.variants.map(\.id)).count, 33, "variant ids are unique")
+        XCTAssertNotNil(catalog.variant("opencodex-light"))
+        XCTAssertNotNil(catalog.variant("opencodex-dark"))
         XCTAssertNotNil(catalog.variant("codegraff-dark"))
         XCTAssertNotNil(catalog.variant("harnesser-light"))
     }

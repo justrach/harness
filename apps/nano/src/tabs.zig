@@ -9,6 +9,9 @@
 //! are parked with its pane or tab while another shows (`Draft`).
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const history = @import("tab_history.zig");
+pub const ClosedEntry = history.Entry;
+pub const closed_history_limit = history.limit;
 
 pub const Axis = enum { horizontal, vertical };
 pub const Direction = enum { left, right, up, down };
@@ -34,11 +37,29 @@ pub const Draft = struct {
     no_project: bool = false,
     /// Explicit execution device, including a draft outside any project.
     device: ?[]u8 = null,
+    /// New-chat local checkout intent follows the draft across tabs and panes.
+    checkout_local: bool = false,
+    ref: ?[]u8 = null,
+    /// Accepted command/skill identity, never inferred from visible draft text.
+    completion: ?[]u8 = null,
 
     pub fn deinit(d: *Draft, gpa: Allocator) void {
         gpa.free(d.text);
         gpa.free(d.harness);
-        inline for (.{ "model", "reasoning", "space", "device" }) |f| if (@field(d, f)) |x| gpa.free(x);
+        inline for (.{ "model", "reasoning", "space", "device", "ref", "completion" }) |f| if (@field(d, f)) |x| gpa.free(x);
+    }
+
+    /// An independent owned copy, including the exact unsent prompt.
+    pub fn clone(d: Draft, gpa: Allocator) !Draft {
+        var out = try d.fresh(gpa);
+        errdefer out.deinit(gpa);
+        const text = try gpa.dupe(u8, d.text);
+        gpa.free(out.text);
+        out.text = text;
+        out.checkout_local = d.checkout_local;
+        if (d.ref) |ref| out.ref = try gpa.dupe(u8, ref);
+        if (d.completion) |v| out.completion = try gpa.dupe(u8, v);
+        return out;
     }
 
     /// The same picks with an empty prompt: a new pane or tab starts with
@@ -48,6 +69,8 @@ pub const Draft = struct {
         errdefer out.deinit(gpa);
         out.harness = try gpa.dupe(u8, d.harness);
         out.no_project = d.no_project;
+        // Fresh siblings default to isolation and host-selected base. Git
+        // picks are canvas-owned, not inherited from the old shared checkout.
         inline for (.{ "model", "reasoning", "space", "device" }) |f| if (@field(d, f)) |x| {
             @field(out, f) = try gpa.dupe(u8, x);
         };
@@ -120,6 +143,8 @@ pub const Split = struct {
     zoomed: bool = false,
     /// Per-panel tab groups, in pane order. Only inactive slots own data.
     groups: [max_panes]PanelTabs = @splat(.{}),
+    /// Stable pane identities survive reordering and collapse/re-expansion.
+    identities: [max_panes]u64 = @splat(0),
 
     pub fn deinit(s: *Split, gpa: Allocator) void {
         for (s.panes.items) |p| if (p) |id| gpa.free(id);
@@ -212,6 +237,10 @@ pub const Tabs = struct {
     /// Not saved: after a restart (`clearShown`), only the active tab is
     /// marked, so closing it falls back to its neighbour.
     shown: std.ArrayList(u64) = .empty,
+    /// Owned closed contexts, most recent last; never a whole-window rollback.
+    closed: std.ArrayList(ClosedEntry) = .empty,
+    identities: std.ArrayList(history.Identity) = .empty,
+    next_identity: u64 = 0,
     next_shown: u64 = 0,
     active: usize = 0,
 
@@ -230,6 +259,14 @@ pub const Tabs = struct {
         try t.drafts.append(t.gpa, null);
         errdefer _ = t.drafts.pop();
         try t.shown.append(t.gpa, 0);
+        errdefer _ = t.shown.pop();
+        const key = t.identity();
+        try t.identities.append(t.gpa, .{ .workspace = key, .pane = t.identity() });
+    }
+
+    fn identity(t: *Tabs) u64 {
+        t.next_identity += 1;
+        return t.next_identity;
     }
 
     pub fn deinit(t: *Tabs) void {
@@ -240,6 +277,61 @@ pub const Tabs = struct {
         for (t.drafts.items) |*d| dropDraft(t.gpa, d);
         t.drafts.deinit(t.gpa);
         t.shown.deinit(t.gpa);
+        for (t.closed.items) |*entry| entry.deinit(t.gpa);
+        t.closed.deinit(t.gpa);
+        t.identities.deinit(t.gpa);
+    }
+
+    /// Compatibility for callers which know only a chat ID.
+    pub fn rememberClosed(t: *Tabs, id: ?[]const u8) void {
+        const chat = id orelse return;
+        if (chat.len == 0) return;
+        t.pushClosed(.{ .chat = t.gpa.dupe(u8, chat) catch return, .workspace_index = t.active + 1 });
+    }
+
+    pub fn pushClosed(t: *Tabs, entry: ClosedEntry) void {
+        var owned = entry;
+        t.closed.append(t.gpa, owned) catch {
+            owned.deinit(t.gpa);
+            return;
+        };
+        if (t.closed.items.len > closed_history_limit) {
+            var oldest = t.closed.orderedRemove(0);
+            oldest.deinit(t.gpa);
+        }
+    }
+
+    pub fn popClosedEntry(t: *Tabs) ?ClosedEntry {
+        return t.closed.pop();
+    }
+
+    pub fn popClosed(t: *Tabs) ?[]u8 {
+        while (t.popClosedEntry()) |value| {
+            var entry = value;
+            const chat = entry.chat;
+            entry.chat = null;
+            entry.deinit(t.gpa);
+            if (chat) |id| return id;
+        }
+        return null;
+    }
+
+    pub fn restoreClosed(t: *Tabs, entry: *ClosedEntry) !void {
+        try history.restore(t, entry);
+    }
+
+    pub fn markAutoArchived(t: *Tabs, id: []const u8) void {
+        if (t.closed.items.len == 0) return;
+        const e = &t.closed.items[t.closed.items.len - 1];
+        if (e.chat) |chat| if (std.mem.eql(u8, chat, id)) {
+            e.auto_archived = true;
+        };
+    }
+
+    pub fn clearAutoArchived(t: *Tabs, id: []const u8) void {
+        for (t.closed.items) |*e| if (e.chat) |chat| if (std.mem.eql(u8, chat, id)) {
+            e.auto_archived = false;
+        };
     }
 
     pub fn bumpShown(t: *Tabs) u64 {
@@ -258,6 +350,7 @@ pub const Tabs = struct {
     /// After restoring tabs from disk: no tab has a prior-shown history except
     /// the one currently on screen, so closing it falls back to its neighbour.
     pub fn clearShown(t: *Tabs) void {
+        t.ensurePaneIdentities();
         t.next_shown = 0;
         for (t.shown.items) |*s| s.* = 0;
         for (t.splits.items) |*sp| if (sp.*) |*s| for (&s.groups) |*group| {
@@ -365,39 +458,47 @@ pub const Tabs = struct {
         return false;
     }
 
+    pub fn ensurePaneIdentities(t: *Tabs) void {
+        for (t.splits.items) |*slot| if (slot.*) |*s| {
+            for (s.identities[0..s.panes.items.len]) |*key| if (key.* == 0) {
+                key.* = t.identity();
+            };
+        };
+    }
+
     /// Give an independent workspace a structural boundary even before its
     /// first split, so split() cannot migrate neighboring workspaces into it.
     pub fn isolateWorkspace(t: *Tabs) !void {
+        t.ensurePaneIdentities();
         if (t.splits.items[t.active] != null) return;
         var s: Split = .{ .axis = .horizontal };
         errdefer s.deinit(t.gpa);
         try s.panes.append(t.gpa, null);
         try s.shares.append(t.gpa, 1);
         try s.drafts.append(t.gpa, null);
+        s.identities[0] = t.identities.items[t.active].pane;
         t.splits.items[t.active] = s;
     }
 
     /// A new chat in a tab of its own, after the current one.
     pub fn newTab(t: *Tabs) void {
         const at = @min(t.active + 1, t.items.items.len);
-        t.items.insert(t.gpa, at, null) catch return;
-        t.splits.insert(t.gpa, at, null) catch {
-            _ = t.items.orderedRemove(at);
-            return;
-        };
-        t.drafts.insert(t.gpa, at, null) catch {
-            _ = t.items.orderedRemove(at);
-            _ = t.splits.orderedRemove(at);
-            return;
-        };
-        t.shown.insert(t.gpa, at, 0) catch {
-            _ = t.items.orderedRemove(at);
-            _ = t.splits.orderedRemove(at);
-            _ = t.drafts.orderedRemove(at);
-            return;
-        };
+        t.insertEmpty(at) catch return;
         t.active = at;
         t.noteShown();
+    }
+
+    pub fn insertEmpty(t: *Tabs, at: usize) !void {
+        try t.items.ensureUnusedCapacity(t.gpa, 1);
+        try t.splits.ensureUnusedCapacity(t.gpa, 1);
+        try t.drafts.ensureUnusedCapacity(t.gpa, 1);
+        try t.shown.ensureUnusedCapacity(t.gpa, 1);
+        try t.identities.ensureUnusedCapacity(t.gpa, 1);
+        t.items.insertAssumeCapacity(at, null);
+        t.splits.insertAssumeCapacity(at, null);
+        t.drafts.insertAssumeCapacity(at, null);
+        t.shown.insertAssumeCapacity(at, 0);
+        t.identities.insertAssumeCapacity(at, .{ .workspace = t.identity(), .pane = t.identity() });
     }
 
     /// A new tab after the last, shown (`create_chat_tab`'s push).
@@ -410,15 +511,17 @@ pub const Tabs = struct {
     /// Closes tab `i`; the last tab left becomes a new chat instead.
     pub fn close(t: *Tabs, i: usize) void {
         if (i >= t.items.items.len) return;
+        history.capture(t, .workspace, i, if (t.splits.items[i]) |s| s.focus else 0, 0);
         if (t.items.items.len == 1) {
-            if (t.splits.items[0]) |*s| if (s.panes.items.len == 1 and s.groups[0].items.items.len <= 1) {
-                s.deinit(t.gpa);
-                t.splits.items[0] = null;
-            };
+            if (t.splits.items[0]) |*s| s.deinit(t.gpa);
+            t.splits.items[0] = null;
+            t.identities.items[0] = .{ .workspace = t.identity(), .pane = t.identity() };
             dropDraft(t.gpa, &t.drafts.items[0]);
             return t.setCurrent(null);
         }
-        if (t.items.orderedRemove(i)) |id| t.gpa.free(id);
+        if (t.items.orderedRemove(i)) |id| {
+            t.gpa.free(id);
+        }
         if (t.splits.orderedRemove(i)) |s| {
             var x = s;
             x.deinit(t.gpa);
@@ -426,6 +529,7 @@ pub const Tabs = struct {
         var d = t.drafts.orderedRemove(i);
         dropDraft(t.gpa, &d);
         if (i < t.shown.items.len) _ = t.shown.orderedRemove(i);
+        _ = t.identities.orderedRemove(i);
         t.active = activeAfterClose(t.shown.items, t.active, i);
         t.noteShown();
     }
@@ -466,6 +570,15 @@ pub const Tabs = struct {
             i -= 1;
             if (t.items.items[i]) |have| if (std.mem.eql(u8, have, id)) t.close(i);
         }
+        var ci = t.closed.items.len;
+        while (ci > 0) {
+            ci -= 1;
+            const chat = t.closed.items[ci].chat orelse continue;
+            if (std.mem.eql(u8, chat, id)) {
+                var entry = t.closed.orderedRemove(ci);
+                entry.deinit(t.gpa);
+            }
+        }
     }
 
     /// Whether `split(axis)` would split: no split yet, or one along `axis`
@@ -499,6 +612,7 @@ pub const Tabs = struct {
     /// then the same size, the new one a new chat with focus. Nothing at
     /// the cap or across an existing split's axis (`split_chat`).
     pub fn split(t: *Tabs, axis: Axis) !bool {
+        t.ensurePaneIdentities();
         const slot = &t.splits.items[t.active];
         if (slot.* == null) {
             var s: Split = .{ .axis = axis };
@@ -506,6 +620,7 @@ pub const Tabs = struct {
             try s.panes.append(t.gpa, null);
             try s.shares.append(t.gpa, 1);
             try s.drafts.append(t.gpa, null);
+            s.identities[0] = t.identities.items[t.active].pane;
             slot.* = s;
         }
         const s = &slot.*.?;
@@ -529,8 +644,12 @@ pub const Tabs = struct {
             return e;
         };
         var group_at = s.panes.items.len - 1;
-        while (group_at > at) : (group_at -= 1) s.groups[group_at] = s.groups[group_at - 1];
+        while (group_at > at) : (group_at -= 1) {
+            s.groups[group_at] = s.groups[group_at - 1];
+            s.identities[group_at] = s.identities[group_at - 1];
+        }
         s.groups[at] = .{};
+        s.identities[at] = t.identity();
         s.panes.items[s.focus] = t.items.items[t.active];
         t.items.items[t.active] = null;
         s.equalize();
@@ -558,12 +677,18 @@ pub const Tabs = struct {
     pub fn closePane(t: *Tabs) bool {
         const s = t.layout() orelse return false;
         if (s.panes.items.len < 2) return false;
-        if (t.items.items[t.active]) |id| t.gpa.free(id);
+        history.capture(t, .pane, t.active, s.focus, s.groups[s.focus].active);
+        if (t.items.items[t.active]) |id| {
+            t.gpa.free(id);
+        }
         const even = s.isEven();
         const closed = s.focus;
         s.groups[closed].deinit(t.gpa);
         var group_at = closed;
-        while (group_at + 1 < s.panes.items.len) : (group_at += 1) s.groups[group_at] = s.groups[group_at + 1];
+        while (group_at + 1 < s.panes.items.len) : (group_at += 1) {
+            s.groups[group_at] = s.groups[group_at + 1];
+            s.identities[group_at] = s.identities[group_at + 1];
+        }
         s.groups[s.panes.items.len - 1] = .{};
         const share = s.shares.orderedRemove(closed);
         _ = s.panes.orderedRemove(closed);
@@ -581,6 +706,7 @@ pub const Tabs = struct {
             dropDraft(t.gpa, &t.drafts.items[t.active]);
             t.drafts.items[t.active] = s.drafts.items[0];
             s.drafts.items[0] = null;
+            t.identities.items[t.active].pane = s.identities[0];
             s.deinit(t.gpa);
             t.splits.items[t.active] = null;
         }
@@ -632,7 +758,10 @@ pub const Tabs = struct {
         const s = t.layout() orelse return false;
         const group = &s.groups[s.focus];
         if (group.items.items.len <= 1) return false;
-        if (t.items.items[t.active]) |id| t.gpa.free(id);
+        history.capture(t, .panel_tab, t.active, s.focus, group.active);
+        if (t.items.items[t.active]) |id| {
+            t.gpa.free(id);
+        }
         const closed = group.active;
         _ = group.items.orderedRemove(closed);
         var stamps: [64]u64 = undefined;
@@ -648,6 +777,28 @@ pub const Tabs = struct {
             dropDraft(t.gpa, &t.drafts.items[t.active]);
             t.drafts.items[t.active] = s.drafts.items[0];
             s.drafts.items[0] = null;
+            t.identities.items[t.active].pane = s.identities[0];
+            s.deinit(t.gpa);
+            t.splits.items[t.active] = null;
+        }
+        return true;
+    }
+
+    /// Close a background panel tab without selecting it or losing its draft.
+    pub fn closeBackgroundPaneTab(t: *Tabs, pane: usize, tab: usize) bool {
+        const s = t.layout() orelse return false;
+        if (pane >= s.panes.items.len) return false;
+        const group = &s.groups[pane];
+        if (tab >= group.items.items.len or tab == group.active) return false;
+        history.capture(t, .panel_tab, t.active, pane, tab);
+        var removed = group.items.orderedRemove(tab);
+        removed.deinit(t.gpa);
+        if (group.active > tab) group.active -= 1;
+        if (s.panes.items.len == 1 and group.count() == 1) {
+            dropDraft(t.gpa, &t.drafts.items[t.active]);
+            t.drafts.items[t.active] = s.drafts.items[0];
+            s.drafts.items[0] = null;
+            t.identities.items[t.active].pane = s.identities[0];
             s.deinit(t.gpa);
             t.splits.items[t.active] = null;
         }
@@ -664,6 +815,7 @@ pub const Tabs = struct {
         std.mem.swap(?Draft, &s.drafts.items[from], &s.drafts.items[to]);
         std.mem.swap(f32, &s.shares.items[from], &s.shares.items[to]);
         std.mem.swap(PanelTabs, &s.groups[from], &s.groups[to]);
+        std.mem.swap(u64, &s.identities[from], &s.identities[to]);
         s.focus = to;
     }
 
@@ -715,6 +867,9 @@ pub const Tabs = struct {
 };
 
 const testing = std.testing;
+test {
+    _ = @import("app_navigation.zig");
+}
 
 test "show switches to an open tab, else replaces the current one" {
     var t: Tabs = .init(testing.allocator);

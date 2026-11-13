@@ -95,7 +95,7 @@ final class ThemeStore {
     var isMatchingDesktop: Bool { followDesktop && desktopMode != nil }
 
     /// The mode in effect — the desktop's while matching, else the phone's.
-    var mode: Mode { isMatchingDesktop ? desktopMode! : ownMode }
+    var mode: Mode { (followDesktop ? desktopMode : nil) ?? ownMode }
 
     func selectedId(for appearance: ThemeAppearance) -> String {
         if isMatchingDesktop, let desktop {

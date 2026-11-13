@@ -22,7 +22,6 @@ const inset: f32 = 4;
 
 /// What the open menus remember between frames.
 pub const State = struct {
-    overview: @import("view_sessions.zig").State = .{},
     query: ui.TextBuffer = .{},
     /// The project menu's highlighted row: its rows, then New project.
     active: usize = 0,
@@ -577,6 +576,53 @@ fn view(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
     ui.key(c, "sidebar-view-menu");
     const card = card_(c, k, x, y, w);
     defer card.end();
+    {
+        const motion = @import("motion_rules.zig");
+        const profile = a.settings.hierarchyProfile();
+        const dev = profile.effectiveMode() == .developer;
+        const seg = ui.div(c).row().wFull().p(3).gap(3).rounded(8).bg(k.ink(0.06));
+        defer seg.end();
+        inline for (.{
+            .{ motion.UiMode.zen, "sidebar-preset-zen", icons.Name.@"magic-stick-3", "Zen", !dev },
+            .{ motion.UiMode.developer, "sidebar-view-developer-mode", icons.Name.terminal, "Developer", dev },
+        }) |item| {
+            ui.key(c, item[1]);
+            var pill = ui.div(c).row().grow().w(0).h(26).gap(5).center().rounded(6);
+            pill = if (item[4]) pill.bg(if (k.frosted) k.card else k.shell).border(k.border).borderW(1) else pill.hover(k.selected);
+            defer pill.end();
+            icons.icon(c, item[2], 12.5, if (item[4]) k.text else k.muted, 0);
+            ui.text(c, item[3], .{ .size = 12, .line_height = 14, .weight = if (item[4]) .semibold else .regular, .color = if (item[4]) k.text else k.muted });
+            if (pill.clicked()) {
+                m.open = null;
+                a.settings.applyUiMode(item[0]);
+                a.redraw();
+            }
+        }
+    }
+    {
+        const motion = @import("motion_rules.zig");
+        const profile = a.settings.hierarchyProfile();
+        const parts = [_]struct { part: motion.MovingPart, text: []const u8 }{
+            .{ .part = .open_workspaces_tree, .text = "Open workspaces" },
+            .{ .part = .git_checkout_chrome, .text = "Git & branch footer" },
+            .{ .part = .prompt_rail, .text = "Prompt rail" },
+            .{ .part = .action_toolbar, .text = "Actions bar" },
+        };
+        for (parts) |entry| {
+            ui.key(c, c.print("sidebar-part-{s}", .{@tagName(entry.part)}));
+            const on = profile.partEnabled(entry.part);
+            var row = ui.div(c).row().wFull().h(28).px(8).gap(10).itemsCenter().rounded(7).hover(k.selected);
+            defer row.end();
+            if (row.clicked()) {
+                m.open = null;
+                a.settings.toggleMovingPart(entry.part);
+                a.redraw();
+            }
+            label(c, k, entry.text, row.hovered() or on);
+            toggle(c, k, on);
+        }
+    }
+    separator(c, k, w);
     for (groups, 0..) |g, gi| {
         ui.key(c, c.print("sidebar-view-group-{d}", .{gi}));
         const open = m.open == gi;

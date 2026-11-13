@@ -30,6 +30,8 @@ use tokio::sync::watch;
 
 #[cfg(windows)]
 pub mod windows;
+#[cfg(any(windows, test))]
+mod windows_package;
 
 /// The version compiled into this binary (the workspace version).
 pub const fn current_version() -> &'static str {

@@ -3,14 +3,15 @@
 //! boxes; quotes with a bar; tables in a grid; code in a panel with its
 //! language, syntax colors and a copy button. After nanoterm's
 //! view_markdown.zig (markdown.zig, markdown_html.zig and highlight.zig
-//! are nanoterm's, unchanged), without its pictures and diagrams: a
-//! picture shows as its alt text.
+//! are nanoterm's, unchanged). Reply pictures use the containing chat's
+//! host-jailed attachment loader; unavailable sources retain their alt text.
 const std = @import("std");
 const nanoui = @import("nanoui");
 const ui = nanoui.ui;
 const theme = @import("theme.zig");
 const md = @import("markdown.zig");
-const highlight = @import("highlight.zig");
+const cache_mod = @import("markdown_cache.zig");
+var active_cache: ?*cache_mod.Cache = null;
 const kit = @import("view_kit.zig");
 const icons = @import("icons.zig");
 const veil_mod = @import("veil.zig");
@@ -67,6 +68,9 @@ pub fn withLinksVeil(
     row_veil: ?*veil_mod.RowVeil,
     streaming: bool,
 ) void {
+    const old_cache = active_cache;
+    active_cache = &a.markdown_cache;
+    defer active_cache = old_cache;
     const old_owner = link_owner;
     const old_veil = active_veil;
     const old_streaming = active_streaming;
@@ -92,8 +96,10 @@ pub fn markdown(c: *ui.Context, colors: theme.Colors, src: []const u8) void {
     k = colors;
     body = kit.style(c, 15, 22.5, .{ .wrap = true });
     const src_in = if (active_streaming) veil_mod.balanceStreamingMarkdown(c.alloc(), src) else src;
-    const blocks = md.parse(c.alloc(), src_in, .{ .code = k.accent, .code_bg = k.accent_wash, .link = k.text, .muted = k.muted });
+    const palette: md.Palette = .{ .code = k.accent, .code_bg = k.accent_wash, .link = k.text, .muted = k.muted };
+    const blocks = if (active_cache) |cache| cache.parse(c.gpa, c.alloc(), src_in, palette) else md.parse(c.alloc(), src_in, palette);
     const col = ui.div(c).column().wFull();
+    c.node(col.index).style.selectable = true;
     defer col.end();
     for (blocks, 0..) |b, i| {
         // Items of a list sit 4 apart (the list's `gap(4)`); other blocks
@@ -113,6 +119,24 @@ pub fn markdown(c: *ui.Context, colors: theme.Colors, src: []const u8) void {
 }
 
 fn rich(c: *ui.Context, in: md.Inline, style: ui.TextStyle) void {
+    if (in.images.len > 0) {
+        // Preserve the exact selectable text, styled runs, links and native
+        // equations. Pictures follow that prose instead of replacing ranges
+        // (which would invalidate all three sets of byte offsets).
+        var prose = in;
+        prose.images = &.{};
+        rich(c, prose, style);
+        for (in.images, 0..) |image, i| {
+            ui.key(c, c.print("md-picture-{d}", .{i}));
+            const alt = in.text[image.start..image.end];
+            if (link_owner) |owner| {
+                @import("view_reply_images.zig").draw(c, owner.app, k, owner.parent, image.src, alt, image.width);
+            } else {
+                ui.text(c, c.print("Image unavailable{s}{s}", .{ if (alt.len > 0) ": " else "", alt }), .{ .size = 12, .color = k.muted, .wrap = true });
+            }
+        }
+        return;
+    }
     var st = style;
     if (st.color == null) st.color = k.text;
     // Inline code at the text's own size, as `render.rs` sets it (nanoui's
@@ -122,19 +146,23 @@ fn rich(c: *ui.Context, in: md.Inline, style: ui.TextStyle) void {
     // round (`INLINE_CODE_PAD_X`, `INLINE_CODE_INSET_Y`,
     // `INLINE_CODE_RADIUS`; nanoui's `span_box`).
     if (comptime @hasField(ui.TextStyle, "span_box")) st.span_box = .{ .pad_x = 2, .inset_y = 2, .radius = 4.5 };
+    if (in.maths.len > 0) return @import("native_math_flow.zig").draw(c, in, st, k.text, rich);
     const spans: []const ui.Span = if (active_veil) |v| blk: {
         const v_spans = v.advance(c.gpa, c.alloc(), current_elem_ix, in.text, veil_now_ms);
         current_elem_ix += 1;
         break :blk veil_mod.applyVeil(c.alloc(), in.text.len, in.spans, v_spans, st.color orelse k.text);
     } else in.spans;
-    if (in.links.len == 0 or link_owner == null) return ui.richText(c, in.text, spans, st);
+    if (in.links.len == 0) return ui.richText(c, in.text, spans, st);
     const area = ui.div(c).column().wFull();
     defer area.end();
     const at = c.nodes.items.len;
     ui.richText(c, in.text, spans, st);
     const rect = c.rects.get(c.node(@intCast(at)).id) orelse {
-        const owner = link_owner.?;
-        if (owner.app.window == null or owner.app.offscreen) c.changed = true else c.frameIn(0);
+        if (link_owner) |owner| {
+            if (owner.app.window == null or owner.app.offscreen) c.changed = true else c.frameIn(0);
+        } else {
+            c.changed = true;
+        }
         return;
     };
     const origin = c.rects.get(c.node(area.index).id) orelse return;
@@ -152,10 +180,14 @@ fn rich(c: *ui.Context, in: md.Inline, style: ui.TextStyle) void {
             const hit = @import("view_tooltip.zig").on(ui.div(c).absolute().offset(rect.x - origin.x + x, rect.y - origin.y + @as(f32, @floatFromInt(row)) * line_h).size(@max(right - x, 1), line_h), k, .{ .text = link.url });
             defer hit.end();
             const action = c.interact(hit.index, .{ .focusable = true });
+            if (link_owner) |owner| @import("view_link_menu.zig").track(c, owner.app, owner.parent, link.url, hit.index, action.right_clicked or action.secondary_clicked);
             const activate = action.clicked or (action.focused and (c.shortcut(.{ .key = ui.Shortcut.enter }) or c.shortcut(.{ .key = ' ' })));
             if (activate) {
-                const owner = link_owner.?;
-                @import("app_browser.zig").openLink(owner.app, owner.parent, link.url);
+                if (link_owner) |owner| {
+                    @import("app_browser.zig").openLink(owner.app, owner.parent, link.url);
+                } else {
+                    _ = nanoui.shell.openUrl(link.url);
+                }
                 c.changed = true;
             }
         }
@@ -211,6 +243,12 @@ fn block(c: *ui.Context, b: md.Block, first: bool) void {
             rich(c, in, st);
         },
         .rule => _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null),
+        .math => |in| {
+            ui.key(c, "md-math-block");
+            const box = ui.div(c).row().wFull().px(14).py(10).rounded(8).bg(k.ink(0.03)).justifyCenter();
+            defer box.end();
+            rich(c, in, kit.style(c, 16, 24, .{ .wrap = true }));
+        },
         .code => |code| codeBlock(c, code.lang, code.text),
         .table => |t| table(c, t.header, t.rows),
     }
@@ -221,7 +259,7 @@ fn item(c: *ui.Context, it: @FieldType(md.Block, "item")) void {
     defer r.end();
     {
         // The marker's column, 18 points at least, so wrapped lines hang.
-        const m = ui.div(c).row().minW(18).h(c.text.lineHeight(body)).itemsCenter();
+        const m = ui.div(c).row().minW(18).h(c.text.lineHeight(body)).itemsCenter().control();
         defer m.end();
         if (it.task) |done| {
             icons.icon(c, .check, 13, if (done) k.success else k.muted, 0);
@@ -252,7 +290,7 @@ fn codeBlock(c: *ui.Context, lang: []const u8, src: []const u8) void {
     defer box.end();
     {
         // `CODE_HEADER_HEIGHT` 28 with its `border_b_1`, the hairline under it.
-        const h = ui.div(c).row().wFull().h(28 - 1).pl(12).pr(5).gap(2).itemsCenter().bg(k.code_header);
+        const h = ui.div(c).row().wFull().h(28 - 1).pl(12).pr(5).gap(2).itemsCenter().bg(k.code_header).control();
         defer h.end();
         ui.text(c, if (lang.len > 0) lang else "code", .{ .size = 11, .color = k.muted });
         ui.spacer(c);
@@ -282,7 +320,6 @@ fn codeBlock(c: *ui.Context, lang: []const u8, src: []const u8) void {
     const lines = ui.div(c).column().wFull().px(12).py(10).gap(0);
     defer lines.end();
     const st = kit.style(c, 12.5, 18, .{ .mono = true, .wrap = true, .color = k.text });
-    var in_block: highlight.State = .{};
     const trimmed_src = std.mem.trimEnd(u8, src, "\n");
     const code_veils: []const veil_mod.VeilSpan = if (active_veil) |v| blk: {
         const vs = v.advance(c.gpa, c.alloc(), current_elem_ix, trimmed_src, veil_now_ms);
@@ -290,9 +327,10 @@ fn codeBlock(c: *ui.Context, lang: []const u8, src: []const u8) void {
         break :blk vs;
     } else &.{};
     var line_offset: usize = 0;
-    var it = std.mem.splitScalar(u8, trimmed_src, '\n');
-    while (it.next()) |l| {
-        const raw_spans = highlight.line(c.alloc(), l, lang, pal, &in_block);
+    const highlighted = if (active_cache) |cache| cache.highlight(c.gpa, c.alloc(), trimmed_src, lang, pal) else cache_mod.highlightLines(c.alloc(), trimmed_src, lang, pal);
+    for (highlighted) |line| {
+        const l = line.text;
+        const raw_spans = line.spans;
         const spans: []const ui.Span = if (code_veils.len > 0 and l.len > 0) blk: {
             const local = veil_mod.sliceSpans(c.alloc(), code_veils, line_offset, line_offset + l.len);
             break :blk veil_mod.applyVeil(c.alloc(), l.len, raw_spans, local, st.color orelse k.text);

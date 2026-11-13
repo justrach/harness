@@ -163,19 +163,10 @@ pub fn settle(a: *App) void {
             if (a.tabs.layout()) |s| if (at.pane < s.panes.items.len) {
                 const group = &s.groups[at.pane];
                 if (at.tab < group.items.items.len and at.tab != group.active) {
-                    var removed = group.items.orderedRemove(at.tab);
-                    if (group.active > at.tab) group.active -= 1;
-                    const closed_id = removed.chat;
-                    removed.chat = null;
-                    if (removed.draft) |*d| d.deinit(a.gpa);
+                    const closed_id = if (group.items.items[at.tab].chat) |id| a.gpa.dupe(u8, id) catch null else null;
                     defer if (closed_id) |x| a.gpa.free(x);
-                    if (s.panes.items.len == 1 and group.count() == 1) {
-                        if (a.tabs.drafts.items[a.tabs.active]) |*d| d.deinit(a.gpa);
-                        a.tabs.drafts.items[a.tabs.active] = s.drafts.items[0];
-                        s.drafts.items[0] = null;
-                        s.deinit(a.gpa);
-                        a.tabs.splits.items[a.tabs.active] = null;
-                    }
+                    // Capture before removal, including inactive draft and position.
+                    if (!a.tabs.closeBackgroundPaneTab(at.pane, at.tab)) return;
                     a.rememberTabs();
                     if (closed_id) |x| a.archiveClosed(x, a.settings.get(.archive_sessions_on_close));
                     a.redraw();
@@ -303,6 +294,19 @@ pub fn open(a: *App, menu: Menu, target: Panel, anchor: ?ui.Rect) void {
     if (menu == .device) a.view.strip.device_anchor = anchor else a.view.strip.anchor = anchor;
     a.redraw();
 }
+
+pub fn toggleProjectPicker(a: *App) void {
+    const state = &a.view.strip;
+    if (state.menu == .folder) {
+        state.menu = null;
+        a.view.focus_composer = true;
+        a.redraw();
+        return;
+    }
+    open(a, .folder, active(a), a.view.space_anchor);
+    state.footer_folder = a.view.space_anchor != null;
+}
+
 /// Workspace focus shortcuts remain available while a folder search owns
 /// text input. Dismiss it before transferring focus, so typing cannot land
 /// in a hidden field or be swallowed by its former menu.
@@ -317,9 +321,32 @@ pub fn navigationKeys(c: *ui.Context, a: *App) bool {
         @import("frame_profile.zig").note(a, "cmd-]");
         a.stepPane(true);
         state.focused = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
+    } else if (c.shortcut(.{ .key = '[', .cmd = true, .shift = true })) {
+        const n = a.tabs.items.items.len;
+        if (n > 1) a.showTab((a.tabs.active + n - 1) % n);
+        state.focused = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
+    } else if (c.shortcut(.{ .key = ']', .cmd = true, .shift = true })) {
+        const n = a.tabs.items.items.len;
+        if (n > 1) a.showTab((a.tabs.active + 1) % n);
+        state.focused = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
     } else if (c.shortcut(.{ .key = 'l', .cmd = true })) {
         state.focused = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
     } else handled = false;
+    if (!handled) {
+        for (0..8) |slot| {
+            if (c.shortcut(.{ .key = @as(u21, @intCast('1' + slot)), .ctrl = true })) {
+                if (slot < a.tabs.items.items.len) a.showTab(slot);
+                state.focused = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
+                handled = true;
+                break;
+            }
+        }
+        if (!handled and c.shortcut(.{ .key = '9', .ctrl = true })) {
+            if (a.tabs.items.items.len > 0) a.showTab(a.tabs.items.items.len - 1);
+            state.focused = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
+            handled = true;
+        }
+    }
     if (!handled) {
         const arrows = [_]struct { u21, tabs.Direction }{ .{ ui.Shortcut.left, .left }, .{ ui.Shortcut.right, .right }, .{ ui.Shortcut.up, .up }, .{ ui.Shortcut.down, .down } };
         for (arrows) |arrow| if (c.shortcut(.{ .key = arrow[0], .cmd = true, .alt = true })) {
@@ -330,21 +357,29 @@ pub fn navigationKeys(c: *ui.Context, a: *App) bool {
         };
     }
     if (!handled) return false;
-    state.menu = null;
-    state.pending_folder = null;
+    finishNavigation(c, a);
+    return true;
+}
+
+/// A menu's field must release keyboard ownership before another workspace
+/// destination is shown, including navigation through a saved custom chord.
+pub fn finishNavigation(c: *ui.Context, a: *App) void {
+    a.view.strip.menu = null;
+    a.view.strip.pending_folder = null;
     c.changed = false;
     a.view.focus_composer = true;
     a.redraw();
-    return true;
 }
 
 pub fn keys(c: *ui.Context, a: *App) void {
     const state = &a.view.strip;
     if (state.menu == null) return;
-    if (c.shortcut(.{ .key = ui.Shortcut.escape })) {
+    const view_mod = @import("view.zig");
+    if (c.shortcut(.{ .key = ui.Shortcut.escape }) or (state.menu == .folder and view_mod.boundShortcut(c, a, "openProjectPicker"))) {
         state.menu = null;
         a.view.focus_composer = true;
-    } else if (c.shortcut(.{ .key = 't', .cmd = true }) or c.shortcut(.{ .key = 'n', .cmd = true })) {
+        a.redraw();
+    } else if (view_mod.boundShortcut(c, a, "newSession") or c.shortcut(.{ .key = 'n', .cmd = true })) {
         state.menu = null;
         state.pending_folder = null;
         @import("app_open_chooser.zig").open(a, .new_workspace_tab);
@@ -352,11 +387,21 @@ pub fn keys(c: *ui.Context, a: *App) void {
         state.menu = null;
         state.pending_folder = null;
         a.closeByShortcut();
-    } else if (c.shortcut(.{ .key = 'd', .cmd = true })) {
+    } else if (view_mod.boundShortcut(c, a, "splitTerminal")) {
         if (!a.tabs.canSplit(.horizontal)) return;
         state.menu = null;
         splitChoosingFolder(a, .horizontal);
+    } else if (view_mod.boundShortcut(c, a, "splitTerminalDown")) {
+        if (!a.tabs.canSplit(.vertical)) return;
+        state.menu = null;
+        splitChoosingFolder(a, .vertical);
     } else if (state.rows > 0) {
+        // Both current project-picker layouts pin two actions after the
+        // projects. Shift+Down jumps to that first action, not the next row.
+        if (state.menu == .folder and c.shortcut(.{ .key = ui.Shortcut.down, .shift = true })) {
+            state.cursor = state.rows -| 2;
+            state.reveal = true;
+        }
         if (c.shortcut(.{ .key = ui.Shortcut.down })) {
             state.cursor = (state.cursor + 1) % state.rows;
             state.reveal = true;

@@ -412,6 +412,7 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
     login.tick(c, a);
     const now = a.nowMs();
     header(c, a, k);
+    @import("view_account_notice.zig").strip(c, a, k);
     set.subtitle(c, k, "CodeGraff usage, graff's provider sign-ins, and the Claude Code, Codex, and Cursor logins on this device. Harness keeps local agent logins backed up and can swap between them.", false);
     if (p.notice.items.len > 0) if (rows.errorStrip(c, k, p.notice.items, false)) p.notice.clearRetainingCapacity();
     if (p.key_notice) if (rows.warningStrip(c, k, key_rejected_notice)) {

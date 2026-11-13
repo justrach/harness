@@ -219,8 +219,19 @@ pub fn stage(a: *App, name: []const u8, bytes: []const u8) !void {
     a.redraw();
 }
 
-pub fn stageFile(a: *App, path: []const u8) !void {
+/// Shared picker/Paste/drop validation. Native drops must validate before
+/// activating another pane; the returned bytes are owned by the caller.
+pub fn readFile(a: *App, path: []const u8) ![]u8 {
     const bytes = try std.Io.Dir.cwd().readFileAlloc(a.io, path, a.gpa, .limited(max_bytes));
+    if (bytes.len == 0) {
+        a.gpa.free(bytes);
+        return error.EmptyAttachment;
+    }
+    return bytes;
+}
+
+pub fn stageFile(a: *App, path: []const u8) !void {
+    const bytes = try readFile(a, path);
     defer a.gpa.free(bytes);
     try stage(a, std.fs.path.basename(path), bytes);
 }

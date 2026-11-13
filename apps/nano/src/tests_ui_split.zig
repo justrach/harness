@@ -37,6 +37,13 @@ const Harness = struct {
         h.a.deinit();
     }
 
+    fn snap(h: *Harness, name: []const u8) void {
+        const dir = std.c.getenv("NANO_SNAP_DIR") orelse return;
+        var buf: [1024]u8 = undefined;
+        const path = std.fmt.bufPrint(&buf, "{s}/{s}.png", .{ std.mem.span(dir), name }) catch return;
+        h.t.screenshot(path) catch {};
+    }
+
     fn load(t: *@import("transcript.zig").Transcript) !void {
         var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, frame, .{});
         defer parsed.deinit();
@@ -163,4 +170,160 @@ test "closing a split page leaves no empty panel to close again" {
     try testing.expectEqual(@as(usize, 0), h.a.panels.tabs.items.len);
     try testing.expectEqual(before_chat_width, h.a.view.chrome.chat_width);
     try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
+}
+
+fn applyFrame(t: *@import("transcript.zig").Transcript, text: []const u8) !void {
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, text, .{});
+    defer parsed.deinit();
+    try t.apply(parsed.value);
+}
+
+fn textTop(h: *Harness, text: []const u8) !f32 {
+    return (h.t.findText(text) orelse {
+        std.debug.print("missing text: {s}\n", .{text});
+        return error.TextMissing;
+    }).y;
+}
+
+test "a message sent while the turn works sits where it arrived, with later work under it" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    try applyFrame(&h.a.transcript,
+        \\{"reset":[
+        \\ {"id":"u","role":"user","parts":[{"id":"p","kind":"text","text":"Synthetic question"}]},
+        \\ {"id":"a","role":"assistant","status":"streaming","parts":[{"id":"p0","kind":"text","text":"Synthetic work before the message."}]}
+        \\]}
+    );
+    h.t.settle(1);
+    // The engine writes the message at the document's end at once...
+    try applyFrame(&h.a.transcript,
+        \\{"upsert":[{"after":"a","entry":{"id":"s","role":"user","status":"complete","parts":[{"id":"t0","kind":"text","text":"Synthetic steer"}]}}],"count":3}
+    );
+    h.t.settle(1);
+    // ...and keeps streaming the running reply into the entry before it.
+    try applyFrame(&h.a.transcript,
+        \\{"upsert":[{"after":"u","entry":{"id":"a","role":"assistant","status":"streaming","parts":[
+        \\ {"id":"p0","kind":"text","text":"Synthetic work before the message."},
+        \\ {"id":"p1","kind":"text","text":"Synthetic work after the message."}]}}],"count":3}
+    );
+    h.t.settle(1);
+    {
+        const before = try textTop(&h, "Synthetic work before the message.");
+        const message = try textTop(&h, "Synthetic steer");
+        const after = try textTop(&h, "Synthetic work after the message.");
+        try testing.expect(before < message);
+        try testing.expect(message < after);
+        h.snap("steer-mid-turn");
+    }
+    // The agent takes the message: the reply ends and the next one starts
+    // after it. Each piece keeps its place; a split pane draws the same.
+    try applyFrame(&h.a.transcript,
+        \\{"upsert":[
+        \\ {"after":"u","entry":{"id":"a","role":"assistant","status":"complete","durationMs":4000,"parts":[
+        \\  {"id":"p0","kind":"text","text":"Synthetic work before the message."},
+        \\  {"id":"p1","kind":"text","text":"Synthetic work after the message."}]}},
+        \\ {"after":"s","entry":{"id":"b","role":"assistant","status":"streaming","parts":[{"id":"p0","kind":"text","text":"Synthetic reply to the steer."}]}}
+        \\],"count":4}
+    );
+    for ([_]bool{ false, true }) |split| {
+        if (split) h.a.splitPane(.horizontal);
+        h.t.settle(1);
+        const before = try textTop(&h, "Synthetic work before the message.");
+        const message = try textTop(&h, "Synthetic steer");
+        const after = try textTop(&h, "Synthetic work after the message.");
+        const reply = try textTop(&h, "Synthetic reply to the steer.");
+        try testing.expect(before < message);
+        try testing.expect(message < after);
+        try testing.expect(after < reply);
+        if (!split) h.snap("steer-taken");
+    }
+}
+
+fn textParent(h: *Harness, label: []const u8) !ui.Rect {
+    for (h.t.ctx.nodes.items) |node| switch (node.content) {
+        .text => |text| if (std.mem.eql(u8, text.str, label)) return h.t.ctx.node(node.parent).rect,
+        else => {},
+    };
+    std.debug.print("missing text: {s}\n", .{label});
+    return error.TextMissing;
+}
+
+const question_options = [_][]const u8{ "Stop here: keep everything else", "Also remove the merged local leftovers", "Remove the merged remote branches too" };
+
+test "an agent's long question keeps its options and buttons inside a split pane" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    // Twelve paragraphs: taller than the window on their own.
+    try applyFrame(&h.a.transcript,
+        \\{"reset":[
+        \\ {"id":"u","role":"user","parts":[{"id":"p","kind":"text","text":"Synthetic request"}]},
+        \\ {"id":"ask","role":"assistant","status":"complete","parts":[{"kind":"input","id":"r1","requestId":"r1","resolved":false,
+        \\  "questions":[{"id":"q1","header":"Cleanup","question":"Synthetic opening line.\n\nThis synthetic paragraph says what was already removed and why each of those removals was safe to make without asking anyone first.\n\nThis synthetic paragraph lists what is left that looks old but needs a decision, because removing it means deleting something that cannot be brought back.\n\nThis synthetic paragraph names the branches that differ from their remote copies and the worktrees that still hold files nobody has committed.\n\nThis synthetic paragraph explains which of them are kept regardless, and how many uncommitted files each one of those still has in it.\n\nThis synthetic paragraph repeats the trade-off between a tidy list of branches and the risk of losing work that only exists in one place.\n\nThis synthetic paragraph describes what the remote would look like after each of the choices offered under this question.\n\nThis synthetic paragraph notes that nothing has been pushed, deleted remotely or rewritten so far, whatever is chosen next.\n\nThis synthetic paragraph says how long each choice would take and what would be reported once it had finished.\n\nThis synthetic paragraph covers the worktrees outside the repository, which were only inspected and never changed.\n\nThis synthetic paragraph is the last piece of background before the question itself is asked.\n\nSynthetic closing line.",
+        \\   "options":["Stop here: keep everything else","Also remove the merged local leftovers","Remove the merged remote branches too"]}]}]}
+        \\]}
+    );
+    h.a.splitPane(.horizontal);
+    h.a.focusPane(0);
+    h.t.settle(1);
+    try testing.expect(h.a.wizard != null);
+    for ([_]f32{ 780, 560 }) |window_h| {
+        h.t.resize(1200, window_h);
+        h.t.settle(1);
+        if (window_h == 780) h.snap("question-split-pane");
+        // The answer's controls are all in the window, under the title bar.
+        const submit = try textParent(&h, "Submit");
+        const cancel = try textParent(&h, "Cancel question");
+        try testing.expect(submit.y + submit.h <= window_h - 16);
+        try testing.expect(cancel.y + cancel.h <= window_h - 16);
+        var above = submit.y;
+        var i = question_options.len;
+        while (i > 0) {
+            i -= 1;
+            const row = try textParent(&h, question_options[i]);
+            try testing.expect(row.y >= 40);
+            try testing.expect(row.y + row.h <= above);
+            above = row.y;
+        }
+        // The question gives way instead: it starts in view and scrolls to
+        // its end, above the options.
+        const opening = h.t.findText("Synthetic opening line.") orelse return error.TextMissing;
+        try testing.expect(opening.y >= 40 and opening.y + opening.h <= above);
+        const before = h.t.findText("Synthetic closing line.") orelse return error.TextMissing;
+        try testing.expect(before.y >= above);
+        h.t.scroll(opening.x + 8, opening.y + 4, -4000);
+        h.t.settle(1);
+        const closing = h.t.findText("Synthetic closing line.") orelse return error.TextMissing;
+        try testing.expect(closing.y >= 40 and closing.y + closing.h <= above + 0.5);
+        h.t.scroll(opening.x + 8, opening.y + 4, 4000);
+        h.t.settle(1);
+    }
+}
+
+test "a question's transcript chip ends inside a narrow pane" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    try applyFrame(&h.a.transcript,
+        \\{"reset":[
+        \\ {"id":"u","role":"user","parts":[{"id":"p","kind":"text","text":"Synthetic request"}]},
+        \\ {"id":"ask","role":"assistant","status":"complete","parts":[{"kind":"input","id":"r1","requestId":"r1","resolved":false,
+        \\  "questions":[{"id":"q1","header":"Cleanup","question":"This synthetic question is long enough to run past the right edge of a narrow split pane if nothing shortens it","options":["Yes","No"]}]}]}
+        \\]}
+    );
+    h.a.splitPane(.horizontal);
+    h.a.focusPane(0);
+    for ([_]f32{ 1200, 900 }) |window_w| {
+        h.t.resize(window_w, 780);
+        h.t.settle(1);
+        // The bubble is right-aligned in the column the chip is in.
+        const bubble = try textParent(&h, "Synthetic request");
+        const column_right = bubble.x + bubble.w;
+        const chip = try textParent(&h, "Question");
+        try testing.expect(chip.x + chip.w <= column_right + 0.5);
+        // What it says after the question is whole, or left out.
+        if (h.t.findText("Waiting for you")) |waiting| try testing.expect(waiting.x + waiting.w <= chip.x + chip.w - 8 + 0.5);
+        if (window_w == 1200) h.snap("question-chip-narrow-pane");
+    }
 }

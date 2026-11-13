@@ -230,6 +230,17 @@ jobs:
           manifest-key: ${{ github.job }}-${{ strategy.job-index }}
       - name: Native visual sandbox regressions
         run: cargo test --locked -p harness-visual
+      - name: Windows workspace and portable-update regressions
+        run: |
+          cargo test --locked -p harness-update
+          if ($LASTEXITCODE -ne 0) { throw 'Windows updater tests failed' }
+          cargo test --locked -p harness-engine --test workspace_files
+          if ($LASTEXITCODE -ne 0) { throw 'Windows workspace-file tests failed' }
+      - name: Native Nano regressions
+        working-directory: apps/nano
+        run: |
+          zig build test
+          if ($LASTEXITCODE -ne 0) { throw 'Windows Nano tests failed' }
       - name: package portable app
         run: ./scripts/package-windows.ps1 -ReleasesUrl "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download"
       - uses: actions/upload-artifact@v4

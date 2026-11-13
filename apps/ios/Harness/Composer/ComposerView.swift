@@ -78,9 +78,10 @@ struct ComposerShell<Chips: View>: View {
     }
 
     /// One animatable shape for background/glass/hairline: capsule-radius
-    /// collapsed (46pt tall pill), 20pt card expanded (t3's 999↔20 morph).
+    /// collapsed (46pt tall pill), 22pt card expanded (concentric with 44pt
+    /// inner circles; `FrameSchedule.lean`: `composer_expanded_radius_22_is_concentric`).
     private var surfaceShape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: expanded && !singleLine ? 20 : 24)
+        RoundedRectangle(cornerRadius: expanded && !singleLine ? 22 : 24, style: .continuous)
     }
 
     // Switching between VStack/HStack via AnyLayout (rather than an if/else
@@ -182,12 +183,11 @@ struct ComposerShell<Chips: View>: View {
         }
         .padding(.horizontal, expanded && !singleLine ? 12 : 5)
         .padding(.vertical, expanded && !singleLine ? 12 : 5)
-        // A bright writing plane on the glass, with an accent edge while
-        // typing (the desktop composer's design).
-        .background(Theme.composerPlane, in: surfaceShape)
+        // Pure native Liquid Glass (`FrameSchedule.lean`:
+        // `native_glass_preserves_specular_refraction`): no interior opaque fill
+        // and no stroke over the glass rim.
         .glassEffect(.regular.interactive(), in: surfaceShape)
-        .overlay(surfaceShape.strokeBorder(
-            focused ? Theme.accent.opacity(0.55) : hairline(0.05), lineWidth: 1))
+        .shadow(color: .black.opacity(0.08), radius: 10, y: 3)
         // The whole glass surface focuses the editor, not just the TextField's
         // own text box: the collapsed pill is mostly padding, and a tap that
         // misses the text box falls through to the transcript underneath —
@@ -237,12 +237,11 @@ struct ComposerShell<Chips: View>: View {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Theme.textMuted)
                 .frame(width: 28, height: 28)
-                .background(ink(0.06), in: Circle())
-                .overlay(Circle().strokeBorder(hairline(0.08), lineWidth: 1))
+                .glassEffect(.regular.interactive(), in: Circle())
                 .frame(width: 40, height: 40)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressScaleButtonStyle(scale: 0.94))
         .offset(x: 8, y: -8)
         .transition(.opacity)
         .accessibilityLabel("Write in full screen")
@@ -257,11 +256,10 @@ struct ComposerShell<Chips: View>: View {
                 .font(.system(size: 16, weight: .medium))
                 .foregroundStyle(Theme.textMuted)
                 .frame(width: singleLine ? 40 : 44, height: singleLine ? 40 : 44)
-                .background(ink(0.06), in: Circle())
-                .overlay(Circle().strokeBorder(hairline(0.08), lineWidth: 1))
+                .glassEffect(.regular.interactive(), in: Circle())
                 .contentShape(Circle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressScaleButtonStyle(scale: 0.94))
         .disabled(busy)
         .accessibilityLabel("Attach photos")
     }
@@ -306,7 +304,7 @@ struct ComposerShell<Chips: View>: View {
                         in: Circle())
             .contentShape(Circle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressScaleButtonStyle(scale: 0.92))
         .accessibilityLabel(showStop && !hasContent ? "Stop response" : sendLabel)
         .accessibilityIdentifier("composer-send")
         .disabled(!buttonActive)
@@ -329,7 +327,13 @@ struct ComposerView: View {
     let runLive: Bool
     /// iPhone Duo: Stop lives in the status pill (DuoChat), so Send never turns into Stop.
     @AppStorage(DuoChat.foldableKey) private var duoChat = false
+    @AppStorage(HomeUiMode.storageKey) private var uiModeRaw = HomeUiMode.zen.rawValue
+    @AppStorage(HomeMovingPart.overridesStorageKey) private var uiPartOverridesRaw = ""
     let questionClosedAtMs: Int64?
+
+    private var showsGitChrome: Bool {
+        HomeHierarchyProfile.resolved(baseModeRaw: uiModeRaw, overridesRaw: uiPartOverridesRaw).showsGitCheckoutChrome
+    }
 
     // What was typed and not sent comes back with the chat (DraftStore).
     @State private var text: String
@@ -400,7 +404,7 @@ struct ComposerView: View {
             .foregroundStyle(Theme.textMuted)
             .padding(.horizontal, 10)
             .frame(height: 30)
-            .background(Theme.text.opacity(0.06), in: Capsule())
+            .glassEffect(.regular.interactive(), in: Capsule())
             .contentShape(Capsule())
             .frame(maxWidth: 220)
             .fixedSize(horizontal: false, vertical: true)
@@ -567,10 +571,10 @@ struct ComposerView: View {
                 focusTick: DuoComposerFocus.shared.tick(chat.id),
                 onExpand: { showWrite = true }
             ) {
-                if let pullRequest = model.changeRequest(for: chat) {
+                if showsGitChrome, let pullRequest = model.changeRequest(for: chat) {
                     PullRequestBadge(summary: pullRequest, surface: .composer)
                 }
-                if let branch = chat.branch?.trimmingCharacters(in: .whitespacesAndNewlines),
+                if showsGitChrome, let branch = chat.branch?.trimmingCharacters(in: .whitespacesAndNewlines),
                    !branch.isEmpty {
                     BranchContextChip(branch: branch)
                 }

@@ -105,6 +105,7 @@ pub const fixed = [_]Fixed{
     .{ .title = "Jump to the message box", .keys = "Cmd+L" },
     .{ .title = "Write the message on a full page (and back)", .keys = "Cmd+Shift+E" },
     .{ .title = "Command palette", .keys = "Cmd+K" },
+    .{ .title = "Toggle Zen / Developer mode", .keys = "Cmd+Shift+M" },
     .{ .title = "Search sessions", .keys = "Cmd+F" },
     .{ .title = "Settings", .keys = "Cmd+," },
     .{ .title = "Bigger text (zoom in)", .keys = "Cmd+=" },
@@ -162,7 +163,9 @@ pub fn display(buf: []u8, combo: []const u8) []const u8 {
 pub fn fromShortcut(buf: []u8, s: ui.Shortcut) ?[]const u8 {
     if (!s.cmd and !s.ctrl and !s.alt) return null;
     const S = ui.Shortcut;
+    var ascii: [1]u8 = undefined;
     const key: []const u8 = switch (s.key) {
+        ' ' => "space",
         S.tab => "tab",
         S.enter => "enter",
         S.escape => return null,
@@ -172,7 +175,8 @@ pub fn fromShortcut(buf: []u8, s: ui.Shortcut) ?[]const u8 {
         S.right => "right",
         else => blk: {
             if (s.key > 127) return null;
-            break :blk &[_]u8{std.ascii.toLower(@intCast(s.key))};
+            ascii[0] = std.ascii.toLower(@intCast(s.key));
+            break :blk &ascii;
         },
     };
     var w: std.Io.Writer = .fixed(buf);
@@ -182,6 +186,41 @@ pub fn fromShortcut(buf: []u8, s: ui.Shortcut) ?[]const u8 {
     if (s.shift) w.writeAll("shift-") catch return null;
     w.writeAll(key) catch return null;
     return w.buffered();
+}
+
+/// Match saved intent against native keys, including mod's Control alias on
+/// Linux/Windows. Serializing the physical key first loses that distinction.
+pub fn matches(combo: []const u8, pressed: ui.Shortcut) bool {
+    const S = ui.Shortcut;
+    var want: S = .{ .key = 0 };
+    var key = combo;
+    while (true) {
+        if (std.mem.startsWith(u8, key, "mod-")) {
+            want.cmd = true;
+            key = key[4..];
+        } else if (std.mem.startsWith(u8, key, "ctrl-")) {
+            want.ctrl = true;
+            key = key[5..];
+        } else if (std.mem.startsWith(u8, key, "alt-")) {
+            want.alt = true;
+            key = key[4..];
+        } else if (std.mem.startsWith(u8, key, "shift-")) {
+            want.shift = true;
+            key = key[6..];
+        } else break;
+    }
+    if (!want.cmd and !want.ctrl and !want.alt) return false;
+    const names = .{ .{ "space", @as(u21, ' ') }, .{ "tab", S.tab }, .{ "enter", S.enter }, .{ "up", S.up }, .{ "down", S.down }, .{ "left", S.left }, .{ "right", S.right } };
+    want.key = inline for (names) |entry| {
+        if (std.mem.eql(u8, key, entry[0])) break entry[1];
+    } else blk: {
+        if (key.len != 1) return false;
+        break :blk std.ascii.toLower(key[0]);
+    };
+    const expected = want.native();
+    const actual = pressed.native();
+    const actual_key = if (actual.key < 128) std.ascii.toLower(@as(u8, @intCast(actual.key))) else actual.key;
+    return expected.key == actual_key and expected.cmd == actual.cmd and expected.ctrl == actual.ctrl and expected.alt == actual.alt and expected.shift == actual.shift;
 }
 
 /// ⌘↩ is the composer's, whatever the keymap says.

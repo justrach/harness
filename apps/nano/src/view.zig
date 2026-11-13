@@ -18,12 +18,44 @@ const chrome = @import("panel_chrome.zig");
 const strip = @import("view_tab_strip.zig");
 const panel_chrome = @import("view_panel_chrome.zig");
 
+test {
+    _ = @import("tests_selection_retention.zig");
+    _ = @import("peer_message.zig");
+}
+
+test "retention selection fully masked horizontal text cannot capture a gutter drag" {
+    const Probe = struct {
+        fn draw(_: *@This(), c: *ui.Context) void {
+            const root = ui.div(c).column().wFull().hFull();
+            c.node(root.index).style.selectable = true;
+            defer root.end();
+            const masked = ui.div(c).absolute().offset(0, 0).size(20, 24).clip();
+            const hidden = ui.div(c).absolute().offset(30, 0).w(100);
+            ui.text(c, "Hidden text", .{ .size = 14 });
+            hidden.end();
+            masked.end();
+            const visible = ui.div(c).absolute().offset(100, 0).w(120);
+            ui.text(c, "Visible text", .{ .size = 14 });
+            visible.end();
+        }
+    };
+    @import("theme.zig").registerFonts();
+    var probe: Probe = .{};
+    var t: ui.Tester = undefined;
+    try t.init(std.testing.allocator, .init(&probe, Probe.draw), .{ .width = 300, .height = 100 });
+    defer t.deinit();
+    t.settle(0.1);
+    const leaf = findNearestSelectableLeaf(&t.ctx, .{ .x = 10, .y = 10 }) orelse return error.NoSelectionCandidate;
+    try std.testing.expectEqualStrings("Visible text", t.ctx.nodes.items[leaf.index].content.text.str);
+}
+
 /// Where the title bar's buttons start: right of the traffic lights.
-const cluster_x: f32 = 88;
+const cluster_x: f32 = @import("window_chrome.zig").leading;
 /// Three 24-point buttons, 8 then 2 points apart.
 const cluster_w: f32 = 24 * 3 + 8 + 2;
 
 pub fn view(a: *App, c: *ui.Context) void {
+    a.markdown_cache.beginFrame();
     @import("frame_profile.zig").beginPass();
     a.view.in_pre_tree = true;
     defer a.view.in_pre_tree = false;
@@ -97,6 +129,8 @@ pub fn view(a: *App, c: *ui.Context) void {
     @import("app_browser.zig").settleFrame(a);
     @import("view_settings_theme_import.zig").settleFrame(a);
     @import("view_settings_devices_updates.zig").settleFrame(a);
+    @import("pane_gesture.zig").observe(a, c);
+    settleSelectionPreTree(a, c);
     // Capture once, before drawing the search can blur it on a pointer
     // press. An open but unfocused search must not steal another field.
     if (c.input.pressed and a.view.sidebar_press_frame != c.frame) {
@@ -108,22 +142,12 @@ pub fn view(a: *App, c: *ui.Context) void {
         a.view.press_kept_keys = a.view.sidebar_press_focus or menuKeepsKeys(a);
     }
     strip.settle(a);
+    @import("view_attachment_drop.zig").prepare(a);
     keys(c, a);
     c.setZoom(a.settings.uiFontSize() / 16.0);
     if (!a.offscreen and c.time < a.view.resize_until) c.frameIn(1.0 / 120.0);
     a.syncPeers();
     a.view.in_pre_tree = false;
-    if (a.view.menus.overview.open and !a.view.settings_open) {
-        @import("view_sessions.zig").page(c, a, k);
-        @import("view_palette.zig").overlay(c, a, surfaces.popup(k));
-        @import("view_chat_menu.zig").overlays(c, a, surfaces.popup(k));
-        @import("view_project_setup.zig").overlay(c, a, surfaces.popup(k));
-        @import("view_open_chooser.zig").overlay(c, a, surfaces.popup(k));
-        @import("view_setup.zig").overlay(c, a, k);
-        @import("app_browser.zig").syncNative(a, c);
-        @import("frame_profile.zig").frame(a, c);
-        return;
-    }
     {
         const root = ui.div(c).row().sizeFull().bg(k.shell);
         defer root.end();
@@ -237,6 +261,7 @@ pub fn view(a: *App, c: *ui.Context) void {
     }
     strip.draw(c, a, k);
     titlebar(c, a, k);
+    @import("window_chrome.zig").draw(c, a, k);
     if (c.input.released) a.view.sidebar_press_focus = false;
     const popup = surfaces.popup(k);
     trailing(c, a, popup);
@@ -248,7 +273,9 @@ pub fn view(a: *App, c: *ui.Context) void {
     @import("view_context.zig").overlay(c, a, popup);
     @import("view_drag.zig").overlay(c, a, popup);
     @import("view_chat_menu.zig").overlays(c, a, popup);
+    @import("view_link_menu.zig").overlay(c, a, popup);
     closeChoice(c, a, popup);
+    @import("app_file_editor.zig").dialog(c, a, popup);
     @import("view_updates.zig").overlayCard(c, a, popup);
     // Over everything, as the GPUI app's deferred palette (priority 2).
     @import("view_palette.zig").overlay(c, a, popup);
@@ -257,12 +284,13 @@ pub fn view(a: *App, c: *ui.Context) void {
     // First-run setup, over the whole window.
     @import("view_setup.zig").overlay(c, a, k);
     @import("app_browser.zig").syncNative(a, c);
+    settleSelectionPostTree(a, c);
     // After the overlays: a click that opens a menu has opened it.
     if (handsKeysBack(.{
         .released = c.input.released,
         .composer_drawn = a.view.composer_frame == c.frame,
         .nothing_focused = c.focus == 0,
-        .kept = a.view.press_kept_keys or menuKeepsKeys(a),
+        .kept = a.view.press_kept_keys or menuKeepsKeys(a) or c.selection.moved or c.selection.text.items.len > 0,
     })) {
         // In the next frame, not this one again: what a release leaves for
         // the next frame's start (a drop's split) must not run under this one.
@@ -277,8 +305,8 @@ pub fn view(a: *App, c: *ui.Context) void {
 /// no focus of its own, so it isn't one.
 pub fn menuKeepsKeys(a: *const App) bool {
     const v = &a.view;
-    return v.project_setup.open or v.open_chooser.open or v.strip.menu != null or v.more_menu or v.filter_menu or v.space_menu or v.checkout_menu or v.ref_menu or v.chat_menu.open or
-        v.menus.ctx_at != null or v.menus.overview.open or v.palette.open or a.picker != .none;
+    return v.project_setup.open or v.open_chooser.open or v.strip.menu != null or v.more_menu or v.filter_menu or v.space_menu or v.checkout_menu or v.ref_menu or v.chat_menu.open or v.link_menu.open or
+        v.menus.ctx_at != null or v.palette.open or v.search.focus or a.picker != .none;
 }
 
 /// A press lands on the window's root unless something nearer takes focus,
@@ -321,6 +349,7 @@ fn seam(c: *ui.Context, a: *App, k: theme.Colors) void {
 fn chatPanel(c: *ui.Context, a: *App, k: theme.Colors) void {
     const panel = panel_chrome.body(c, k).grow().wFull().h(0);
     defer panel.end();
+    @import("view_attachment_drop.zig").target(c, a, panel.index, if (a.tabs.layout()) |s| s.focus else null);
     if (c.input.pressed and panel.interaction().hovered) a.view.strip.focused = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
     if (strip.rendering.selectedBounds(a)) |selected| panel_chrome.join(c, k, a.view.chrome.chat_width, selected.left, selected.right);
     // Decorative shoulders change node count as the sidebar slides; the
@@ -334,10 +363,13 @@ fn chatPanel(c: *ui.Context, a: *App, k: theme.Colors) void {
 fn focused(c: *ui.Context, a: *App, k: theme.Colors) void {
     // The Write page takes the pane: the transcript and composer step aside.
     if (a.view.write_open) return @import("view_write.zig").page(c, a, k, transcript_view.paneWidth(c, a));
+    // The catch-up, a bot's details or the new-bot form take it the same way.
+    if (a.bots.page != .none) return @import("view_bots_page.zig").page(c, a, k, transcript_view.paneWidth(c, a));
     if (a.selected == null) {
         @import("view_newchat.zig").canvas(c, a, k);
     } else {
-        @import("view_actions.zig").toolbar(c, a, k);
+        if (a.settings.hierarchyProfile().shows_action_toolbar) @import("view_actions.zig").toolbar(c, a, k);
+        @import("view_bots.zig").strip(c, a, k, @min(transcript_view.paneWidth(c, a), transcript_view.column_w));
         transcript_view.transcript(c, a, k);
         @import("view_composer.zig").docked(c, a, k);
         @import("view_actions.zig").dock(c, a, k);
@@ -392,6 +424,7 @@ fn panes(c: *ui.Context, a: *App, k: theme.Colors, s: *tabs.Split) void {
         var pane = panel_chrome.body(c, k).clip();
         pane = if (across) pane.w(size).hFull() else pane.h(size).wFull();
         defer pane.end();
+        @import("view_attachment_drop.zig").target(c, a, pane.index, ix);
         if (c.input.pressed and pane.interaction().hovered) a.view.strip.focused = .{ .chat = ix };
         if (ix == s.focus) {
             focused(c, a, k);
@@ -401,14 +434,17 @@ fn panes(c: *ui.Context, a: *App, k: theme.Colors, s: *tabs.Split) void {
         // Capture the whole subtree, then finish its action before focus
         // moves the transcript into the active outlet (as GPUI does).
         const it = pane.interaction();
-        if (c.input.pressed and it.hovered) a.view.pane_press = .{ .tab = a.tabs.active, .pane = ix };
-        if (c.input.released and it.hovered) if (press) |p| {
-            if (p.tab == a.tabs.active and p.pane == ix) focus = ix;
+        if (c.input.pressed and it.hovered and c.window_focused) a.view.pane_press = .{ .tab = @import("pane_gesture.zig").context(a, c), .pane = ix };
+        if (c.input.released and it.hovered and c.window_focused) if (press) |p| {
+            if (p.tab == @import("pane_gesture.zig").context(a, c) and p.pane == ix) focus = ix;
         };
         const neighbor_w = @max(0, (if (across) size else a.view.chrome.chat_width) - a.view.seam_inset);
         if (neighbor(c, a, k, ix, chat, neighbor_w)) return;
     }
     if (focus) |ix| {
+        if (s.panes.items[ix]) |id| {
+            if (c.selection.anchor != null) @import("selection_owner.zig").state(c).promoted_chat = std.hash.Wyhash.hash(0, id);
+        }
         strip.queue(a, .{ .focus = .{ .chat = ix } });
         c.changed = true;
     }
@@ -490,6 +526,7 @@ fn keys(c: *ui.Context, a: *App) void {
     // A shortcut being rebound takes the keys first.
     const rebinding = @import("view_settings_shortcuts.zig");
     if (rebinding.recording(a)) return rebinding.capture(c, a);
+    if (@import("app_file_editor.zig").keys(c, a)) return;
     // First-run setup covers the window and has every key.
     if (@import("view_setup.zig").keys(c, a)) return;
     if (@import("view_project_setup.zig").keys(c, a)) return;
@@ -504,14 +541,12 @@ fn keys(c: *ui.Context, a: *App) void {
         return;
     }
     const palette_had_keys = a.view.palette.open;
+    const picker_had_keys = a.picker != .none;
     palette.keys(c, a);
-    // All sessions is a full route, not a sheet over a live composer.
-    // Closing its history palette must not also close the overview.
-    if (a.view.menus.overview.open and !a.view.settings_open) {
-        if (!palette_had_keys) @import("view_sessions.zig").keys(c, a);
-        return;
-    }
     if (a.picker != .none) @import("view_picker.zig").keys(c, a);
+    // Modal searches own the event even when it is not one of their editing
+    // keys. Never navigate or open a second picker underneath them.
+    if (palette_had_keys or a.view.palette.open or picker_had_keys or a.picker != .none) return;
     // A dialog has the keys; else an open header menu takes Escape, the
     // arrows and Return.
     const header_menus = @import("view_sidebar_menus.zig");
@@ -552,7 +587,24 @@ fn keys(c: *ui.Context, a: *App) void {
             return;
         }
     }
+    if (@import("view_composer_completion.zig").keys(c, a)) return;
+    // Configured commands win over fixed aliases: on Linux/Windows both
+    // mod-1 (session jump) and Ctrl+1 (tab focus) use the native Control key.
+    if (sessionNavigationKeys(c, a)) {
+        strip.finishNavigation(c, a);
+        return;
+    }
     if (strip.navigationKeys(c, a)) return;
+    if (boundShortcut(c, a, "reopenClosedTab")) {
+        strip.finishNavigation(c, a);
+        a.reopenClosedTab();
+        return;
+    }
+    if (closeOnlyPressed(c, a)) {
+        strip.finishNavigation(c, a);
+        a.closeArchiving(false);
+        return;
+    }
     if (a.view.strip.menu != null) {
         strip.keys(c, a);
         return;
@@ -563,7 +615,7 @@ fn keys(c: *ui.Context, a: *App) void {
         // The session search, while it holds the keys.
         @import("view_sidebar_search.zig").keys(c, a);
     }
-    if (c.shortcut(.{ .key = 'b', .cmd = true })) {
+    if (boundShortcut(c, a, "toggleSidebar")) {
         @import("frame_profile.zig").note(a, "cmd-b");
         c.changed = false;
         toggleSidebar(c, a, false);
@@ -590,6 +642,24 @@ fn keys(c: *ui.Context, a: *App) void {
         @import("app_open_chooser.zig").open(a, .new_project);
         return;
     }
+    if (!a.view.settings_open and boundShortcut(c, a, "openProjectPicker")) {
+        strip.toggleProjectPicker(a);
+        return;
+    }
+    if (!a.view.settings_open and !picker_had_keys and boundShortcut(c, a, "openModelPicker")) {
+        a.picker = .model;
+        @import("view_picker.zig").opened(a);
+        a.redraw();
+        return;
+    }
+    if (boundShortcut(c, a, "saveFile")) {
+        if (!@import("app_file_editor.zig").saveFocused(a)) {
+            if (a.view.write_open) @import("view_write.zig").close(a);
+        }
+    }
+    if (boundShortcut(c, a, "browserReload")) {
+        if (a.panels.host_open) if (a.panels.activeTab()) |tab| if (tab.browser) |b| b.reload();
+    }
     // The Write page, from the composer's place (`ToggleWriteDocument`); the
     // page takes the same keys back itself.
     if (!a.view.write_open and !a.view.settings_open and a.picker == .none and c.shortcut(@import("view_write.zig").toggle)) @import("view_write.zig").open(a);
@@ -599,10 +669,17 @@ fn keys(c: *ui.Context, a: *App) void {
         const search = @import("view_sidebar_search.zig");
         if (!a.view.search.open) search.toggle(a) else a.view.search.focus = true;
     }
-    if (a.selected != null and c.shortcut(.{ .key = 'e', .cmd = true })) @import("app_files.zig").toggle(a);
-    if (a.selected != null and c.shortcut(.{ .key = 'r', .cmd = true })) @import("app_panels.zig").toggleHost(a);
-    if (c.shortcut(.{ .key = 't', .cmd = true }) or c.shortcut(.{ .key = 'n', .cmd = true })) @import("app_open_chooser.zig").open(a, .new_workspace_tab);
+    if (a.selected != null and boundShortcut(c, a, "toggleFiles")) @import("app_files.zig").toggle(a);
+    if (a.selected != null and (boundShortcut(c, a, "toggleChanges") or boundShortcut(c, a, "toggleTerminal"))) @import("app_panels.zig").toggleHost(a);
+    if (boundShortcut(c, a, "newSession") or c.shortcut(.{ .key = 'n', .cmd = true })) @import("app_open_chooser.zig").open(a, .new_workspace_tab);
+    if (boundShortcut(c, a, "archiveSession")) {
+        if (a.selected) |sel| a.setArchived(sel, true);
+    }
     if (c.shortcut(.{ .key = 'j', .cmd = true, .shift = true })) strip.nextAttention(a);
+    if (c.shortcut(.{ .key = 'm', .cmd = true, .shift = true })) {
+        a.settings.toggleUiMode();
+        a.redraw();
+    }
     for (0..@min(strip.count(a), 6)) |ix| {
         if (c.shortcut(.{ .key = @as(u21, '1') + @as(u21, @intCast(ix)), .cmd = true, .alt = true })) {
             const chats = strip.chatCount(a);
@@ -622,9 +699,8 @@ fn keys(c: *ui.Context, a: *App) void {
         a.chooseCloseArchiving(false);
     }
     if (c.shortcut(.{ .key = 'w', .cmd = true })) a.closeByShortcut();
-    // Close without archiving (⌥⌘W, rebindable): never asks, never archives.
-    if (closeOnlyPressed(c, a)) a.closeArchiving(false);
-    if (c.shortcut(.{ .key = 'd', .cmd = true })) strip.splitChoosingFolder(a, .horizontal);
+    if (boundShortcut(c, a, "splitTerminal")) strip.splitChoosingFolder(a, .horizontal);
+    if (boundShortcut(c, a, "splitTerminalDown")) strip.splitChoosingFolder(a, .vertical);
     if (c.shortcut(.{ .key = S.enter, .cmd = true, .shift = true })) strip.queue(a, .{ .zoom = strip.active(a) });
     if (c.shortcut(.{ .key = '=', .cmd = true, .ctrl = true })) {
         a.tabs.equalize();
@@ -638,7 +714,9 @@ fn keys(c: *ui.Context, a: *App) void {
         }
     }
     // A session menu or its dialog, over everything, takes Escape first.
-    if (@import("view_chat_menu.zig").anyOpen(a) and c.shortcut(.{ .key = S.escape })) {
+    if (a.view.link_menu.open and c.shortcut(.{ .key = S.escape })) {
+        a.view.link_menu.open = false;
+    } else if (@import("view_chat_menu.zig").anyOpen(a) and c.shortcut(.{ .key = S.escape })) {
         @import("view_chat_menu.zig").dismiss(a);
     } else if (a.view.write_open and !a.view.palette.open and a.picker == .none and c.shortcut(.{ .key = S.escape })) {
         // The global fallback must not swallow Write's Save/back gesture.
@@ -649,6 +727,48 @@ fn keys(c: *ui.Context, a: *App) void {
         a.view.more_menu = false;
         a.view.account_menu = false;
     }
+}
+
+/// Session navigation is shared by the normal workspace and a focused strip
+/// search. The focused panel's tabs take precedence, then workspaces, then
+/// the visible sidebar; every sidebar destination uses the preserving opener.
+fn sessionNavigationKeys(c: *ui.Context, a: *App) bool {
+    const next = boundShortcut(c, a, "nextSession");
+    const prev = !next and boundShortcut(c, a, "prevSession");
+    if (next or prev) {
+        if (a.tabs.layout()) |layout| {
+            const group = &layout.groups[layout.focus];
+            const count = group.count();
+            if (count > 1) {
+                a.showPaneTab(if (next) (group.active + 1) % count else (group.active + count - 1) % count);
+                return true;
+            }
+        }
+        const n = a.tabs.items.items.len;
+        if (n >= 2) {
+            a.showTab(if (next) (a.tabs.active + 1) % n else (a.tabs.active + n - 1) % n);
+        } else {
+            const visible = sidebar.visibleSessionIds(c, a);
+            if (visible.len > 0) {
+                var at: ?usize = null;
+                if (a.selected) |sel| {
+                    for (visible, 0..) |id, ix| if (std.mem.eql(u8, id, sel)) {
+                        at = ix;
+                        break;
+                    };
+                }
+                const to = if (at) |cur| (if (next) (cur + 1) % visible.len else (cur + visible.len - 1) % visible.len) else if (next) 0 else visible.len - 1;
+                a.openChatInTab(visible[to]);
+            }
+        }
+        return true;
+    }
+    for (0..9) |slot| if (boundShortcutSlot(c, a, "jumpSession", @intCast(slot))) {
+        const visible = sidebar.visibleSessionIds(c, a);
+        if (slot < visible.len) a.openChatInTab(visible[slot]);
+        return true;
+    };
+    return false;
 }
 
 /// Mouse and keyboard share search cleanup and return hidden controls' focus
@@ -732,13 +852,21 @@ fn closeChoice(c: *ui.Context, a: *App, k: theme.Colors) void {
 }
 
 /// A rebindable command, matched exactly as Settings › Shortcuts stores it.
-fn boundShortcut(c: *ui.Context, a: *App, key: []const u8) bool {
+pub fn boundShortcut(c: *ui.Context, a: *App, key: []const u8) bool {
     const sc = @import("shortcuts.zig");
     const pressed = c.input.shortcut orelse return false;
-    var buf: [64]u8 = undefined;
-    const combo = sc.fromShortcut(&buf, pressed) orelse return false;
-    for (sc.all) |entry| if (std.mem.eql(u8, entry.key, key)) {
-        if (!std.mem.eql(u8, combo, a.settings.combo(entry))) return false;
+    for (sc.all) |entry| if (entry.slot == null and std.mem.eql(u8, entry.key, key)) {
+        if (!sc.matches(a.settings.combo(entry), pressed)) return false;
+        return c.shortcut(pressed);
+    };
+    return false;
+}
+
+pub fn boundShortcutSlot(c: *ui.Context, a: *App, key: []const u8, slot: u8) bool {
+    const sc = @import("shortcuts.zig");
+    const pressed = c.input.shortcut orelse return false;
+    for (sc.all) |entry| if (entry.slot == slot and std.mem.eql(u8, entry.key, key)) {
+        if (!sc.matches(a.settings.combo(entry), pressed)) return false;
         return c.shortcut(pressed);
     };
     return false;
@@ -748,10 +876,8 @@ fn boundShortcut(c: *ui.Context, a: *App, key: []const u8) bool {
 fn closeOnlyPressed(c: *ui.Context, a: *App) bool {
     const sc = @import("shortcuts.zig");
     const s = c.input.shortcut orelse return false;
-    var buf: [32]u8 = undefined;
-    const pressed = sc.fromShortcut(&buf, s) orelse return false;
     for (sc.all) |entry| if (std.mem.eql(u8, entry.key, "closeTabWithoutArchiving")) {
-        if (!std.mem.eql(u8, pressed, a.settings.combo(entry))) return false;
+        if (!sc.matches(a.settings.combo(entry), s)) return false;
         return c.shortcut(s);
     };
     return false;
@@ -775,6 +901,16 @@ fn titlebar(c: *ui.Context, a: *App, k: theme.Colors) void {
         defer history.end();
         icons.icon(c, .@"clock-circle", 16, k.muted, 0);
         if (history.clicked()) strip.open(a, .history, strip.active(a), c.rects.get(c.node(history.index).id));
+        ui.div(c).w(4).end();
+        const dev = a.settings.uiMode() == .developer;
+        ui.key(c, "titlebar-ui-mode-pill");
+        if (kit.iconButton(c, k, if (dev) .terminal else .@"magic-stick-3", .{
+            .on = dev,
+            .tip = .{ .text = "Toggle Zen / Developer mode (⇧⌘M)" },
+        })) {
+            a.settings.toggleUiMode();
+            a.redraw();
+        }
     }
     @import("view_updates.zig").titlebarControl(c, a, k);
 }
@@ -790,7 +926,7 @@ fn trailing(c: *ui.Context, a: *App, k: theme.Colors) void {
     // apart (`PANEL_TOGGLE_GAP`), 6 from the edge
     // (`TITLEBAR_ACTION_EDGE_INSET`).
     const w: f32 = 28 * 2 + 4 + (if (actions_w > 0) actions_w + 8 else 0);
-    const bar = ui.div(c).fixed().offset(c.size.w - 6 - w, 4 + (34 - 28) / 2).row().itemsCenter().layer(3);
+    const bar = ui.div(c).fixed().offset(c.size.w - @import("window_chrome.zig").trailing - 6 - w, 4 + (34 - 28) / 2).row().itemsCenter().layer(3);
     defer bar.end();
     if (actions_w > 0) {
         va.control(c, a, k);
@@ -823,4 +959,403 @@ fn header(c: *ui.Context, a: *App, k: theme.Colors) void {
     const space = a.findSpace(chat.space_id);
     const where = c.print("{s} @ {s}", .{ if (space) |s| s.name else "~", a.deviceName(chat.device_id) });
     kit.fadeText(c, where, .{ .size = 12, .color = k.muted.alpha(0.5) }, room - title_w - 20 - 12);
+}
+
+fn selectionScope(a: *const App) u64 {
+    var h = std.hash.Wyhash.init(0x5345_4c5f_5343_4f50);
+    h.update(std.mem.asBytes(&a.tabs.active));
+    if (a.selected) |sel| {
+        h.update(&.{1});
+        h.update(sel);
+    } else {
+        h.update(&.{0});
+    }
+    h.update(&.{ @intFromBool(a.view.settings_open), @intFromBool(a.view.write_open) });
+    if (a.wizard) |*wz| {
+        h.update(&.{1});
+        h.update(wz.request_id);
+        h.update(std.mem.asBytes(&wz.page));
+        const q = wz.question();
+        h.update(q.question);
+    } else {
+        h.update(&.{0});
+    }
+    return h.final();
+}
+
+fn settleSelectionPreTree(a: *App, c: *ui.Context) void {
+    // nanoui's field-selection block is sticky; each new press gets a
+    // fresh hit decision. Otherwise selecting the draft once disables all
+    // later output/question selections in this native context.
+    if (c.input.pressed) c.selection.blocked = false;
+    const owner = @import("selection_owner.zig").state(c);
+    if (c.input.pressed and c.input.button == .left) owner.return_focus = if (c.focus == a.view.composer_id) c.focus else 0;
+    if (c.right_press or c.input.button != .left or c.input.secondary) {
+        c.selection.pressed = false;
+        c.selection.dragging = false;
+    }
+    const scope = selectionScope(a);
+    const promotion = owner.promoted_chat != 0 and a.selected != null and owner.promoted_chat == std.hash.Wyhash.hash(0, a.selected.?);
+    if (!c.window_focused or (a.view.selection_scope != 0 and a.view.selection_scope != scope and !promotion)) {
+        c.selection.clear();
+        a.view.selection_had_text = false;
+        a.view.whitespace_drag = .{};
+        owner.* = .{};
+    }
+    if (a.view.selection_scope != scope and promotion) owner.promoted_chat = 0;
+    a.view.selection_scope = scope;
+    // An empty paint cache is not an empty selection: both endpoints can
+    // be offscreen. Post-tree validation checks the actual source nodes.
+    a.view.selection_had_text = c.selection.text.items.len > 0;
+}
+
+fn settleSelectionPostTree(a: *App, c: *ui.Context) void {
+    const owner = @import("selection_owner.zig").state(c);
+    if (c.selection.pressed and !c.selection.blocked) {
+        owner.surface = 0;
+        if (findNearestSelectableLeaf(c, c.input.mouse)) |leaf| {
+            var ix = leaf.index;
+            while (ix != 0) : (ix = c.nodes.items[ix].parent) {
+                if (c.nodes.items[ix].style.scroll) {
+                    owner.surface = c.nodes.items[ix].id;
+                    break;
+                }
+            }
+        }
+    }
+    if (owner.surface != 0 and (c.selection.pressed or c.selection.anchor != null)) {
+        // The dependency's selection registry is window-wide. Restrict its
+        // painted candidates to the scroll surface that owns this gesture.
+        // Ownership survives paragraphs and culled anchors; another pane or
+        // the question's separate scroller cannot extend or steal it.
+        for (c.nodes.items, 0..) |*n, index| {
+            var ix: u32 = @intCast(index);
+            var inside = false;
+            while (true) {
+                if (c.nodes.items[ix].id == owner.surface) {
+                    inside = true;
+                    break;
+                }
+                if (ix == 0) break;
+                ix = c.nodes.items[ix].parent;
+            }
+            if (!inside) n.style.selectable = false;
+        }
+    }
+    if (c.right_press or c.input.button != .left or c.input.secondary) {
+        c.selection.pressed = false;
+        c.selection.dragging = false;
+    }
+    if (c.selection.pressed) {
+        if (!c.selection.blocked and !a.view.settings_open and !menuKeepsKeys(a) and c.input.mouse.x >= a.view.sidebar_width and !anySelectableLeafContains(c, c.input.mouse) and findWhitespaceStartLeaf(c, c.input.mouse) != null) {
+            a.view.whitespace_drag = .{ .active = true, .origin = c.input.mouse };
+        } else {
+            a.view.whitespace_drag = .{};
+        }
+    }
+    if (!c.input.down or c.input.released or c.selection.blocked) {
+        a.view.whitespace_drag.active = false;
+    }
+    if (c.input.down and c.input.button == .left and !c.input.secondary and !c.right_press and !c.selection.blocked) {
+        if (a.view.whitespace_drag.active and c.selection.anchor == null) {
+            const origin = a.view.whitespace_drag.origin;
+            const p = c.input.mouse;
+            if (@abs(p.x - origin.x) > 1 or @abs(p.y - origin.y) > 1) {
+                if (findWhitespaceStartLeaf(c, origin)) |leaf| {
+                    const at = hitLeafIndex(c, leaf.index, leaf.rect, leaf.visible, origin);
+                    c.selection.anchor = .{ .id = c.nodes.items[leaf.index].id, .at = at };
+                    c.selection.focus = .{ .id = c.nodes.items[leaf.index].id, .at = at };
+                    c.selection.dragging = true;
+                    c.selection.pressed = false;
+                }
+            }
+        }
+        if (c.selection.dragging and c.selection.anchor != null and !anySelectableLeafContains(c, c.input.mouse)) {
+            if (findNearestSelectableLeaf(c, c.input.mouse)) |leaf| {
+                c.selection.focus = .{
+                    .id = c.nodes.items[leaf.index].id,
+                    .at = hitLeafIndex(c, leaf.index, leaf.rect, leaf.visible, c.input.mouse),
+                };
+                c.selection.moved = c.selection.moved or !std.meta.eql(c.selection.anchor, c.selection.focus);
+                c.selection.pressed = false;
+                // Gaps between paragraphs are still part of the same drag.
+                // Stopping here freezes its end at the first paragraph.
+                c.changed = true;
+            }
+        }
+    }
+    const left_press_blurred = c.input.pressed and c.input.button == .left and !c.input.secondary and !c.right_press and c.focus == 0;
+    const page_selection_active = c.selection.anchor != null and (c.selection.moved or c.selection.text.items.len > 0);
+    if (left_press_blurred or page_selection_active) {
+        var it = c.edits.valueIterator();
+        while (it.next()) |e| e.anchor = e.caret;
+        if (c.focused_text) |*ft| ft.anchor = ft.caret;
+        // Do not repeatedly erase a newly acquired editor/control focus
+        // merely because the last completed page gesture moved.
+        if (page_selection_active and c.focus == 0 and owner.return_focus == a.view.composer_id) c.focus = owner.return_focus;
+    }
+    c.selection.order.clearRetainingCapacity();
+    registerSelectionOrder(c, 0, false);
+    validateSelectionSnapshot(c, owner);
+    gatherSelection(c);
+    if (!c.copy_done and c.shortcut(.{ .key = 'c', .cmd = true })) {
+        if (c.focus == a.view.composer_id and a.view.composer_id != 0) {
+            if (c.edits.get(c.focus)) |e| if (e.anchor != e.caret) {
+                const txt = a.composer.text();
+                const lo = @min(e.caret, e.anchor);
+                const hi = @min(@max(e.caret, e.anchor), txt.len);
+                if (hi > lo) {
+                    c.clipboard.write(c.clipboard.ctx, txt[lo..hi]);
+                    c.copy_done = true;
+                }
+            };
+        }
+        if (!c.copy_done and c.selection.text.items.len > 0) {
+            c.clipboard.write(c.clipboard.ctx, c.selection.text.items);
+            c.copy_done = true;
+        }
+    }
+}
+
+/// Paint intentionally skips offscreen lines. Keep the gesture's reading
+/// order and Copy source independent of visibility, using the same native
+/// selectability inheritance as paint. Transcript rows remain mounted while
+/// a selection owns them, even when their glyphs are culled.
+fn registerSelectionOrder(c: *ui.Context, ix: u32, inherited: bool) void {
+    const n = c.nodes.items[ix];
+    const selectable = (inherited or n.style.selectable) and !n.style.control;
+    if (selectable and n.content == .text and n.content.text.str.len > 0) {
+        const order: u32 = @intCast(c.selection.order.count());
+        c.selection.order.put(c.gpa, n.id, order) catch {};
+    }
+    var child = n.first_child;
+    while (child != no_child) : (child = c.nodes.items[child].next) registerSelectionOrder(c, child, selectable);
+}
+
+fn gatherSelection(c: *ui.Context) void {
+    const ends = c.selection.ordered() orelse return;
+    const lo = c.selection.order.get(ends[0].id) orelse return;
+    const hi = c.selection.order.get(ends[1].id) orelse return;
+    c.selection.text.clearRetainingCapacity();
+    for (c.nodes.items) |n| {
+        if (n.content != .text) continue;
+        const order = c.selection.order.get(n.id) orelse continue;
+        if (order < lo or order > hi) continue;
+        const str = n.content.text.str;
+        const start = if (n.id == ends[0].id) @min(ends[0].at, str.len) else 0;
+        const end = if (n.id == ends[1].id) @min(ends[1].at, str.len) else str.len;
+        if (end <= start) continue;
+        if (c.selection.text.items.len > 0) c.selection.text.append(c.gpa, '\n') catch {};
+        c.selection.text.appendSlice(c.gpa, str[start..end]) catch {};
+    }
+}
+
+/// Copy is offered before this frame's paint. Do not let last paint's
+/// clipboard cache outlive a removed/collapsed/replaced selection. Hash
+/// only selected bytes, so streaming beyond the selected range is harmless.
+fn validateSelectionSnapshot(c: *ui.Context, owner: *@import("selection_owner.zig").State) void {
+    if (c.selection.anchor == null or c.selection.dragging or c.selection.pressed) {
+        owner.snapshot = 0;
+        return;
+    }
+    const ends = c.selection.ordered() orelse return;
+    const lo = c.selection.order.get(ends[0].id) orelse {
+        c.selection.clear();
+        owner.snapshot = 0;
+        return;
+    };
+    const hi = c.selection.order.get(ends[1].id) orelse {
+        c.selection.clear();
+        owner.snapshot = 0;
+        return;
+    };
+    var found_start = false;
+    var found_end = false;
+    var h = std.hash.Wyhash.init(0x5345_4c45_4354_4544);
+    for (c.nodes.items) |n| {
+        if (n.content != .text) continue;
+        const order = c.selection.order.get(n.id) orelse continue;
+        if (order < lo or order > hi) continue;
+        if (n.id == ends[0].id) found_start = true;
+        if (n.id == ends[1].id) found_end = true;
+        const str = n.content.text.str;
+        const start = if (n.id == ends[0].id) @min(ends[0].at, str.len) else 0;
+        const end = if (n.id == ends[1].id) @min(ends[1].at, str.len) else str.len;
+        h.update(std.mem.asBytes(&n.id));
+        if (end > start) h.update(str[start..end]);
+    }
+    const snapshot = h.final();
+    if (!found_start or !found_end or (owner.snapshot != 0 and owner.snapshot != snapshot)) {
+        c.selection.clear();
+        owner.snapshot = 0;
+    } else owner.snapshot = snapshot;
+}
+
+const no_child = std.math.maxInt(u32);
+
+const SelectableLeaf = struct {
+    index: u32,
+    rect: ui.Rect,
+    visible: ui.Rect,
+    score: f32,
+};
+
+fn anySelectableLeafContains(c: *const ui.Context, p: ui.Point) bool {
+    if (c.nodes.items.len == 0) return false;
+    return walkContains(c, 0, false, null, p);
+}
+
+fn walkContains(c: *const ui.Context, ix: u32, sel_in: bool, clip_in: ?ui.Rect, p: ui.Point) bool {
+    const n = c.nodes.items[ix];
+    const block_select = n.style.control or (n.interactive and n.first_child == no_child);
+    if (block_select) return false;
+    const selectable = sel_in or n.style.selectable;
+    const r = c.rects.get(n.id);
+    const clip = if ((n.style.clip or n.style.scroll) and r != null)
+        if (clip_in) |prev| intersectRect(prev, r.?) else r.?
+    else
+        clip_in;
+    if (n.first_child == no_child) {
+        const text_len = switch (n.content) {
+            .text => |tx| tx.str.len,
+            else => 0,
+        };
+        if (!selectable or text_len == 0 or r == null) return false;
+        if (clip) |cl| if (!cl.contains(p)) return false;
+        return r.?.contains(p);
+    }
+    var ch = n.first_child;
+    while (ch != no_child) : (ch = c.nodes.items[ch].next) {
+        if (walkContains(c, ch, selectable, clip, p)) return true;
+    }
+    return false;
+}
+
+fn findNearestSelectableLeaf(c: *const ui.Context, p: ui.Point) ?SelectableLeaf {
+    if (c.nodes.items.len == 0) return null;
+    var best: ?SelectableLeaf = null;
+    walkNearest(c, 0, false, null, p, &best);
+    return best;
+}
+
+/// A new gutter gesture belongs to a visible text band in its own scroll
+/// viewport. The unrestricted nearest-leaf search is only for extending an
+/// already-owned drag through paragraph gaps or beyond its visible ends.
+fn findWhitespaceStartLeaf(c: *const ui.Context, p: ui.Point) ?SelectableLeaf {
+    const leaf = findNearestSelectableLeaf(c, p) orelse return null;
+    if (p.y < leaf.visible.y or p.y >= leaf.visible.y + leaf.visible.h) return null;
+    var ix = leaf.index;
+    while (ix != 0) : (ix = c.nodes.items[ix].parent) {
+        const n = c.nodes.items[ix];
+        if (n.style.scroll) {
+            const viewport = c.rects.get(n.id) orelse return null;
+            return if (viewport.contains(p)) leaf else null;
+        }
+    }
+    return null;
+}
+
+fn walkNearest(c: *const ui.Context, ix: u32, sel_in: bool, clip_in: ?ui.Rect, p: ui.Point, best: *?SelectableLeaf) void {
+    const n = c.nodes.items[ix];
+    const block_select = n.style.control or (n.interactive and n.first_child == no_child);
+    if (block_select) return;
+    const selectable = sel_in or n.style.selectable;
+    const r = c.rects.get(n.id);
+    const clip = if ((n.style.clip or n.style.scroll) and r != null)
+        if (clip_in) |prev| intersectRect(prev, r.?) else r.?
+    else
+        clip_in;
+    if (n.first_child == no_child) {
+        const text_len = switch (n.content) {
+            .text => |tx| tx.str.len,
+            else => 0,
+        };
+        if (!selectable or text_len == 0 or r == null) return;
+        const rect = r.?;
+        if (rect.w <= 0 or rect.h <= 0) return;
+        const visible = if (clip) |cl| intersectRect(rect, cl) else rect;
+        // Fully masked lines/columns are not candidates, including nested
+        // horizontal clips and exact zero-width/height boundaries.
+        if (visible.w <= 0 or visible.h <= 0) return;
+        const dy: f32 = if (p.y < visible.y) visible.y - p.y else if (p.y > visible.y + visible.h) p.y - (visible.y + visible.h) else 0;
+        const dx: f32 = if (p.x < visible.x) visible.x - p.x else if (p.x > visible.x + visible.w) p.x - (visible.x + visible.w) else 0;
+        const clip_penalty: f32 = if (clip) |cl| (if (cl.contains(p)) @as(f32, 0) else 100_000) else 0;
+        const score = clip_penalty + dy * 1000.0 + dx;
+        if (best.* == null or score < best.*.?.score) {
+            best.* = .{ .index = ix, .rect = rect, .visible = visible, .score = score };
+        }
+        return;
+    }
+    var ch = n.first_child;
+    while (ch != no_child) : (ch = c.nodes.items[ch].next) {
+        walkNearest(c, ch, selectable, clip, p, best);
+    }
+}
+
+fn intersectRect(a: ui.Rect, b: ui.Rect) ui.Rect {
+    const x1 = @max(a.x, b.x);
+    const y1 = @max(a.y, b.y);
+    const x2 = @min(a.x + a.w, b.x + b.w);
+    const y2 = @min(a.y + a.h, b.y + b.h);
+    return .{ .x = x1, .y = y1, .w = @max(0, x2 - x1), .h = @max(0, y2 - y1) };
+}
+
+fn hitLeafIndex(c: *ui.Context, ix: u32, r: ui.Rect, visible: ui.Rect, pointer: ui.Point) usize {
+    // Resolve against the original wrapping geometry, but inside the
+    // paint-time mask. A collapsed/partially scrolled leaf must never map
+    // an out-of-band drag to a hidden continuation line.
+    const eps = @min(@as(f32, 0.001), visible.h / 4);
+    var p = pointer;
+    if (p.y < visible.y) {
+        p.y = visible.y + eps;
+        p.x = visible.x;
+    } else if (p.y >= visible.y + visible.h) {
+        p.y = visible.y + visible.h - eps;
+        p.x = visible.x + visible.w;
+    }
+    const n = c.nodes.items[ix];
+    const tx = switch (n.content) {
+        .text => |t| t,
+        else => return 0,
+    };
+    const lh = c.text.lineHeight(tx.style);
+    const lines = if (tx.lines.len > 0)
+        tx.lines
+    else if (tx.spans.len > 0)
+        c.text.wrapAttributed(tx.str, tx.style, tx.spans, r.w)
+    else if (tx.style.wrap)
+        c.text.wrap(tx.str, tx.style, r.w)
+    else
+        null;
+    if (lines) |ls| {
+        if (ls.len == 0) return 0;
+        if (p.y < r.y) return 0;
+        if (p.y > r.y + r.h) return tx.str.len;
+        const raw = @floor((p.y - r.y) / @max(lh, 1));
+        const row: usize = @intFromFloat(std.math.clamp(raw, 0, @as(f32, @floatFromInt(ls.len - 1))));
+        const line = ls[row];
+        const col = hitSliceAt(c, tx.str[line.start..line.end], tx.style, p.x - r.x);
+        return line.start + col;
+    }
+    if (p.y < r.y and p.x <= r.x) return 0;
+    if (p.y > r.y + r.h and p.x >= r.x) return tx.str.len;
+    return hitSliceAt(c, tx.str, tx.style, p.x - r.x);
+}
+
+fn hitSliceAt(c: *ui.Context, slice: []const u8, style: ui.TextStyle, x: f32) usize {
+    if (x <= 0 or slice.len == 0) return 0;
+    var best: usize = 0;
+    var best_d: f32 = x;
+    var i: usize = 0;
+    while (i < slice.len) {
+        const step = std.unicode.utf8ByteSequenceLength(slice[i]) catch 1;
+        i = @min(i + step, slice.len);
+        const w = c.text.width(slice[0..i], style);
+        const d = @abs(x - w);
+        if (d < best_d) {
+            best_d = d;
+            best = i;
+        }
+    }
+    return best;
 }

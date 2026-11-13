@@ -127,6 +127,11 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
             c.focus = c.peekId(null);
             a.view.write_focus = false;
         }
+        const field_id = c.peekId(null);
+        const prev_edit = c.edits.get(field_id);
+        const prev_caret: ?usize = if (prev_edit) |e| e.caret else null;
+        const prev_anchor: ?usize = if (prev_edit) |e| e.anchor else null;
+        const field_index: u32 = @intCast(c.nodes.items.len);
         const r = ui.textField(c, &a.composer, .{
             .placeholder = "Do anything\u{2026}",
             .width = .fill,
@@ -139,6 +144,21 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
             .caret = @import("view_composer.zig").message_caret,
             .caret_color = k.accent,
         });
+        c.node(field_index).style.scroll_bar = false;
+        _ = c.scrollbars.remove(field_id);
+        if (c.edits.get(field_id)) |e| {
+            const clicked_field = c.input.pressed and c.input.button == .left and !c.input.secondary and !c.right_press and c.hot == field_id;
+            const moved_selection = prev_caret != null and (e.caret != prev_caret.? or e.anchor != prev_anchor.?);
+            if (clicked_field or r.changed or moved_selection) c.selection.clear();
+        }
+        if (r.focused and c.shortcut(.{ .key = 'a', .cmd = true })) {
+            if (c.edits.getPtr(field_id)) |e| {
+                e.anchor = 0;
+                e.caret = a.composer.text().len;
+                c.selection.clear();
+                c.changed = true;
+            }
+        }
         // Enter always inserts a line here, regardless of composer settings.
         if (r.submitted) {
             _ = a.composer.insert(r.caret, "\n");

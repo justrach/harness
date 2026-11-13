@@ -33,6 +33,12 @@ pub fn cases(gpa: std.mem.Allocator) ![]Case {
         try case(gpa, "engine ready", r.none("EngineReady"), false),
         try case(gpa, "list agents", r.none("ListHarnesses"), false),
         try case(gpa, "list models", r.listModels("mock"), false),
+        try case(gpa, "discover project composer commands", r.listCommands(.{ .harness = "mock", .spaceId = space, .path = dir }), false),
+        try case(gpa, "discover project composer skills", r.listSkills(.{ .harness = "mock", .spaceId = space, .path = dir }), false),
+        try case(gpa, "discover chat composer commands", r.listCommands(.{ .harness = "mock", .chatId = chat }), false),
+        try case(gpa, "discover chat composer skills", r.listSkills(.{ .harness = "mock", .chatId = chat }), false),
+        try case(gpa, "discover projectless composer commands", r.listCommands(.{ .harness = "mock" }), false),
+        try case(gpa, "discover projectless composer skills", r.listSkills(.{ .harness = "mock" }), false),
         try case(gpa, "watch spaces", r.none("WatchSpaces"), true),
         try case(gpa, "watch chats", r.none("WatchChats"), true),
         try case(gpa, "watch sessions", r.none("WatchSessions"), true),
@@ -48,6 +54,7 @@ pub fn cases(gpa: std.mem.Allocator) ![]Case {
         try case(gpa, "answer a question", r.respondInput(chat, "req-parity", &answers), false),
         try case(gpa, "dismiss a question", r.dismissInput(chat, "req-parity"), false),
         try case(gpa, "watch the queue", r.watchQueue(chat), true),
+        try case(gpa, "watch live tool progress", r.watchToolProgress(chat), true),
         try case(gpa, "queue a message", r.queueMessage(chat, "Then update the changelog"), false),
         try case(gpa, "remove a queued message", r.removeQueued(chat, "row-parity", null), false),
         try case(gpa, "send a queued message now", r.sendQueuedNow(chat, "row-parity", null), false),
@@ -64,12 +71,21 @@ pub fn cases(gpa: std.mem.Allocator) ![]Case {
         try case(gpa, "list a folder", r.listDirectory(chat, "", false, null), false),
         try case(gpa, "search files", r.searchFiles(chat, "readme", true, null), false),
         try case(gpa, "read a file", r.readFile(chat, "README.md", null), false),
+        try case(gpa, "read a project editor file", r.readWorkspaceFile(.{ .spaceId = space, .checkoutPath = dir, .path = "README.md" }), false),
+        // Deliberately stale fences: understood, but must never publish.
+        try case(gpa, "save a chat editor file with stale fences", r.writeWorkspaceFile(.{ .chatId = chat, .path = "README.md", .text = "Explicit edit\n", .expectedCheckoutId = "checkout-parity-stale", .expectedContentHash = "hash-parity-stale", .encoding = "utf8", .lineEnding = "lf" }), false),
+        try case(gpa, "save a project editor file with stale fences", r.writeWorkspaceFile(.{ .spaceId = space, .checkoutPath = dir, .path = "README.md", .text = "Explicit edit\n", .expectedCheckoutId = "checkout-parity-stale", .expectedContentHash = "hash-parity-stale", .encoding = "utf8Bom", .lineEnding = "crlf" }), false),
         try case(gpa, "watch git", r.watchGit(space, dir, null), true),
         try case(gpa, "list project actions", r.listActions(space, null), false),
         // Before the action exists: a real run would leave a terminal open.
         try case(gpa, "run a project action", r.runAction(space, chat, "test", null), false),
         try case(gpa, "add a project action", r.upsertAction(space, null, .{ .name = "Test", .command = "echo hi", .icon = "test", .runOnWorktreeCreate = false }, null), false),
         try case(gpa, "change a project action", r.upsertAction(space, "test", .{ .name = "Test", .command = "echo hello", .icon = "play", .runOnWorktreeCreate = true }, null), false),
+        // Bots that aren't there: understood, and nothing is started for them.
+        try case(gpa, "list bots", r.none("BotsState"), false),
+        try case(gpa, "read a bot", r.botDetail("parity-bot"), false),
+        try case(gpa, "pause a bot's routine", r.botAction(.{ .action = "routinePause", .bot = "parity-bot", .routine = "r1" }), false),
+        try case(gpa, "run a bot", r.runBot("parity-bot", "What is new?", null), false),
         // A host that isn't there: the engine refuses them, understood.
         try case(gpa, "watch a host's updates", r.updateStatus("host-parity"), true),
         try case(gpa, "check a host for updates", r.checkForUpdates("host-parity"), false),
@@ -82,6 +98,13 @@ pub fn cases(gpa: std.mem.Allocator) ![]Case {
         // The project isn't a git checkout: no PR to watch or merge, answered.
         try case(gpa, "watch a branch's pull request", r.watchChangeRequest(.{ .cwd = dir, .branch = "main" }), true),
         try case(gpa, "merge a branch's pull request", r.mergeChangeRequest(.{ .cwd = dir, .branch = "main", .number = 90 }), false),
+        // Agent CLI update lifecycle (`harness-updates-v1`).
+        try case(gpa, "watch agent CLI updates", r.watchHarnessUpdates("host-parity"), true),
+        try case(gpa, "check agent CLI updates", r.checkHarnessUpdates("claude-code", "host-parity"), false),
+        try case(gpa, "apply an agent CLI update", r.applyHarnessUpdate("claude-code", "host-parity"), false),
+        try case(gpa, "cancel an agent CLI update", r.cancelHarnessUpdate("claude-code", "host-parity"), false),
+        try case(gpa, "dismiss an agent CLI update", r.dismissHarnessUpdate("claude-code", "2.1.322", "host-parity"), false),
+        try case(gpa, "set agent CLI auto-update policy", r.setHarnessUpdatePolicy("claude-code", true, "host-parity"), false),
     };
     return gpa.dupe(Case, &list);
 }

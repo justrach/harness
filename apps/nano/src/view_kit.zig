@@ -263,7 +263,7 @@ pub fn truncateAt(c: *ui.Context, s: []const u8, st: ui.TextStyle, max_w: f32) u
 }
 
 /// The 2×3 "snake" a working session shows: rows in the accent's three
-/// tones, lit clockwise at 15 Hz (`loaders.rs`). Asks for its next frame
+/// tones, lit clockwise at 2 Hz. Asks for its next frame
 /// only while the graphic is on screen. An unfocused window stretches that
 /// request by GPUI's background tick divisor.
 pub fn snake(c: *ui.Context, k: theme.Colors) void {
@@ -272,7 +272,7 @@ pub fn snake(c: *ui.Context, k: theme.Colors) void {
     // Keep the slot, but do not paint or schedule a wave the reader cannot see.
     if (!c.reduced_motion and !loaderOnScreen(c)) return;
     const order = [_][2]u8{ .{ 0, 0 }, .{ 1, 0 }, .{ 1, 1 }, .{ 1, 2 }, .{ 0, 2 }, .{ 0, 1 } };
-    const step: usize = if (c.reduced_motion) 0 else @intFromFloat(@mod(@floor(c.time * 15), 6));
+    const step: usize = if (c.reduced_motion) 0 else @intFromFloat(@mod(@floor(c.time * 2), 6));
     for (0..3) |row| {
         const r = ui.div(c).row().gap(1);
         defer r.end();
@@ -291,14 +291,17 @@ pub fn snake(c: *ui.Context, k: theme.Colors) void {
 }
 
 /// GPUI's `BACKGROUND_TICK_DIVISOR`: an unfocused window delivers every
-/// third loader tick (30Hz → 10Hz). A graphic whose last box is outside
+/// third loader tick. A graphic whose last box is outside
 /// the window schedules nothing — the same as a virtualized row that
 /// never mounts its spinner.
 pub const background_tick_divisor: f32 = 3;
 
 pub fn loaderFrame(c: *ui.Context, seconds: f32) void {
     if (!loaderOnScreen(c)) return;
-    c.frameIn(if (c.input.window_active) seconds else seconds * background_tick_divisor);
+    // nanoui invalidates the window, not an individual spinner. Keep
+    // quiet working sessions at 2 Hz; input and streaming still draw immediately.
+    const interval = @max(seconds, 0.5);
+    c.frameIn(if (c.input.window_active) interval else interval * background_tick_divisor);
 }
 
 pub fn loaderOnScreen(c: *ui.Context) bool {

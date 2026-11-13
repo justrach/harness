@@ -76,28 +76,41 @@ pub fn next(f: Facts) Step {
     return .start;
 }
 
-/// Where `harness` may be, in order: `HARNESS_NANO_ENGINE_BIN`, the app in
-/// /Applications and ~/Applications, then each directory on `PATH`.
-pub fn candidates(gpa: Allocator, env: *const Map) ![][]u8 {
+/// Where `harness` may be, in order: `HARNESS_NANO_ENGINE_BIN`, the app's own
+/// executable directory (the Windows portable layout), /Applications and
+/// ~/Applications, then each directory on `PATH`.
+pub fn candidates(gpa: Allocator, io: std.Io, env: *const Map) ![][]u8 {
+    const self_exe = std.process.executablePathAlloc(io, gpa) catch null;
+    defer if (self_exe) |path| gpa.free(path);
+    return candidatesFor(gpa, env, self_exe, builtin.os.tag);
+}
+
+fn candidatesFor(gpa: Allocator, env: *const Map, self_exe: ?[]const u8, os: @TypeOf(builtin.os.tag)) ![][]u8 {
+    const engine_name = if (os == .windows) "harness.exe" else "harness";
     var out: std.ArrayList([]u8) = .empty;
     errdefer {
         for (out.items) |p| gpa.free(p);
         out.deinit(gpa);
     }
     if (env.get("HARNESS_NANO_ENGINE_BIN")) |p| if (p.len > 0) try out.append(gpa, try gpa.dupe(u8, p));
+    // The Windows zip has harness.exe and harness-nano.exe side by side. Nano
+    // must find its engine even when it, rather than the Rust launcher, opens.
+    if (self_exe) |exe| if (std.fs.path.dirname(exe)) |dir| {
+        try out.append(gpa, try std.fs.path.join(gpa, &.{ dir, engine_name }));
+    };
     const in_app = "Applications/Harness.app/Contents/MacOS/harness";
     try out.append(gpa, try gpa.dupe(u8, "/" ++ in_app));
     if (env.get("HOME")) |home| if (home.len > 0) try out.append(gpa, try std.fs.path.join(gpa, &.{ home, in_app }));
     if (env.get("PATH")) |path| {
-        var dirs = std.mem.tokenizeScalar(u8, path, ':');
-        while (dirs.next()) |dir| try out.append(gpa, try std.fs.path.join(gpa, &.{ dir, "harness" }));
+        var dirs = std.mem.tokenizeScalar(u8, path, if (os == .windows) ';' else ':');
+        while (dirs.next()) |dir| try out.append(gpa, try std.fs.path.join(gpa, &.{ dir, engine_name }));
     }
     return out.toOwnedSlice(gpa);
 }
 
 /// The first candidate this user can run (owned), or null.
-pub fn find(gpa: Allocator, env: *const Map) ?[]u8 {
-    const list = candidates(gpa, env) catch return null;
+pub fn find(gpa: Allocator, io: std.Io, env: *const Map) ?[]u8 {
+    const list = candidates(gpa, io, env) catch return null;
     defer gpa.free(list);
     var found: ?[]u8 = null;
     for (list) |p| {
@@ -250,7 +263,7 @@ fn tick(a: *App) void {
     reap(s);
     const now = nowMs(a.io);
     const env = a.env orelse return;
-    const path = find(a.gpa, env);
+    const path = find(a.gpa, a.io, env);
     defer if (path) |p| a.gpa.free(p);
     switch (next(.{
         .connected = a.engine.state == .connected,
@@ -307,6 +320,7 @@ fn spawn(a: *App, path: []const u8) !std.c.pid_t {
     const out: std.process.SpawnOptions.StdIo = if (log) |f| .{ .file = f } else .ignore;
     const child = try std.process.spawn(a.io, .{
         .argv = &.{ path, "headless" },
+        .create_no_window = true,
         .environ_map = a.env,
         .stdin = .ignore,
         .stdout = out,
@@ -375,7 +389,7 @@ test "harness is looked for in the override, the app, ~/Applications, then PATH"
     try env.put("HOME", "/Users/synthetic");
     try env.put("PATH", "/opt/a::/usr/local/bin");
     try env.put("HARNESS_NANO_ENGINE_BIN", "/tmp/fake-harness");
-    const got = try candidates(testing.allocator, &env);
+    const got = try candidatesFor(testing.allocator, &env, null, .macos);
     defer {
         for (got) |p| testing.allocator.free(p);
         testing.allocator.free(got);
@@ -389,6 +403,28 @@ test "harness is looked for in the override, the app, ~/Applications, then PATH"
     };
     try testing.expectEqual(want.len, got.len);
     for (want, got) |w, g| try testing.expectEqualStrings(w, g);
+}
+
+test "Windows portable Nano finds its sibling and PATH harness executables" {
+    var env = Map.init(testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/synthetic-home");
+    try env.put("PATH", "C:\\tools;D:\\Harness");
+    const got = try candidatesFor(testing.allocator, &env, "/portable/harness-nano.exe", .windows);
+    defer {
+        for (got) |p| testing.allocator.free(p);
+        testing.allocator.free(got);
+    }
+    const sibling = try std.fs.path.join(testing.allocator, &.{ "/portable", "harness.exe" });
+    defer testing.allocator.free(sibling);
+    const path_first = try std.fs.path.join(testing.allocator, &.{ "C:\\tools", "harness.exe" });
+    defer testing.allocator.free(path_first);
+    const path_second = try std.fs.path.join(testing.allocator, &.{ "D:\\Harness", "harness.exe" });
+    defer testing.allocator.free(path_second);
+    try testing.expectEqual(@as(usize, 5), got.len);
+    try testing.expectEqualStrings(sibling, got[0]);
+    try testing.expectEqualStrings(path_first, got[3]);
+    try testing.expectEqualStrings(path_second, got[4]);
 }
 
 test "parseLockPid extracts valid engine lock pid and rejects invalid or self pids" {

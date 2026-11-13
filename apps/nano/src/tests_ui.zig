@@ -943,6 +943,7 @@ test "Copy › Harness conversation link copies the GPUI app's link; a press out
     try h.init();
     defer h.deinit();
     h.a.device_id = try testing.allocator.dupe(u8, "dev");
+    h.a.account.scope = .local; // Actual EngineInfo authority, not a guessed workspace.
     try openRowMenu(&h, "Beta");
     try h.t.clickText("Copy");
     h.t.settle(1);
@@ -2025,6 +2026,11 @@ test "answering a question keeps its text alive through the frame that drew it" 
         var h: Harness = undefined;
         try h.init();
         defer h.deinit();
+        // This lifetime probe exercises successful completion; failed requests
+        // intentionally restore their question and draft for retry (#479).
+        h.a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+            \\{"QueueCommand":{}}
+        , .{});
         var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
             \\{"reset":[{"id":"ask","role":"assistant","status":"complete","parts":[{"kind":"input","id":"r1","requestId":"r1","resolved":false,
             \\  "questions":[{"id":"q1","header":"Approach","question":"A synthetic question that wraps","options":["First option","Second option"],"multiSelect":true}]}]}]}
@@ -2220,6 +2226,12 @@ test "Cmd+W closes an open file tab before closing a chat tab even when multiple
     defer h.deinit();
     h.a.settings.set(.archive_on_close_chosen, true);
     h.a.settings.set(.archive_sessions_on_close, false);
+    // File access requires an authoritative owner, not only a selected ID.
+    const owners = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"c1","spaceId":"s1","deviceId":"dev"},{"id":"c2","spaceId":"s1","deviceId":"dev"}]
+    , .{});
+    defer owners.deinit();
+    try h.a.chats.replace(owners.value);
     h.a.select("c1", "s1");
     h.a.newTab();
     h.a.select("c2", "s1");

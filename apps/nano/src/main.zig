@@ -8,6 +8,7 @@ const App = @import("app.zig").App;
 const Engine = @import("engine.zig").Engine;
 const theme = @import("theme.zig");
 const crash_log = @import("crash_log.zig");
+const Lifecycle = @import("window_lifecycle.zig").Lifecycle;
 
 /// Warnings too, in every build: why a picture isn't drawn, say. A fatal
 /// signal's stack trace in every build too, into the crash log.
@@ -15,10 +16,13 @@ pub const std_options: std.Options = .{ .log_level = .warn, .enable_segfault_han
 
 pub fn main(init: std.process.Init) !void {
     theme.registerFonts();
-    const app = try nanoui.App.create(init, .{ .name = "Harness" });
-    defer app.destroy();
     var a: App = .init(init.gpa, init.io, Engine.portFrom(init.environ_map));
     defer a.deinit();
+    var lifecycle: Lifecycle = .{ .state = &a, .navigation = &a.external_navigation };
+    const app = try nanoui.App.create(init, lifecycle.options());
+    defer app.destroy();
+    lifecycle.native = app;
+    defer lifecycle.detach();
     const harness_override = init.environ_map.get("HARNESS_NANO_HARNESS");
     a.new_harness = try init.gpa.dupe(u8, harness_override orelse "graff");
     a.settings = .open(init.gpa, init.io, init.environ_map);
@@ -41,17 +45,7 @@ pub fn main(init: std.process.Init) !void {
     try @import("native_menu.zig").install(app, &a);
     // The same window size the desktop reopens with, rather than a one-off
     // Nano size that visibly jumps when moving between the two apps.
-    const window_size = a.settings.windowSize();
-    a.window = try app.newWindow(.{
-        .title = "Harness",
-        .width = window_size.width,
-        .height = window_size.height,
-        .min_width = 760,
-        .min_height = 480,
-        .title_bar = .hidden,
-        .theme = theme.ui(nanoui.isDark()),
-        .content = .{ .view = .init(&a, @import("view.zig").view) },
-    });
+    try lifecycle.open();
     try a.start();
     // Whether this device can dictate, found off the main thread.
     @import("app_dictation.zig").probe(&a);

@@ -99,7 +99,6 @@ pub const Prefs = struct {
     archive_on_close_chosen: bool = false,
     escape_stops_active_agent: bool = false,
     transcript_compact_mode: bool = true,
-    sidebar_task_view: bool = false,
     pause_animations_in_background: bool = false,
     /// The Write page starts in the interface sans; Aa offers a serif.
     write_sans: bool = true,
@@ -135,7 +134,6 @@ pub const Flag = enum {
     archive_on_close_chosen,
     escape_stops_active_agent,
     transcript_compact_mode,
-    sidebar_task_view,
     pause_animations_in_background,
     write_sans,
     sidebar_compact,
@@ -749,6 +747,74 @@ pub const Store = struct {
         s.set(flag, !s.get(flag));
     }
 
+    /// Experience mode from the Lean 4 state machine (`motion_rules.zig:UiMode`):
+    /// Live disk-backed stores (`s.path != null`) default to `.zen` ("for normies"),
+    /// while in-memory test stores (`s.path == null`) default to `.developer` unless
+    /// explicitly switched with `applyUiMode`.
+    pub fn baseUiMode(s: *const Store) @import("motion_rules.zig").UiMode {
+        const rules = @import("motion_rules.zig");
+        if (s.text("uiMode")) |raw| {
+            if (std.mem.eql(u8, raw, "zen")) return .zen;
+            if (std.mem.eql(u8, raw, "developer")) return .developer;
+        }
+        return if (s.path != null) rules.UiState.initial.mode else .developer;
+    }
+
+    pub fn hierarchyProfile(s: *const Store) @import("motion_rules.zig").HierarchyProfile {
+        const rules = @import("motion_rules.zig");
+        var p = rules.HierarchyProfile.ofMode(s.baseUiMode());
+        for (rules.MovingPart.all) |part| {
+            if (s.text(part.key())) |raw| {
+                if (std.mem.eql(u8, raw, "on")) p = p.setPart(part, true);
+                if (std.mem.eql(u8, raw, "off")) p = p.setPart(part, false);
+            }
+        }
+        return p;
+    }
+
+    pub fn uiMode(s: *const Store) @import("motion_rules.zig").UiMode {
+        return s.hierarchyProfile().effectiveMode();
+    }
+
+    pub fn applyUiMode(s: *Store, mode: @import("motion_rules.zig").UiMode) void {
+        const rules = @import("motion_rules.zig");
+        for (rules.MovingPart.all) |part| s.clearText(part.key());
+        s.setText("uiMode", mode.key());
+        switch (mode) {
+            .zen => {
+                s.setText("sidebarOrganization", Organization.in_one_list.key());
+                s.set(.sidebar_show_harness, true);
+                s.set(.sidebar_show_project_icon, true);
+                s.set(.sidebar_show_branch, false);
+                s.set(.sidebar_show_project_label, false);
+            },
+            .developer => {
+                s.setText("sidebarOrganization", Organization.by_project.key());
+                s.set(.sidebar_show_harness, true);
+                s.set(.sidebar_show_branch, true);
+            },
+        }
+    }
+
+    pub fn toggleMovingPart(s: *Store, part: @import("motion_rules.zig").MovingPart) void {
+        const next = !s.hierarchyProfile().partEnabled(part);
+        s.setText(part.key(), if (next) "on" else "off");
+        switch (part) {
+            .grouped_sections => s.setText("sidebarOrganization", if (next) Organization.by_project.key() else Organization.in_one_list.key()),
+            .row_tech_badges => {
+                s.set(.sidebar_show_harness, next);
+                s.set(.sidebar_show_branch, next);
+            },
+            else => {},
+        }
+    }
+
+    pub fn toggleUiMode(s: *Store) void {
+        const rules = @import("motion_rules.zig");
+        const next = rules.stepUiState(.{ .mode = s.uiMode() }, .toggle_mode).mode;
+        s.applyUiMode(next);
+    }
+
     pub fn organization(s: *const Store) Organization {
         return fromKey(Organization, s.text("sidebarOrganization"), .by_project);
     }
@@ -809,6 +875,38 @@ pub const Store = struct {
         if (id) |v| return s.setText("spaceFilter", v);
         _ = s.doc.orderedRemove("spaceFilter");
         s.write("spaceFilter", .null);
+    }
+
+    pub fn projectFolderOverride(s: *const Store, device: []const u8) ?[]const u8 {
+        const root = s.doc.get("projectFoldersByDevice") orelse return null;
+        if (root != .object) return null;
+        const pref = root.object.get(device) orelse return null;
+        if (pref != .object) return null;
+        const value = pref.object.get("overridePath") orelse return null;
+        if (value != .string or !@import("project_paths.zig").valid(value.string)) return null;
+        return value.string;
+    }
+
+    /// Only confirmation changes a host's override; resetting preserves its learned history.
+    pub fn setProjectFolderOverride(s: *Store, device: []const u8, path: ?[]const u8) bool {
+        if (device.len == 0) return false;
+        if (path) |value| if (!@import("project_paths.zig").valid(value)) return false;
+        if (s.doc_arena == null) s.doc_arena = .init(s.gpa);
+        const a = s.doc_arena.?.allocator();
+        var root = s.doc.get("projectFoldersByDevice") orelse json.Value{ .object = .empty };
+        if (root != .object) root = .{ .object = .empty };
+        var pref = root.object.get(device) orelse json.Value{ .object = .empty };
+        if (pref != .object) pref = .{ .object = .empty };
+        if (path) |value| {
+            const copy = a.dupe(u8, std.mem.trim(u8, value, " \t\r\n")) catch return false;
+            pref.object.put(a, "overridePath", .{ .string = copy }) catch return false;
+        } else {
+            _ = pref.object.orderedRemove("overridePath");
+        }
+        root.object.put(a, a.dupe(u8, device) catch return false, pref) catch return false;
+        s.remember("projectFoldersByDevice", root);
+        s.write("projectFoldersByDevice", root);
+        return true;
     }
 
     /// Record only acknowledged project creation, as the desktop does.

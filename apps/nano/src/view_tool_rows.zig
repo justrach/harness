@@ -27,12 +27,12 @@ pub fn counts(c: *ui.Context, k: theme.Colors, additions: u64, deletions: u64) v
 pub fn trail(c: *ui.Context, k: theme.Colors, result: rows.Result, opacity: f32) void {
     var box = ui.div(c).row().itemsCenter().motion(.{ .opacity = opacity });
     if (result.washed()) {
-        const label = if (result == .failed) result.failed else result.passed;
+        const label = result.passed;
         box = box.w(@max(80, c.text.width(label, .{ .size = 11, .weight = .semibold }) + 12)).justifyEnd();
     }
     defer box.end();
     switch (result) {
-        .settled => {},
+        .settled, .failed => {},
         .running => |ms| if (ms) |elapsed| {
             const buf = c.alloc().alloc(u8, 32) catch return;
             ui.text(c, rows.timer(buf, elapsed), kit.style(c, 11, 18, .{ .color = k.muted }));
@@ -40,8 +40,8 @@ pub fn trail(c: *ui.Context, k: theme.Colors, result: rows.Result, opacity: f32)
         },
         .summary => |text| ui.text(c, text, kit.style(c, 11, 18, .{ .color = k.muted })),
         .diff => |d| counts(c, k, d.additions, d.deletions),
-        .failed, .passed => |text| {
-            const color = if (result == .failed) k.danger else k.success;
+        .passed => |text| {
+            const color = k.success;
             const pill = ui.div(c).row().h(18).px(6).itemsCenter().rounded(5).bg(color);
             defer pill.end();
             // WCAG luminance comparison, as desktop's fg_on(color).
@@ -63,7 +63,7 @@ fn foreground(bg: ui.Color) ui.Color {
 /// unobscured and the long command clipped before them.
 pub fn wash(c: *ui.Context, k: theme.Colors, result: rows.Result, width: f32, height: f32, progress: f32) void {
     if (!result.washed()) return;
-    const color = if (result == .failed) k.danger else k.success;
+    const color = k.success;
     const w = @min(rows.wash_width, width);
     const box = ui.div(c).row().absolute().offset(@max(width - w, 0), 0).size(w, height).rounded(8).clip().motion(.{ .opacity = progress });
     defer box.end();
@@ -147,9 +147,11 @@ pub fn summary(c: *ui.Context, k: theme.Colors, stats: []const tr.Stat) void {
 }
 
 /// Slower desktop 3.4s title shimmer (not the per-file scramble clock).
-pub fn title(c: *ui.Context, k: theme.Colors, text: []const u8, active: bool, hot: bool) void {
+pub fn title(c: *ui.Context, k: theme.Colors, text: []const u8, active: bool, hot: bool, max_w: f32) void {
     const st = kit.style(c, 15, 18, .{ .color = if (hot) k.text else k.muted });
-    if (!active or c.reduced_motion) return ui.text(c, text, st);
+    if (!active or c.reduced_motion) return kit.fadeText(c, text, st, max_w);
+    const box = ui.div(c).row().maxW(max_w).clip();
+    defer box.end();
     const phase: f32 = @floatCast(@mod(c.time / 3.4, 1));
     var spans: std.ArrayList(ui.Span) = .empty;
     var it = std.unicode.Utf8View.initUnchecked(text).iterator();

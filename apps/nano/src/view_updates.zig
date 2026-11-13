@@ -282,7 +282,7 @@ pub fn appRestartVersion(a: *const App) ?[]const u8 {
 }
 
 pub fn sidebarFits(a: *const App) bool {
-    return a.view.sidebar_open and !a.view.settings_open and !a.settings.get(.sidebar_task_view);
+    return a.view.sidebar_open and !a.view.settings_open;
 }
 
 pub fn graffVisible(a: *const App) bool {
@@ -436,7 +436,7 @@ fn findHarnessCli(gpa: std.mem.Allocator, io: std.Io, env: ?*const std.process.E
     if (std.Io.Dir.cwd().access(io, app_bin, .{})) |_| {
         return gpa.dupe(u8, app_bin) catch null;
     } else |_| {}
-    if (env) |e| return @import("engine_start.zig").find(gpa, e);
+    if (env) |e| return @import("engine_start.zig").find(gpa, io, e);
     return null;
 }
 
@@ -447,7 +447,7 @@ fn appUpdateWorker(a: *App) void {
         a.updates.setAppFailed("Harness CLI not found in /Applications/Harness.app");
         a.updates.dirty = true;
         a.updates.release();
-        nanoui.App.after(0, a, appUpdateDelivered);
+        _ = nanoui.App.onMain(a, appUpdateDelivered);
         return;
     };
     defer a.gpa.free(bin);
@@ -462,7 +462,7 @@ fn appUpdateWorker(a: *App) void {
         a.updates.setAppFailed(std.fmt.bufPrint(&ebuf, "{t}", .{err}) catch "update command failed");
         a.updates.dirty = true;
         a.updates.release();
-        nanoui.App.after(0, a, appUpdateDelivered);
+        _ = nanoui.App.onMain(a, appUpdateDelivered);
         return;
     };
     defer a.gpa.free(res.stdout);
@@ -489,7 +489,7 @@ fn appUpdateWorker(a: *App) void {
     }
     a.updates.dirty = true;
     a.updates.release();
-    nanoui.App.after(0, a, appUpdateDelivered);
+    _ = nanoui.App.onMain(a, appUpdateDelivered);
 }
 
 pub const UpdateCommandOutcome = union(enum) {

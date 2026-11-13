@@ -134,6 +134,79 @@ async fn find_chat(engine: &Engine, id: &str) -> Result<Chat, RpcError> {
         .ok_or_else(|| RpcError::invalid_params("unknown threadId"))
 }
 
+fn filter_and_page_chats(
+    chats: Vec<Chat>,
+    spaces: &[harness_proto::Space],
+    params: &Value,
+) -> Result<(Vec<Chat>, Option<String>), RpcError> {
+    let archived = params
+        .get("archived")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let search = params["searchTerm"]
+        .as_str()
+        .unwrap_or_default()
+        .to_lowercase();
+    let mut chats: Vec<Chat> = chats
+        .into_iter()
+        .filter(|c| c.archived == archived)
+        // Subagent chats belong to their parent's transcript.
+        .filter(|c| c.parent_chat_id.is_none())
+        .filter(|c| {
+            let resolved_cwd = chat_cwd(c, spaces);
+            let cwd_matches = match &params["cwd"] {
+                Value::String(cwd) => cwd == &resolved_cwd,
+                Value::Array(cwds) => cwds
+                    .iter()
+                    .any(|cwd| cwd.as_str() == Some(resolved_cwd.as_str())),
+                _ => true,
+            };
+            cwd_matches
+                && (search.is_empty()
+                    || c.title
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .contains(&search)
+                    || c.last_message_preview
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .contains(&search)
+                    || c.id.to_lowercase().contains(&search))
+        })
+        .collect();
+    let created = params["sortKey"] == "created_at";
+    chats.sort_by(|a, b| {
+        let stamp = |c: &Chat| {
+            if created {
+                c.created_at
+            } else {
+                c.last_message_at.unwrap_or(c.created_at)
+            }
+        };
+        stamp(b).cmp(&stamp(a)).then_with(|| a.id.cmp(&b.id))
+    });
+    if params["sortDirection"] == "asc" {
+        chats.reverse();
+    }
+    let start = match params["cursor"].as_str() {
+        Some(cursor) => chats
+            .iter()
+            .position(|c| c.id == cursor)
+            .map(|n| n + 1)
+            .ok_or_else(|| RpcError::invalid_params("invalid session cursor"))?,
+        None => 0,
+    };
+    let limit = params["limit"].as_u64().unwrap_or(50).clamp(1, 200) as usize;
+    let end = chats.len().min(start.saturating_add(limit));
+    let page = chats[start..end].to_vec();
+    let next = (start + page.len() < chats.len())
+        .then(|| page.last().map(|c| c.id.clone()))
+        .flatten();
+    Ok((page, next))
+}
+
 async fn thread_list(engine: &Engine, params: &Value) -> Reply {
     let (chats, sessions, spaces) = match tokio::try_join!(
         engine.client.chats(),
@@ -143,23 +216,11 @@ async fn thread_list(engine: &Engine, params: &Value) -> Reply {
         Ok(all) => all,
         Err(error) => return fail(error.to_string()),
     };
-    let archived = params
-        .get("archived")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let cwd = params.get("cwd").and_then(Value::as_str);
-    let mut chats: Vec<Chat> = chats
-        .into_iter()
-        .filter(|c| c.archived == archived)
-        // Subagent chats belong to their parent's transcript.
-        .filter(|c| c.parent_chat_id.is_none())
-        .filter(|c| cwd.is_none_or(|cwd| chat_cwd(c, &spaces) == cwd))
-        .collect();
-    chats.sort_by_key(|c| std::cmp::Reverse(c.last_message_at.unwrap_or(c.created_at)));
-    if let Some(limit) = params.get("limit").and_then(Value::as_u64) {
-        chats.truncate(limit as usize);
-    }
-    let data: Vec<Value> = chats
+    let (page, next) = match filter_and_page_chats(chats, &spaces, params) {
+        Ok(res) => res,
+        Err(error) => return (Err(error), None),
+    };
+    let data: Vec<Value> = page
         .iter()
         .map(|c| {
             thread_json(
@@ -170,7 +231,7 @@ async fn thread_list(engine: &Engine, params: &Value) -> Reply {
             )
         })
         .collect();
-    ok(json!({ "data": data, "nextCursor": null, "backwardsCursor": null }))
+    ok(json!({ "data": data, "nextCursor": next, "backwardsCursor": null }))
 }
 
 async fn thread_read(engine: &Engine, params: &Value) -> Reply {
@@ -733,5 +794,65 @@ mod tests {
     #[test]
     fn an_empty_transcript_has_no_turns() {
         assert!(turns_from(&[], "/").is_empty());
+    }
+
+    fn sample_chat(id: &str, title: &str, cwd: &str, created_secs: i64, updated_secs: i64) -> Chat {
+        use chrono::TimeZone;
+        serde_json::from_value(json!({
+            "id": id,
+            "deviceId": "synthetic-device",
+            "title": title,
+            "createdAt": chrono::Utc.timestamp_opt(created_secs, 0).unwrap().to_rfc3339(),
+            "lastMessageAt": chrono::Utc.timestamp_opt(updated_secs, 0).unwrap().to_rfc3339(),
+            "lastMessagePreview": format!("preview for {title}"),
+            "archived": false,
+            "cwd": cwd,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn thread_list_supports_search_cwd_array_sort_and_cursor_pagination() {
+        let chats = vec![
+            sample_chat("c1", "Alpha refactor", "/repo/a", 100, 300),
+            sample_chat("c2", "Beta release", "/repo/b", 200, 200),
+            sample_chat("c3", "Gamma alpha test", "/repo/c", 300, 100),
+        ];
+
+        // Search + cwd array filter
+        let (filtered, next) = filter_and_page_chats(
+            chats.clone(),
+            &[],
+            &json!({ "searchTerm": "alpha", "cwd": ["/repo/a", "/repo/c"] }),
+        )
+        .unwrap();
+        let ids: Vec<&str> = filtered.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["c1", "c3"]);
+        assert_eq!(next, None);
+
+        // Sort by created_at asc + pagination with cursor
+        let (page1, next1) = filter_and_page_chats(
+            chats.clone(),
+            &[],
+            &json!({ "sortKey": "created_at", "sortDirection": "asc", "limit": 2 }),
+        )
+        .unwrap();
+        let ids1: Vec<&str> = page1.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids1, ["c1", "c2"]);
+        assert_eq!(next1.as_deref(), Some("c2"));
+
+        let (page2, next2) = filter_and_page_chats(
+            chats.clone(),
+            &[],
+            &json!({ "sortKey": "created_at", "sortDirection": "asc", "limit": 2, "cursor": next1 }),
+        )
+        .unwrap();
+        let ids2: Vec<&str> = page2.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids2, ["c3"]);
+        assert_eq!(next2, None);
+
+        // Unknown cursor returns invalid_params
+        let err = filter_and_page_chats(chats, &[], &json!({ "cursor": "missing" })).unwrap_err();
+        assert_eq!(err.message, "invalid session cursor");
     }
 }
