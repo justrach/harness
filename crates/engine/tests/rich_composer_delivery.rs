@@ -8,18 +8,18 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream::BoxStream};
-use tokio::sync::mpsc;
+use harness_adapters::{Harness, HarnessError, RunControls};
 use harness_doc::{MessagePart, MessageRole};
 use harness_engine::doc_host::{
     BeginQueueEditOutcome, FinishQueueEditAction, FinishQueueEditOutcome,
 };
 use harness_engine::{EngineCore, HarnessRegistry, SteerOutcome};
-use harness_adapters::{Harness, HarnessError, RunControls};
 use harness_proto::invocation::Invocation;
 use harness_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
     SteeringMode,
 };
+use tokio::sync::mpsc;
 
 const CHAT: &str = "rich-delivery";
 const HARNESSES: [HarnessId; 10] = [
@@ -359,11 +359,16 @@ async fn rich_selections_are_converted_once_on_startup_retry_for_every_harness()
 async fn queue_edits_preserve_reselected_skills_until_delivery_for_every_harness() {
     for id in HARNESSES {
         let (_tmp, core, _harness, mut rx) = setup(id).await;
+        // Direct Sessions dispatch and DocHost's subsequent queued dispatch
+        // must describe the same execution owner. createChat defaults to "~";
+        // a /tmp opening run without this stamp legitimately requests a
+        // checkout handoff on Send Now, rather than an ordinary queue edit.
+        core.workspace.set_chat_cwd(CHAT, "/tmp").unwrap();
         core.sessions
             .dispatch(CHAT, id, request("opening"), None)
             .await
             .unwrap();
-        let Delivery::Run(_) = receive(&mut rx).await else {
+        let Delivery::Run(opening) = receive(&mut rx).await else {
             panic!("fresh run expected")
         };
         let (old, _) = rich_text("old");
@@ -403,12 +408,26 @@ async fn queue_edits_preserve_reselected_skills_until_delivery_for_every_harness
             .read_queue()
             .unwrap();
         assert_eq!(queue[0].text, edited);
+        let before = core.workspace.chat(CHAT).unwrap().unwrap();
+        assert_eq!(before.cwd.as_deref(), Some(opening.cwd.as_str()), "{id:?}");
+        assert_eq!(before.device_id, core.device_id, "{id:?}");
         assert!(core.doc_host.send_queued_now(CHAT, &queued).await.unwrap());
         let Delivery::Run(run) = receive(&mut rx).await else {
             panic!("send now replaces run")
         };
+        // Do not strip any context prefix: this fixture has not changed
+        // checkout, and canonical skill/file identity must survive intact.
+        assert_eq!(
+            run.cwd, opening.cwd,
+            "queue edit changed execution owner: {id:?}"
+        );
+        let after = core.workspace.chat(CHAT).unwrap().unwrap();
+        assert_eq!(after.device_id, before.device_id, "{id:?}");
+        assert_eq!(after.cwd, before.cwd, "{id:?}");
         assert_delivered(&run.prompt, &edited, &readable, id);
         assert_persisted(&core, &edited, 2);
+        assert_persisted(&core, "opening", 2);
+        assert_eq!(core.sessions.last_request(CHAT).unwrap().prompt, edited);
         core.shutdown().await;
     }
 }
