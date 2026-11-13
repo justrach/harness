@@ -195,17 +195,17 @@ theorem unhovered_slot_recovers_full_room :
 
 /-- Left inset of the top instrument strip (`stripLeftInset`).
 Accounts for traffic lights (`88px`), sidebar toggle (`24px`), collapsed history
-button (`28px`), optional titlebar update button (`26px`), and `14px` clearance. -/
+and mode controls (`56px`), optional update (`26px`), and `14px` clearance. -/
 def stripLeftInset (sidebarW : Nat) ( settingsOpen : Bool) (hasUpdate : Bool) : Nat :=
-  let history := if settingsOpen || sidebarW == 0 then 28 else 0
+  let history := if settingsOpen || sidebarW == 0 then 56 else 0
   let updates := if !settingsOpen && hasUpdate then 26 else 0
   (88 + 24 + history + updates + 14) - Nat.min (88 + 24 + history + updates + 14) sidebarW
 
 /-- Theorem: When the sidebar is closed (`sidebarW = 0`) and the titlebar update
-button (`🔄`, ending at `x = 88 + 24 + 28 + 26 = 166px`) is visible, the first
-slot starts at `x = 180px > 166px`, never overlapping the update button. -/
+button (`🔄`, ending at `x = 88 + 24 + 56 + 26 = 194px`) is visible, the first
+slot starts at `x = 208px > 194px`, never overlapping the update button. -/
 theorem update_button_never_overlaps_first_slot :
-    stripLeftInset 0 false true = 180 ∧ stripLeftInset 0 false true > 166 := by
+    stripLeftInset 0 false true = 208 ∧ stripLeftInset 0 false true > 194 := by
   native_decide
 
 structure SplitSlotPartition where

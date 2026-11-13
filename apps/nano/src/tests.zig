@@ -18,6 +18,7 @@ test {
     _ = @import("diff.zig");
     _ = @import("tests_diff_availability.zig");
     _ = @import("tests_link_actions.zig");
+    _ = @import("tests_titlebar_clearance.zig");
     _ = @import("wizard.zig");
     _ = @import("termlog.zig");
     _ = @import("parity.zig");

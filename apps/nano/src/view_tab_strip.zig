@@ -604,8 +604,8 @@ pub fn tabCount(a: *const App, panel: Panel) usize {
         .files => 1,
     };
 }
-/// Desktop's toggle + history, then 10+4px control clearance. The history
-/// control's 28 points ride the collapse tween with the seam instead of
+/// Desktop's toggle + history + mode, then 10+4px control clearance. The two
+/// collapsed controls' 56 points ride the seam tween instead of
 /// flipping on `sidebar_open` at the ⌘B press, so opening the sidebar can
 /// never teleport the lane backwards before the first tween frame.
 pub fn leftInset(a: *const App) f32 {
