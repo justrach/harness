@@ -117,7 +117,41 @@ pub fn build(b: *std.Build) void {
         \\
     );
     const info_mod = b.createModule(.{ .root_source_file = info_root });
+    const luau = b.dependency("luau", .{});
+    const luau_h_files = b.addWriteFiles();
+    const luau_shim = luau_h_files.add("luau_shim.h",
+        \\#define LUA_USE_LONGJMP 1
+        \\#define LUAI_MAXCSTACK 1000000
+        \\#define LUA_VECTOR_SIZE 3
+        \\#include "lua.h"
+        \\#include "lualib.h"
+        \\#include "luacode.h"
+        \\
+    );
+    const luau_tc = b.addTranslateC(.{
+        .root_source_file = luau_shim,
+        .target = target,
+        .optimize = optimize,
+    });
+    luau_tc.addIncludePath(luau.path("VM/include"));
+    luau_tc.addIncludePath(luau.path("Compiler/include"));
+    const luau_c = luau_tc.createModule();
+    buildLuau(b, luau, target, optimize, luau_c);
+
+    // Exercise the sandbox (including its deadline) without compiling the UI
+    // or Rust math. The ordinary application tests still import these tests.
+    const visual_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/visual_luau.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "luau_c", .module = luau_c }},
+    }) });
+    visual_tests.use_llvm = true;
+    if (target.result.os.tag == .windows and target.result.abi == .msvc) visual_tests.linkage = .static;
+    b.step("test-visual", "Run the isolated native visual sandbox tests").dependOn(&b.addRunArtifact(visual_tests).step);
+
     const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "luau_c", .module = luau_c },
         .{ .name = "build_info", .module = info_mod },
         .{ .name = "nanoui", .module = nanoui },
         .{ .name = "http_zig", .module = http_zig },
@@ -164,6 +198,18 @@ pub fn build(b: *std.Build) void {
     tests.root_module.addOptions("parity_options", opts);
     const test_step = b.step("test", "Run harness-nano tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+    if (b.graph.host.result.os.tag == .windows and target.result.os.tag == .windows and target.result.abi == .msvc) {
+        // Exercise the actual Windows PowerShell 5.1 -> cmd -> MSVC boundary
+        // for every Zig 0.17 mode, not a mocked shell on a different OS.
+        const luau_build_test = b.addSystemCommand(&.{ "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File" });
+        luau_build_test.addFileArg(b.path("src/luau_windows_test.ps1"));
+        luau_build_test.addArg("-Helper");
+        luau_build_test.addFileArg(b.path("src/luau_windows.ps1"));
+        luau_build_test.addArg("-OutputDirectory");
+        _ = luau_build_test.addOutputDirectoryArg("luau-build-test");
+        test_step.dependOn(&luau_build_test.step);
+        b.step("test-luau-windows", "Test the Windows Luau build helper with the installed MSVC toolset").dependOn(&luau_build_test.step);
+    }
     // Pure AST/box geometry, safety and native-ABI regressions from the
     // original implementation remain part of the regular nano test gate.
     const math_tests = b.addSystemCommand(&.{ "cargo", "test", "--quiet", "--locked", "-j2", "--manifest-path" });
@@ -211,6 +257,10 @@ pub fn build(b: *std.Build) void {
     // Large UI artifacts must never use Zig's self-hosted backend.
     inline for (.{ exe, tests, snap, profile, vectors }) |artifact| {
         artifact.use_llvm = true;
+        // Luau /MT, libcpmt and Rust +crt-static must all use one static
+        // CRT. Make that explicit rather than relying on Zig's defaults;
+        // mixing CRTs breaks allocation/exception ownership.
+        if (target.result.os.tag == .windows and target.result.abi == .msvc) artifact.linkage = .static;
         artifact.root_module.addObjectFile(linked_math);
         if (math_index) |index| artifact.step.dependOn(&index.step);
         // Rust's catch_unwind boundary needs the platform unwinder. Zig
@@ -233,4 +283,149 @@ fn rustTarget(target: std.Target) []const u8 {
             (if (target.cpu.arch == .aarch64) "aarch64-pc-windows-gnullvm" else "x86_64-pc-windows-gnu"),
         else => @panic("native math needs a supported desktop Rust target"),
     };
+}
+
+fn buildLuau(
+    b: *std.Build,
+    luau: *std.Build.Dependency,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    consumer: *std.Build.Module,
+) void {
+    const flags: []const []const u8 = if (optimize == .debug) &.{
+        "-std=c++17",
+        "-fexceptions",
+        "-DLUA_USE_LONGJMP=1",
+        "-DLUAI_MAXCSTACK=1000000",
+        "-DLUA_VECTOR_SIZE=3",
+        "-DLUA_API=extern \"C\"",
+        "-DLUACODE_API=extern \"C\"",
+    } else &.{
+        "-std=c++17",
+        "-fexceptions",
+        "-fno-math-errno",
+        "-DLUA_USE_LONGJMP=1",
+        "-DLUAI_MAXCSTACK=1000000",
+        "-DLUA_VECTOR_SIZE=3",
+        "-DLUA_API=extern \"C\"",
+        "-DLUACODE_API=extern \"C\"",
+    };
+    const common_files = [_][]const u8{
+        "Common/src/BytecodeWire.cpp",
+        "Common/src/StringUtils.cpp",
+        "Common/src/TimeTrace.cpp",
+    };
+    const ast_files = [_][]const u8{
+        "Ast/src/Allocator.cpp",
+        "Ast/src/Ast.cpp",
+        "Ast/src/Confusables.cpp",
+        "Ast/src/Cst.cpp",
+        "Ast/src/Lexer.cpp",
+        "Ast/src/Location.cpp",
+        "Ast/src/Parser.cpp",
+        "Ast/src/PrettyPrinter.cpp",
+    };
+    const bytecode_files = [_][]const u8{
+        "Bytecode/src/BytecodeBuilder.cpp",
+        "Bytecode/src/BytecodeDump.cpp",
+        "Bytecode/src/BytecodeGraph.cpp",
+        "Bytecode/src/Sccp.cpp",
+    };
+    const compiler_files = [_][]const u8{
+        "Compiler/src/BuiltinFolding.cpp",
+        "Compiler/src/Builtins.cpp",
+        "Compiler/src/Compiler.cpp",
+        "Compiler/src/ConstantFolding.cpp",
+        "Compiler/src/CostModel.cpp",
+        "Compiler/src/TableShape.cpp",
+        "Compiler/src/Types.cpp",
+        "Compiler/src/ValueTracking.cpp",
+        "Compiler/src/lcode.cpp",
+    };
+    const vm_files = [_][]const u8{
+        "VM/src/lapi.cpp",
+        "VM/src/laux.cpp",
+        "VM/src/lbaselib.cpp",
+        "VM/src/lbitlib.cpp",
+        "VM/src/lbuffer.cpp",
+        "VM/src/lbuflib.cpp",
+        "VM/src/lbuiltins.cpp",
+        "VM/src/lclass.cpp",
+        "VM/src/lclasslib.cpp",
+        "VM/src/lcorolib.cpp",
+        "VM/src/ldblib.cpp",
+        "VM/src/ldebug.cpp",
+        "VM/src/ldo.cpp",
+        "VM/src/lfunc.cpp",
+        "VM/src/lgc.cpp",
+        "VM/src/lgcdebug.cpp",
+        "VM/src/linit.cpp",
+        "VM/src/lintlib.cpp",
+        "VM/src/lmathlib.cpp",
+        "VM/src/lmem.cpp",
+        "VM/src/lnumprint.cpp",
+        "VM/src/lobject.cpp",
+        "VM/src/loslib.cpp",
+        "VM/src/lperf.cpp",
+        "VM/src/lstate.cpp",
+        "VM/src/lstring.cpp",
+        "VM/src/lstrlib.cpp",
+        "VM/src/ltable.cpp",
+        "VM/src/ltablib.cpp",
+        "VM/src/ltm.cpp",
+        "VM/src/ludata.cpp",
+        "VM/src/lutf8lib.cpp",
+        "VM/src/lveclib.cpp",
+        "VM/src/lvector.cpp",
+        "VM/src/lvmexecute.cpp",
+        "VM/src/lvmload.cpp",
+        "VM/src/lvmutils.cpp",
+    };
+    const sources = common_files ++ ast_files ++ bytecode_files ++ compiler_files ++ vm_files;
+    if (target.result.os.tag == .windows and target.result.abi == .msvc) {
+        // Zig's bundled libc++/libc++abi cannot be mixed with MSVC vcruntime
+        // headers or Rust's MSVC native-math archive. Compile Luau with the
+        // installed MSVC toolset and /MT, then link its matching static C++
+        // runtime. The helper bootstraps VS itself in both UI and package jobs;
+        // neither requires a developer prompt or a workflow-specific setup.
+        const compile = b.addSystemCommand(&.{ "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File" });
+        compile.addFileArg(b.path("src/luau_windows.ps1"));
+        compile.addArg("-OutputLibrary");
+        const archive = compile.addOutputFileArg("luau.lib");
+        compile.addArg("-LuauRoot");
+        compile.addDirectoryArg(luau.path("."));
+        compile.addArgs(&.{ "-Architecture", switch (target.result.cpu.arch) {
+            .x86_64 => "x64",
+            .aarch64 => "arm64",
+            else => @panic("MSVC Luau needs a supported desktop architecture"),
+        }, "-Optimize", @tagName(optimize) });
+        // Track each translation unit as a build input as well as the root
+        // directory (which includes the pinned Luau headers).
+        for (sources) |source| compile.addFileArg(luau.path(source));
+        consumer.addObjectFile(archive);
+        consumer.link_libc = true;
+        consumer.linkSystemLibrary("libcpmt", .{ .preferred_link_mode = .static });
+        return;
+    }
+
+    const lib = b.addLibrary(.{
+        .name = "luau",
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libcpp = true,
+        }),
+    });
+    lib.root_module.addIncludePath(luau.path("Common/include"));
+    lib.root_module.addIncludePath(luau.path("Ast/include"));
+    lib.root_module.addIncludePath(luau.path("Bytecode/include"));
+    lib.root_module.addIncludePath(luau.path("Compiler/include"));
+    lib.root_module.addIncludePath(luau.path("VM/include"));
+    lib.root_module.addCSourceFiles(.{
+        .root = luau.path("."),
+        .files = &sources,
+        .flags = flags,
+    });
+    consumer.linkLibrary(lib);
 }

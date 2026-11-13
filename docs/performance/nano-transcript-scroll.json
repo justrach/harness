@@ -1,0 +1,14 @@
+{
+  "workload": "160 synthetic completed Markdown replies; 24 warm wheel frames",
+  "configuration": "macOS arm64, ReleaseSafe, offscreen native UI",
+  "reference": {
+    "cpuMs": 1.81,
+    "nodes": 5310
+  },
+  "optimized": {
+    "cpuMs": 0.11,
+    "nodes": 474
+  },
+  "scope": "UI build/layout/paint CPU work, not display FPS",
+  "correctness": "Pixel hashes and scroll geometry match for wheel, large jump, resize; native selection/copy passes"
+}

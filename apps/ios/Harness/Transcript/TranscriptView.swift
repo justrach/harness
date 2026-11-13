@@ -31,6 +31,7 @@ struct TranscriptView: View {
     static let jumpThreshold: CGFloat = 140
     @State private var veils = VeilStore()
     @State var folds = ToolGroupFolds()
+    @State private var visualCache = VisualCache()
     @State private var userExpansionHeights: [String: CGFloat] = [:]
     @State private var reauthRequest: AgentReauthRequest?
     /// Beside another column the page is lifted (ContentPlane).
@@ -185,6 +186,8 @@ struct TranscriptView: View {
             case .generatedImage(let owner, let reference):
                 GeneratedImageView(owner: owner, host: store.hostDeviceId ?? "", reference: reference,
                                    onResize: { scroll.refreshLayout?() })
+            case .visual(let title, let script):
+                VisualCardView(partKey: row.id, title: title, script: script, cache: visualCache)
             case .markdown(let block, let streaming):
                 MarkdownRowView(row: row, block: block, streaming: streaming, veils: veils)
             case .toolGroup(let tools, let autoOpen):

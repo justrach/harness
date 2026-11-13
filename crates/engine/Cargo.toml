@@ -5,9 +5,14 @@ edition.workspace = true
 license-file.workspace = true
 publish.workspace = true
 
+[features]
+default = ["preview", "visual"]
+preview = ["dep:harness-preview"]
+visual = ["dep:harness-visual"]
+
 [dependencies]
-harness-preview.workspace = true
-harness-visual.workspace = true
+harness-preview = { workspace = true, optional = true }
+harness-visual = { workspace = true, optional = true }
 harness-proto.workspace = true
 harness-doc.workspace = true
 harness-sync.workspace = true
@@ -60,3 +65,11 @@ zip.workspace = true
 tokio-tungstenite.workspace = true
 # In-process registry server for the two-engine workspace integration tests.
 harness-sync = { workspace = true, features = ["mock-server"] }
+
+[[test]]
+name = "previews"
+required-features = ["preview"]
+
+[[test]]
+name = "show_visual"
+required-features = ["visual"]

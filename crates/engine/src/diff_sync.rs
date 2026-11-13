@@ -981,36 +981,66 @@ fn parse_name_status(value: &[u8]) -> Vec<DiffFileSummary> {
 }
 
 fn apply_numstat(files: &mut [DiffFileSummary], value: &[u8]) {
-    // With -z, a rename record is `adds<TAB>dels<TAB><NUL>old<NUL>new<NUL>`.
-    let records: Vec<String> = value
-        .split(|b| *b == 0)
-        .map(|part| String::from_utf8_lossy(part).to_string())
+    if files.is_empty() || value.is_empty() {
+        return;
+    }
+    let index_by_path: HashMap<&str, usize> = files
+        .iter()
+        .enumerate()
+        .map(|(idx, f)| (f.path.as_str(), idx))
         .collect();
-    let mut i = 0usize;
-    while i < records.len() {
-        let record = &records[i];
-        if record.is_empty() {
-            i += 1;
+    let mut updates: Vec<(usize, u32, u32, bool)> = Vec::new();
+    // With -z, a rename record is `adds<TAB>dels<TAB><NUL>old<NUL>new<NUL>`.
+    let mut records = value.split(|b| *b == 0);
+    while let Some(raw_record) = records.next() {
+        if raw_record.is_empty() {
             continue;
         }
-        let mut parts = record.splitn(3, '\t');
-        let adds = parts.next().unwrap_or_default().to_string();
-        let dels = parts.next().unwrap_or_default().to_string();
-        let inline_path = parts.next().unwrap_or_default().to_string();
-        let path = if inline_path.is_empty() {
+        let record = std::str::from_utf8(raw_record).ok();
+        let record_owned;
+        let record_str = match record {
+            Some(s) => s,
+            None => {
+                record_owned = String::from_utf8_lossy(raw_record);
+                record_owned.as_ref()
+            }
+        };
+        let mut parts = record_str.splitn(3, '\t');
+        let adds = parts.next().unwrap_or_default();
+        let dels = parts.next().unwrap_or_default();
+        let inline_path = parts.next().unwrap_or_default();
+        let path_owned;
+        let path: &str = if inline_path.is_empty() {
             // Rename: the next two records are old, new.
-            let new_path = records.get(i + 2).cloned().unwrap_or_default();
-            i += 2;
-            new_path
+            let _old = records.next();
+            match records.next() {
+                Some(raw_new) => match std::str::from_utf8(raw_new) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        path_owned = String::from_utf8_lossy(raw_new);
+                        path_owned.as_ref()
+                    }
+                },
+                None => "",
+            }
         } else {
             inline_path
         };
-        i += 1;
-        if let Some(file) = files.iter_mut().find(|f| f.path == path) {
-            file.additions = adds.parse().unwrap_or(0);
-            file.deletions = dels.parse().unwrap_or(0);
-            file.binary = adds == "-" || dels == "-";
+        if let Some(&idx) = index_by_path.get(path) {
+            updates.push((
+                idx,
+                adds.parse().unwrap_or(0),
+                dels.parse().unwrap_or(0),
+                adds == "-" || dels == "-",
+            ));
         }
+    }
+    drop(index_by_path);
+    for (idx, additions, deletions, binary) in updates {
+        let file = &mut files[idx];
+        file.additions = additions;
+        file.deletions = deletions;
+        file.binary = binary;
     }
 }
 
@@ -1027,21 +1057,28 @@ fn quote_patch_path(path: &str) -> String {
 
 /// Synthesize a new-file hunk for an untracked file (git diff never shows them).
 fn untracked_patch(path: &str, content: &str) -> String {
-    let mut lines: Vec<&str> = content.split('\n').collect();
-    if lines.last() == Some(&"") {
-        lines.pop();
-    }
-    let body: String = lines
-        .iter()
-        .map(|line| format!("+{line}"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let trimmed = content.strip_suffix('\n').unwrap_or(content);
+    let line_count = if content.is_empty() {
+        0
+    } else {
+        trimmed.bytes().filter(|&b| b == b'\n').count() + 1
+    };
     let a = quote_patch_path(&format!("a/{path}"));
     let b = quote_patch_path(&format!("b/{path}"));
-    format!(
-        "diff --git {a} {b}\nnew file mode 100644\n--- /dev/null\n+++ {b}\n@@ -0,0 +1,{} @@\n{body}\n",
-        lines.len()
-    )
+    let mut out = String::with_capacity(128 + a.len() + b.len() * 2 + trimmed.len() + line_count);
+    use std::fmt::Write as _;
+    let _ = writeln!(
+        out,
+        "diff --git {a} {b}\nnew file mode 100644\n--- /dev/null\n+++ {b}\n@@ -0,0 +1,{line_count} @@"
+    );
+    if line_count > 0 {
+        for line in trimmed.split('\n') {
+            out.push('+');
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 fn validate_diff_path(path: &str) -> Result<&Path, EngineError> {
@@ -1221,8 +1258,11 @@ pub async fn capture_diff_against(
     root: &Path,
     base_override: Option<&str>,
 ) -> Result<DiffSnapshot, EngineError> {
-    let head = capture_git(root, &["rev-parse", "--verify", "HEAD"], 256)
-        .await
+    let (head_res, branch_res) = tokio::join!(
+        capture_git(root, &["rev-parse", "--verify", "HEAD"], 256),
+        repos.current_branch(root),
+    );
+    let head = head_res
         .map(|c| String::from_utf8_lossy(&c.stdout).trim().to_string())
         .unwrap_or_default();
     let base: &str = match base_override {
@@ -1230,51 +1270,37 @@ pub async fn capture_diff_against(
         None if head.is_empty() => EMPTY_TREE_SHA,
         None => &head,
     };
-    let branch = repos
-        .current_branch(root)
-        .await
-        .unwrap_or_else(|_| "HEAD".into());
+    let branch = branch_res.unwrap_or_else(|_| "HEAD".into());
 
-    let names = capture_git(
-        root,
-        &["diff", "--name-status", "-z", "--find-renames", base, "--"],
-        2 * 1024 * 1024,
-    )
-    .await?;
-    let nums = capture_git(
-        root,
-        &["diff", "--numstat", "-z", "--find-renames", base, "--"],
-        2 * 1024 * 1024,
-    )
-    .await?;
-    let tracked = capture_git(
-        root,
-        &[
-            "diff",
-            "--no-ext-diff",
-            "--no-color",
-            "--find-renames",
-            "--unified=3",
-            base,
-            "--",
-        ],
-        MAX_PATCH_BYTES,
-    )
-    .await?;
-    // Untracked listing via porcelain status; `--no-optional-locks` keeps this
-    // read-only (a status-triggered index refresh would re-kick our own watcher).
-    let status = capture_git(
-        root,
-        &[
-            "--no-optional-locks",
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=all",
-        ],
-        2 * 1024 * 1024,
-    )
-    .await?;
+    let names_args = ["diff", "--name-status", "-z", "--find-renames", base, "--"];
+    let nums_args = ["diff", "--numstat", "-z", "--find-renames", base, "--"];
+    let tracked_args = [
+        "diff",
+        "--no-ext-diff",
+        "--no-color",
+        "--find-renames",
+        "--unified=3",
+        base,
+        "--",
+    ];
+    let (names, nums, tracked, status) = tokio::try_join!(
+        capture_git(root, &names_args, 2 * 1024 * 1024),
+        capture_git(root, &nums_args, 2 * 1024 * 1024),
+        capture_git(root, &tracked_args, MAX_PATCH_BYTES),
+        // Untracked listing via porcelain status; `--no-optional-locks` keeps this
+        // read-only (a status-triggered index refresh would re-kick our own watcher).
+        capture_git(
+            root,
+            &[
+                "--no-optional-locks",
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+            ],
+            2 * 1024 * 1024,
+        ),
+    )?;
 
     let mut files = parse_name_status(&names.stdout);
     apply_numstat(&mut files, &nums.stdout);
@@ -2087,5 +2113,64 @@ mod watch_budget_tests {
         // A self-referential symlink cycle must not send the walk into a spin.
         std::os::unix::fs::symlink(root.join("real"), root.join("real/inner/loop")).unwrap();
         assert!(!exceeds_watch_budget(root)); // terminates, under budget
+    }
+
+    #[test]
+    fn apply_numstat_handles_normal_binary_and_rename_records() {
+        use super::{DiffFileSummary, apply_numstat};
+        let mut files = vec![
+            DiffFileSummary {
+                path: "src/lib.rs".into(),
+                old_path: None,
+                status: "modified".into(),
+                additions: 0,
+                deletions: 0,
+                binary: false,
+            },
+            DiffFileSummary {
+                path: "assets/logo.png".into(),
+                old_path: None,
+                status: "added".into(),
+                additions: 0,
+                deletions: 0,
+                binary: false,
+            },
+            DiffFileSummary {
+                path: "src/new_name.rs".into(),
+                old_path: Some("src/old_name.rs".into()),
+                status: "renamed".into(),
+                additions: 0,
+                deletions: 0,
+                binary: false,
+            },
+        ];
+        let payload =
+            b"12\t3\tsrc/lib.rs\0-\t-\tassets/logo.png\04\t1\t\0src/old_name.rs\0src/new_name.rs\0";
+        apply_numstat(&mut files, payload);
+        assert_eq!(
+            (files[0].additions, files[0].deletions, files[0].binary),
+            (12, 3, false)
+        );
+        assert_eq!(
+            (files[1].additions, files[1].deletions, files[1].binary),
+            (0, 0, true)
+        );
+        assert_eq!(
+            (files[2].additions, files[2].deletions, files[2].binary),
+            (4, 1, false)
+        );
+    }
+
+    #[test]
+    fn untracked_patch_formats_empty_text_and_spaced_paths() {
+        use super::untracked_patch;
+        assert_eq!(
+            untracked_patch("empty.txt", ""),
+            "diff --git a/empty.txt b/empty.txt\nnew file mode 100644\n--- /dev/null\n+++ b/empty.txt\n@@ -0,0 +1,0 @@\n"
+        );
+        assert_eq!(
+            untracked_patch("my file.txt", "one\ntwo"),
+            "diff --git \"a/my file.txt\" \"b/my file.txt\"\nnew file mode 100644\n--- /dev/null\n+++ \"b/my file.txt\"\n@@ -0,0 +1,2 @@\n+one\n+two\n"
+        );
     }
 }

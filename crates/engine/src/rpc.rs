@@ -54,7 +54,7 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use futures::StreamExt;
 use futures::stream::BoxStream;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -788,6 +788,7 @@ pub struct EngineRpc {
     workspace_files: crate::WorkspaceFiles,
     terminals: Terminals,
     project_actions: ProjectActionsStore,
+    #[cfg(feature = "preview")]
     previews: Option<harness_preview::PreviewService>,
     simulators: Option<crate::simulators::Simulators>,
     localhost_view: Option<crate::localhost_view::LocalhostView>,
@@ -837,6 +838,7 @@ impl EngineRpc {
             workspace_files,
             terminals,
             project_actions,
+            #[cfg(feature = "preview")]
             previews: None,
             simulators: None,
             localhost_view: None,
@@ -854,6 +856,7 @@ impl EngineRpc {
         }
     }
 
+    #[cfg(feature = "preview")]
     pub fn with_previews(mut self, previews: harness_preview::PreviewService) -> Self {
         self.previews = Some(previews);
         self
@@ -901,9 +904,10 @@ impl EngineRpc {
                     })
                     .await
                     .map_err(RpcError::Failed)?;
-                let stream =
-                    events.filter_map(|event| async move { serde_json::to_value(&event).ok() });
-                Ok(RpcReply::Stream(stream.boxed()))
+                let stream = events.filter_map(|event| async move {
+                    serde_json::value::to_raw_value(&event).ok()
+                });
+                Ok(RpcReply::StreamRaw(stream.boxed()))
             }
             methods::LOCALHOST_PAGE_INPUT => {
                 let p: LocalhostPageInputParams = parse_params(params)?;
@@ -970,9 +974,10 @@ impl EngineRpc {
                     .map_err(RpcError::Failed)?;
                 // Latest frame wins at the viewer's own rate: a slow viewer
                 // skips frames instead of queueing them.
-                let stream = crate::simulators::viewer_frames(rx, p.max_fps)
-                    .filter_map(|frame| async move { serde_json::to_value(&*frame).ok() });
-                Ok(RpcReply::Stream(stream.boxed()))
+                let stream = crate::simulators::viewer_frames(rx, p.max_fps).filter_map(
+                    |frame| async move { serde_json::value::to_raw_value(&*frame).ok() },
+                );
+                Ok(RpcReply::StreamRaw(stream.boxed()))
             }
             methods::SIMULATOR_INPUT => {
                 let p: SimulatorInputParams = parse_params(params)?;
@@ -1188,27 +1193,43 @@ impl EngineRpc {
     /// normalizes them against the resolved root before using them as ranking
     /// hints, so stale or out-of-workspace tool paths simply disappear.
     fn featured_file_paths(&self, chat_id: &str) -> Vec<String> {
-        let mut paths = Vec::new();
-        let mut seen = HashSet::new();
-        if let Ok(handle) = self.doc_host.open(chat_id)
-            && let Ok(entries) = handle.doc().read_entries()
-        {
-            for entry in entries.into_iter().rev() {
-                for part in entry.parts.into_iter().rev() {
-                    if let MessagePart::Tool { call, .. } = part
-                        && let Some(path) = tool_file_path(&call)
-                        && !path.trim().is_empty()
-                        && seen.insert(path.to_string())
-                    {
-                        paths.push(path.to_string());
-                        if paths.len() == FILE_SEARCH_FEATURED_PATHS {
-                            break;
-                        }
+        fn collect_entry(
+            entry: &harness_doc::SessionMessageEntry,
+            paths: &mut Vec<String>,
+            seen: &mut HashSet<String>,
+        ) -> bool {
+            for part in entry.parts.iter().rev() {
+                if let MessagePart::Tool { call, .. } = part
+                    && let Some(path) = tool_file_path(call)
+                    && !path.trim().is_empty()
+                    && seen.insert(path.to_string())
+                {
+                    paths.push(path.to_string());
+                    if paths.len() == FILE_SEARCH_FEATURED_PATHS {
+                        return true;
                     }
                 }
-                if paths.len() == FILE_SEARCH_FEATURED_PATHS {
-                    break;
+            }
+            false
+        }
+
+        let mut paths = Vec::new();
+        let mut seen = HashSet::new();
+        if let Ok(handle) = self.doc_host.open(chat_id) {
+            let cached_empty = {
+                let watch = handle.watch_messages();
+                let snapshot = watch.borrow();
+                for entry in snapshot.entries.iter().rev() {
+                    if collect_entry(entry, &mut paths, &mut seen) {
+                        break;
+                    }
                 }
+                snapshot.entries.is_empty()
+            };
+            if cached_empty && paths.len() < FILE_SEARCH_FEATURED_PATHS {
+                let _ = handle
+                    .doc()
+                    .walk_entries_rev(|entry| !collect_entry(&entry, &mut paths, &mut seen));
             }
         }
 
@@ -1571,6 +1592,10 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         methods::APPLY_HARNESS_UPDATE => crate::harness_updates::APPLY_REPLY_DEADLINE,
         methods::BOOT_SIMULATOR => Duration::from_secs(150),
         methods::CREATE_WORKTREE => Duration::from_secs(120),
+        // One bounded push (120s), plus pre/post snapshot checks and relay.
+        methods::APPLY_CHECKOUT_GIT_ACTION => Duration::from_secs(180),
+        // Includes bounded pre/post Git context resolution and provider wait.
+        methods::BROWSE_CHECKOUT_GITHUB => Duration::from_secs(100),
         // Allow the adapter discovery budget plus relay and shutdown overhead.
         methods::LIST_MODELS | methods::LIST_COMMANDS => Duration::from_secs(100),
         // A reconnect handshakes every server; a login waits on a browser page.
@@ -1660,6 +1685,9 @@ fn forwardable(method: &str) -> bool {
             | methods::MERGE_CHANGE_REQUEST
             | methods::GET_CHECKOUT_DIFF
             | methods::DISCARD_WORKING_TREE
+            | methods::GET_CHECKOUT_GIT_STATE
+            | methods::BROWSE_CHECKOUT_GITHUB
+            | methods::APPLY_CHECKOUT_GIT_ACTION
             | methods::GET_CHECKOUT_FILE_DIFF_TEXT
             // Terminals live on the chat's host device.
             | methods::OPEN_TERMINAL
@@ -1738,20 +1766,20 @@ fn is_stream_method(method: &str) -> bool {
     )
 }
 
-/// A watch receiver as a stream: current value first, then every change.
-fn watch_stream<T>(rx: watch::Receiver<T>) -> BoxStream<'static, serde_json::Value>
+/// A watch receiver as a pre-serialized stream: current value first, then every change.
+fn watch_stream<T>(rx: watch::Receiver<T>) -> BoxStream<'static, Box<serde_json::value::RawValue>>
 where
-    T: serde::Serialize + Clone + Send + Sync + 'static,
+    T: serde::Serialize + Send + Sync + 'static,
 {
     futures::stream::unfold((rx, false), |(mut rx, emitted)| async move {
         if emitted {
             rx.changed().await.ok()?;
         }
-        let value = {
+        let raw = {
             let borrowed = rx.borrow_and_update();
-            serde_json::to_value(&*borrowed).ok()?
+            serde_json::value::to_raw_value(&*borrowed).ok()?
         };
-        Some((value, (rx, true)))
+        Some((raw, (rx, true)))
     })
     .boxed()
 }
@@ -1762,8 +1790,8 @@ where
 fn doc_messages_stream(
     rx: watch::Receiver<crate::doc_host::TranscriptSnapshot>,
     doc: std::sync::Arc<harness_doc::SessionDoc>,
-) -> BoxStream<'static, serde_json::Value> {
-    use harness_doc::transcript_delta::{TranscriptFrame, diff_transcript};
+) -> BoxStream<'static, Box<serde_json::value::RawValue>> {
+    use harness_doc::transcript_delta::{TranscriptFrame, diff_transcript_shared};
     futures::stream::unfold(
         (
             rx,
@@ -1781,13 +1809,13 @@ fn doc_messages_stream(
                 // connection used to deep-copy the entire transcript here.
                 let current = rx.borrow_and_update().clone();
                 let frame = match prev.as_ref() {
-                    None => TranscriptFrame::reset(&current.entries),
-                    Some(prev) => diff_transcript(&prev.entries, &current.entries),
+                    None => TranscriptFrame::reset_shared(&current.entries),
+                    Some(prev) => diff_transcript_shared(&prev.entries, &current.entries),
                 };
                 let replay_baseline = match prev.as_ref() {
                     None => {
                         opening_baseline =
-                            harness_doc::TranscriptBaseline::capture(&current.entries);
+                            harness_doc::TranscriptBaseline::capture_shared(&current.entries);
                         Some(opening_baseline.clone())
                     }
                     Some(prev)
@@ -1821,13 +1849,13 @@ fn doc_messages_stream(
                     continue;
                 }
                 previous_usage = usage;
-                let value = serde_json::to_value(harness_doc::TranscriptUpdate {
+                let raw = serde_json::value::to_raw_value(&harness_doc::TranscriptUpdate {
                     frame,
                     context_usage: usage,
                     replay_baseline,
                 })
                 .ok()?;
-                return Some((value, (rx, prev, doc, previous_usage, opening_baseline)));
+                return Some((raw, (rx, prev, doc, previous_usage, opening_baseline)));
             }
         },
     )
@@ -1839,7 +1867,7 @@ fn doc_messages_stream(
 async fn opening_doc_messages_stream(
     host: crate::doc_host::DocHost,
     chat_id: String,
-) -> Result<BoxStream<'static, serde_json::Value>, RpcError> {
+) -> Result<BoxStream<'static, Box<serde_json::value::RawValue>>, RpcError> {
     let (handle, preview) = tokio::task::spawn_blocking(move || {
         let handle = host.open(&chat_id)?;
         let entries = handle.doc().read_opening_tail(128)?;
@@ -1850,7 +1878,9 @@ async fn opening_doc_messages_stream(
         })
         .map_err(|e| crate::EngineError::Other(e.to_string()))?;
         preview["historyPending"] = serde_json::Value::Bool(true);
-        Ok::<_, crate::EngineError>((handle, preview))
+        let raw = serde_json::value::to_raw_value(&preview)
+            .map_err(|e| crate::EngineError::Other(e.to_string()))?;
+        Ok::<_, crate::EngineError>((handle, raw))
     })
     .await
     .map_err(|e| RpcError::Failed(e.to_string()))?
@@ -1907,7 +1937,7 @@ impl AuthRpc {
 impl RpcService for AuthRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
         match method {
-            methods::AUTH_STATUS => Ok(RpcReply::Stream(watch_stream(self.auth.watch_state()))),
+            methods::AUTH_STATUS => Ok(RpcReply::StreamRaw(watch_stream(self.auth.watch_state()))),
             methods::SIGN_IN => {
                 let url = self
                     .auth
@@ -2388,7 +2418,7 @@ impl RpcService for EngineRpc {
                     .unwrap_or(false);
                 let p: ChatParams = parse_params(params)?;
                 if opening_tail {
-                    return Ok(RpcReply::Stream(
+                    return Ok(RpcReply::StreamRaw(
                         opening_doc_messages_stream(self.doc_host.clone(), p.chat_id).await?,
                     ));
                 }
@@ -2396,12 +2426,18 @@ impl RpcService for EngineRpc {
                     .doc_host
                     .open(&p.chat_id)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
-                Ok(RpcReply::Stream(doc_messages_stream(
+                Ok(RpcReply::StreamRaw(doc_messages_stream(
                     handle.watch_messages(),
                     handle.doc_arc(),
                 )))
             }
             methods::WATCH_QUEUE => {
+                #[derive(Serialize)]
+                struct WatchQueueFrame<'a> {
+                    items: &'a [harness_doc::QueuedMessage],
+                    #[serde(rename = "pendingPrompts")]
+                    pending_prompts: &'a [crate::doc_host::PendingPrompt],
+                }
                 let p: ChatParams = parse_params(params)?;
                 // Opening a cold chat imports its whole doc; selecting a chat
                 // starts this watch alongside the transcript's, so keep that
@@ -2414,7 +2450,7 @@ impl RpcService for EngineRpc {
                 // Prompts first: watch_queue's publish then fills both.
                 let prompts = handle.watch_pending_prompts();
                 let rx = handle.watch_queue();
-                Ok(RpcReply::Stream(
+                Ok(RpcReply::StreamRaw(
                     futures::stream::unfold(
                         (rx, prompts, true),
                         |(mut rx, mut prompts, first)| async move {
@@ -2424,29 +2460,41 @@ impl RpcService for EngineRpc {
                                     changed = prompts.changed() => changed.ok()?,
                                 }
                             }
-                            let items = rx.borrow_and_update().clone();
-                            let pending = prompts.borrow_and_update().clone();
-                            let value = serde_json::json!({
-                                "items": items,
-                                "pendingPrompts": pending,
-                            });
-                            Some((value, (rx, prompts, false)))
+                            let raw = {
+                                let items = rx.borrow_and_update();
+                                let pending = prompts.borrow_and_update();
+                                serde_json::value::to_raw_value(&WatchQueueFrame {
+                                    items: &items,
+                                    pending_prompts: &pending,
+                                })
+                                .ok()?
+                            };
+                            Some((raw, (rx, prompts, false)))
                         },
                     )
                     .boxed(),
                 ))
             }
             methods::WATCH_TOOL_PROGRESS => {
+                #[derive(Serialize)]
+                struct WatchToolProgressFrame<'a> {
+                    items: &'a [harness_proto::ToolProgressItem],
+                }
                 let p: ChatParams = parse_params(params)?;
                 let rx = self.sessions.watch_tool_progress(&p.chat_id);
-                Ok(RpcReply::Stream(
+                Ok(RpcReply::StreamRaw(
                     futures::stream::unfold((rx, true), |(mut rx, first)| async move {
                         if !first {
                             rx.changed().await.ok()?;
                         }
-                        let items = rx.borrow_and_update().clone();
-                        let value = serde_json::json!({ "items": items });
-                        Some((value, (rx, false)))
+                        let raw = {
+                            let items = rx.borrow_and_update();
+                            serde_json::value::to_raw_value(&WatchToolProgressFrame {
+                                items: &items,
+                            })
+                            .ok()?
+                        };
+                        Some((raw, (rx, false)))
                     })
                     .boxed(),
                 ))
@@ -2634,85 +2682,93 @@ impl RpcService for EngineRpc {
                     "resources": self.doc_host.sync_resources(),
                 }))
             }
-            methods::WATCH_CONNECTIVITY => Ok(RpcReply::Stream(watch_stream(
+            methods::WATCH_CONNECTIVITY => Ok(RpcReply::StreamRaw(watch_stream(
                 self.doc_host.watch_connectivity(),
             ))),
-            methods::WATCH_TRANSFERS => Ok(RpcReply::Stream(watch_stream(
+            methods::WATCH_TRANSFERS => Ok(RpcReply::StreamRaw(watch_stream(
                 self.doc_host.watch_transfers(),
             ))),
             methods::WATCH_PREVIEWS => {
-                let p: harness_proto::WatchPreviewsParams = parse_params(params)?;
-                if self
-                    .workspace
-                    .chat(&p.chat_id)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?
-                    .is_none()
+                #[cfg(not(feature = "preview"))]
                 {
-                    return Err(RpcError::Failed("Project session not found".into()));
+                    let _ = params;
+                    Err(RpcError::Failed("Preview discovery unavailable".into()))
                 }
-                let previews = self
-                    .previews
-                    .as_ref()
-                    .ok_or_else(|| RpcError::Failed("Preview discovery unavailable".into()))?;
-                let catalog = previews.catalog().clone();
-                let changes = catalog.subscribe();
-                let chats = self.workspace.watch_chats();
-                let workspace = self.workspace.clone();
-                // This subscription stays on the viewing device. A remote chat
-                // selects advertised services, but its URL uses our local proxy.
-                let stream = futures::stream::unfold(
-                    (changes, chats, true, workspace, catalog, p.chat_id),
-                    |(mut changes, mut chats, first, workspace, catalog, chat_id)| async move {
-                        if !first {
-                            tokio::select! {
-                                result = changes.changed() => { if result.is_err() { return None; } }
-                                result = chats.changed() => { if result.is_err() { return None; } }
+                #[cfg(feature = "preview")]
+                {
+                    let p: harness_proto::WatchPreviewsParams = parse_params(params)?;
+                    if self
+                        .workspace
+                        .chat(&p.chat_id)
+                        .map_err(|e| RpcError::Failed(e.to_string()))?
+                        .is_none()
+                    {
+                        return Err(RpcError::Failed("Project session not found".into()));
+                    }
+                    let previews = self
+                        .previews
+                        .as_ref()
+                        .ok_or_else(|| RpcError::Failed("Preview discovery unavailable".into()))?;
+                    let catalog = previews.catalog().clone();
+                    let changes = catalog.subscribe();
+                    let chats = self.workspace.watch_chats();
+                    let workspace = self.workspace.clone();
+                    // This subscription stays on the viewing device. A remote chat
+                    // selects advertised services, but its URL uses our local proxy.
+                    let stream = futures::stream::unfold(
+                        (changes, chats, true, workspace, catalog, p.chat_id),
+                        |(mut changes, mut chats, first, workspace, catalog, chat_id)| async move {
+                            if !first {
+                                tokio::select! {
+                                    result = changes.changed() => { if result.is_err() { return None; } }
+                                    result = chats.changed() => { if result.is_err() { return None; } }
+                                }
                             }
-                        }
-                        let mut snapshot = changes.borrow_and_update().clone();
-                        chats.borrow_and_update();
-                        let chat = workspace.chat(&chat_id).ok().flatten();
-                        let device = chat
-                            .as_ref()
-                            .map(|c| c.device_id.clone())
-                            .unwrap_or_default();
-                        snapshot.remote = device != catalog.device_id();
-                        let cwd = chat.and_then(|c| c.cwd);
-                        let cwd = cwd.map(|cwd| {
-                            if snapshot.remote {
-                                std::path::PathBuf::from(cwd)
-                            } else {
-                                std::path::PathBuf::from(&cwd)
-                                    .canonicalize()
-                                    .unwrap_or_else(|_| cwd.into())
-                            }
-                        });
-                        snapshot.project_name = cwd
-                            .as_ref()
-                            .and_then(|p| p.file_name())
-                            .map(|s| s.to_string_lossy().into_owned());
-                        snapshot.services.retain(|service| {
-                            service.device_id == device
-                                && cwd.as_ref().is_some_and(|cwd| {
-                                    cwd == std::path::Path::new(&service.project_cwd)
-                                })
-                        });
-                        let value = serde_json::to_value(snapshot).ok()?;
-                        Some((value, (changes, chats, false, workspace, catalog, chat_id)))
-                    },
-                );
-                Ok(RpcReply::Stream(Box::pin(stream)))
+                            let mut snapshot = changes.borrow_and_update().clone();
+                            chats.borrow_and_update();
+                            let chat = workspace.chat(&chat_id).ok().flatten();
+                            let device = chat
+                                .as_ref()
+                                .map(|c| c.device_id.clone())
+                                .unwrap_or_default();
+                            snapshot.remote = device != catalog.device_id();
+                            let cwd = chat.and_then(|c| c.cwd);
+                            let cwd = cwd.map(|cwd| {
+                                if snapshot.remote {
+                                    std::path::PathBuf::from(cwd)
+                                } else {
+                                    std::path::PathBuf::from(&cwd)
+                                        .canonicalize()
+                                        .unwrap_or_else(|_| cwd.into())
+                                }
+                            });
+                            snapshot.project_name = cwd
+                                .as_ref()
+                                .and_then(|p| p.file_name())
+                                .map(|s| s.to_string_lossy().into_owned());
+                            snapshot.services.retain(|service| {
+                                service.device_id == device
+                                    && cwd.as_ref().is_some_and(|cwd| {
+                                        cwd == std::path::Path::new(&service.project_cwd)
+                                    })
+                            });
+                            let raw = serde_json::value::to_raw_value(&snapshot).ok()?;
+                            Some((raw, (changes, chats, false, workspace, catalog, chat_id)))
+                        },
+                    );
+                    Ok(RpcReply::StreamRaw(Box::pin(stream)))
+                }
             }
-            methods::WATCH_CHATS => {
-                Ok(RpcReply::Stream(watch_stream(self.workspace.watch_chats())))
-            }
-            methods::WATCH_SIDEBAR_PREFERENCES => Ok(RpcReply::Stream(watch_stream(
+            methods::WATCH_CHATS => Ok(RpcReply::StreamRaw(watch_stream(
+                self.workspace.watch_chats(),
+            ))),
+            methods::WATCH_SIDEBAR_PREFERENCES => Ok(RpcReply::StreamRaw(watch_stream(
                 self.workspace.watch_sidebar_preferences(),
             ))),
-            methods::WATCH_DEVICES => Ok(RpcReply::Stream(watch_stream(
+            methods::WATCH_DEVICES => Ok(RpcReply::StreamRaw(watch_stream(
                 self.workspace.watch_devices(),
             ))),
-            methods::WATCH_SPACES => Ok(RpcReply::Stream(watch_stream(
+            methods::WATCH_SPACES => Ok(RpcReply::StreamRaw(watch_stream(
                 self.workspace.watch_spaces(),
             ))),
             methods::WATCH_SESSIONS => {
@@ -2720,7 +2776,7 @@ impl RpcService for EngineRpc {
                 let merged = self
                     .workspace
                     .merged_sessions_watch(self.sessions.watch_sessions());
-                Ok(RpcReply::Stream(watch_stream(merged)))
+                Ok(RpcReply::StreamRaw(watch_stream(merged)))
             }
             methods::LOCAL_DEVICE => {
                 RpcReply::value(&serde_json::json!({ "deviceId": self.doc_host.device_id() }))
@@ -2832,7 +2888,9 @@ impl RpcService for EngineRpc {
                     move |cx| rx.poll_recv(cx),
                 ))))
             }
-            methods::UPDATE_STATUS => Ok(RpcReply::Stream(watch_stream(self.updater()?.watch()))),
+            methods::UPDATE_STATUS => {
+                Ok(RpcReply::StreamRaw(watch_stream(self.updater()?.watch())))
+            }
             methods::CHECK_FOR_UPDATES => {
                 self.updater()?.check_now();
                 RpcReply::value(&serde_json::json!({ "ok": true }))
@@ -2854,7 +2912,7 @@ impl RpcService for EngineRpc {
             methods::WATCH_HARNESS_UPDATES => {
                 let coordinator = self.harness_updates()?;
                 coordinator.recheck_changed_binaries_soon();
-                Ok(RpcReply::Stream(watch_stream(coordinator.watch())))
+                Ok(RpcReply::StreamRaw(watch_stream(coordinator.watch())))
             }
             methods::CHECK_HARNESS_UPDATES => {
                 let p: HarnessUpdateParams = parse_params(params)?;
@@ -2914,9 +2972,9 @@ impl RpcService for EngineRpc {
                 }
                 RpcReply::value(&serde_json::json!({ "ok": true }))
             }
-            methods::WATCH_CHECKOUT_DIFFS => {
-                Ok(RpcReply::Stream(watch_stream(self.diff_sync.watch_diffs())))
-            }
+            methods::WATCH_CHECKOUT_DIFFS => Ok(RpcReply::StreamRaw(watch_stream(
+                self.diff_sync.watch_diffs(),
+            ))),
             methods::WATCH_WORKSPACE_GIT_STATUS => {
                 let request: harness_proto::WatchWorkspaceFilesRequest = parse_params(params)?;
                 let workspace = self.workspace_files.resolve_target(&request.target).await?;
@@ -2938,17 +2996,16 @@ impl RpcService for EngineRpc {
                             if !emitted || previous != next {
                                 emitted = true;
                                 previous = next.clone();
-                                let value =
-                                    serde_json::to_value(harness_proto::WorkspaceGitStatusFrame {
-                                        status: next,
-                                    })
-                                    .ok()?;
-                                return Some((value, (rx, checkout_id, previous, emitted)));
+                                let raw = serde_json::value::to_raw_value(
+                                    &harness_proto::WorkspaceGitStatusFrame { status: next },
+                                )
+                                .ok()?;
+                                return Some((raw, (rx, checkout_id, previous, emitted)));
                             }
                         }
                     },
                 );
-                Ok(RpcReply::Stream(stream.boxed()))
+                Ok(RpcReply::StreamRaw(stream.boxed()))
             }
             methods::WATCH_CHECKOUT_CHANGE_REQUEST => {
                 let p: CheckoutChangeRequestParams = parse_params(params)?;
@@ -2958,8 +3015,10 @@ impl RpcService for EngineRpc {
                     .watch_for_branch(&cwd, p.branch.as_deref())
                     .await
                     .map_err(|error| RpcError::Failed(error.to_string()))?
-                    .filter_map(|status| async move { serde_json::to_value(status).ok() });
-                Ok(RpcReply::Stream(stream.boxed()))
+                    .filter_map(
+                        |status| async move { serde_json::value::to_raw_value(&status).ok() },
+                    );
+                Ok(RpcReply::StreamRaw(stream.boxed()))
             }
             // One-shot scoped capture for the Changes pane: `branch` diffs the
             // working tree against merge-base(baseRef, HEAD); `turn` diffs the
@@ -3038,6 +3097,50 @@ impl RpcService for EngineRpc {
                 })
                 .await
             }
+            methods::BROWSE_CHECKOUT_GITHUB => {
+                Box::pin(async move {
+                    let p: harness_rpc::BrowseCheckoutGitHubParams = parse_params(params)?;
+                    let response = crate::github_repository::browse(
+                        &self.workspace,
+                        &self.repos,
+                        self.doc_host.device_id(),
+                        p,
+                    )
+                    .await?;
+                    RpcReply::value(&response)
+                })
+                .await
+            }
+            methods::GET_CHECKOUT_GIT_STATE => {
+                Box::pin(async move {
+                    let p: harness_rpc::GetCheckoutGitStateParams = parse_params(params)?;
+                    let state = crate::git_actions::get_state(
+                        &self.workspace,
+                        &self.repos,
+                        &self.sessions,
+                        self.doc_host.device_id(),
+                        &p.chat_id,
+                    )
+                    .await?;
+                    RpcReply::value(&state)
+                })
+                .await
+            }
+            methods::APPLY_CHECKOUT_GIT_ACTION => {
+                Box::pin(async move {
+                    let p: harness_rpc::ApplyCheckoutGitActionParams = parse_params(params)?;
+                    let state = crate::git_actions::apply(
+                        self.workspace.clone(),
+                        self.repos.clone(),
+                        self.sessions.clone(),
+                        self.doc_host.device_id().to_owned(),
+                        p,
+                    )
+                    .await?;
+                    RpcReply::value(&state)
+                })
+                .await
+            }
             methods::DISCARD_WORKING_TREE => {
                 // This destructive branch performs several nested filesystem
                 // futures. Box it so unrelated RPC calls do not inherit that
@@ -3106,11 +3209,18 @@ impl RpcService for EngineRpc {
                         }
                     }
 
-                    let snapshot = self
-                        .diff_sync
-                        .discard_working_tree(&identity.id, &p.expected_checksum)
-                        .await
-                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    let diff_sync = self.diff_sync.clone();
+                    // Hold the shared Git workflow gate until the independent
+                    // discard task finishes, even if this RPC is cancelled.
+                    let snapshot = tokio::spawn(async move {
+                        let _guard = crate::git_actions::mutation_guard(&identity.id).await;
+                        diff_sync
+                            .discard_working_tree(&identity.id, &p.expected_checksum)
+                            .await
+                    })
+                    .await
+                    .map_err(|_| RpcError::Failed("discard task failed".into()))?
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
                     RpcReply::value(&serde_json::json!({
                         "ok": true,
                         "checksum": snapshot.checksum,
@@ -3541,10 +3651,10 @@ impl RpcService for EngineRpc {
                     .map_err(RpcError::from)?;
                 let stream = futures::stream::unfold(subscription, |mut subscription| async move {
                     let changes = subscription.recv().await?;
-                    let value = serde_json::to_value(changes).ok()?;
-                    Some((value, subscription))
+                    let raw = serde_json::value::to_raw_value(&changes).ok()?;
+                    Some((raw, subscription))
                 });
-                Ok(RpcReply::Stream(stream.boxed()))
+                Ok(RpcReply::StreamRaw(stream.boxed()))
             }
             methods::CREATE_WORKTREE => {
                 let p: CreateWorktreeParams = parse_params(params)?;
@@ -3788,10 +3898,10 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 let stream = futures::stream::unfold(rx, |mut rx| async move {
                     let event = rx.recv().await?;
-                    let value = serde_json::to_value(&event).ok()?;
-                    Some((value, rx))
+                    let raw = serde_json::value::to_raw_value(&event).ok()?;
+                    Some((raw, rx))
                 });
-                Ok(RpcReply::Stream(stream.boxed()))
+                Ok(RpcReply::StreamRaw(stream.boxed()))
             }
             // Built and boxed in its own frame: the dispatcher's stack is budgeted.
             methods::LIST_SIMULATORS
@@ -4052,6 +4162,16 @@ impl RpcService for EngineRpc {
 mod tests {
     use super::*;
 
+    async fn opening_doc_messages_stream(
+        host: crate::doc_host::DocHost,
+        chat_id: String,
+    ) -> Result<BoxStream<'static, serde_json::Value>, RpcError> {
+        let stream = super::opening_doc_messages_stream(host, chat_id).await?;
+        Ok(stream
+            .map(|raw| serde_json::from_str(raw.get()).unwrap())
+            .boxed())
+    }
+
     #[test]
     fn queue_message_decodes_structural_origin_without_attribution() {
         let human: QueueMessageParams = serde_json::from_value(serde_json::json!({
@@ -4164,9 +4284,7 @@ mod tests {
         };
         match mode {
             "success" | "npm" => {
-                let RpcReply::Value(value) = result.unwrap() else {
-                    panic!("expected descriptors");
-                };
+                let value = result.unwrap().into_value().expect("expected descriptors");
                 let list: Vec<crate::registry::HarnessDescriptor> =
                     serde_json::from_value(value).unwrap();
                 assert!(list[0].installed);
@@ -4511,6 +4629,16 @@ mod tests {
     }
 
     #[test]
+    fn github_repository_browse_routes_to_host_with_context_budget() {
+        assert!(forwardable(methods::BROWSE_CHECKOUT_GITHUB));
+        assert!(!is_stream_method(methods::BROWSE_CHECKOUT_GITHUB));
+        assert_eq!(
+            forward_deadline(methods::BROWSE_CHECKOUT_GITHUB),
+            std::time::Duration::from_secs(100)
+        );
+    }
+
+    #[test]
     fn local_device_is_not_forwardable() {
         assert!(!forwardable(methods::LOCAL_DEVICE));
         assert!(!forwardable(methods::SHOW_VISUAL));
@@ -4525,6 +4653,14 @@ mod tests {
         assert!(forwardable(methods::WATCH_CHECKOUT_CHANGE_REQUEST));
         assert!(is_stream_method(methods::WATCH_CHECKOUT_CHANGE_REQUEST));
         assert!(forwardable(methods::DISCARD_WORKING_TREE));
+        assert!(forwardable(methods::GET_CHECKOUT_GIT_STATE));
+        assert!(forwardable(methods::APPLY_CHECKOUT_GIT_ACTION));
+        assert!(!is_stream_method(methods::GET_CHECKOUT_GIT_STATE));
+        assert!(!is_stream_method(methods::APPLY_CHECKOUT_GIT_ACTION));
+        assert_eq!(
+            forward_deadline(methods::APPLY_CHECKOUT_GIT_ACTION),
+            std::time::Duration::from_secs(180)
+        );
         assert!(forwardable(methods::LIST_WORKSPACE_DIRECTORY));
         assert!(forwardable(methods::SEARCH_WORKSPACE_FILES));
         assert!(forwardable(methods::READ_WORKSPACE_FILE));
@@ -4713,6 +4849,15 @@ mod context_usage_tests {
     use super::*;
     use futures::StreamExt;
     use std::sync::Arc;
+
+    fn doc_messages_stream(
+        rx: watch::Receiver<crate::doc_host::TranscriptSnapshot>,
+        doc: std::sync::Arc<harness_doc::SessionDoc>,
+    ) -> BoxStream<'static, serde_json::Value> {
+        super::doc_messages_stream(rx, doc)
+            .map(|raw| serde_json::from_str(raw.get()).unwrap())
+            .boxed()
+    }
 
     #[tokio::test]
     async fn replay_cutoff_travels_with_coalesced_backfill_and_live_content() {

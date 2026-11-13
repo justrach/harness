@@ -1365,15 +1365,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "getopts"
-version = "0.2.24"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfe4fbac503b8d1f88e6676011885f34b7174f46e59956bba534ba83abded4df"
-dependencies = [
- "unicode-width",
-]
-
-[[package]]
 name = "getrandom"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1465,7 +1456,7 @@ dependencies = [
 
 [[package]]
 name = "harness"
-version = "0.2.190"
+version = "0.2.191"
 dependencies = [
  "anyhow",
  "clap",
@@ -1489,7 +1480,7 @@ dependencies = [
 
 [[package]]
 name = "harness-adapters"
-version = "0.2.190"
+version = "0.2.191"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1516,7 +1507,7 @@ dependencies = [
 
 [[package]]
 name = "harness-doc"
-version = "0.2.190"
+version = "0.2.191"
 dependencies = [
  "chrono",
  "harness-proto",
@@ -1530,7 +1521,7 @@ dependencies = [
 
 [[package]]
 name = "harness-engine"
-version = "0.2.190"
+version = "0.2.191"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1575,7 +1566,7 @@ dependencies = [
 
 [[package]]
 name = "harness-mcp"
-version = "0.2.190"
+version = "0.2.191"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1593,7 +1584,7 @@ dependencies = [
 
 [[package]]
 name = "harness-mobile"
-version = "0.2.190"
+version = "0.2.191"
 dependencies = [
  "async-trait",
  "futures",
@@ -1616,7 +1607,7 @@ dependencies = [
 
 [[package]]
 name = "harness-observe"
-version = "0.2.190"
+version = "0.2.191"
 dependencies = [
  "anyhow",
  "clap",
@@ -1629,7 +1620,7 @@ dependencies = [
 
 [[package]]
 name = "harness-preview"
-version = "0.2.190"
+version = "0.2.191"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1657,7 +1648,7 @@ dependencies = [
 
 [[package]]
 name = "harness-proto"
-version = "0.2.190"
+version = "0.2.191"
 dependencies = [
  "chrono",
  "pulldown-cmark",
@@ -1667,7 +1658,7 @@ dependencies = [
 
 [[package]]
 name = "harness-rpc"
-version = "0.2.190"
+version = "0.2.191"
 dependencies = [
  "async-trait",
  "futures",
@@ -1684,7 +1675,7 @@ dependencies = [
 
 [[package]]
 name = "harness-sync"
-version = "0.2.190"
+version = "0.2.191"
 dependencies = [
  "block2",
  "chrono",
@@ -1706,7 +1697,7 @@ dependencies = [
 
 [[package]]
 name = "harness-syntax"
-version = "0.2.190"
+version = "0.2.191"
 dependencies = [
  "thiserror 2.0.20",
  "tree-sitter",
@@ -1740,7 +1731,7 @@ dependencies = [
 
 [[package]]
 name = "harness-theme"
-version = "0.2.190"
+version = "0.2.191"
 dependencies = [
  "anyhow",
  "clap",
@@ -1755,7 +1746,7 @@ dependencies = [
 
 [[package]]
 name = "harness-update"
-version = "0.2.190"
+version = "0.2.191"
 dependencies = [
  "anyhow",
  "futures",
@@ -1773,7 +1764,7 @@ dependencies = [
 
 [[package]]
 name = "harness-visual"
-version = "0.2.190"
+version = "0.2.191"
 dependencies = [
  "mlua",
  "serde",
@@ -3215,17 +3206,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f86ba2052aebccc42cbbb3ed234b8b13ce76f75c3551a303cb2bcffcff12bb14"
 dependencies = [
  "bitflags 2.13.1",
- "getopts",
  "memchr",
- "pulldown-cmark-escape",
  "unicase",
 ]
-
-[[package]]
-name = "pulldown-cmark-escape"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "007d8adb5ddab6f8e3f491ac63566a7d5002cc7ed73901f72057943fa71ae1ae"
 
 [[package]]
 name = "quick-xml"
@@ -4605,7 +4588,6 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
- "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",

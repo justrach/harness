@@ -479,7 +479,7 @@ pub fn title(a: *const App, panel: Panel) []const u8 {
     };
 }
 pub fn hostTitle(a: *const App, tab: panels.Tab) []const u8 {
-    return if (tab.kind == .tool_access) "Tool access" else if (tab.agent) |agent| agent.title else if (tab.browser) |browser| browser.title.text() else if (tab.kind == .diffs) a.panels.scope.label() else std.fs.path.basename(tab.path);
+    return if (tab.kind == .git) "Git history" else if (tab.kind == .github) "GitHub" else if (tab.kind == .tool_access) "Tool access" else if (tab.agent) |agent| agent.title else if (tab.browser) |browser| browser.title.text() else if (tab.kind == .diffs) a.panels.scope.label() else std.fs.path.basename(tab.path);
 }
 pub fn glyph(a: *const App, panel: Panel) icons.Name {
     return switch (panel) {
@@ -489,6 +489,8 @@ pub fn glyph(a: *const App, panel: Panel) icons.Name {
             .browser => .globe,
             .file => .document,
             .diffs => .list,
+            .git => .@"git-branch",
+            .github => .@"pull-request",
             .subagent => .bot,
             .tool_access => .widget,
         } else .plus,
@@ -604,8 +606,8 @@ pub fn tabCount(a: *const App, panel: Panel) usize {
         .files => 1,
     };
 }
-/// Desktop's toggle + history, then 10+4px control clearance. The history
-/// control's 28 points ride the collapse tween with the seam instead of
+/// Desktop's toggle + history + mode, then 10+4px control clearance. The two
+/// collapsed controls' 56 points ride the seam tween instead of
 /// flipping on `sidebar_open` at the ⌘B press, so opening the sidebar can
 /// never teleport the lane backwards before the first tween frame.
 pub fn leftInset(a: *const App) f32 {

@@ -618,6 +618,60 @@ test "the composer has the keys after ⌘D, ⌘[ and ⌘]: nothing typed is lost
     try testing.expectEqualStrings("on alpha", h.a.composer.text());
 }
 
+test "native visual renders interactive Luau widgets 1:1 in transcript" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.t.resize(1200, 920);
+    const demo_script = @embedFile("test_visuals_demo.luau");
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    try buf.appendSlice(testing.allocator, "{\"reset\":[{\"id\":\"vis-turn\",\"role\":\"assistant\",\"status\":\"complete\",\"parts\":[{\"id\":\"v1\",\"kind\":\"visual\",\"title\":\"Capacity planner\",\"script\":");
+    try buf.print(testing.allocator, "{f}", .{std.json.fmt(demo_script, .{})});
+    try buf.appendSlice(testing.allocator, "}]}]}");
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.items, .{});
+    defer parsed.deinit();
+    try h.a.transcript.apply(parsed.value);
+    h.t.settle(1);
+
+    try testing.expect(h.t.hasText("Capacity planner"));
+    try testing.expect(h.t.hasText("Native · Interactive"));
+    try testing.expect(h.t.hasText("Monthly estimate: $1036"));
+    try testing.expect(h.t.hasText("Capacity: 60 units"));
+    try testing.expect(h.t.hasText("Projected monthly cost · USD"));
+    try testing.expect(h.t.hasText("Saved scenarios: 0"));
+    h.snap("native-visual-demo");
+
+    try h.t.clickText("Save scenario");
+    h.t.settle(1);
+    try testing.expect(h.t.hasText("Saved scenarios: 1"));
+
+    try h.t.clickText("Efficiency mode");
+    h.t.settle(1);
+    try testing.expect(h.t.hasText("Monthly estimate: $1440"));
+    try testing.expect(h.t.hasText("Off"));
+    h.snap("native-visual-demo-updated");
+}
+
+test "native visual shows sanitized error card when Luau script fails" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.t.resize(1200, 920);
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"vis-err","role":"assistant","status":"complete","parts":[
+        \\ {"id":"v-bad","kind":"visual","title":"Broken visual","script":"return function() return ui.webview{} end"}]}]}
+    , .{});
+    defer parsed.deinit();
+    try h.a.transcript.apply(parsed.value);
+    h.t.settle(1);
+    try testing.expect(h.t.hasText("Broken visual"));
+    try testing.expect(h.t.hasText("Stopped"));
+    try testing.expect(h.t.hasText("This visual could not run"));
+    h.snap("native-visual-error");
+}
+
+
 test "a second line makes the docked composer taller and keeps the keys" {
     var h: Harness = undefined;
     try h.init();

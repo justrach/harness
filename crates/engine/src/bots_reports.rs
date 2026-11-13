@@ -288,8 +288,8 @@ impl Bots {
 pub async fn follow(rpc: Arc<dyn RpcService>, bots: Bots) {
     let mut reports = Reports::default();
     loop {
-        if let Ok(RpcReply::Stream(mut stream)) =
-            rpc.handle(methods::WATCH_SESSIONS, json!({})).await
+        if let Ok(reply) = rpc.handle(methods::WATCH_SESSIONS, json!({})).await
+            && let Ok(mut stream) = reply.into_stream()
         {
             while let Some(item) = stream.next().await {
                 let Ok(sessions) = serde_json::from_value::<Vec<Session>>(item) else {

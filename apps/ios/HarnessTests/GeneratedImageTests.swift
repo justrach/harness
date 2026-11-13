@@ -37,7 +37,7 @@ final class GeneratedImageTests: XCTestCase {
         }
     }
 
-    func testVisualFallbackPreservesMixedPartsWithoutExposingSource() throws {
+    func testNativeVisualProjectionPreservesMixedPartsAndScript() throws {
         let value: [String: Any] = ["id": "reply", "role": "assistant", "parts": [
             ["id": "before", "kind": "text", "text": "Before"],
             ["id": "v", "kind": "visual", "title": "Overview",
@@ -49,12 +49,12 @@ final class GeneratedImageTests: XCTestCase {
         let entry = try XCTUnwrap(SessionStore.entryFrom(.fromJSON(value)))
         XCTAssertEqual(entry.parts, [
             .text(id: "before", text: "Before"),
-            .text(id: "v", text: "Native visual: Overview — open in Harness desktop"),
+            .visual(id: "v", title: "Overview", script: "error('must not run or display')"),
             .text(id: "after", text: "After")
         ])
     }
 
-    func testVisualFallbackRequiresABoundedNonblankTitleOnly() {
+    func testNativeVisualProjectionRequiresABoundedNonblankTitleAndDefaultsMissingScript() {
         let invalid: [Any] = [NSNull(), 42, "", " \n\t", String(repeating: "界", count: 201),
                               String(repeating: "e\u{301}", count: 101)]
         for title in invalid {
@@ -63,9 +63,9 @@ final class GeneratedImageTests: XCTestCase {
         XCTAssertNil(SessionStore.partFrom(.fromJSON(["id": "v", "kind": "visual"])))
         for title in [String(repeating: "界", count: 200), String(repeating: "😀", count: 200),
                       String(repeating: "e\u{301}", count: 100)] {
-            // A fallback requires no script and counts Unicode scalars, not grapheme clusters.
+            // Projection accepts a missing script and counts Unicode scalars, not grapheme clusters.
             XCTAssertEqual(SessionStore.partFrom(.fromJSON(["id": "v", "kind": "visual", "title": title])),
-                           .text(id: "v", text: "Native visual: \(title) — open in Harness desktop"))
+                           .visual(id: "v", title: title, script: ""))
         }
     }
 

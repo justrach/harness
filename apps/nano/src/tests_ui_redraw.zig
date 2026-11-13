@@ -72,8 +72,8 @@ test "#814 a different working chat builds at least 5x fewer transcript nodes" {
     try fixture(&a, &t);
     defer a.deinit();
     defer t.deinit();
-    // Exercise the on-screen culling path with no engine or personal data.
-    a.offscreen = false;
+    // Measure the intentionally full fixture tree as the reference. The
+    // ordinary settled live path now culls too, even before another chat works.
     var history: std.ArrayList(u8) = .empty;
     defer history.deinit(testing.allocator);
     try history.appendSlice(testing.allocator, "{\"reset\":[");
@@ -87,6 +87,8 @@ test "#814 a different working chat builds at least 5x fewer transcript nodes" {
     try a.transcript.apply(parsed.value);
     t.settle(1);
     const full_nodes = t.ctx.nodes.items.len;
+    // Exercise the on-screen culling path with no engine or personal data.
+    a.offscreen = false;
     const sessions = try std.json.parseFromSlice(std.json.Value, testing.allocator,
         \\[{"chatId":"other-synthetic","status":"working"}]
     , .{});

@@ -62,6 +62,7 @@ const SWAPPING: &str = "Not attached to an active page";
 /// The most pages open at once.
 const MAX_TABS: usize = 8;
 /// The most servers listed.
+#[cfg(feature = "preview")]
 const MAX_SERVERS: usize = 30;
 
 /// One frame of a page, as a viewer gets it.
@@ -808,6 +809,7 @@ impl LocalhostView {
     }
 
     /// Servers listening on this computer's loopback that answer HTTP.
+    #[cfg(feature = "preview")]
     pub async fn servers(&self) -> Vec<LocalServer> {
         let listeners = tokio::task::spawn_blocking(harness_preview::discovery::listeners)
             .await
@@ -850,6 +852,12 @@ impl LocalhostView {
         servers.sort_by_key(|s| s.port);
         servers.truncate(MAX_SERVERS);
         servers
+    }
+
+    /// Servers listening on this computer's loopback that answer HTTP.
+    #[cfg(not(feature = "preview"))]
+    pub async fn servers(&self) -> Vec<LocalServer> {
+        Vec::new()
     }
 
     /// Close every page and the browser.

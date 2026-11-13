@@ -36,7 +36,7 @@ use harness_doc::{
     COMMAND_DEFAULT_TTL_MS, CommandBasedOn, CommandDisposition, DocError, EvaluationContext,
     MessagePart, MessageRole, MessageStatus, QueueDeliveryGate, QueuedMessage, SessionCommandEntry,
     SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry, evaluate_command,
-    join_continuation_entries,
+    join_continuation_entries_shared,
 };
 use harness_proto::{
     ConversationSourceContext, HarnessId, TurnOrigin, UserInputAnswer, UserInputQuestion,
@@ -560,7 +560,7 @@ pub(crate) fn pending_prompts(commands: &[SessionCommandEntry]) -> Vec<PendingPr
 /// when the watch coalesces several backfill and live commits.
 #[derive(Clone, Default)]
 pub struct TranscriptSnapshot {
-    pub entries: Arc<Vec<SessionMessageEntry>>,
+    pub entries: Arc<Vec<Arc<SessionMessageEntry>>>,
     pub replay_baseline: Arc<harness_doc::TranscriptBaseline>,
 }
 
@@ -911,7 +911,7 @@ impl ChatDocHandle {
         // Re-materialize only the messages changed since the last publish:
         // a streaming commit touches one, the transcript can be megabytes.
         let mut cache = lock(&self.transcript_history).take_entry_cache();
-        let read = self.doc.read_entries_cached(&mut cache);
+        let read = self.doc.read_entries_cached_shared(&mut cache);
         if read.is_err() {
             cache = Default::default();
         }
@@ -920,7 +920,7 @@ impl ChatDocHandle {
             Ok(entries) => {
                 let replay_baseline =
                     lock(&self.transcript_history).snapshot(self.doc.doc(), &entries);
-                let joined = join_continuation_entries(entries);
+                let joined = join_continuation_entries_shared(entries);
                 // send_replace: update the watch even with no subscribers yet, so a
                 // late subscriber's first borrow sees the current transcript.
                 self.messages_tx.send_replace(TranscriptSnapshot {
@@ -6451,7 +6451,10 @@ mod transfer_progress_tests {
         let full = |handle: &super::ChatDocHandle| {
             harness_doc::join_continuation_entries(handle.doc.read_entries().unwrap())
         };
-        assert_eq!(*rx.borrow().entries, full(&handle));
+        let to_vec = |entries: &[Arc<harness_doc::SessionMessageEntry>]| {
+            entries.iter().map(|e| (**e).clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(to_vec(&rx.borrow().entries), full(&handle));
 
         let mut writer = harness_doc::SegmentWriter::begin(&handle.doc, "reply", "device", 99).unwrap();
         let mut text = String::new();
@@ -6462,7 +6465,7 @@ mod transfer_progress_tests {
                 .unwrap();
             handle.doc.doc().commit();
             handle.publish_messages_if_watched();
-            assert_eq!(*rx.borrow().entries, full(&handle), "token {token}");
+            assert_eq!(to_vec(&rx.borrow().entries), full(&handle), "token {token}");
         }
 
         // A remote peer edits an OLD message and appends one; the import
@@ -6497,7 +6500,7 @@ mod transfer_progress_tests {
             .unwrap();
         handle.doc.doc().import(&update).unwrap();
         handle.publish_messages_if_watched();
-        assert_eq!(*rx.borrow().entries, full(&handle));
+        assert_eq!(to_vec(&rx.borrow().entries), full(&handle));
         assert!(rx.borrow().entries.iter().any(|e| e.id == "remote"));
 
         // Unwatched changes drop the cache; reattaching rebuilds correctly.
@@ -6508,7 +6511,7 @@ mod transfer_progress_tests {
         handle.doc.doc().commit();
         handle.publish_messages_if_watched();
         let rx = handle.watch_messages();
-        assert_eq!(*rx.borrow().entries, full(&handle));
+        assert_eq!(to_vec(&rx.borrow().entries), full(&handle));
     }
 
     #[tokio::test]

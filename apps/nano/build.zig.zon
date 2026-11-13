@@ -12,6 +12,10 @@
             .url = "git+https://github.com/justrach/http-zig#5b0324bb3ab49fe18947b2f17fe7649760e1540a",
             .hash = "http_zig-0.1.0-2CB7E00SAwAnwnBkJDgCDm3zLwrCmZZkHNSw5t7X9Vbf",
         },
+        .luau = .{
+            .url = "https://github.com/luau-lang/luau/archive/refs/tags/0.740.tar.gz",
+            .hash = "N-V-__8AAJStHwHBMyJpk0Co2z_LW7obT2wCMdyGdJZ6LYHH",
+        },
     },
     .paths = .{
         "build.zig",                            "build.zig.zon",                      "src",                         "assets",                  "native_math",                 "math_archive.zig",

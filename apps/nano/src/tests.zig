@@ -17,7 +17,12 @@ test {
     _ = @import("engine_start.zig");
     _ = @import("diff.zig");
     _ = @import("tests_diff_availability.zig");
+    _ = @import("tests_git.zig");
+    _ = @import("tests_git_workflow.zig");
+    _ = @import("tests_github_repository.zig");
+    _ = @import("tests_scroll_performance.zig");
     _ = @import("tests_link_actions.zig");
+    _ = @import("tests_titlebar_clearance.zig");
     _ = @import("wizard.zig");
     _ = @import("termlog.zig");
     _ = @import("parity.zig");
@@ -145,4 +150,5 @@ test {
     _ = @import("graff_update.zig");
     _ = @import("view_updates.zig");
     _ = @import("sound.zig");
+    _ = @import("visual_luau.zig");
 }

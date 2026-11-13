@@ -785,11 +785,10 @@ final class SessionStore {
             // The body lives in `reasoning`, never `text` (schema.rs DocPartJson).
             return .reasoning(id: id, text: m["reasoning"]?.stringValue ?? "")
         case "visual":
-            // Mobile shows only the bounded title; source is never read or executed.
             guard let title = m["title"]?.stringValue,
                   !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   title.unicodeScalars.count <= 200 else { return nil }
-            return .text(id: id, text: "Native visual: \(title) — open in Harness desktop")
+            return .visual(id: id, title: title, script: m["script"]?.stringValue ?? "")
         case "image":
             let reference = GeneratedImageReference(path: m["path"]?.stringValue ?? "",
                                                     name: m["name"]?.stringValue ?? "",

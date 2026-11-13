@@ -25,7 +25,7 @@ pub const Scope = enum {
     }
 };
 
-pub const TabKind = enum { diffs, file, subagent, browser, tool_access };
+pub const TabKind = enum { diffs, file, subagent, browser, tool_access, git, github };
 
 pub const Tab = struct {
     kind: TabKind,
@@ -100,12 +100,18 @@ pub const Panels = struct {
     /// The chat these are for: a change clears them.
     chat: ?[]u8 = null,
     discard_confirm: bool = false,
+    history: @import("app_git.zig").State = .{},
+    git_workflow: @import("app_git_workflow.zig").State = .{},
+    github_repository: @import("app_github_repository.zig").State = .{},
 
     pub fn init(gpa: Allocator) Panels {
         return .{ .gpa = gpa, .arena = .init(gpa) };
     }
 
     pub fn deinit(p: *Panels) void {
+        p.history.deinit(p.gpa);
+        p.git_workflow.deinit(p.gpa);
+        p.github_repository.deinit(p.gpa);
         @import("text_buffer.zig").deinit(&p.search);
         if (p.pending_agent) |s| s.destroy();
         if (p.pending_browser) |b| b.destroy();
@@ -165,6 +171,9 @@ pub fn chatChanged(a: *App) void {
     const p = &a.panels;
     const same = if (p.chat) |c| (if (a.selected) |s| std.mem.eql(u8, c, s) else false) else a.selected == null;
     if (same) return;
+    @import("app_git.zig").reset(a);
+    @import("app_git_workflow.zig").reset(a);
+    @import("app_github_repository.zig").reset(a);
     if (p.w_diffs) |id| a.engine.cancel(id);
     if (p.w_git) |id| a.engine.cancel(id);
     p.w_diffs = null;
@@ -205,8 +214,13 @@ pub fn chatChanged(a: *App) void {
 /// The chat list came: a panel opened before the chat's folder was known
 /// can fetch now.
 pub fn chatsArrived(a: *App) void {
+    @import("app_git.zig").reconcile(a);
+    @import("app_git_workflow.zig").reconcile(a);
+    @import("app_github_repository.zig").reconcile(a);
     const p = &a.panels;
     if (a.selected == null) return;
+    if (p.host_open and p.history.target == null) if (p.activeTab()) |tab| if (tab.kind == .git) @import("app_git.zig").load(a, 0);
+    if (p.host_open and p.github_repository.open and p.github_repository.target == null) if (p.activeTab()) |tab| if (tab.kind == .github) @import("app_github_repository.zig").show(a);
     @import("app_actions.zig").refresh(a);
     if (p.host_open and p.diff == null and !p.diff_loading) {
         if (p.activeTab()) |t| if (t.kind == .diffs) openDiffs(a);
@@ -241,6 +255,11 @@ pub fn closeTab(a: *App, i: usize) void {
     p.retired.ensureUnusedCapacity(p.gpa, 1) catch return;
     const was_active = p.active;
     const t = p.tabs.orderedRemove(i);
+    if (t.kind == .git) {
+        @import("app_git.zig").reset(a);
+        @import("app_git_workflow.zig").reset(a);
+    }
+    if (t.kind == .github) @import("app_github_repository.zig").reset(a);
     if (t.agent) |s| s.stop();
     if (comptime @import("builtin").os.tag == .macos) if (t.browser) |b| if (b.native) |n| n.show(false);
     p.retired.appendAssumeCapacity(t);
@@ -269,6 +288,14 @@ pub fn showTab(a: *App, i: usize) void {
     const t = p.tabs.items[i];
     switch (t.kind) {
         .diffs => openDiffs(a),
+        .git => {
+            if (p.history.snapshot == null) @import("app_git.zig").load(a, 0);
+            if (p.git_workflow.open) @import("app_git_workflow.zig").load(a);
+        },
+        .github => {
+            @import("app_change_requests.zig").reconcile(a);
+            if (p.github_repository.open) @import("app_github_repository.zig").show(a);
+        },
         .file => if (t.editor) |e| {
             e.focus = true;
             if (!e.belongsTo(a.selected)) @import("app_file_editor.zig").reveal(a, e) else readFile(a, t.path);

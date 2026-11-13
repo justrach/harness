@@ -57,6 +57,7 @@ jobs:
             -resultBundlePath "$RUNNER_TEMP/reauth-tests.xcresult" \
             -only-testing:HarnessTests/AgentReauthenticationTests \
             -only-testing:HarnessTests/GeneratedImageTests \
+            -only-testing:HarnessTests/VisualRuntimeTests \
             -only-testing:HarnessTests/BrandMarkTests \
             -only-testing:HarnessTests/ParityTests \
             -only-testing:HarnessTests/PerfMonitorTests \

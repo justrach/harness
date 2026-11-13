@@ -2036,6 +2036,7 @@ mod tests {
     }
 }
 
+#[cfg(feature = "preview")]
 #[async_trait::async_trait]
 impl harness_preview::signaling::TokenSource for Auth {
     async fn token(&self) -> anyhow::Result<String> {

@@ -367,6 +367,9 @@ pub struct RegistryDoc {
     /// Bumped on every mutation (local or applied) — the engine host converts
     /// this into watch-channel publishes and snapshot debounces.
     generation: u64,
+    /// Per-kind mutation counter so callers (like `WorkspaceHost`) can skip
+    /// re-decoding unchanged kinds on unrelated mutations or presence ticks.
+    kind_generations: HashMap<String, u64>,
 }
 
 impl RegistryDoc {
@@ -379,6 +382,7 @@ impl RegistryDoc {
             clock: HlcClock::default(),
             pending: Vec::new(),
             generation: 0,
+            kind_generations: HashMap::new(),
         }
     }
 
@@ -394,6 +398,45 @@ impl RegistryDoc {
     /// Monotonic local change counter (any mutation bumps it).
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Monotonic change counter for a single row kind.
+    pub fn kind_generation(&self, kind: &str) -> u64 {
+        self.kind_generations.get(kind).copied().unwrap_or(0)
+    }
+
+    fn bump_kind(&mut self, kind: &str) {
+        if let Some(counter) = self.kind_generations.get_mut(kind) {
+            *counter += 1;
+        } else {
+            self.kind_generations.insert(kind.to_string(), 1);
+        }
+    }
+
+    fn bump_all_kinds(&mut self) {
+        for kind in [
+            KIND_DEVICES,
+            KIND_SPACES,
+            KIND_CHATS,
+            KIND_SESSIONS,
+            KIND_PREFERENCES,
+        ] {
+            self.bump_kind(kind);
+        }
+        let extra: Vec<String> = self
+            .authoritative
+            .keys()
+            .filter(|k| {
+                !matches!(
+                    k.as_str(),
+                    KIND_DEVICES | KIND_SPACES | KIND_CHATS | KIND_SESSIONS | KIND_PREFERENCES
+                )
+            })
+            .cloned()
+            .collect();
+        for kind in extra {
+            self.bump_kind(&kind);
+        }
     }
 
     pub fn pending_len(&self) -> usize {
@@ -511,6 +554,7 @@ impl RegistryDoc {
             }
         }
         self.authoritative = incoming;
+        self.bump_all_kinds();
         self.server_seq = seq;
         self.gc_floor = gc_floor;
         if seed.is_empty() {
@@ -557,9 +601,24 @@ impl RegistryDoc {
     /// re-pulling our own batch is an idempotent LWW no-op.
     pub fn ack_batch(&mut self, batch: &str, _seq: u64) -> bool {
         let before = self.pending.len();
-        self.pending.retain(|b| b.batch != batch);
+        let mut touched: Vec<String> = Vec::new();
+        self.pending.retain(|b| {
+            if b.batch == batch {
+                for op in &b.ops {
+                    if !touched.iter().any(|k| k == &op.kind) {
+                        touched.push(op.kind.clone());
+                    }
+                }
+                false
+            } else {
+                true
+            }
+        });
         if self.pending.len() != before {
             self.generation += 1;
+            for kind in touched {
+                self.bump_kind(&kind);
+            }
             true
         } else {
             false
@@ -586,6 +645,7 @@ impl RegistryDoc {
     }
 
     fn put_authoritative(&mut self, row: RegistryRow) {
+        self.bump_kind(&row.kind);
         self.authoritative
             .entry(row.kind.clone())
             .or_default()
@@ -633,6 +693,15 @@ impl RegistryDoc {
         // atomically (only cross-chunk atomicity is given up).
         const MAX_OPS_PER_BATCH: usize = 400;
         self.generation += 1;
+        let mut touched: Vec<String> = Vec::new();
+        for op in &ops {
+            if !touched.iter().any(|k| k == &op.kind) {
+                touched.push(op.kind.clone());
+            }
+        }
+        for kind in touched {
+            self.bump_kind(&kind);
+        }
         while !ops.is_empty() {
             let tail = if ops.len() > MAX_OPS_PER_BATCH {
                 ops.split_off(MAX_OPS_PER_BATCH)
@@ -705,33 +774,36 @@ impl RegistryDoc {
         row.filter(|r| !r.deleted)
     }
 
-    /// All live rows of `kind`, overlay applied.
+    /// All live rows of `kind`, overlay applied in a single O(N + P) pass.
     pub fn overlay_rows(&self, kind: &str) -> Vec<RegistryRow> {
-        let mut ids: Vec<String> = self
+        let mut by_id: HashMap<&str, RegistryRow> = self
             .authoritative
             .get(kind)
-            .map(|m| m.keys().cloned().collect())
+            .map(|m| m.iter().map(|(k, v)| (k.as_str(), v.clone())).collect())
             .unwrap_or_default();
         for batch in &self.pending {
             for op in &batch.ops {
-                if op.kind == kind && !ids.iter().any(|id| id == &op.id) {
-                    ids.push(op.id.clone());
+                if op.kind == kind {
+                    let current = by_id.get(op.id.as_str());
+                    let (next, _) = apply_op(current, op);
+                    if let Some(next) = next {
+                        by_id.insert(op.id.as_str(), next);
+                    }
                 }
             }
         }
-        ids.iter()
-            .filter_map(|id| self.overlay_row(kind, id))
-            .collect()
+        by_id.into_values().filter(|r| !r.deleted).collect()
     }
 
     fn read_kind<T: serde::de::DeserializeOwned>(&self, kind: &str) -> Vec<T> {
         let mut out = Vec::new();
         for row in self.overlay_rows(kind) {
-            let value = Value::Object(row.fields.clone().into_iter().collect());
+            let id = row.id;
+            let value = Value::Object(row.fields.into_iter().collect());
             match serde_json::from_value::<T>(value) {
                 Ok(parsed) => out.push(parsed),
                 Err(err) => {
-                    tracing::warn!(kind, row = %row.id, error = %err, "skipping malformed registry row");
+                    tracing::warn!(kind, row = %id, error = %err, "skipping malformed registry row");
                 }
             }
         }

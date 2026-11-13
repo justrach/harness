@@ -76,6 +76,21 @@ pub fn cases(gpa: std.mem.Allocator) ![]Case {
         try case(gpa, "save a chat editor file with stale fences", r.writeWorkspaceFile(.{ .chatId = chat, .path = "README.md", .text = "Explicit edit\n", .expectedCheckoutId = "checkout-parity-stale", .expectedContentHash = "hash-parity-stale", .encoding = "utf8", .lineEnding = "lf" }), false),
         try case(gpa, "save a project editor file with stale fences", r.writeWorkspaceFile(.{ .spaceId = space, .checkoutPath = dir, .path = "README.md", .text = "Explicit edit\n", .expectedCheckoutId = "checkout-parity-stale", .expectedContentHash = "hash-parity-stale", .encoding = "utf8Bom", .lineEnding = "crlf" }), false),
         try case(gpa, "watch git", r.watchGit(space, dir, null), true),
+        try case(gpa, "page local git history", r.gitHistory(dir, 0, null), false),
+        try case(gpa, "page remote git history", r.gitHistory(dir, 50, "host-parity"), false),
+        try case(gpa, "inspect checkout Git state", r.gitState(chat, null), false),
+        // This fixture has no GitHub remote; stale repo keys must prevent API calls.
+        try case(gpa, "browse repository PRs", r.githubBrowse(.{ .chatId = chat, .kind = .pulls, .state = .open }), false),
+        try case(gpa, "browse repository issues", r.githubBrowse(.{ .chatId = chat, .kind = .issues, .state = .closed, .page = 2, .expectedRepository = "repo-parity-stale" }), false),
+        try case(gpa, "inspect repository PR summary", r.githubBrowse(.{ .chatId = chat, .kind = .pull, .number = 42, .expectedRepository = "repo-parity-stale" }), false),
+        try case(gpa, "inspect repository issue summary", r.githubBrowse(.{ .chatId = chat, .kind = .issue, .number = 43, .expectedRepository = "repo-parity-stale" }), false),
+        try case(gpa, "inspect repository PR files", r.githubBrowse(.{ .chatId = chat, .kind = .files, .number = 42, .expectedRepository = "repo-parity-stale" }), false),
+        try case(gpa, "inspect repository activity", r.githubBrowse(.{ .chatId = chat, .kind = .activity, .number = 42, .expectedRepository = "repo-parity-stale" }), false),
+        // Impossible checkout/checksum fences: parity must never write or push.
+        try case(gpa, "stage with stale checkout fences", r.gitAction(chat, "checkout-parity-stale", "hash-parity-stale", .{ .kind = .stage, .path = "README.md" }, null), false),
+        try case(gpa, "unstage with stale checkout fences", r.gitAction(chat, "checkout-parity-stale", "hash-parity-stale", .{ .kind = .unstage, .path = "README.md" }, null), false),
+        try case(gpa, "commit with stale checkout fences", r.gitAction(chat, "checkout-parity-stale", "hash-parity-stale", .{ .kind = .commit, .message = "Synthetic staged changes" }, null), false),
+        try case(gpa, "push with stale checkout fences", r.gitAction(chat, "checkout-parity-stale", "hash-parity-stale", .{ .kind = .push }, null), false),
         try case(gpa, "list project actions", r.listActions(space, null), false),
         // Before the action exists: a real run would leave a terminal open.
         try case(gpa, "run a project action", r.runAction(space, chat, "test", null), false),

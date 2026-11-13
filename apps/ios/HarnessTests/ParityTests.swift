@@ -555,6 +555,8 @@ final class ParityTests: XCTestCase {
         case .reasoning(let id, let text): return "reasoning \(id) \(text)"
         case .image(let id, let reference):
             return "image \(id) \(reference.path) \(reference.name) \(reference.mimeType)"
+        case .visual(let id, let title, _):
+            return "visual \(id) \(title)"
         case .tool(let id, let call, let isError, let resolved):
             let fields = call.fields.keys.sorted().map { "\($0)=\(field(call.fields[$0]!))" }.joined(separator: ",")
             return "tool \(id) \(call.tag) resolved=\(resolved) error=\(isError) fields=\(fields)"
