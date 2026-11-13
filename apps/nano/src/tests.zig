@@ -22,6 +22,7 @@ test {
     _ = @import("tests_github_repository.zig");
     _ = @import("tests_scroll_performance.zig");
     _ = @import("tests_link_actions.zig");
+    _ = @import("tests_titlebar_clearance.zig");
     _ = @import("wizard.zig");
     _ = @import("termlog.zig");
     _ = @import("parity.zig");
