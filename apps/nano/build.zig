@@ -198,6 +198,18 @@ pub fn build(b: *std.Build) void {
     tests.root_module.addOptions("parity_options", opts);
     const test_step = b.step("test", "Run harness-nano tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+    if (b.graph.host.result.os.tag == .windows and target.result.os.tag == .windows and target.result.abi == .msvc) {
+        // Exercise the actual Windows PowerShell 5.1 -> cmd -> MSVC boundary
+        // for every Zig 0.17 mode, not a mocked shell on a different OS.
+        const luau_build_test = b.addSystemCommand(&.{ "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File" });
+        luau_build_test.addFileArg(b.path("src/luau_windows_test.ps1"));
+        luau_build_test.addArg("-Helper");
+        luau_build_test.addFileArg(b.path("src/luau_windows.ps1"));
+        luau_build_test.addArg("-OutputDirectory");
+        _ = luau_build_test.addOutputDirectoryArg("luau-build-test");
+        test_step.dependOn(&luau_build_test.step);
+        b.step("test-luau-windows", "Test the Windows Luau build helper with the installed MSVC toolset").dependOn(&luau_build_test.step);
+    }
     // Pure AST/box geometry, safety and native-ABI regressions from the
     // original implementation remain part of the regular nano test gate.
     const math_tests = b.addSystemCommand(&.{ "cargo", "test", "--quiet", "--locked", "-j2", "--manifest-path" });
