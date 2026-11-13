@@ -12,6 +12,10 @@ const types = @import("types.zig");
 const access = @import("access.zig");
 const Theme = @import("theme.zig").Theme;
 const Surface = @import("surface.zig").Surface;
+const cf = @import("cf.zig");
+const selected_text = @import("accessible_text.zig");
+const NSRange = extern struct { location: usize, length: usize };
+const not_found: usize = @as(usize, std.math.maxInt(isize));
 
 pub const Payload = struct {
     surface: *Surface,
@@ -26,6 +30,8 @@ pub const Payload = struct {
     enabled: bool = true,
     adjustable: bool = false,
     header: bool = false,
+    /// A stable read-only text-area proxy for a cross-node page selection.
+    document: bool = false,
     /// The build that last listed it: older ones are let go.
     seen: u64 = 0,
 
@@ -62,6 +68,10 @@ pub const State = struct {
     builds: u64 = 0,
     /// What was read last (ids, labels, values): a change is a new layout.
     hash: u64 = 0,
+    selection_key: u64 = 0,
+    notified_selection: u64 = 0,
+    had_page_selection: bool = false,
+    selection_element: ?objc.Object = null,
     arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator),
 };
 
@@ -69,6 +79,9 @@ pub const methods = [_]objc.Method{
     .{ .name = "isAccessibilityElement", .imp = &viewIsElement, .types = "c@:" },
     .{ .name = "accessibilityRole", .imp = &viewRole, .types = "@@:" },
     .{ .name = "accessibilityChildren", .imp = &viewChildren, .types = "@@:" },
+    .{ .name = "accessibilityFocusedUIElement", .imp = &viewFocused, .types = "@@:" },
+    .{ .name = "accessibilitySelectedText", .imp = &viewSelectedText, .types = "@@:" },
+    .{ .name = "accessibilitySelectedTextRange", .imp = &viewSelectedRange, .types = "{_NSRange=QQ}@:" },
 };
 
 fn viewIsElement(_: objc.Object, _: objc.SEL) callconv(.c) objc.BOOL {
@@ -92,6 +105,13 @@ fn elementClass() objc.Class {
             .{ .name = "accessibilitySubrole", .imp = &elemSubrole, .types = "@@:" },
             .{ .name = "accessibilityLabel", .imp = &elemLabel, .types = "@@:" },
             .{ .name = "accessibilityValue", .imp = &elemValue, .types = "@@:" },
+            .{ .name = "isAccessibilityFocused", .imp = &elemFocused, .types = "c@:" },
+            .{ .name = "isAccessibilityEditable", .imp = &elemEditable, .types = "c@:" },
+            .{ .name = "accessibilitySelectedText", .imp = &elemSelectedText, .types = "@@:" },
+            .{ .name = "accessibilitySelectedTextRange", .imp = &elemSelectedRange, .types = "{_NSRange=QQ}@:" },
+            .{ .name = "accessibilitySelectedTextRanges", .imp = &elemSelectedRanges, .types = "@@:" },
+            .{ .name = "accessibilityNumberOfCharacters", .imp = &elemCharacterCount, .types = "q@:" },
+            .{ .name = "accessibilityStringForRange:", .imp = &elemStringForRange, .types = "@@:{_NSRange=QQ}" },
             .{ .name = "accessibilityHelp", .imp = &elemHelp, .types = "@@:" },
             .{ .name = "accessibilityFrame", .imp = &elemFrame, .types = "{CGRect={CGPoint=dd}{CGSize=dd}}@:" },
             .{ .name = "accessibilityPerformPress", .imp = &elemPress, .types = "c@:" },
@@ -126,6 +146,19 @@ pub fn afterFrame(s: *Surface) void {
         if (a.screen_changed or s.a11y_cache.hash != before) objc.NSAccessibilityPostNotificationWithUserInfo(s.nsview, objc.nsString("AXLayoutChanged"), null);
         a.screen_changed = false;
     }
+    const key = selected_text.key(&s.ctx);
+    const st = &s.a11y_cache;
+    if (st.notified_selection != key) {
+        const first = st.notified_selection == 0;
+        st.notified_selection = key; // Set before posting: native asks may re-enter.
+        const target = viewFocused(s.nsview, objc.sel("accessibilityFocusedUIElement"));
+        const page_selected = target != null and st.selection_element != null and target.? == st.selection_element.?;
+        if (!first) {
+            objc.NSAccessibilityPostNotificationWithUserInfo(target orelse s.nsview, objc.nsString("AXSelectedTextChanged"), null);
+            if (page_selected != st.had_page_selection) objc.NSAccessibilityPostNotificationWithUserInfo(s.nsview, objc.nsString("AXFocusedUIElementChanged"), null);
+        }
+        st.had_page_selection = page_selected;
+    }
     if (a.announcement_len > 0) {
         announce(s.nsview, a.announcement[0..a.announcement_len]);
         a.announcement_len = 0;
@@ -140,12 +173,14 @@ fn viewChildren(obj: objc.Object, _: objc.SEL) callconv(.c) objc.Object {
 /// The last frame's elements, made once per frame.
 pub fn elements(s: *Surface) ?objc.Object {
     const st = &s.a11y_cache;
-    if (st.built == s.ctx.frame) if (st.array) |arr| return arr;
+    const selection_key = selected_text.key(&s.ctx);
+    if (st.built == s.ctx.frame and st.selection_key == selection_key) if (st.array) |arr| return arr;
     _ = st.arena.reset(.retain_capacity);
     var list: std.ArrayList(access.Element) = .empty;
     access.tree(&s.ctx, st.arena.allocator(), &list) catch return st.array;
     st.builds += 1;
     st.built = s.ctx.frame;
+    st.selection_key = selection_key;
     const arr = objc.msg(objc.Object, objc.class("NSMutableArray"), "arrayWithCapacity:", .{@as(objc.NSUInteger, list.items.len)});
     var h: std.hash.Wyhash = .init(0);
     const cls = elementClass();
@@ -170,6 +205,9 @@ pub fn elements(s: *Surface) ?objc.Object {
         p.seen = st.builds;
         p.update(s.gpa, e);
         objc.msg(void, arr, "addObject:", .{el});
+    }
+    if (selected_text.active(&s.ctx, st.arena.allocator()) catch null) |snapshot| {
+        if (snapshot.field_id == null) if (selectionElement(s, snapshot.rect)) |el| objc.msg(void, arr, "addObject:", .{el});
     }
     st.hash = h.final();
     prune(s);
@@ -208,9 +246,118 @@ pub fn clearCache(s: *Surface) void {
     var it = st.cache.valueIterator();
     while (it.next()) |el| forget(s.gpa, el.*);
     st.cache.deinit(s.gpa);
+    if (st.selection_element) |el| forget(s.gpa, el);
+    st.selection_element = null;
     if (st.array) |a| objc.release(a);
     st.array = null;
     st.arena.deinit();
+}
+
+fn selectionElement(s: *Surface, rect: types.Rect) ?objc.Object {
+    const st = &s.a11y_cache;
+    if (st.selection_element == null) {
+        const p = s.gpa.create(Payload) catch return null;
+        p.* = .{ .surface = s, .id = std.math.maxInt(u64), .role = .text_field, .document = true };
+        const el = objc.msg(objc.Object, elementClass(), "new", .{});
+        objc.setZig(el, p);
+        st.selection_element = el;
+    }
+    if (objc.getZig(Payload, st.selection_element.?)) |p| p.rect = rect;
+    return st.selection_element;
+}
+
+fn viewFocused(obj: objc.Object, _: objc.SEL) callconv(.c) ?objc.Object {
+    const s = objc.getZig(Surface, obj) orelse return null;
+    _ = elements(s);
+    var arena: std.heap.ArenaAllocator = .init(s.gpa);
+    defer arena.deinit();
+    if (selected_text.active(&s.ctx, arena.allocator()) catch null) |snapshot| {
+        if (snapshot.field_id == null) return selectionElement(s, snapshot.rect);
+    }
+    return s.a11y_cache.cache.get(s.ctx.focus);
+}
+
+fn viewSelectedText(obj: objc.Object, _: objc.SEL) callconv(.c) ?objc.Object {
+    const s = objc.getZig(Surface, obj) orelse return null;
+    var arena: std.heap.ArenaAllocator = .init(s.gpa);
+    defer arena.deinit();
+    const snapshot = (selected_text.active(&s.ctx, arena.allocator()) catch null) orelse return null;
+    return objc.nsString(snapshot.selected());
+}
+
+fn range16(snapshot: selected_text.Snapshot) NSRange {
+    const start: usize = @intCast(cf.utf16Offset(snapshot.value, snapshot.range[0]));
+    const end: usize = @intCast(cf.utf16Offset(snapshot.value, snapshot.range[1]));
+    return .{ .location = start, .length = end - start };
+}
+
+fn viewSelectedRange(obj: objc.Object, _: objc.SEL) callconv(.c) NSRange {
+    const s = objc.getZig(Surface, obj) orelse return .{ .location = not_found, .length = 0 };
+    var arena: std.heap.ArenaAllocator = .init(s.gpa);
+    defer arena.deinit();
+    const snapshot = (selected_text.active(&s.ctx, arena.allocator()) catch null) orelse return .{ .location = not_found, .length = 0 };
+    return range16(snapshot);
+}
+
+fn elementSnapshot(p: *const Payload, arena: std.mem.Allocator) !?selected_text.Snapshot {
+    if (p.document) return selected_text.page(&p.surface.ctx, arena);
+    const f = selected_text.field(&p.surface.ctx) orelse return null;
+    return if (f.field_id.? == p.id) f else null;
+}
+
+fn elemFocused(obj: objc.Object, _: objc.SEL) callconv(.c) objc.BOOL {
+    const p = payloadOf(obj) orelse return objc.NO;
+    if (!p.surface.ctx.window_focused) return objc.NO;
+    if (!p.document) return p.surface.ctx.focus == p.id;
+    var arena: std.heap.ArenaAllocator = .init(p.surface.gpa);
+    defer arena.deinit();
+    const snapshot = (selected_text.active(&p.surface.ctx, arena.allocator()) catch null) orelse return objc.NO;
+    return snapshot.field_id == null;
+}
+
+fn elemEditable(obj: objc.Object, _: objc.SEL) callconv(.c) objc.BOOL {
+    const p = payloadOf(obj) orelse return objc.NO;
+    return !p.document and p.role == .text_field;
+}
+
+fn elemSelectedText(obj: objc.Object, _: objc.SEL) callconv(.c) ?objc.Object {
+    const p = payloadOf(obj) orelse return null;
+    var arena: std.heap.ArenaAllocator = .init(p.surface.gpa);
+    defer arena.deinit();
+    const snapshot = (elementSnapshot(p, arena.allocator()) catch null) orelse return null;
+    return objc.nsString(snapshot.selected());
+}
+
+fn elemSelectedRange(obj: objc.Object, _: objc.SEL) callconv(.c) NSRange {
+    const p = payloadOf(obj) orelse return .{ .location = not_found, .length = 0 };
+    var arena: std.heap.ArenaAllocator = .init(p.surface.gpa);
+    defer arena.deinit();
+    const snapshot = (elementSnapshot(p, arena.allocator()) catch null) orelse return .{ .location = not_found, .length = 0 };
+    return range16(snapshot);
+}
+
+fn elemSelectedRanges(obj: objc.Object, sel: objc.SEL) callconv(.c) objc.Object {
+    const range = elemSelectedRange(obj, sel);
+    if (range.location == not_found) return objc.msg(objc.Object, objc.class("NSArray"), "array", .{});
+    const value = objc.msg(objc.Object, objc.class("NSValue"), "valueWithRange:", .{range});
+    return objc.msg(objc.Object, objc.class("NSArray"), "arrayWithObject:", .{value});
+}
+
+fn elemCharacterCount(obj: objc.Object, sel: objc.SEL) callconv(.c) objc.NSInteger {
+    const p = payloadOf(obj) orelse return 0;
+    if (!p.document and p.role != .text_field) return 0;
+    const value = elemValue(obj, sel) orelse return 0;
+    return @intCast(objc.msg(objc.NSUInteger, value, "length", .{}));
+}
+
+fn elemStringForRange(obj: objc.Object, sel: objc.SEL, requested: NSRange) callconv(.c) ?objc.Object {
+    const p = payloadOf(obj) orelse return null;
+    if (!p.document and p.role != .text_field) return null;
+    const value = elemValue(obj, sel) orelse return null;
+    const len = objc.msg(objc.NSUInteger, value, "length", .{});
+    if (requested.location > len) return null;
+    const range: NSRange = .{ .location = requested.location, .length = @min(requested.length, len - requested.location) };
+    return objc.msg(?objc.Object, value, "substringWithRange:", .{range});
 }
 
 fn payloadOf(obj: objc.Object) ?*Payload {
@@ -259,7 +406,7 @@ pub fn roleName(role: access.Role, header: bool) []const u8 {
 
 fn elemRole(obj: objc.Object, _: objc.SEL) callconv(.c) objc.Object {
     const p = payloadOf(obj) orelse return objc.nsString("AXUnknown");
-    return objc.nsString(roleName(p.role, p.header));
+    return objc.nsString(if (p.document) "AXTextArea" else roleName(p.role, p.header));
 }
 
 fn elemSubrole(obj: objc.Object, _: objc.SEL) callconv(.c) ?objc.Object {
@@ -273,11 +420,17 @@ fn elemSubrole(obj: objc.Object, _: objc.SEL) callconv(.c) ?objc.Object {
 
 fn elemLabel(obj: objc.Object, _: objc.SEL) callconv(.c) objc.Object {
     const p = payloadOf(obj) orelse return objc.nsString("");
-    return objc.nsString(p.label);
+    return objc.nsString(if (p.document) "Selected text" else p.label);
 }
 
 fn elemValue(obj: objc.Object, _: objc.SEL) callconv(.c) ?objc.Object {
     const p = payloadOf(obj) orelse return null;
+    if (p.document or p.role == .text_field) {
+        var arena: std.heap.ArenaAllocator = .init(p.surface.gpa);
+        defer arena.deinit();
+        if (elementSnapshot(p, arena.allocator()) catch null) |snapshot| return objc.nsString(snapshot.value);
+        if (p.document) return objc.nsString("");
+    }
     if (p.value.len > 0) return objc.nsString(p.value);
     return switch (p.role) {
         .checkbox, .switch_toggle, .tab, .radio_button => objc.msg(objc.Object, objc.class("NSNumber"), "numberWithBool:", .{if (p.selected) objc.YES else objc.NO}),
@@ -302,7 +455,7 @@ fn elemFrame(obj: objc.Object, _: objc.SEL) callconv(.c) objc.CGRect {
 
 fn elemPress(obj: objc.Object, _: objc.SEL) callconv(.c) objc.BOOL {
     const p = payloadOf(obj) orelse return objc.NO;
-    if (!p.enabled or p.surface.dead) return objc.NO;
+    if (p.document or !p.enabled or p.surface.dead) return objc.NO;
     p.surface.ctx.a11yPress(p.id);
     p.surface.frame();
     return objc.YES;
@@ -330,7 +483,7 @@ fn step(obj: objc.Object, dir: i8) objc.BOOL {
 fn elemAllowed(obj: objc.Object, _: objc.SEL, s: objc.SEL) callconv(.c) objc.BOOL {
     const p = payloadOf(obj) orelse return objc.NO;
     if (s == objc.sel("accessibilityPerformIncrement") or s == objc.sel("accessibilityPerformDecrement")) return if (p.adjustable) objc.YES else objc.NO;
-    if (s == objc.sel("accessibilityPerformPress")) return if (p.enabled and p.role != .static_text) objc.YES else objc.NO;
+    if (s == objc.sel("accessibilityPerformPress")) return if (p.enabled and !p.document and p.role != .static_text) objc.YES else objc.NO;
     return objc.msgSuper(objc.BOOL, obj, objc.class("NSAccessibilityElement"), "isAccessibilitySelectorAllowed:", .{s});
 }
 

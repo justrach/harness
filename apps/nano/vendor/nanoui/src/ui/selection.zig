@@ -27,6 +27,10 @@ pub const Selection = struct {
     hit: ?Point = null,
     hit_word: ?[2]usize = null,
     hit_line: ?[2]usize = null,
+    /// The unit selected on press, retained while the pointer is held.
+    drag_range: ?[2]Point = null,
+    drag_press: types.Point = .{},
+
     hit_str: []const u8 = "",
     /// The end of the last line above the pointer, if it is between lines.
     below: ?Point = null,
@@ -60,6 +64,7 @@ pub const Selection = struct {
     pub fn clear(s: *Selection) void {
         s.anchor = null;
         s.focus = null;
+        s.drag_range = null;
         s.text.clearRetainingCapacity();
     }
 
@@ -115,13 +120,14 @@ pub fn line(c: anytype, out: *std.ArrayList(gpu.Instance), id: u64, index: u32, 
         // nearest insertion caret. That caret may be at either side of a
         // whole emoji/combining cluster; cursor navigation would then skip
         // separators or accidentally include the preceding word.
-        // Only double-click consumes hit_word. Ordinary hovering/dragging
-        // must not scan a long paragraph for Unicode word boundaries.
+        // Only a multi-click consumes these ranges. Ordinary hovering
+        // and character dragging must not scan paragraph boundaries.
+        const prose = c.nodes.items[index].content.text.style.prose_selection;
         if (c.input.click_count == 2) {
             const word_at = start + text_selection.glyphClusterAt(lay.glyphs, lay.width, m.x - x);
-            s.hit_word = text_selection.wordRange(str, word_at);
+            s.hit_word = if (prose) text_selection.sentenceRange(str, word_at) else text_selection.wordRange(str, word_at);
         }
-        s.hit_line = .{ start, end };
+        s.hit_line = if (prose and c.input.click_count >= 3) text_selection.paragraphRange(str, at) else .{ start, end };
         s.hit_str = str;
         // Over text that selects: the text cursor, as over a text field.
         c.cursor_text = true;
@@ -207,6 +213,8 @@ pub fn afterPaint(c: anytype) void {
     if (s.pressed) {
         s.pressed = false;
         s.moved = false;
+        s.drag_range = null;
+        s.drag_press = c.input.mouse;
         if (s.touch and c.input.click_count < 2) {
             // Nothing yet: `ios/selecting.zig` lets go of it on a tap.
         } else if (s.hit != null and !s.blocked) {
@@ -229,12 +237,38 @@ pub fn afterPaint(c: anytype) void {
                 s.anchor = h;
                 s.focus = h;
             }
+            if (c.input.click_count >= 2) s.drag_range = .{ s.anchor.?, s.focus.? };
             // A finger still down isn't dragging: it would pull the word's end
             // back under it. Its handles move the ends.
             s.dragging = !s.touch;
         } else if (!s.blocked) s.clear();
     } else if (s.dragging and c.input.down) {
-        if (s.hit orelse s.below) |p| if (s.focus == null or !std.meta.eql(p, s.focus.?)) {
+        if (s.drag_range) |unit| {
+            // Repaints while held are not drags. Previously the next frame
+            // replaced the selected unit's end with the insertion caret,
+            // leaving only the text to the left of the pointer highlighted.
+            const dx = c.input.mouse.x - s.drag_press.x;
+            const dy = c.input.mouse.y - s.drag_press.y;
+            if (s.moved or dx * dx + dy * dy >= 9) {
+                s.moved = true;
+                if (s.hit orelse s.below) |p| {
+                    const range_hit = if (c.input.click_count >= 3) s.hit_line else s.hit_word;
+                    var a = unit[0];
+                    var b = unit[1];
+                    if (s.before(p, unit[0])) {
+                        a = unit[1];
+                        b = .{ .id = p.id, .at = if (s.hit != null and range_hit != null) range_hit.?[0] else p.at };
+                    } else if (s.before(unit[1], p)) {
+                        b = .{ .id = p.id, .at = if (s.hit != null and range_hit != null) range_hit.?[1] else p.at };
+                    }
+                    if (s.anchor == null or s.focus == null or !std.meta.eql(a, s.anchor.?) or !std.meta.eql(b, s.focus.?)) {
+                        s.anchor = a;
+                        s.focus = b;
+                        c.animating = true;
+                    }
+                }
+            }
+        } else if (s.hit orelse s.below) |p| if (s.focus == null or !std.meta.eql(p, s.focus.?)) {
             s.focus = p;
             if (s.anchor != null and !std.meta.eql(p, s.anchor.?)) s.moved = true;
             c.animating = true;

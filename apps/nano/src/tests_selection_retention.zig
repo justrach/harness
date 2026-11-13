@@ -86,6 +86,252 @@ fn copy(h: *Harness) void {
     _ = h.t.shortcut(.{ .key = 'c', .cmd = true });
 }
 
+fn edgeOutput(h: *Harness) ![]u8 {
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(testing.allocator);
+    for (0..48) |i| {
+        const line = try std.fmt.allocPrint(testing.allocator, "Synthetic section {d:0>2} stays selectable beyond the visible viewport. ", .{i});
+        defer testing.allocator.free(line);
+        try output.appendSlice(testing.allocator, line);
+    }
+    try output.appendSlice(testing.allocator, "Final synthetic output marker.");
+    const text = try output.toOwnedSlice(testing.allocator);
+    errdefer testing.allocator.free(text);
+    const frame = try std.json.Stringify.valueAlloc(testing.allocator, .{ .reset = &.{.{
+        .id = "edge-scroll",
+        .role = "assistant",
+        .parts = &.{.{ .id = "p", .kind = "text", .text = text }},
+    }} }, .{});
+    defer testing.allocator.free(frame);
+    try Harness.apply(&h.a.transcript, frame);
+    h.t.resize(760, 600);
+    const box = h.a.view.jump_box;
+    h.a.view.stick_end = false;
+    try h.t.ctx.scroll.put(testing.allocator, box, 0);
+    try h.t.ctx.scroll_follow.put(testing.allocator, box, false);
+    h.t.settle(0.1);
+    return text;
+}
+
+test "retention selection edge scroll continues downward without more pointer events" {
+    for ([_]u32{ 1, 2 }) |clicks| {
+        var h: Harness = undefined;
+        try h.init();
+        defer h.deinit();
+        const text = try edgeOutput(&h);
+        defer testing.allocator.free(text);
+        const box = h.a.view.jump_box;
+        const viewport = h.t.ctx.rects.get(box).?;
+        const n = textNode(&h.t.ctx, text) orelse return error.TextNodeMissing;
+        const node = h.t.ctx.nodes.items[n];
+        const x = node.rect.x + 1;
+        const y = node.rect.y + h.t.ctx.text.lineHeight(node.content.text.style) / 2;
+        h.t.moveTo(x, y);
+        h.t.ctx.input.click_count = clicks;
+        h.t.ctx.pointerDown();
+        h.t.frame();
+        const anchor = h.t.ctx.selection.anchor.?;
+        h.t.move(x, viewport.y + viewport.h + 12);
+        const first = h.t.ctx.scroll.get(box) orelse 0;
+        h.t.advance(0.3);
+        try h.snap("selection-edge-scroll-down");
+        const next = h.t.ctx.scroll.get(box) orelse 0;
+        try testing.expect(next > first + 30);
+        try testing.expect(h.t.ctx.frame_in != null);
+        try testing.expectEqual(anchor, h.t.ctx.selection.anchor.?);
+        h.t.advance(6);
+        const maximum = h.t.ctx.scroll_max.get(box).?;
+        try testing.expectApproxEqAbs(maximum, h.t.ctx.scroll.get(box).?, 0.5);
+        h.t.up();
+        h.t.settle(0.1);
+        copy(&h);
+        try testing.expectEqualStrings(text, h.t.clipboard.items);
+        const stopped = h.t.ctx.scroll.get(box).?;
+        h.t.advance(0.3);
+        try testing.expectEqual(stopped, h.t.ctx.scroll.get(box).?);
+    }
+}
+
+test "retention selection edge scroll reaches the beginning when dragged upward" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    const text = try edgeOutput(&h);
+    defer testing.allocator.free(text);
+    const box = h.a.view.jump_box;
+    try h.t.ctx.scroll.put(testing.allocator, box, h.t.ctx.scroll_max.get(box).?);
+    h.t.settle(0.1);
+    const viewport = h.t.ctx.rects.get(box).?;
+    const n = textNode(&h.t.ctx, text) orelse return error.TextNodeMissing;
+    const node = h.t.ctx.nodes.items[n];
+    const tx = node.content.text;
+    const last = tx.lines[tx.lines.len - 1];
+    const x = node.rect.x + h.t.ctx.text.width(text[last.start..last.end], tx.style);
+    h.t.down(x, node.rect.y + node.rect.h - h.t.ctx.text.lineHeight(tx.style) / 2);
+    const anchor = h.t.ctx.selection.anchor.?;
+    h.t.move(node.rect.x + 1, viewport.y - 12);
+    const first = h.t.ctx.scroll.get(box).?;
+    h.t.advance(0.3);
+    try h.snap("selection-edge-scroll-up");
+    try testing.expect(h.t.ctx.scroll.get(box).? < first - 30);
+    try testing.expectEqual(anchor, h.t.ctx.selection.anchor.?);
+    h.t.advance(6);
+    try testing.expectApproxEqAbs(@as(f32, 0), h.t.ctx.scroll.get(box).?, 0.5);
+    h.t.up();
+    h.t.settle(0.1);
+    copy(&h);
+    try testing.expectEqualStrings(text, h.t.clipboard.items);
+}
+
+test "retention selection edge scroll stops on release center focus loss and other buttons" {
+    for (0..4) |stop| {
+        var h: Harness = undefined;
+        try h.init();
+        defer h.deinit();
+        const text = try edgeOutput(&h);
+        defer testing.allocator.free(text);
+        const box = h.a.view.jump_box;
+        const viewport = h.t.ctx.rects.get(box).?;
+        const n = textNode(&h.t.ctx, text) orelse return error.TextNodeMissing;
+        const node = h.t.ctx.nodes.items[n];
+        const x = node.rect.x + 1;
+        h.t.down(x, node.rect.y + h.t.ctx.text.lineHeight(node.content.text.style) / 2);
+        h.t.move(x, viewport.y + viewport.h + 12);
+        h.t.advance(0.1);
+        try testing.expect(h.t.ctx.scroll.get(box).? > 0);
+        switch (stop) {
+            0 => h.t.up(),
+            1 => h.t.move(x, viewport.y + viewport.h / 2),
+            2 => h.t.ctx.window_focused = false,
+            else => h.t.ctx.input.button = .right,
+        }
+        const stopped = h.t.ctx.scroll.get(box).?;
+        h.t.advance(0.3);
+        try testing.expectEqual(stopped, h.t.ctx.scroll.get(box).?);
+    }
+}
+
+test "retention selection edge scroll cannot drive a neighboring pane" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    const text = try edgeOutput(&h);
+    defer testing.allocator.free(text);
+    try h.split();
+    h.a.select("selection-b", null);
+    try Harness.load(&h.a.transcript);
+    h.t.settle(0.2);
+    const n = textNode(&h.t.ctx, text) orelse return error.TextNodeMissing;
+    const node = h.t.ctx.nodes.items[n];
+    var ix = n;
+    while (!h.t.ctx.nodes.items[ix].style.scroll) ix = h.t.ctx.nodes.items[ix].parent;
+    const owner = h.t.ctx.nodes.items[ix].id;
+    try h.t.ctx.scroll.put(testing.allocator, owner, 0);
+    try h.t.ctx.scroll_follow.put(testing.allocator, owner, false);
+    h.t.settle(0.1);
+    const r = h.t.ctx.nodes.items[textNode(&h.t.ctx, text).?].rect;
+    const viewport = h.t.ctx.rects.get(owner).?;
+    h.t.down(r.x + 1, r.y + h.t.ctx.text.lineHeight(node.content.text.style) / 2);
+    h.t.move(r.x + 1, viewport.y + viewport.h + 12);
+    h.t.advance(0.2);
+    try testing.expect(h.t.ctx.scroll.get(owner).? > 0);
+    const neighbor = h.a.view.jump_box;
+    const neighbor_before = h.t.ctx.scroll.get(neighbor) orelse 0;
+    const neighbor_view = h.t.ctx.rects.get(neighbor).?;
+    h.t.move(neighbor_view.x + neighbor_view.w / 2, neighbor_view.y + neighbor_view.h + 12);
+    const owner_before = h.t.ctx.scroll.get(owner).?;
+    h.t.advance(0.3);
+    try testing.expectEqual(owner_before, h.t.ctx.scroll.get(owner).?);
+    try testing.expectEqual(neighbor_before, h.t.ctx.scroll.get(neighbor) orelse 0);
+    try testing.expectEqual(owner, @import("selection_owner.zig").state(&h.t.ctx).surface);
+}
+
+const multi_click_prose = "First synthetic sentence. The second sentence contains bold words and wraps across several visual lines so selecting it must include text on both sides of the pointer. Final sentence.";
+
+fn multiClick(h: *Harness, count: u32, hold: bool) !void {
+    const frame = try std.json.Stringify.valueAlloc(testing.allocator, .{ .reset = &.{.{
+        .id = "multi-click",
+        .role = "assistant",
+        .parts = &.{.{ .id = "p", .kind = "text", .text = "First synthetic sentence. The second sentence contains **bold words** and wraps across several visual lines so selecting it must include text on both sides of the pointer. Final sentence.\n\nA separate paragraph must stay unselected." }},
+    }} }, .{});
+    defer testing.allocator.free(frame);
+    try Harness.apply(&h.a.transcript, frame);
+    h.t.resize(760, 780);
+    h.t.settle(0.2);
+    const n = textNode(&h.t.ctx, multi_click_prose) orelse return error.TextNodeMissing;
+    const node = h.t.ctx.nodes.items[n];
+    const line = node.content.text.lines[1];
+    const style = node.content.text.style;
+    const x = node.rect.x + 35;
+    const y = node.rect.y + h.t.ctx.text.lineHeight(style) * 1.5;
+    try testing.expect(line.start > 0);
+    h.t.moveTo(x, y);
+    h.t.ctx.input.click_count = count;
+    h.t.ctx.pointerDown();
+    h.t.frame();
+    if (hold) {
+        h.t.advance(0.2);
+        h.t.move(x + 1, y);
+        h.t.advance(0.1);
+    }
+    h.t.up();
+    h.t.settle(0.1);
+    copy(h);
+    try h.snap(if (count == 2) "double-click-sentence" else "triple-click-paragraph");
+}
+
+test "retention selection double click selects the complete wrapped sentence" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    try multiClick(&h, 2, false);
+    try testing.expectEqualStrings(multi_click_prose[26 .. multi_click_prose.len - " Final sentence.".len], h.t.clipboard.items);
+}
+
+test "retention selection triple click selects the complete wrapped paragraph" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    try multiClick(&h, 3, false);
+    try testing.expectEqualStrings(multi_click_prose, h.t.clipboard.items);
+}
+
+test "retention selection held multi click does not collapse to the pointer" {
+    for ([_]u32{ 2, 3 }) |count| {
+        var h: Harness = undefined;
+        try h.init();
+        defer h.deinit();
+        try multiClick(&h, count, true);
+        const expected = if (count == 3) multi_click_prose else multi_click_prose[26 .. multi_click_prose.len - " Final sentence.".len];
+        try testing.expectEqualStrings(expected, h.t.clipboard.items);
+    }
+}
+
+test "retention selection sentence drag extends complete units in both directions" {
+    for ([_]bool{ false, true }) |backwards| {
+        var h: Harness = undefined;
+        try h.init();
+        defer h.deinit();
+        try multiClick(&h, 2, false);
+        h.t.ctx.pointerDown();
+        h.t.frame();
+        const n = textNode(&h.t.ctx, multi_click_prose) orelse return error.TextNodeMissing;
+        const node = h.t.ctx.nodes.items[n];
+        const text = node.content.text;
+        const row = if (backwards) 0 else text.lines.len - 1;
+        const last = text.lines[row];
+        const x = node.rect.x + if (backwards) @as(f32, 3) else h.t.ctx.text.width(multi_click_prose[last.start..last.end], text.style) - 3;
+        const y = node.rect.y + h.t.ctx.text.lineHeight(text.style) * (@as(f32, @floatFromInt(row)) + 0.5);
+        h.t.move(x, y);
+        h.t.settle(0.1);
+        h.t.up();
+        h.t.settle(0.1);
+        copy(&h);
+        const expected = if (backwards) multi_click_prose[0 .. multi_click_prose.len - " Final sentence.".len] else multi_click_prose[26..];
+        try testing.expectEqualStrings(expected, h.t.clipboard.items);
+    }
+}
+
 test "retention 348 URL-only inline code keeps code styling and excludes commands" {
     const md = @import("markdown.zig");
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
@@ -525,14 +771,16 @@ test "deep interface inactive pane link opens under the source owner on first cl
     try testing.expectEqualStrings("selection-a", h.a.panels.tabs.items[0].browser.?.parent);
 }
 
-test "deep interface doubleclick preserves whole Unicode graphemes 613" {
+test "deep interface doubleclick preserves whole Unicode graphemes in code 613" {
     var h: Harness = undefined;
     try h.init();
     defer h.deinit();
     for ([_][]const u8{ "a\u{301}", "👍🏽", "🇸🇬", "👩‍💻" }) |cluster| {
         const text = try std.fmt.allocPrint(testing.allocator, "Start {s} end", .{cluster});
         defer testing.allocator.free(text);
-        const frame = try std.json.Stringify.valueAlloc(testing.allocator, .{ .reset = &.{.{ .id = "unicode", .role = "assistant", .parts = &.{.{ .id = "p", .kind = "text", .text = text }} }} }, .{});
+        const source = try std.fmt.allocPrint(testing.allocator, "```text\n{s}\n```", .{text});
+        defer testing.allocator.free(source);
+        const frame = try std.json.Stringify.valueAlloc(testing.allocator, .{ .reset = &.{.{ .id = "unicode", .role = "assistant", .parts = &.{.{ .id = "p", .kind = "text", .text = source }} }} }, .{});
         defer testing.allocator.free(frame);
         try Harness.apply(&h.a.transcript, frame);
         h.t.settle(0.1);
@@ -553,13 +801,13 @@ test "deep interface doubleclick preserves whole Unicode graphemes 613" {
     }
 }
 
-test "deep interface doubleclick keeps identifier Unicode word and punctuation boundaries" {
+test "deep interface doubleclick keeps code identifier Unicode word and punctuation boundaries" {
     var h: Harness = undefined;
     try h.init();
     defer h.deinit();
     const text = "alpha_beta42, café! 中文.";
     try Harness.apply(&h.a.transcript,
-        \\{"reset":[{"id":"word-boundaries","role":"assistant","parts":[{"id":"p","kind":"text","text":"alpha_beta42, café! 中文."}]}]}
+        \\{"reset":[{"id":"word-boundaries","role":"assistant","parts":[{"id":"p","kind":"text","text":"```text\nalpha_beta42, café! 中文.\n```"}]}]}
     );
     h.t.settle(0.1);
     const index = textNode(&h.t.ctx, text) orelse return error.TextMissing;
@@ -601,7 +849,7 @@ test "deep interface collapsed prompt does not capture reply doubleclick" {
     h.t.doubleClick(node.rect.x + h.t.ctx.text.width("Visible syn", node.content.text.style), node.rect.y + node.rect.h / 2);
     h.t.settle(0.1);
     copy(&h);
-    try testing.expectEqualStrings("synthetic", h.t.clipboard.items);
+    try testing.expectEqualStrings("Visible synthetic reply.", h.t.clipboard.items);
 }
 
 test "deep interface thinking folds fit fractional zoom and narrow wrapping" {
