@@ -14,8 +14,10 @@ pub const Listing = struct { path: []const u8, entries: []const Entry, truncated
 pub const Drive = struct { name: []const u8, path: []const u8 };
 const Drives = struct { drives: []const Drive };
 pub const Folder = struct { device: []const u8, device_name: []const u8, path: []const u8, git: bool };
+pub const Purpose = enum { new_project, starting_folder };
 pub const State = struct {
     open: bool = false,
+    purpose: Purpose = .new_project,
     /// Scopes the sheet's entrance motion across repeated opens.
     generation: u64 = 0,
     step: Step = .details,
@@ -82,6 +84,29 @@ pub fn open(a: *App) void {
     a.redraw();
 }
 
+/// Reuse the host browser without creating a project or changing the live draft.
+pub fn openStartingFolder(a: *App) void {
+    if (a.view.project_setup.busy) return;
+    open(a);
+    const s = &a.view.project_setup;
+    s.purpose = .starting_folder;
+    if (a.device_id) |id| {
+        s.device = s.keep(id);
+        s.device_name = s.keep(a.deviceName(id));
+    }
+    beginFolder(a);
+}
+
+pub fn resetStartingFolder(a: *App) void {
+    const s = &a.view.project_setup;
+    if (!s.open or s.purpose != .starting_folder or s.busy) return;
+    const device = s.device orelse return;
+    if (!a.settings.setProjectFolderOverride(device, null)) return;
+    cancelReads(a);
+    s.open = false;
+    a.redraw();
+}
+
 fn cancelReads(a: *App) void {
     const s = &a.view.project_setup;
     if (s.load_call) |id| a.engine.cancel(id);
@@ -104,10 +129,10 @@ pub fn details(a: *App) void {
 pub fn dismiss(a: *App) void {
     const s = &a.view.project_setup;
     if (s.busy) return;
-    if (s.step != .details) return details(a);
+    if (s.purpose == .new_project and s.step != .details) return details(a);
     cancelReads(a);
     s.open = false;
-    a.view.focus_composer = true;
+    a.view.focus_composer = s.purpose == .new_project;
     a.redraw();
 }
 
@@ -262,6 +287,17 @@ pub fn useFolder(a: *App) void {
     const s = &a.view.project_setup;
     if (s.busy or s.step != .folders) return;
     const l = ready(s) orelse return;
+    if (s.purpose == .starting_folder) {
+        if (!a.settings.setProjectFolderOverride(s.device orelse return, l.path)) {
+            s.err = "Choose an absolute folder on this computer.";
+            a.redraw();
+            return;
+        }
+        cancelReads(a);
+        s.open = false;
+        a.redraw();
+        return;
+    }
     s.folder = .{ .device = s.keep(s.device orelse return), .device_name = s.keep(s.device_name), .path = s.keep(l.path), .git = s.git };
     details(a);
 }

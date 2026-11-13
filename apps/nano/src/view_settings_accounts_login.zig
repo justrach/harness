@@ -75,7 +75,9 @@ pub const State = struct {
     pub fn deinit(s: *State, gpa: Allocator) void {
         @import("text_buffer.zig").deinit(&s.code);
         if (s.flow) |*f| f.deinit(gpa);
-        if (s.relay) |r| r.cancel();
+        if (s.relay) |r| {
+            if (@import("builtin").is_test) r.cancelAndWait() else r.cancel();
+        }
     }
 };
 
@@ -100,16 +102,21 @@ fn drop(a: *App) void {
 
 fn stopRelay(a: *App) void {
     const s = state(a);
-    if (s.relay) |r| r.cancel();
+    if (s.relay) |r| {
+        if (@import("builtin").is_test) r.cancelAndWait() else r.cancel();
+    }
     s.relay = null;
 }
 
-/// How a landing reaches the UI thread (`nanoui.App.after`); tests hold
+/// How a landing reaches the UI thread (`nanoui.App.onMain`); tests hold
 /// it and run it themselves.
 pub var hop: *const fn (ctx: ?*anyopaque, func: *const fn (?*anyopaque) callconv(.c) void) void = afterNow;
 
 fn afterNow(ctx: ?*anyopaque, func: *const fn (?*anyopaque) callconv(.c) void) void {
-    nanoui.App.after(0, ctx, func);
+    if (!nanoui.App.onMain(ctx, func)) {
+        const cap: *relay_cb.Capture = @ptrCast(@alignCast(ctx.?));
+        cap.release();
+    }
 }
 
 /// `spawn_relay_capture`: catch the browser's loopback redirect for a

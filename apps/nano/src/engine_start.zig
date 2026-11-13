@@ -320,6 +320,7 @@ fn spawn(a: *App, path: []const u8) !std.c.pid_t {
     const out: std.process.SpawnOptions.StdIo = if (log) |f| .{ .file = f } else .ignore;
     const child = try std.process.spawn(a.io, .{
         .argv = &.{ path, "headless" },
+        .create_no_window = true,
         .environ_map = a.env,
         .stdin = .ignore,
         .stdout = out,

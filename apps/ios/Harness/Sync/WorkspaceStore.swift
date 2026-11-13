@@ -473,7 +473,8 @@ final class WorkspaceStore {
                         spaceId: f["spaceId"]?.stringValue,
                         lastSeenAt: f["lastSeenAt"]?.int64Value,
                         roomGen: f["roomGen"]?.int64Value.map(Int.init),
-                        lastPromptAt: f["lastPromptAt"]?.int64Value)
+                        lastPromptAt: f["lastPromptAt"]?.int64Value,
+                        parentChatId: f["parentChatId"]?.stringValue)
         }
 
         var rows: [String: SessionRow] = [:]
@@ -506,7 +507,7 @@ final class WorkspaceStore {
     /// attention-sorted.
     var overviewChats: [Chat] {
         let liveSpaceIds = Set(spaces.map(\.id))
-        let live = chats.filter { !$0.archived && ($0.spaceId.map(liveSpaceIds.contains) ?? true) }
+        let live = chats.filter { $0.isTopLevel && !$0.archived && ($0.spaceId.map(liveSpaceIds.contains) ?? true) }
         return sortPinnedFirst(live, pinnedSessionIds: pinnedSessionIds)
     }
 
@@ -518,7 +519,7 @@ final class WorkspaceStore {
     /// Sessions section — so it follows that list's ordering instead.
     func chats(in spaceId: String) -> [Chat] {
         sortPinnedFirst(
-            chats.filter { !$0.archived && $0.spaceId == spaceId },
+            chats.filter { $0.isTopLevel && !$0.archived && $0.spaceId == spaceId },
             pinnedSessionIds: pinnedSessionIds
         )
     }
@@ -528,7 +529,7 @@ final class WorkspaceStore {
     /// `overviewChats`, a live space is not required: an archived session of a
     /// deleted space should still be reachable for unarchive.
     func archivedChats(in spaceId: String? = nil) -> [Chat] {
-        sortActive(chats.filter { $0.archived && (spaceId == nil || $0.spaceId == spaceId) })
+        sortActive(chats.filter { $0.isTopLevel && $0.archived && (spaceId == nil || $0.spaceId == spaceId) })
     }
 
     func indicator(for chat: Chat) -> ChatIndicator {

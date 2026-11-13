@@ -32,6 +32,9 @@ async fn git(cwd: &Path, args: &[&str]) {
 async fn init_repo(path: &Path) {
     std::fs::create_dir_all(path.join("src/nested")).expect("repo tree");
     git(path, &["init", "-b", "main"]).await;
+    // The identity test needs identical bytes in both worktrees, even on
+    // Windows runners whose global Git configuration enables CRLF checkout.
+    git(path, &["config", "core.autocrlf", "false"]).await;
     std::fs::write(path.join("README.md"), "hello\n").expect("readme");
     std::fs::write(path.join("src/lib.rs"), "pub fn answer() -> u8 { 42 }\n").expect("source");
     std::fs::write(path.join("src/nested/mod.rs"), "pub mod child;\n").expect("nested source");
@@ -421,4 +424,101 @@ async fn write_rejects_changed_checkout_even_when_contents_match() {
         std::fs::read_to_string(worktree.join("README.md")).unwrap(),
         "hello\n"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workspace_file_rpcs_use_chat_subfolder_without_expanding_its_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init_repo(&repo).await;
+    let linked = temp.path().join("linked");
+    git(
+        &repo,
+        &["worktree", "add", "--detach", linked.to_str().unwrap()],
+    )
+    .await;
+    let plain = temp.path().join("plain");
+    std::fs::create_dir_all(plain.join("src")).unwrap();
+    let core = assemble(&temp.path().join("data"), "device-subfolders");
+    let client = harness_rpc::memory_client(core.rpc_service());
+    for (index, space_root, chat_root) in [
+        (0, &repo, repo.join("src")),
+        (1, &repo, linked.join("src")),
+        (2, &plain, plain.join("src")),
+    ] {
+        std::fs::write(chat_root.join("notes.txt"), "inside chat\n").unwrap();
+        let sid = format!("space-{}", if index == 1 { 0 } else { index });
+        let cid = format!("chat-{index}");
+        core.workspace
+            .create_space(
+                &sid,
+                &core.device_id,
+                space_root.to_str().unwrap(),
+                None,
+                index != 2,
+            )
+            .unwrap();
+        core.workspace
+            .create_chat(&cid, Some(&sid), None, None, None)
+            .unwrap();
+        core.workspace
+            .set_chat_cwd(&cid, chat_root.to_str().unwrap())
+            .unwrap();
+        let read = client
+            .call(
+                methods::READ_WORKSPACE_FILE,
+                serde_json::json!({
+                    "chatId": cid, "path": "notes.txt"
+                }),
+            )
+            .await
+            .expect("chat subfolder is an authorized workspace");
+        assert_eq!(read["text"], "inside chat\n");
+        assert!(
+            client
+                .call(
+                    methods::READ_WORKSPACE_FILE,
+                    serde_json::json!({
+                        "chatId": cid, "path": "../README.md"
+                    })
+                )
+                .await
+                .is_err()
+        );
+        #[cfg(unix)]
+        {
+            let escape = chat_root.join("escape");
+            std::os::unix::fs::symlink(temp.path(), &escape).unwrap();
+            core.workspace
+                .set_chat_cwd(&cid, escape.to_str().unwrap())
+                .unwrap();
+            assert!(
+                client
+                    .call(
+                        methods::READ_WORKSPACE_FILE,
+                        serde_json::json!({
+                            "chatId": cid, "path": "notes.txt"
+                        })
+                    )
+                    .await
+                    .is_err()
+            );
+        }
+        // A canonical parent must still be rejected.
+        core.workspace
+            .set_chat_cwd(&cid, temp.path().to_str().unwrap())
+            .unwrap();
+        assert!(
+            client
+                .call(
+                    methods::READ_WORKSPACE_FILE,
+                    serde_json::json!({
+                        "chatId": cid, "path": "notes.txt"
+                    })
+                )
+                .await
+                .is_err()
+        );
+    }
+    core.shutdown().await;
 }

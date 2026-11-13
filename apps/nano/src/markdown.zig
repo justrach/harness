@@ -4,6 +4,9 @@
 //! HTML READMEs mix in (`markdown_html.zig`). Parsed into blocks whose
 //! text carries nanoui spans, in the frame's memory.
 const std = @import("std");
+test {
+    _ = @import("tests_native_math.zig");
+}
 const nanoui = @import("nanoui");
 const html = @import("markdown_html.zig");
 const Span = nanoui.ui.Span;
@@ -27,6 +30,9 @@ pub const Inline = struct {
     images: []const Image = &.{},
     /// Destinations and rendered byte ranges, retained separately from style.
     links: []const Link = &.{},
+    /// Atomic equations retain their exact delimited source in `text` for
+    /// selection/Copy, alongside the raw body for native layout.
+    maths: []const Math = &.{},
     /// Centered, as HTML's `align="center"` asks.
     center: bool = false,
 };
@@ -35,6 +41,7 @@ pub const Inline = struct {
 /// width HTML gave it.
 pub const Image = struct { src: []const u8, start: u32, end: u32, width: ?f32 = null };
 pub const Link = struct { url: []const u8, start: u32, end: u32 };
+pub const Math = struct { source: []const u8, start: u32, end: u32, display: bool };
 
 pub const Block = union(enum) {
     paragraph: Inline,
@@ -121,13 +128,13 @@ pub const Parser = struct {
                 continue;
             }
             // Display math (`$$ ... $$` or `\[ ... \]`), once its closing delimiter has arrived.
-            if (std.mem.startsWith(u8, t, "$$") or std.mem.startsWith(u8, t, "\\[")) {
+            if ((std.mem.startsWith(u8, t, "$$") and (t.len == 2 or t[2] != '$')) or std.mem.startsWith(u8, t, "\\[")) {
                 const close_delim = if (t[0] == '$') "$$" else "\\]";
                 if (t.len >= 4 and std.mem.endsWith(u8, t, close_delim)) {
                     const inner = std.mem.trim(u8, t[2 .. t.len - 2], " \t");
                     if (inner.len > 0) {
                         try p.flush();
-                        try p.blocks.append(p.arena, .{ .math = try p.mathInline(inner) });
+                        try p.blocks.append(p.arena, .{ .math = try p.mathInline(inner, t) });
                         continue;
                     }
                 } else {
@@ -135,6 +142,9 @@ pub const Parser = struct {
                     var j = i + 1;
                     while (j < lines.items.len) : (j += 1) {
                         const lt = std.mem.trim(u8, lines.items[j], " \t");
+                        // Display delimiters cannot swallow another paragraph
+                        // or a fenced literal region while streaming.
+                        if (lt.len == 0 or std.mem.startsWith(u8, lt, "```") or std.mem.startsWith(u8, lt, "~~~")) break;
                         if (std.mem.endsWith(u8, lt, close_delim)) {
                             close_line = j;
                             break;
@@ -150,11 +160,11 @@ pub const Parser = struct {
                             const lt = std.mem.trim(u8, lines.items[k], " \t");
                             const slice = if (k == end_ix) std.mem.trim(u8, lt[0 .. lt.len - 2], " \t") else lt;
                             if (slice.len > 0) {
-                                if (body.items.len > 0) try body.append(p.arena, ' ');
+                                if (body.items.len > 0) try body.append(p.arena, '\n');
                                 try body.appendSlice(p.arena, slice);
                             }
                         }
-                        try p.blocks.append(p.arena, .{ .math = try p.mathInline(body.items) });
+                        try p.blocks.append(p.arena, .{ .math = try p.mathInline(body.items, try std.mem.join(p.arena, "\n", lines.items[i .. end_ix + 1])) });
                         i = end_ix;
                         continue;
                     }
@@ -236,13 +246,13 @@ pub const Parser = struct {
     fn inlines(p: *Parser, src: []const u8) !Inline {
         var b: Builder = .{ .arena = p.arena, .pal = p.pal };
         try b.parse(src, .{});
-        return .{ .text = b.text.items, .spans = b.spans.items, .images = b.images.items, .links = b.links.items };
+        return .{ .text = b.text.items, .spans = b.spans.items, .images = b.images.items, .links = b.links.items, .maths = b.maths.items };
     }
 
-    fn mathInline(p: *Parser, src: []const u8) !Inline {
+    fn mathInline(p: *Parser, src: []const u8, original: []const u8) !Inline {
         var b: Builder = .{ .arena = p.arena, .pal = p.pal };
-        try b.emitMath(src, .{});
-        return .{ .text = b.text.items, .spans = b.spans.items, .images = b.images.items, .links = b.links.items, .center = true };
+        try b.emitMath(src, original, true, .{});
+        return .{ .text = b.text.items, .spans = b.spans.items, .maths = b.maths.items, .center = true };
     }
 
     pub const Builder = struct {
@@ -252,6 +262,7 @@ pub const Parser = struct {
         spans: std.ArrayList(Span) = .empty,
         images: std.ArrayList(Image) = .empty,
         links: std.ArrayList(Link) = .empty,
+        maths: std.ArrayList(Math) = .empty,
 
         pub fn emit(b: *Builder, s: []const u8, f: Flags) !void {
             if (s.len == 0) return;
@@ -283,17 +294,11 @@ pub const Parser = struct {
             try b.spans.append(b.arena, span);
         }
 
-        pub fn emitMath(b: *Builder, raw: []const u8, base: Flags) !void {
-            const formatted = try formatLatexMath(b.arena, raw);
-            var idx: usize = 0;
-            while (idx < formatted.len) {
-                const start = idx;
-                const is_var = std.ascii.isAlphabetic(formatted[idx]);
-                while (idx < formatted.len and std.ascii.isAlphabetic(formatted[idx]) == is_var) : (idx += 1) {}
-                var mf = base;
-                if (is_var) mf.italic = true;
-                try b.emit(formatted[start..idx], mf);
-            }
+        pub fn emitMath(b: *Builder, raw: []const u8, original: []const u8, display: bool, base: Flags) !void {
+            const start: u32 = @intCast(b.text.items.len);
+            try b.emit(original, base);
+            // Large equations remain literal without invoking native parsing.
+            if (raw.len <= 4096) try b.maths.append(b.arena, .{ .source = raw, .start = start, .end = @intCast(b.text.items.len), .display = display });
         }
 
         fn parse(b: *Builder, src: []const u8, f: Flags) anyerror!void {
@@ -302,16 +307,21 @@ pub const Parser = struct {
             while (i < src.len) {
                 const ch = src[i];
                 const rest = src[i..];
-                if (ch == '\\' and i + 1 < src.len and (src[i + 1] == '(' or src[i + 1] == '[')) {
+                if (!f.link and !f.code and ch == '\\' and i + 1 < src.len and (src[i + 1] == '(' or src[i + 1] == '[')) {
                     const close_delim = if (src[i + 1] == '(') "\\)" else "\\]";
-                    if (std.mem.indexOfPos(u8, src, i + 2, close_delim)) |close| {
+                    if (mathClose(src, i + 2, close_delim)) |close| {
                         if (close > i + 2) {
                             try b.emit(src[plain..i], f);
-                            try b.emitMath(src[i + 2 .. close], f);
+                            try b.emitMath(src[i + 2 .. close], src[i .. close + 2], src[i + 1] == '[', f);
                             i = close + 2;
                             plain = i;
                             continue;
                         }
+                    } else {
+                        // A streaming/incomplete explicit delimiter is literal,
+                        // including its backslash and any script markers.
+                        try b.emit(src[plain..], f);
+                        return;
                     }
                 }
                 if (ch == '\\' and i + 1 < src.len and std.mem.indexOfScalar(u8, "\\`$*_{}[]()#+-.!~|<>", src[i + 1]) != null) {
@@ -340,24 +350,36 @@ pub const Parser = struct {
                         continue;
                     }
                 }
-                if (ch == '$' and !f.code) {
+                if (ch == '$' and !f.code and !f.link) {
+                    if (rest.len >= 3 and rest[1] == '$' and rest[2] == '$') {
+                        while (i < src.len and src[i] == '$') i += 1;
+                        continue;
+                    }
                     if (rest.len >= 4 and rest[1] == '$') {
-                        if (std.mem.indexOfPos(u8, src, i + 2, "$$")) |close| {
+                        if (mathClose(src, i + 2, "$$")) |close| {
                             const inner = std.mem.trim(u8, src[i + 2 .. close], " \t");
                             if (inner.len > 0) {
                                 try b.emit(src[plain..i], f);
-                                try b.emitMath(inner, f);
+                                try b.emitMath(inner, src[i .. close + 2], true, f);
                                 i = close + 2;
                                 plain = i;
                                 continue;
                             }
+                        } else {
+                            try b.emit(src[plain..], f);
+                            return;
                         }
                     } else if (inlineMathEnd(src, i)) |close| {
                         try b.emit(src[plain..i], f);
-                        try b.emitMath(src[i + 1 .. close], f);
+                        try b.emitMath(src[i + 1 .. close], src[i .. close + 1], false, f);
                         i = close + 1;
                         plain = i;
                         continue;
+                    } else if (rest.len > 1 and !std.ascii.isWhitespace(rest[1]) and std.mem.indexOfAny(u8, rest, "\\_^") != null and std.mem.indexOfScalar(u8, rest[1..], '$') == null) {
+                        // An unfinished equation is not Markdown emphasis.
+                        // Preserve script/group markers while it streams.
+                        try b.emit(src[plain..], f);
+                        return;
                     }
                 }
                 if (ch == '*' or ch == '_' or ch == '~') {
@@ -430,23 +452,55 @@ pub const Parser = struct {
 /// Currency-safe closing `$` index for an inline `$ ... $` span starting at `open`.
 /// Returns `null` for `$5 and $10`, `$ 5`, unclosed streaming `$`, or `$` followed by digits.
 pub fn inlineMathEnd(src: []const u8, open: usize) ?usize {
-    if (open + 2 > src.len or src[open] != '$') return null;
-    if (src[open + 1] == '$' or src[open + 1] == ' ' or src[open + 1] == '\t' or src[open + 1] == '\n' or src[open + 1] == '\r') return null;
-    if (open > 0 and (src[open - 1] == '\\' or src[open - 1] == '$' or std.ascii.isAlphanumeric(src[open - 1]))) return null;
+    if (open + 2 > src.len or src[open] != '$' or escapedMath(src, open)) return null;
+    if (src[open + 1] == '$' or std.ascii.isWhitespace(src[open + 1])) return null;
+    if (open > 0 and src[open - 1] == '$') return null;
     var j = open + 1;
-    while (j < src.len) : (j += 1) {
+    while (j < src.len and j - open <= 4097) : (j += 1) {
         const ch = src[j];
-        if (ch == '`' or ch == '\n') return null;
-        if (ch == '$') {
-            if (src[j - 1] == '\\') continue;
-            if (j == open + 1 or src[j - 1] == ' ' or src[j - 1] == '\t') return null;
-            if (j + 1 < src.len and (src[j + 1] == '$' or std.ascii.isAlphanumeric(src[j + 1]))) return null;
-            return j;
+        if (ch == '`' or ch == '\n' or ch == '\r') return null;
+        if (ch != '$' or escapedMath(src, j)) continue;
+        if (j == open + 1 or std.ascii.isWhitespace(src[j - 1])) return null;
+        if (j + 1 < src.len and (src[j + 1] == '$' or std.ascii.isDigit(src[j + 1]))) return null;
+        if (j + 2 < src.len and src[j + 1] == '.' and std.ascii.isDigit(src[j + 2])) return null;
+        // In `pay $5 ($x^2$)`, the price must not steal the opening
+        // delimiter of the following equation. Bare `$5$` remains math.
+        const body = src[open + 1 .. j];
+        if (std.ascii.isDigit(body[0]) or (body[0] == '.' and body.len > 1 and std.ascii.isDigit(body[1]))) {
+            var n: usize = 0;
+            while (n < body.len and (std.ascii.isDigit(body[n]) or body[n] == '.' or body[n] == ',')) n += 1;
+            if (n < body.len) {
+                var price = true;
+                for (body[n..]) |b| if (!std.ascii.isWhitespace(b) and b != '(' and b != '[' and b != '{') {
+                    price = false;
+                    break;
+                };
+                if (price) return null;
+            }
         }
+        return j;
     }
     return null;
 }
 
+fn escapedMath(src: []const u8, at: usize) bool {
+    var n: usize = 0;
+    var i = at;
+    while (i > 0 and src[i - 1] == '\\') : (i -= 1) n += 1;
+    return n % 2 != 0;
+}
+
+fn mathClose(src: []const u8, from: usize, close: []const u8) ?usize {
+    var at = from;
+    while (at + close.len <= src.len and at - from <= 4096) : (at += 1) {
+        if (src[at] == '`' or (src[at] == '\n' and at + 1 < src.len and src[at + 1] == '\n')) return null;
+        if (std.mem.startsWith(u8, src[at..], close) and !escapedMath(src, at)) return at;
+    }
+    return null;
+}
+
+/// Lossy plain-text compatibility utility, not equation rendering. Native
+/// Markdown uses retained source plus native_math's AST/box layout instead.
 pub fn formatLatexMath(arena: std.mem.Allocator, raw_in: []const u8) ![]const u8 {
     const raw = std.mem.trim(u8, raw_in, " \t\n\r");
     var out: std.ArrayList(u8) = .empty;

@@ -17,6 +17,10 @@ const transcript_view = @import("view_transcript.zig");
 const footer_view = @import("view_session_footer.zig");
 const App = @import("app.zig").App;
 
+test {
+    _ = @import("tests_composer_completion.zig");
+}
+
 /// Docked under a chat's transcript: as wide as the conversation column
 /// setting, less its 16-point gutters only once the pane is narrower
 /// (shell.rs `composer_target_width`, less the composer's `px(SPACE_LG)`).
@@ -140,6 +144,7 @@ pub const textarea_min: f32 = 60;
 pub const expanded_min: f32 = textarea_min + 42 + 2;
 
 pub fn pill(c: *ui.Context, a: *App, k: theme.Colors, w: f32, shape: Shape, corner: f32) void {
+    @import("view_composer_completion.zig").menu(c, a, k, w);
     // `border_1` takes its point from inside the box in GPUI: the pill is
     // 49 tall compact (`COMPACT_TOTAL_HEIGHT`), 60 + 42 + 2 = 104 expanded
     // (`COMPOSER_MIN_HEIGHT`), its controls a point in from each edge.
@@ -261,6 +266,9 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
     attachments.paste(c, a);
     const field_id = c.peekId(null);
     keepFocus(c, a, field_id);
+    // Native popup keys precede the field's Tab traversal and Return submit.
+    _ = @import("view_composer_completion.zig").keys(c, a);
+    @import("composer_completion.zig").beforeEdit(a, c);
     const prev_edit = c.edits.get(field_id);
     const prev_caret: ?usize = if (prev_edit) |e| e.caret else null;
     const prev_anchor: ?usize = if (prev_edit) |e| e.anchor else null;
@@ -300,6 +308,7 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
     // "Send messages with" (Settings › Shortcuts): Enter sends, or starts a
     // new line and ⌘↩ sends (`composerSendBehavior`).
     a.view.composer_caret = r.caret;
+    @import("composer_completion.zig").afterEdit(a, c, r.changed);
     const on_enter = @import("view_settings_shortcuts.zig").sendsOnEnter(a);
     if (r.submitted) {
         // Shift-Return is always a newline. The field owns this translation,

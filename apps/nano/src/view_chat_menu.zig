@@ -147,7 +147,7 @@ fn menu(c: *ui.Context, a: *App, k: theme.Colors) void {
             if (copyPath(ch)) |path| if (row(c, k, .copy, "Path", k.muted, k.text.alpha(0.9), false)) return copied(c, a, path, "Path copied");
             if (row(c, k, .copy, "Harness conversation link", k.muted, k.text.alpha(0.9), false)) {
                 var buf: [512]u8 = undefined;
-                const link = conversationLink(&buf, ch.id, a.device_id orelse "") orelse return close(a);
+                const link = a.external_navigation.conversationLink(&buf, a, ch.id) orelse return close(a);
                 return copied(c, a, link, "Harness conversation link copied");
             }
             if (ch.harness_session_id) |sid| if (std.mem.trim(u8, sid, " ").len > 0) {

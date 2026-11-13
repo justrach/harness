@@ -268,6 +268,59 @@ pub fn compose_login_shell_path(cmd: &mut tokio::process::Command) {
     compose_path(cmd.as_std_mut(), std::iter::empty());
 }
 
+/// A command for `program` with the login shell's PATH
+/// ([`compose_login_shell_path`]), with a bare program name (`git`, `gh`)
+/// resolved against that PATH up front.
+///
+/// The standard library can't use `posix_spawn` for a bare name when the
+/// command sets `PATH`, so it falls back to `fork` + `exec`. In the engine
+/// that `fork` copies a process with hundreds of threads and holds every
+/// malloc lock meanwhile, which stalled the runtime on every `git` it ran.
+/// With an absolute program it uses `posix_spawn`. A name not found on the
+/// PATH is left as it is, so the spawn error stays the same.
+pub fn login_shell_command(program: &str) -> tokio::process::Command {
+    let path = composed_path(std::iter::empty());
+    let resolved = path
+        .as_deref()
+        .and_then(|path| resolve_on_path(std::ffi::OsStr::new(program), path));
+    let mut cmd = match resolved {
+        Some(resolved) => tokio::process::Command::new(resolved),
+        None => tokio::process::Command::new(program),
+    };
+    if let Some(path) = path {
+        cmd.env("PATH", path);
+    }
+    cmd
+}
+
+/// The first executable file named `program` in `path`, for a bare name;
+/// None for a name with a directory in it, or when nothing matches.
+fn resolve_on_path(
+    program: &std::ffi::OsStr,
+    path: &std::ffi::OsStr,
+) -> Option<std::path::PathBuf> {
+    let name = std::path::Path::new(program);
+    if program.is_empty() || name.components().count() != 1 || name.is_absolute() {
+        return None;
+    }
+    std::env::split_paths(path)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(name))
+        .find(|candidate| is_executable_file(candidate))
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(_: &std::path::Path) -> bool {
+    // Windows resolves PATHEXT itself and has no fork to avoid.
+    false
+}
+
 /// Compose the child's PATH: the resolved executable's directory first, then
 /// our own PATH, then the login-shell PATH snapshot — deduped. npm-shim CLIs
 /// are `#!/usr/bin/env node` scripts whose `node` lives beside them in the
@@ -297,6 +350,14 @@ fn compose_path<'a>(
     cmd: &mut std::process::Command,
     executable_dir: impl IntoIterator<Item = &'a std::path::Path>,
 ) {
+    if let Some(joined) = composed_path(executable_dir) {
+        cmd.env("PATH", joined);
+    }
+}
+
+fn composed_path<'a>(
+    executable_dir: impl IntoIterator<Item = &'a std::path::Path>,
+) -> Option<std::ffi::OsString> {
     let mut paths: Vec<std::path::PathBuf> = Vec::new();
     for dir in executable_dir {
         paths.push(dir.to_path_buf());
@@ -316,9 +377,7 @@ fn compose_path<'a>(
     }
     let mut seen = std::collections::HashSet::new();
     paths.retain(|p| !p.as_os_str().is_empty() && seen.insert(p.clone()));
-    if let Ok(joined) = std::env::join_paths(paths) {
-        cmd.env("PATH", joined);
-    }
+    std::env::join_paths(paths).ok()
 }
 
 /// Rolling tail of a child's stderr, shared between the reader task and the

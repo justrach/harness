@@ -178,6 +178,24 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     } else null;
     if (subagent == null) if (chat_id) |id| ui.key(c, c.print("scroll-{s}", .{id}));
     const scroll = c.open(st, null);
+    // A cached peer is promoted into the focused outlet after its release.
+    // Its native text/edit/control IDs must follow the transcript, not the
+    // old parent's node position, or the just-created selection vanishes.
+    if (subagent) |agent| {
+        // A child tab is a revocable surface, not just a slot or document
+        // name. A press retained from a closed child must not match the
+        // link/control IDs of a replacement (even the same doc reopened).
+        // Duplicate opens reuse the live Agent, so its feed and native IDs
+        // stay stable until that actual surface is retired.
+        const lifetime = @intFromPtr(agent);
+        var identity = std.hash.Wyhash.init(0x4348_494c_445f_5549);
+        identity.update(agent.parent);
+        identity.update(agent.doc);
+        identity.update(std.mem.asBytes(&lifetime));
+        c.node(scroll).id = identity.final();
+    } else if (chat_id) |id| {
+        c.node(scroll).id = std.hash.Wyhash.hash(0x5452_414e_5343_5250, id);
+    }
     defer ui.end(c);
     var drawn: Drawn = .{ .box = c.node(scroll).id };
     const entries_ = t.entries.items;
@@ -260,7 +278,7 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
         if (i > 0) _ = c.leaf(.{ .height = .{ .px = 16 } }, .none, null);
         ui.key(c, c.print("entry-{s}-{s}", .{ chat_id orelse "", e.id }));
         if (spacer(c, cull, (!just_stuck or i + 1 < entries_.len) and e.status != .streaming, &e.cached_h, &e.cached_w, &e.measured_w)) |r| {
-            if (e.role == .user) {
+            if (e.isHumanPrompt()) {
                 ticks.append(c.alloc(), .{ .entry = i, .top = r.y - (if (i > 0) @as(f32, 16) else 0) }) catch {};
             }
             continue;
@@ -270,7 +288,7 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
             .user => {
                 // Its row starts where the turn's gap does (`top_gap_for`).
                 const r = user(c, a, k, e, col, chat_id);
-                ticks.append(c.alloc(), .{ .entry = i, .top = if (r) |x| x.y - (if (i > 0) @as(f32, 16) else 0) else null }) catch {};
+                if (e.isHumanPrompt()) ticks.append(c.alloc(), .{ .entry = i, .top = if (r) |x| x.y - (if (i > 0) @as(f32, 16) else 0) else null }) catch {};
             },
             .assistant => if (head_end == parts_len) assistant(c, a, k, e, at) else {
                 // Under the reply's own id: its rows keep what they
@@ -282,11 +300,14 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
         }
     }
     if (subagent == null) {
-        if (chat_id) |id| if (@import("app_send_feedback.zig").active(a, id, t)) |pending| {
-            ui.key(c, c.print("pending-{s}", .{pending.message}));
-            if (entries_.len > 0) _ = c.leaf(.{ .height = .{ .px = 16 } }, .none, null);
+        var pending_count: usize = 0;
+        if (chat_id) |id| for (a.pending_sends.items) |pending| {
+            if (!@import("app_send_feedback.zig").visible(pending, id, t)) continue;
+            if (entries_.len > 0 or pending_count > 0) _ = c.leaf(.{ .height = .{ .px = 16 } }, .none, null);
+            ui.key(c, c.print("pending-{s}-{s}", .{ pending.chat, pending.message }));
             const entry = pending.entry();
             _ = user(c, a, k, &entry, col, chat_id);
+            pending_count += 1;
         };
         @import("view_working.zig").trailer(c, a, k, chat_id, t);
     }
@@ -352,6 +373,7 @@ fn steerTail(c: *ui.Context, a: *App, k: theme.Colors, t: steer_order.Tail, entr
 
 /// A prompt's bubble; where it was last laid out.
 fn user(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, col: f32, chat_id: ?[]const u8) ?ui.Rect {
+    if (e.peer()) |message| return peerMessage(c, a, k, e, message);
     const wrap = ui.div(c).column().wFull().itemsEnd();
     defer wrap.end();
     const hovered = wrap.hovered();
@@ -378,6 +400,19 @@ fn user(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, col: f32, 
     }
     lane(c, a, k, e, hovered, true);
     return c.rects.get(c.node(wrap.index).id);
+}
+
+fn peerMessage(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, message: @import("peer_message.zig").Message) ?ui.Rect {
+    const box = ui.div(c).column().wFull().gap(6);
+    defer box.end();
+    const header = ui.div(c).row().control();
+    ui.text(c, c.print("Agent message · {s}", .{message.sender}), .{ .size = 11, .weight = .medium, .color = k.muted });
+    header.end();
+    // Coordination is not a right-aligned human prompt. Keep its body
+    // selectable, while the sender label is not part of cross-message Copy.
+    @import("view_markdown.zig").markdown(c, k, message.body);
+    lane(c, a, k, e, box.hovered(), false);
+    return c.rects.get(c.node(box.index).id);
 }
 
 fn sentAttachment(c: *ui.Context, a: *App, k: theme.Colors, chat_id: ?[]const u8, path: []const u8) void {
@@ -558,7 +593,7 @@ fn part(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *const 
         },
         .tool => treeRow(c, a, k, e, p, true, at.chat_id),
         .@"error" => errorPart(c, a, k, e, p, at),
-        .image => attachment(c, k, .document, p.text.items),
+        .image => @import("view_reply_images.zig").draw(c, a, k, at.chat_id, p.path, p.text.items, null),
         .visual => attachment(c, k, .widget, p.text.items),
         .delegation => attachment(c, k, .widget, "Delegated to a subagent"),
         .input => {

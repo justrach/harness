@@ -375,8 +375,11 @@ fn files(c: *ui.Context, a: *App, k: theme.Colors) void {
     defer r.end();
     tile(c, k, .folder);
     // Edit's own width: 12 a side and its words.
-    words(c, k, "New project starting folder", c.print("Automatic · {s}", .{startingFolder(a) orelse "Home"}), 24 + @ceil(c.text.width("Edit", .{ .size = 13 })));
-    if (ghost(c, k, "Edit")) a.setNotice("Choosing a starting folder isn't in Harness Nano yet: use Harness.");
+    const device = a.device_id orelse a.draftDevice();
+    const override = if (device) |id| a.settings.projectFolderOverride(id) else null;
+    const inferred = if (device) |id| @import("project_paths.zig").starting(c.alloc(), a.settings.doc.get("projectFoldersByDevice"), id, a.spaces.items) catch null else null;
+    words(c, k, "New project starting folder", c.print("{s} · {s}", .{ if (override != null) "Custom" else "Automatic", override orelse inferred orelse "Home" }), 24 + @ceil(c.text.width("Edit", .{ .size = 13 })));
+    if (ghost(c, k, "Edit")) @import("app_project_setup.zig").openStartingFolder(a);
 }
 
 /// The folder new projects start in, with none chosen: the folder most of
