@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		A1000000000000000000B001 /* Loro in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000P002 /* Loro */; };
 		A1000000000000000000B002 /* Markdown in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000P004 /* Markdown */; };
+		A1000000000000000000B003 /* CLuau in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000P006 /* CLuau */; };
 		AB9C174743381D5C067EE245 /* HarnessWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = C99B889A3F9FE78185F10F4E /* HarnessWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		D2E2115BBF69BED0B4439FC4 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DB88999CE90755C33D472091 /* Foundation.framework */; };
 		A4000000000000000000B001 /* HarnessWatch.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = A4000000000000000000PR01 /* HarnessWatch.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -232,6 +233,7 @@
 			files = (
 				A1000000000000000000B001 /* Loro in Frameworks */,
 				A1000000000000000000B002 /* Markdown in Frameworks */,
+				A1000000000000000000B003 /* CLuau in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -329,6 +331,7 @@
 			packageProductDependencies = (
 				A1000000000000000000P002 /* Loro */,
 				A1000000000000000000P004 /* Markdown */,
+				A1000000000000000000P006 /* CLuau */,
 			);
 			productName = Harness;
 			productReference = A1000000000000000000PR01 /* Harness.app */;
@@ -461,6 +464,7 @@
 			packageReferences = (
 				A1000000000000000000P001 /* XCRemoteSwiftPackageReference "loro-swift" */,
 				A1000000000000000000P003 /* XCRemoteSwiftPackageReference "swift-markdown" */,
+				A1000000000000000000P005 /* XCLocalSwiftPackageReference "Packages/CLuau" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A1000000000000000000G002 /* Products */;
@@ -995,6 +999,13 @@
 		};
 /* End XCConfigurationList section */
 
+/* Begin XCLocalSwiftPackageReference section */
+		A1000000000000000000P005 /* XCLocalSwiftPackageReference "Packages/CLuau" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/CLuau;
+		};
+/* End XCLocalSwiftPackageReference section */
+
 /* Begin XCRemoteSwiftPackageReference section */
 		A1000000000000000000P001 /* XCRemoteSwiftPackageReference "loro-swift" */ = {
 			isa = XCRemoteSwiftPackageReference;
@@ -1024,6 +1035,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A1000000000000000000P003 /* XCRemoteSwiftPackageReference "swift-markdown" */;
 			productName = Markdown;
+		};
+		A1000000000000000000P006 /* CLuau */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A1000000000000000000P005 /* XCLocalSwiftPackageReference "Packages/CLuau" */;
+			productName = CLuau;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

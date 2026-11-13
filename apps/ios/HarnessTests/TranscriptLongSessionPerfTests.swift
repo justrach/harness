@@ -183,6 +183,7 @@ final class TranscriptLongSessionPerfTests: XCTestCase {
     private func kindTag(_ row: TranscriptRow) -> String {
         switch row.kind {
         case .generatedImage: return "image"
+        case .visual: return "visual"
         case .user: return "user"
         case .markdown: return "markdown"
         case .toolGroup: return "toolGroup"
