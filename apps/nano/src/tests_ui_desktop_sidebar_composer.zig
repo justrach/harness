@@ -916,6 +916,76 @@ test "Home agent-update island dismisses with its close button and returns only 
     try testing.expect(h.t.hasText("Claude Code 2.1.330 available \u{00b7} Synthetic Mac Studio"));
 }
 
+test "Home agent-update island auto-dismisses completed updates after five seconds" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    const devs = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"synthetic-device","name":"Synthetic Mac Studio","online":true}]
+    , .{});
+    defer devs.deinit();
+    try h.a.devices.replace(devs.value);
+    if (h.a.device_id) |old| h.a.gpa.free(old);
+    h.a.device_id = try h.a.gpa.dupe(u8, "synthetic-device");
+    const updates = @import("agent_updates.zig");
+    const updated =
+        \\[{"harness":"codex","installedVersion":"1.0.0","latestVersion":"1.0.0","phase":"updated"}]
+    ;
+    try updates.setTestStatuses(&h.a, "synthetic-device", true, updated);
+    const start = h.t.time;
+    h.t.settle(0.3);
+    h.t.frame();
+    try testing.expect(updates.hasVisible(&h.a));
+    try testing.expect(h.a.agent_updates.card_rect != null);
+    h.snap("desktop-agent-updates-timeout-before");
+
+    // The app must schedule the timeout even when there is no other activity.
+    try testing.expectEqual(@as(?f64, start + 5), updates.tick(&h.a, h.t.ctx.time));
+    h.t.time = start + 4.99;
+    h.t.frame();
+    try testing.expect(updates.hasVisible(&h.a));
+    // Repeated engine snapshots must not restart the countdown.
+    try updates.setTestStatuses(&h.a, "synthetic-device", true, updated);
+    h.t.time = start + 5;
+    h.t.frame();
+    try testing.expect(!updates.hasVisible(&h.a));
+    try testing.expect(h.a.agent_updates.card_rect == null);
+    h.snap("desktop-agent-updates-timeout-after");
+
+    try updates.setTestStatuses(&h.a, "synthetic-device", true, updated);
+    h.t.advance(1);
+    try testing.expect(!updates.hasVisible(&h.a));
+
+    // A different completed version gets its own full five seconds.
+    try updates.setTestStatuses(&h.a, "synthetic-device", true,
+        \\[{"harness":"codex","installedVersion":"1.1.0","latestVersion":"1.1.0","phase":"updated"}]
+    );
+    const next_start = h.t.time;
+    h.t.frame();
+    h.t.time = next_start + 4.99;
+    h.t.frame();
+    try testing.expect(updates.hasVisible(&h.a));
+    h.t.time = next_start + 5;
+    h.t.frame();
+    try testing.expect(!updates.hasVisible(&h.a));
+}
+
+test "Home agent-update island keeps unfinished updates and failures visible beyond five seconds" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    const updates = @import("agent_updates.zig");
+    for ([_][]const u8{ "available", "downloading", "failed" }) |phase| {
+        var buf: [512]u8 = undefined;
+        try updates.setTestStatuses(&h.a, "synthetic-device", true, try std.fmt.bufPrint(&buf,
+            \\[{{"harness":"codex","phase":"updated"}},{{"harness":"pi","phase":"{s}"}}]
+        , .{phase}));
+        h.t.frame();
+        h.t.advance(6);
+        try testing.expect(updates.hasVisible(&h.a));
+    }
+}
+
 test "desktop 3-pane horizontal split contains tool rows, question chips, and session footer within each pane" {
     var h: Harness = undefined;
     try h.init(false);
