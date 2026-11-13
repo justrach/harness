@@ -160,7 +160,7 @@ async fn a_send_with_a_new_model_waits_for_the_running_turn() {
     client
         .call(
             harness_rpc::methods::MUTATE,
-            serde_json::json!({"op": "createChat", "chatId": CHAT, "deviceId": core.device_id}),
+            serde_json::json!({"op": "createChat", "chatId": CHAT, "deviceId": core.device_id, "cwd": cwd}),
         )
         .await
         .expect("createChat");

@@ -326,9 +326,27 @@ fn matchesExpected(expected: Expected, input: Input) bool {
     };
 }
 
+fn performanceCounterNs(counter: i64, frequency: i64) i128 {
+    // Widen before multiplying: a long-running QPC can overflow i64 even
+    // though the resulting nanosecond timestamp fits comfortably in i128.
+    return @divTrunc(@as(i128, counter) * std.time.ns_per_s, frequency);
+}
+
 fn nowNs() i128 {
+    if (@import("builtin").os.tag == .windows) {
+        const windows = std.os.windows;
+        var counter: windows.LARGE_INTEGER = undefined;
+        var frequency: windows.LARGE_INTEGER = undefined;
+        // These are the monotonic performance-counter APIs std.Io.Threaded
+        // uses too. Never substitute wall time for the sandbox deadline.
+        if (!windows.ntdll.RtlQueryPerformanceFrequency(&frequency).toBool() or frequency <= 0 or
+            !windows.ntdll.RtlQueryPerformanceCounter(&counter).toBool())
+            @panic("monotonic performance counter unavailable");
+        return performanceCounterNs(counter, frequency);
+    }
     var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+    if (std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts) != 0)
+        @panic("monotonic clock unavailable");
     return @as(i128, ts.sec) * std.time.ns_per_s + @as(i128, ts.nsec);
 }
 
@@ -392,8 +410,8 @@ fn openSafeLibs(L: *c.lua_State) void {
         c.lua_call(L, 1, 0);
     }
     const disabled = [_][:0]const u8{
-        "print",        "warn",    "require", "load",     "loadstring",
-        "loadfile",     "dofile",  "collectgarbage", "getfenv",  "setfenv",
+        "print",    "warn",   "require",        "load",    "loadstring",
+        "loadfile", "dofile", "collectgarbage", "getfenv", "setfenv",
         "newproxy",
     };
     for (disabled) |name| {
@@ -416,7 +434,7 @@ fn installUi(L: *c.lua_State) void {
             .slider => "slider",
             .rule => "rule",
         };
-        c.lua_pushinteger(L, @intFromEnum(k));
+        c.lua_pushinteger(L, @backingInt(k));
         c.lua_pushcclosurek(L, uiConstructor, z.ptr, 1, null);
         c.lua_rawsetfield(L, -2, z.ptr);
     }
@@ -427,7 +445,7 @@ fn installUi(L: *c.lua_State) void {
 fn uiConstructor(L_opt: ?*c.lua_State) callconv(.c) c_int {
     const L = L_opt.?;
     const raw_kind = c.lua_tointegerx(L, c.lua_upvalueindex(1), null);
-    const kind: Kind = @enumFromInt(@as(u8, @intCast(raw_kind)));
+    const kind: Kind = @fromBackingInt(@intCast(@as(u8, @intCast(raw_kind))));
 
     if (c.lua_gettop(L) < 1) {
         c.luaL_errorL(L, "visual constructors require a property table (or a text string)");
@@ -1031,6 +1049,23 @@ test "sandbox has only local safe capabilities" {
         testing.allocator.free(e);
         return error.TestUnexpectedResult;
     }
+}
+
+test "performance counter conversion preserves sandbox deadline units without overflow" {
+    try testing.expectEqual(@as(i128, 20 * std.time.ns_per_ms), performanceCounterNs(200_000, 10_000_000));
+    try testing.expectEqual(@as(i128, 1_000_000_000), performanceCounterNs(3_579_545, 3_579_545));
+    try testing.expectEqual(@as(i128, 922_337_203_685_477_580_700), performanceCounterNs(std.math.maxInt(i64), 10_000_000));
+}
+
+test "visual deadline clock is monotonic and advances" {
+    const start = nowNs();
+    var previous = start;
+    for (0..10_000) |_| {
+        const current = nowNs();
+        try testing.expect(current >= previous);
+        previous = current;
+    }
+    try testing.expect(previous > start);
 }
 
 test "setup render and handler loops time out" {
