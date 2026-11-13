@@ -147,6 +147,10 @@ struct MarkdownBlockView: View {
 
     var body: some View {
         switch block {
+        case .response(let blocks):
+            MarkdownResponseText(blocks: blocks, veil: veil)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
         case .paragraph(let runs):
             SelectableMarkdownText(runs: runs, veil: veil)
                 .frame(maxWidth: .infinity, alignment: .leading)

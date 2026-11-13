@@ -252,6 +252,33 @@ final class DemoDataset {
                     parts: [.text(id: "t0", text: "Select this word and drag across multiple lines to copy only the highlighted passage. The rest of this response stays unselected.")],
                     createdAt: nowMs(), deviceId: "demo", status: .complete, continuationOf: nil)
             ])
+        } else if ProcessInfo.processInfo.arguments.contains("-responseselection") {
+            // Keep the entire mixed-block reply visible at a 402pt phone width
+            // so the regression exercises selection, not transcript scrolling.
+            store.setEntries([
+                MessageEntry(id: "response-selection-ask", role: .user,
+                    parts: [.text(id: "t0", text: "Keep this prompt out of copied text.")],
+                    createdAt: nowMs(), deviceId: "demo", status: .complete, continuationOf: nil),
+                MessageEntry(id: "response-selection-reply", role: .assistant,
+                    parts: [.text(id: "t0", text: """
+                        Start here.
+
+                        Second paragraph.
+
+                        ## Quick steps
+
+                        - First item.
+                        - Second item.
+
+                        ```swift
+                        let total = 2
+                        print(total)
+                        ```
+
+                        Finish here.
+                        """)],
+                    createdAt: nowMs(), deviceId: "demo", status: .complete, continuationOf: nil)
+            ])
         } else if ProcessInfo.processInfo.arguments.contains("-links") {
             // Link-tap UI checks: a settled reply with a bare URL and a
             // markdown link, both loopback so a tap opens the host-link sheet.

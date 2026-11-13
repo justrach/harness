@@ -140,6 +140,84 @@ final class TextSelectionTests: XCTestCase {
         }
     }
 
+    func testOneSelectionCrossesResponseParagraphsHeadingsListsAndCode() async throws {
+        let config = AppConfig(edgeURL: URL(string: "http://localhost:8787")!, mode: .dev,
+                               userId: "test", orgId: "test", deviceId: "test", deviceName: "Test")
+        let store = SessionStore(chatId: UUID().uuidString, config: config, offline: true)
+        let source = "First paragraph.\n\n## Heading\n\nSecond paragraph.\n\n- First item\n- Second item\n\n```swift\nlet first = 1\n\nlet second = 2\n```\n\nFinal paragraph."
+        store.setEntries([MessageEntry(id: "response", role: .assistant,
+            parts: [.text(id: "t0", text: source)], createdAt: 1, deviceId: "test", status: .complete)])
+        let (window, host) = await mount(TranscriptView(store: store, chatId: store.chatId, scroll: ScrollState()))
+        defer { window.isHidden = true; window.rootViewController = nil }
+        let views = textViews(in: host.view)
+        XCTAssertEqual(views.count, 1, "Response blocks must share native text storage, not isolated selection ranges")
+        let view = try XCTUnwrap(views.first { $0.text.hasPrefix("First paragraph.") })
+        XCTAssertTrue(view.text.contains("Final paragraph."), "The selection surface must reach the last paragraph")
+        XCTAssertTrue(view.text.contains("Heading"))
+        XCTAssertTrue(view.text.contains("First item"))
+        XCTAssertTrue(view.text.contains("let first = 1\n\nlet second = 2"), "Code keeps literal line breaks")
+        let end = (view.text as NSString).range(of: "Final paragraph.")
+        guard end.location != NSNotFound else { return }
+        let range = NSRange(location: 0, length: NSMaxRange(end))
+        view.selectedRange = range
+        view.copy(nil)
+        XCTAssertEqual(UIPasteboard.general.string, (view.text as NSString).substring(with: range))
+    }
+
+    func testResponseSelectionSurvivesNewParagraphAndStreamingCompletion() async throws {
+        let config = AppConfig(edgeURL: URL(string: "http://localhost:8787")!, mode: .dev,
+                               userId: "test", orgId: "test", deviceId: "test", deviceName: "Test")
+        let store = SessionStore(chatId: UUID().uuidString, config: config, offline: true)
+        var entry = MessageEntry(id: "streaming-response", role: .assistant,
+            parts: [.text(id: "t0", text: "Keep this passage selected.")],
+            createdAt: 1, deviceId: "test", status: .streaming)
+        store.setEntries([entry])
+        let (window, host) = await mount(TranscriptView(store: store, chatId: store.chatId, scroll: ScrollState()))
+        defer { window.isHidden = true; window.rootViewController = nil }
+        let view = try XCTUnwrap(textViews(in: host.view).first)
+        let range = (view.text as NSString).range(of: "this passage")
+        view.selectedRange = range
+        for streaming in [true, false] {
+            entry.parts = [.text(id: "t0", text: "Keep this passage selected.\n\nA second paragraph."),
+                           .text(id: "t1", text: "## Another heading\n\nFinal words.")]
+            entry.status = streaming ? .streaming : .complete
+            entry.stamp = MessageEntry.nextStamp()
+            store.setEntries([entry])
+            try? await Task.sleep(for: .milliseconds(700))
+            window.layoutIfNeeded()
+            let current = try XCTUnwrap(textViews(in: host.view).first)
+            XCTAssertTrue(current === view, "Adding blocks or settling must not replace the native selection surface")
+            XCTAssertEqual(current.selectedRange, range)
+            XCTAssertTrue(current.text.contains("Final words."), "Adjacent text parts share selection too")
+            current.copy(nil)
+            XCTAssertEqual(UIPasteboard.general.string, "this passage")
+        }
+    }
+
+    func testResponseGroupingDoesNotMergeDifferentMessagesOrInteractiveRows() {
+        let entries = [
+            MessageEntry(id: "a", role: .assistant, parts: [
+                .text(id: "t0", text: "First.\n\nSecond."), .text(id: "t1", text: "Third."),
+                .tool(id: "tool", call: RenderToolCall(tag: "exec", fields: ["command": "echo synthetic"]),
+                      isError: false, resolved: true),
+                .text(id: "t2", text: "After the tool.")], createdAt: 1, deviceId: "test", status: .complete),
+            MessageEntry(id: "b", role: .assistant, parts: [.text(id: "t0", text: "Another response.")],
+                         createdAt: 2, deviceId: "test", status: .complete),
+        ]
+        var parsers: [String: IncrementalMarkdownParser] = [:]
+        var completed: [String: CompletedParse] = [:]
+        let rows = TranscriptRowBuilder.rows(entries: entries, pendingSends: [], parsers: &parsers, completed: &completed)
+        XCTAssertEqual(rows.count, 4)
+        guard case .markdown(.response(let blocks), _) = rows.first?.kind else {
+            XCTFail("Consecutive text parts must form one selection surface")
+            return
+        }
+        XCTAssertEqual(blocks.count, 3)
+        guard case .toolGroup = rows[1].kind else { return XCTFail("Tools must retain their own interactive row") }
+        XCTAssertEqual(rows[2].entryId, "a")
+        XCTAssertEqual(rows[3].entryId, "b")
+    }
+
     func testPaintUpdatesAndAppendsPreserveUTF16Selection() async throws {
         let source = "Keep 👩🏽‍💻 café selected"
         let (window, host) = await mount(SelectableText(text: NSAttributedString(string: source)))
