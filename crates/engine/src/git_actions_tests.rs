@@ -74,9 +74,11 @@ impl Fixture {
         self.git(&["add", "tracked"]);
         self.git(&["commit", "-m", "initial"]);
     }
+    #[cfg(unix)]
     async fn state(&self) -> CheckoutGitState {
         stable_capture(&self.identity()).await.unwrap()
     }
+    #[cfg(unix)]
     async fn action(&self, action: CheckoutGitAction) -> CheckoutGitState {
         let state = self.state().await;
         apply_in_checkout(&self.identity(), &state.checksum, &action)
@@ -100,6 +102,7 @@ fn git_actions_status_rejects_traversal_and_represents_rename_as_two_paths() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn git_actions_unborn_exact_paths_and_partially_staged_commit() {
     isolated(async {
@@ -149,6 +152,7 @@ async fn git_actions_unborn_exact_paths_and_partially_staged_commit() {
     .await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn git_actions_checksum_fences_binary_second_edits_index_head_and_config() {
     isolated(async {
@@ -182,6 +186,7 @@ async fn git_actions_checksum_fences_binary_second_edits_index_head_and_config()
     .await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn git_actions_rename_is_explicit_and_unstage_preserves_worktree() {
     isolated(async {
@@ -206,6 +211,7 @@ async fn git_actions_rename_is_explicit_and_unstage_preserves_worktree() {
     .await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn git_actions_push_only_existing_upstream_to_local_bare_remote() {
     isolated(async {
@@ -286,6 +292,7 @@ async fn git_actions_push_only_existing_upstream_to_local_bare_remote() {
     .await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn git_actions_push_pins_confirmed_sha_if_head_advances_after_fence() {
     isolated(async {
@@ -322,6 +329,7 @@ async fn git_actions_push_pins_confirmed_sha_if_head_advances_after_fence() {
     .await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn git_actions_detached_and_conflicts_block_mutations() {
     isolated(async {
@@ -398,6 +406,35 @@ async fn git_actions_symlink_fifo_oversize_and_hook_fail_closed() {
         .unwrap_err();
         assert!(!err.to_string().contains("secret-fixture-value"));
         assert_eq!(f.git(&["log", "--format=%s"]), "initial\n");
+    })
+    .await;
+}
+
+#[cfg(not(unix))]
+#[tokio::test]
+async fn git_actions_unsupported_host_refuses_actions_without_mutating_checkout() {
+    isolated(async {
+        let f = Fixture::new();
+        f.initial_commit();
+        f.write("tracked", "working changes kept\n");
+        let head = f.git(&["rev-parse", "HEAD"]);
+        let index = f.git(&["ls-files", "--stage"]);
+        for action in [
+            CheckoutGitAction::Stage { path: "tracked".into() },
+            CheckoutGitAction::Unstage { path: "tracked".into() },
+            CheckoutGitAction::Commit { message: "must not commit".into() },
+            CheckoutGitAction::Push {},
+        ] {
+            let error = apply_in_checkout(&f.identity(), "unsupported-host-fence", &action)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains(
+                "Native Git mutations require safe descriptor-relative filesystem access on this host"
+            ));
+            assert_eq!(f.git(&["rev-parse", "HEAD"]), head);
+            assert_eq!(f.git(&["ls-files", "--stage"]), index);
+            assert_eq!(std::fs::read_to_string(f.root.join("tracked")).unwrap(), "working changes kept\n");
+        }
     })
     .await;
 }
