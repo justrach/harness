@@ -69,6 +69,60 @@ test "queue edit keeps both action hitboxes inside the tray at split-pane widths
     }
 }
 
+test "queue edit actions stay visually centered at every pane width" {
+    for ([_]bool{ false, true }) |dark| {
+        for ([_]u32{ 160, 220, 320, 520, 900 }) |width| {
+            var h: Harness = undefined;
+            try h.init(@floatFromInt(width), dark);
+            defer h.deinit();
+            h.snap(width);
+            var left: f32 = std.math.inf(f32);
+            var right: f32 = 0;
+            for (h.t.ctx.nodes.items) |node| {
+                if (@abs(node.rect.h - 28) > 0.01 or node.style.radius != 5) continue;
+                left = @min(left, node.rect.x);
+                right = @max(right, node.rect.x + node.rect.w);
+            }
+            try testing.expectApproxEqAbs(@as(f32, @floatFromInt(width)) / 2, (left + right) / 2, 0.5);
+        }
+    }
+}
+
+test "queue edit tray does not scroll a single row or its decorative tuck" {
+    var h: Harness = undefined;
+    try h.init(320, false);
+    defer h.deinit();
+    for (h.t.ctx.nodes.items) |node| {
+        if (!node.style.scroll) continue;
+        try testing.expectEqual(@as(f32, 0), h.t.ctx.scroll_max.get(node.id) orelse 0);
+        try testing.expect(node.rect.h >= 36);
+    }
+}
+
+test "queue edit tray still scrolls genuinely overflowing rows" {
+    var h: Harness = undefined;
+    try h.init(320, false);
+    defer h.deinit();
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"queued","text":"Synthetic first message"},{"id":"second","text":"Synthetic second message"},{"id":"third","text":"Synthetic third message"}]
+    , .{});
+    defer parsed.deinit();
+    try h.a.queue.replace(parsed.value);
+    h.t.settle(2);
+    var scroller: ?ui.Rect = null;
+    var id: @TypeOf(h.t.ctx.nodes.items[0].id) = 0;
+    for (h.t.ctx.nodes.items) |node| {
+        if (!node.style.scroll) continue;
+        scroller = node.rect;
+        id = node.id;
+        try testing.expect((h.t.ctx.scroll_max.get(id) orelse 0) > 0);
+    }
+    const box = scroller orelse return error.NoQueueScroller;
+    h.t.scroll(box.x + box.w / 2, box.y + box.h / 2, -100);
+    h.t.settle(2);
+    try testing.expect((h.t.ctx.scroll.get(id) orelse 0) > 0);
+}
+
 test "queue edit icon actions retain meaningful hints" {
     for ([_]bool{ false, true }) |dark| {
         var h: Harness = undefined;

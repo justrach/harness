@@ -1,8 +1,7 @@
 //! The queue tray over the composer (crates/ui/src/queue.rs): a surface
 //! with rounded top corners tucked behind the pill, one 36-point row per
 //! message: its text on one line, then Remove, Edit and "Send now"; the row
-//! being edited reads "Editing in composer" with "Save to queue" and
-//! "Cancel".
+//! being edited centers "Save to queue" and "Cancel" as one action group.
 const std = @import("std");
 const nanoui = @import("nanoui");
 const ui = nanoui.ui;
@@ -15,12 +14,18 @@ const App = @import("app.zig").App;
 
 /// How far the pill covers the tray's foot.
 pub const tuck: f32 = 26;
+const row_height: f32 = 36;
 
 pub fn tray(c: *ui.Context, a: *App, k: theme.Colors, w: f32) bool {
     if (a.queue.items.len == 0) return false;
-    const box = ui.div(c).column().w(w - 32).bg(k.composer).border(k.border).borderW(1).rounded(16).pb(8 + tuck).pt(4).px(4)
-        .maxH(c.size.h * 0.3).scrollY();
+    const box = ui.div(c).column().w(w - 32).bg(k.composer).border(k.border).borderW(1).rounded(16).pb(8 + tuck).pt(4).px(4);
     defer box.end();
+    // Only message rows scroll. The padding tucked behind the composer is
+    // decoration, not overflow; always leave room for one complete row.
+    const chrome_height = 4 + 8 + tuck + 2;
+    const rows = ui.div(c).column().wFull().maxH(@max(row_height, c.size.h * 0.3 - chrome_height))
+        .scrollY().scrollbar(.{ .overlay = k.muted.alpha(0.5) });
+    defer rows.end();
     const compact = w < 520;
     // Tray: 32pt outer inset, 1pt borders and 4pt horizontal padding.
     const row_width = @max(0, w - 42);
@@ -39,19 +44,17 @@ const edit_actions = [_]kit.Action{
 fn row(c: *ui.Context, a: *App, k: theme.Colors, r: queue.Row, newest: bool, compact: bool, width: f32) void {
     const editing = if (a.queue_edit) |e| std.mem.eql(u8, e.row, r.id) else false;
     const gap: f32 = if (compact) 4 else 8;
-    const layout = kit.actionLayout(c, @max(0, width - 16), &edit_actions, c.text.width("Editing in composer", .{ .size = 12.5 }), gap);
-    var line = ui.div(c).row().wFull().h(36).px(8).gap(gap).itemsCenter().rounded(8);
-    line = if (editing) line.bg(k.ink(0.06)) else line.hover(k.ink(0.04));
+    const layout = kit.actionLayout(c, @max(0, width - 16), &edit_actions, 0, gap);
+    var line = ui.div(c).row().wFull().h(row_height).px(8).gap(gap).itemsCenter().rounded(8);
+    line = if (editing) line.bg(k.ink(0.06)).justifyCenter() else line.hover(k.ink(0.04));
     defer line.end();
     const gated = r.gate != .none;
     // Editing is not draggable; do not spend scarce action space on a handle.
     if (!editing) icons.icon(c, .@"queue-drag-handle", 13, k.muted.alpha(if (gated) 0.35 * 0.5 else 0.5), 14);
-    if (!editing or layout.status) {
+    if (!editing) {
         const col = ui.div(c).column().grow().w(0).clip();
         defer col.end();
-        const title: []const u8 = if (editing)
-            (if (a.queue_edit.?.saving) "Saving…" else "Editing in composer")
-        else switch (r.gate) {
+        const title: []const u8 = switch (r.gate) {
             .editing => |who| c.print("Editing on {s}", .{who}),
             .review => "Needs review",
             .none => blk: {
