@@ -98,6 +98,10 @@ pub fn listDrives(host: ?[]const u8) Request(struct { targetDeviceId: ?[]const u
     return .{ .method = "ListDrives", .params = .{ .targetDeviceId = host } };
 }
 
+pub fn gitHistory(cwd: []const u8, cursor: usize, host: ?[]const u8) Request(struct { cwd: []const u8, cursor: usize, limit: usize, targetDeviceId: ?[]const u8 }) {
+    return .{ .method = "ListGitHistory", .params = .{ .cwd = cwd, .cursor = cursor, .limit = 50, .targetDeviceId = host } };
+}
+
 pub fn listRefs(repo_path: []const u8, host: ?[]const u8) Request(struct { repoPath: []const u8, targetDeviceId: ?[]const u8 }) {
     return .{ .method = "ListRefs", .params = .{ .repoPath = repo_path, .targetDeviceId = host } };
 }

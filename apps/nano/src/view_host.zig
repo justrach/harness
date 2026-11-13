@@ -24,6 +24,8 @@ pub fn host(c: *ui.Context, a: *App, k: theme.Colors) void {
     const t = a.panels.activeTab() orelse return picker(c, a, k);
     switch (t.kind) {
         .diffs => @import("view_diffs.zig").diffs(c, a, k),
+        .git => @import("view_git.zig").history(c, a, k),
+        .github => @import("view_git.zig").github(c, a, k),
         .file => file(c, a, k, t.path),
         .browser => if (t.browser) |b| @import("view_browser.zig").draw(c, a, k, b),
         .tool_access => @import("view_tool_access.zig").draw(c, a, k),
@@ -77,14 +79,24 @@ fn band(c: *ui.Context, a: *App, k: theme.Colors) void {
 fn picker(c: *ui.Context, a: *App, k: theme.Colors) void {
     const area = ui.div(c).column().wFull().grow().center().gap(8);
     defer area.end();
-    for ([_]bool{ true, false }) |browser| {
+    for ([_]struct { title: []const u8, glyph: icons.Name, kind: panels.TabKind }{
+        .{ .title = "Browser", .glyph = .globe, .kind = .browser },
+        .{ .title = "Diffs", .glyph = .list, .kind = .diffs },
+        .{ .title = "Git history", .glyph = .@"git-branch", .kind = .git },
+        .{ .title = "GitHub", .glyph = .@"pull-request", .kind = .github },
+    }) |item| {
         const row = ui.div(c).row().w(280).h(44).px(14).gap(10).itemsCenter().rounded(10).border(k.border).borderW(1).bg(k.ink(0.02)).hover(k.ink(0.05));
         defer row.end();
         if (row.clicked()) {
-            if (browser) @import("app_browser.zig").openBlank(a) else panels.addDiffsTab(a);
+            switch (item.kind) {
+                .browser => @import("app_browser.zig").openBlank(a),
+                .diffs => panels.addDiffsTab(a),
+                .git, .github => @import("app_git.zig").open(a, item.kind),
+                else => unreachable,
+            }
         }
-        icons.icon(c, if (browser) .globe else .list, 15, k.muted, 0);
-        ui.text(c, if (browser) "Browser" else "Diffs", .{ .size = 13, .weight = .medium, .color = k.text });
+        icons.icon(c, item.glyph, 15, k.muted, 0);
+        ui.text(c, item.title, .{ .size = 13, .weight = .medium, .color = k.text });
     }
 }
 

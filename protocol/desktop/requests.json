@@ -49,6 +49,8 @@
     {"name": "save a chat editor file with stale fences", "method": "WriteWorkspaceFile", "stream": false, "params": {"chatId":"chat-parity","path":"README.md","text":"Explicit edit\n","expectedCheckoutId":"checkout-parity-stale","expectedContentHash":"hash-parity-stale","encoding":"utf8","lineEnding":"lf"}},
     {"name": "save a project editor file with stale fences", "method": "WriteWorkspaceFile", "stream": false, "params": {"spaceId":"space-parity","checkoutPath":"$DIR","path":"README.md","text":"Explicit edit\n","expectedCheckoutId":"checkout-parity-stale","expectedContentHash":"hash-parity-stale","encoding":"utf8Bom","lineEnding":"crlf"}},
     {"name": "watch git", "method": "WatchWorkspaceGitStatus", "stream": true, "params": {"spaceId":"space-parity","checkoutPath":"$DIR"}},
+    {"name": "page local git history", "method": "ListGitHistory", "stream": false, "params": {"cwd":"$DIR","cursor":0,"limit":50}},
+    {"name": "page remote git history", "method": "ListGitHistory", "stream": false, "params": {"cwd":"$DIR","cursor":50,"limit":50,"targetDeviceId":"host-parity"}},
     {"name": "list project actions", "method": "ListProjectActions", "stream": false, "params": {"spaceId":"space-parity"}},
     {"name": "run a project action", "method": "RunProjectAction", "stream": false, "params": {"spaceId":"space-parity","chatId":"chat-parity","actionId":"test","cols":80,"rows":24}},
     {"name": "add a project action", "method": "UpsertProjectAction", "stream": false, "params": {"spaceId":"space-parity","action":{"name":"Test","command":"echo hi","icon":"test","runOnWorktreeCreate":false}}},

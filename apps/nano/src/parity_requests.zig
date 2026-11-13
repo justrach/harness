@@ -76,6 +76,8 @@ pub fn cases(gpa: std.mem.Allocator) ![]Case {
         try case(gpa, "save a chat editor file with stale fences", r.writeWorkspaceFile(.{ .chatId = chat, .path = "README.md", .text = "Explicit edit\n", .expectedCheckoutId = "checkout-parity-stale", .expectedContentHash = "hash-parity-stale", .encoding = "utf8", .lineEnding = "lf" }), false),
         try case(gpa, "save a project editor file with stale fences", r.writeWorkspaceFile(.{ .spaceId = space, .checkoutPath = dir, .path = "README.md", .text = "Explicit edit\n", .expectedCheckoutId = "checkout-parity-stale", .expectedContentHash = "hash-parity-stale", .encoding = "utf8Bom", .lineEnding = "crlf" }), false),
         try case(gpa, "watch git", r.watchGit(space, dir, null), true),
+        try case(gpa, "page local git history", r.gitHistory(dir, 0, null), false),
+        try case(gpa, "page remote git history", r.gitHistory(dir, 50, "host-parity"), false),
         try case(gpa, "list project actions", r.listActions(space, null), false),
         // Before the action exists: a real run would leave a terminal open.
         try case(gpa, "run a project action", r.runAction(space, chat, "test", null), false),
