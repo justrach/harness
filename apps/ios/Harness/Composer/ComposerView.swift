@@ -72,7 +72,9 @@ struct ComposerShell<Chips: View>: View {
     private var compact: Bool { verticalSizeClass == .compact }
     @State private var focused = false
     @State private var editor = ComposerEditorController()
-    @Environment(AppModel.self) private var model
+    // The shared shell also renders without command context (queue edits and
+    // isolated layout probes); only host-backed completion needs an app model.
+    @Environment(AppModel.self) private var model: AppModel?
     @State private var caret = NSRange(location: 0, length: 0)
     @State private var commands: [ComposerCommand] = []
     @State private var commandSource: ComposerCommandContext?
@@ -127,7 +129,7 @@ struct ComposerShell<Chips: View>: View {
     }
 
     private var richReferences: Bool {
-        commandContext.map { model.hostSupportsComposerReferences(deviceId: $0.deviceId) } ?? false
+        commandContext.map { model?.hostSupportsComposerReferences(deviceId: $0.deviceId) ?? false } ?? false
     }
 
     private var needsHostUpdate: Bool {
@@ -162,9 +164,9 @@ struct ComposerShell<Chips: View>: View {
             surface
         }
         .task(id: ComposerCommandRequest(context: commandContext, active: commandQuery != nil,
-                                        online: commandContext.map { model.deviceOnline($0.deviceId) } ?? false,
+                                        online: commandContext.map { model?.deviceOnline($0.deviceId) ?? false } ?? false,
                                         retry: commandRetry)) {
-            guard let context = commandContext, commandQuery != nil else { return }
+            guard let model, let context = commandContext, commandQuery != nil else { return }
             if commandSource != context {
                 commands = []
                 commandError = nil
