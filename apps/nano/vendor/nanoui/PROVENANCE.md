@@ -66,9 +66,12 @@ background transport; the toolkit hook does not serialize or send data.
 
 Harness-local bottom overscroll changes in `src/ui/scroll.zig` use a bounded
 nonlinear resistance curve and its inverse, preserving event-coalescing and
-reversal behavior. Discrete wheels, native momentum, Reduce Motion and idle
-spring termination retain their explicit paths. Harness's `tests_scroll_bounce`
-module exercises the production consumer.
+reversal behavior. Precise native momentum crossing the bottom now seeds one
+bounded rebound, without pumping the spring again on later momentum events.
+The impact invalidates retained scrolling so its displacement is freshly laid
+out and painted. Discrete wheels and Reduce Motion do not gain an inertial
+bounce. Harness's `tests_scroll_bounce` module checks the production consumer,
+including full-tree/culled pixel parity through impact and recovery.
 
 Harness-local ImageIO orientation handling in `src/ui/image.zig` reports
 EXIF-oriented dimensions for both header layout and transformed thumbnails.
