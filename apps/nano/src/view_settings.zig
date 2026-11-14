@@ -12,6 +12,7 @@ const settings = @import("settings.zig");
 const sidebar = @import("view_sidebar.zig");
 const App = @import("app.zig").App;
 const Section = settings.Section;
+const catalog = @import("settings_catalog.zig");
 
 /// GPUI's line height, as a multiple of the text's size.
 const phi: f32 = 1.618;
@@ -48,22 +49,16 @@ fn show(a: *App, s: Section) void {
     a.redraw();
 }
 
-/// The sections a search finds: those whose name has the query in it.
+/// Match task words, not just the name of the section that owns them.
 pub fn matches(query: []const u8, buf: []Section) []Section {
     var n: usize = 0;
     for (Section.all) |s| {
-        if (containsIgnoreCase(s.label(), query)) {
+        if (catalog.matches(s, query)) {
             buf[n] = s;
             n += 1;
         }
     }
     return buf[0..n];
-}
-
-fn containsIgnoreCase(hay: []const u8, needle: []const u8) bool {
-    if (needle.len > hay.len) return false;
-    for (0..hay.len - needle.len + 1) |i| if (std.ascii.eqlIgnoreCase(hay[i..][0..needle.len], needle)) return true;
-    return false;
 }
 
 /// Space above the next box (the GPUI kit's `mt`).
@@ -112,18 +107,31 @@ pub fn nav(c: *ui.Context, a: *App, k: theme.Colors) void {
             _ = c.anims.remove(anim_h.final());
             _ = ui.textField(c, &a.view.settings_search, .{ .placeholder = "Search settings", .placeholder_color = k.faint, .width = .fill, .bare = true, .size = 14, .line_height = 22.75 });
         }
-        const rows = ui.div(c).column().wFull().gap(2);
+        space(c, 8);
+        const rows = ui.div(c).column().wFull().grow().h(0).gap(2).scrollY();
         defer rows.end();
-        const query = std.mem.trim(u8, a.view.settings_search.text(), " ");
+        const query = std.mem.trim(u8, a.view.settings_search.text(), " \t\r\n");
         if (query.len > 0) {
             var buf: [Section.all.len]Section = undefined;
             const found = matches(query, &buf);
             if (found.len == 0) {
-                const e = ui.div(c).row().px(8).py(6);
+                const e = ui.div(c).column().wFull().px(8).py(6).gap(4);
                 defer e.end();
                 ui.text(c, "No matching settings", st(c, 12, .{ .color = k.muted }));
+                ui.text(c, "Try links, updates, privacy or text size.", st(c, 11, .{ .color = k.muted, .wrap = true }));
             }
-            for (found, 0..) |s, i| if (navRow(c, k, s, i == 0)) show(a, s);
+            {
+                const info = ui.div(c).row().wFull().px(8).py(4).itemsCenter();
+                defer info.end();
+                ui.text(c, c.print("{d} {s}", .{ found.len, if (found.len == 1) "section" else "sections" }), st(c, 11, .{ .color = k.muted }));
+                ui.spacer(c);
+                if (ghost(c, k, "Clear")) {
+                    a.view.settings_search.clear();
+                    a.view.settings_search_focus = true;
+                    a.redraw();
+                }
+            }
+            for (found) |s| if (navRow(c, k, s, s == a.settings.section, true, sidebar.widthOf(a))) show(a, s);
         } else {
             var group: []const u8 = "";
             for (Section.all) |s| {
@@ -133,7 +141,7 @@ pub fn nav(c: *ui.Context, a: *App, k: theme.Colors) void {
                     defer h.end();
                     ui.text(c, group, st(c, 11, .{ .weight = .medium, .color = k.muted.alpha(0.6) }));
                 }
-                if (navRow(c, k, s, s == a.settings.section)) show(a, s);
+                if (navRow(c, k, s, s == a.settings.section, false, sidebar.widthOf(a))) show(a, s);
             }
         }
     }
@@ -152,18 +160,24 @@ pub fn nav(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (back.clicked()) close(a);
 }
 
-fn navRow(c: *ui.Context, k: theme.Colors, s: Section, selected: bool) bool {
+fn navRow(c: *ui.Context, k: theme.Colors, s: Section, selected: bool, searching: bool, width: f32) bool {
     ui.key(c, s.key());
-    var r = ui.div(c).row().wFull().px(8).py(6).gap(8).itemsCenter().rounded(8);
+    var r = ui.div(c).row().wFull().px(8).py(7).gap(8).itemsCenter().rounded(8).control();
     if (selected) {
         r = r.bg(k.selected);
     } else {
         r = r.hover(k.hover);
     }
     defer r.end();
+    _ = kit.focusRing(c, r, k.accent, 2);
     const hot = r.hovered();
-    icons.icon(c, s.icon(), 16, k.muted, 0);
+    icons.icon(c, s.icon(), 16, if (selected) k.text else k.muted, 0);
+    // Give wrapped descriptions their actual width before intrinsic height
+    // measurement; a zero-width grow column overestimates the scroll row.
+    const text = ui.div(c).column().w(@max(80, width - 56)).gap(2);
+    defer text.end();
     ui.text(c, s.label(), st(c, 13, .{ .weight = if (selected) .medium else .regular, .color = if (selected or hot) k.text else k.muted }));
+    if (searching) ui.text(c, catalog.description(s), st(c, 11, .{ .color = k.muted, .wrap = true }));
     return r.clicked();
 }
 
@@ -194,13 +208,24 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
         const col = ui.div(c).column().wFull().maxW(768).px(24).pt(32).pb(64).motion(enter);
         defer col.end();
         // The column's inside: wrapped text needs its width up front.
-        const main_w = c.size.w - sidebar.width;
+        const main_w = c.size.w - sidebar.widthOf(a);
         inner_w = @min(main_w, 768) - 2 * 24;
+        {
+            const context = ui.div(c).row().wFull().pb(16).gap(6).itemsCenter();
+            defer context.end();
+            ui.text(c, c.print("Settings / {s}", .{a.settings.section.group()}), st(c, 11, .{ .color = k.muted }));
+            ui.spacer(c);
+            if (ghost(c, k, "Find a setting")) {
+                a.view.settings_search_focus = true;
+                a.redraw();
+            }
+        }
         // Appearance's theme menu doesn't outlive its page.
         if (a.settings.section != .appearance) a.view.theme_menu = null;
         switch (a.settings.section) {
             .notifications => notifications(c, a, k),
             .files => files(c, a, k),
+            .browsing => browsing(c, a, k),
             .archived => @import("view_settings_archived.zig").page(c, a, k),
             .devices => @import("view_settings_devices.zig").page(c, a, k),
             .shortcuts => @import("view_settings_shortcuts.zig").page(c, a, k),
@@ -303,11 +328,16 @@ pub fn toggle(c: *ui.Context, k: theme.Colors, on: bool, enabled: bool) bool {
 fn switchRow(c: *ui.Context, a: *App, k: theme.Colors, comptime flag: settings.Flag, icon: icons.Name, title: []const u8, meta: []const u8, first: bool, enabled: bool) void {
     ui.key(c, @tagName(flag));
     const r = row(c, k, first, !enabled);
+    if (enabled) {
+        _ = r.control();
+        _ = kit.focusRing(c, r, k.accent, 2);
+    }
     defer r.end();
     tile(c, k, icon);
     words(c, k, title, meta, 40);
-    if (toggle(c, k, a.settings.get(flag), enabled)) {
+    if (toggle(c, k, a.settings.get(flag), enabled) or (enabled and r.clicked())) {
         a.settings.toggle(flag);
+        if (comptime flag == .share_desktop_responsiveness) a.performance.consent(a.performance.available and a.settings.get(flag), a.nowMs());
         a.redraw();
     }
 }
@@ -360,7 +390,23 @@ fn notifications(c: *ui.Context, a: *App, k: theme.Colors) void {
     fieldLabel(c, k, "Privacy");
     const cd = card(c, k);
     defer cd.end();
-    switchRow(c, a, k, .share_performance_stats, .@"fast-tier", "Share anonymous performance stats", "Send launch, load, send, and streaming timings so Harness can get faster. Timings only: no account, chats, paths, or content.", true, true);
+    switchRow(c, a, k, .share_desktop_responsiveness, .@"fast-tier", "Share anonymous responsiveness stats", "Opt in to aggregated CPU frame costs and active scroll/animation intervals, grouped by OS, architecture, app version, renderer and pane-count range. No account, content, paths or installation ID. Off by default; release app only.", true, true);
+}
+
+fn browsing(c: *ui.Context, a: *App, k: theme.Colors) void {
+    header(c, k, "Links & browsing", null);
+    subtitle(c, k, "Choose where GitHub links in your conversations open.", true);
+    {
+        const cd = card(c, k);
+        defer cd.end();
+        switchRow(c, a, k, .open_github_links_in_harness, .@"pull-request", "Open GitHub links in Harness", "Show pull requests and issues in the native GitHub panel beside your chat. Turn off to use your default browser.", true, true);
+    }
+    space(c, 20);
+    fieldLabel(c, k, "You stay in control");
+    subtitle(c, k, "Right-click a link for Open in Harness or Open in browser, regardless of this preference. Open on GitHub always uses your browser. Other websites keep their existing behavior.", true);
+    space(c, 16);
+    fieldLabel(c, k, "Repository access");
+    subtitle(c, k, "Native GitHub browsing uses the session host's signed-in gh installation and repository permissions. Opening a PR does not switch your branch or change working files.", true);
 }
 
 fn files(c: *ui.Context, a: *App, k: theme.Colors) void {

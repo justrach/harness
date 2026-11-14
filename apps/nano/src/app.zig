@@ -341,6 +341,7 @@ pub const App = struct {
     io: std.Io,
     engine: engine_mod.Engine,
     window: ?*nanoui.Window = null,
+    performance: @import("performance.zig").State = .{},
     spaces: workspace.Spaces,
     chats: workspace.Chats,
     /// A missing owner revokes callbacks only after an authoritative snapshot.
@@ -530,6 +531,7 @@ pub const App = struct {
     }
 
     pub fn deinit(a: *App) void {
+        a.performance.deinit();
         a.markdown_cache.deinit();
         a.visuals.deinit(a.gpa);
         @import("text_buffer.zig").deinit(&a.composer);
@@ -766,6 +768,10 @@ pub const App = struct {
         a.external_navigation.settle(a);
         question.syncWizard(a);
         var next: ?f64 = question.tick(a, now);
+        if (@import("view_updates.zig").tick(a)) |delay| {
+            const deadline = now + @as(f64, delay);
+            next = if (next) |n| @min(n, deadline) else deadline;
+        }
         if (queue_mod.tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (@import("app_progress.zig").tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;
         if (account.tick(a, now)) |t| next = if (next) |n| @min(n, t) else t;

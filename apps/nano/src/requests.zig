@@ -123,6 +123,7 @@ pub const GitHubBrowse = struct {
     page: usize = 1,
     expectedRepository: ?[]const u8 = null,
     targetDeviceId: ?[]const u8 = null,
+    linkedRepository: ?struct { owner: []const u8, name: []const u8 } = null,
 };
 pub fn githubBrowse(params: GitHubBrowse) Request(GitHubBrowse) {
     return .{ .method = "BrowseCheckoutGitHub", .params = params };

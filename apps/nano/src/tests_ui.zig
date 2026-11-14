@@ -671,7 +671,6 @@ test "native visual shows sanitized error card when Luau script fails" {
     h.snap("native-visual-error");
 }
 
-
 test "a second line makes the docked composer taller and keeps the keys" {
     var h: Harness = undefined;
     try h.init();
@@ -2160,7 +2159,7 @@ test "bottom-docked checkout and ref popovers open upward above the composer foo
     try testing.expectEqualStrings("feature/popover-upward", h.a.new_ref.?);
 }
 
-test "Settings Devices and the sidebar footer surface desktop app updates and auto-restart" {
+test "Settings Devices and the sidebar footer surface desktop app updates and hourly checks" {
     var h: Harness = undefined;
     try h.init();
     defer h.deinit();
@@ -2180,19 +2179,16 @@ test "Settings Devices and the sidebar footer surface desktop app updates and au
     // Sidebar footer surfaces the update row immediately when a newer release is known.
     try testing.expect(h.t.hasText("Update to v99.0.0"));
 
-    // Open Settings -> Devices and verify the update card, button, auto-restart toggle, and remote badge.
+    // Open Settings -> Devices and verify the update card, hourly policy and remote badge.
     h.a.settings.setSection(.devices);
     @import("view_settings.zig").open(&h.a);
     h.t.settle(1);
     h.snap("settings-devices-update-card");
     try testing.expect(h.t.hasText("Harness v99.0.0 is available."));
     try testing.expect(h.t.hasText("Update to v99.0.0"));
-    try testing.expect(h.t.hasText("Restart automatically to install updates"));
+    try testing.expect(h.t.hasText("Automatic update checks"));
+    try testing.expect(!h.t.hasText("Restart automatically to install updates"));
     try testing.expect(h.t.hasText("Update available · Details"));
-    try testing.expect(h.a.settings.get(.restart_to_install_updates));
-    try h.t.clickText("Restart automatically to install updates");
-    h.t.settle(1);
-    try testing.expect(!h.a.settings.get(.restart_to_install_updates));
 }
 
 test "model picker row context badges stay valid through paint and clicking Models back button with reasoning slider never panics" {

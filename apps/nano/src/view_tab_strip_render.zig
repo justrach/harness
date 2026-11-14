@@ -101,8 +101,7 @@ fn topWorkspacePill(c: *ui.Context, a: *App, k: theme.Colors, ws: usize, pill_w:
     const ch = if (cid) |id| a.findChat(id) else null;
     const t_name = if (ch) |v| @import("view_sidebar.zig").chatLabel(v) else "New tab";
     const panes_n = workspacePaneCount(a, ws);
-    var pill = ui.div(c).row().size(pill_w, chrome.tab_height).px(8).gap(6).itemsCenter().rounded(6).bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover).clip().control();
-    pill = tip.on(pill, k, .{ .text = t_name, .look = .tab });
+    const pill = ui.div(c).row().size(pill_w, chrome.tab_height).px(8).gap(6).itemsCenter().rounded(6).bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover).clip().control();
     defer pill.end();
     const pill_hot = pill.hovered();
     icons.icon(c, if (panes_n > 1) .widget else .@"chat-round-line", 13, k.muted, 0);
@@ -156,8 +155,7 @@ fn inactiveTabPill(c: *ui.Context, a: *App, k: theme.Colors, slot_ix: usize, pan
     ui.key(c, c.print("instrument-slot-{d}-tab-{d}", .{ slot_ix, tab_ix }));
     const ch = if (chat_id) |cid| a.findChat(cid) else null;
     const t_name = if (ch) |v| @import("view_sidebar.zig").chatLabel(v) else "New tab";
-    var pill = ui.div(c).row().size(pill_w, chrome.tab_height).px(7).gap(5).itemsCenter().rounded(6).bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover).clip().control();
-    pill = tip.on(pill, k, .{ .text = t_name, .look = .tab });
+    const pill = ui.div(c).row().size(pill_w, chrome.tab_height).px(7).gap(5).itemsCenter().rounded(6).bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover).clip().control();
     defer pill.end();
     const pill_hot = pill.hovered();
     icons.icon(c, .@"chat-round-line", 13, k.muted, 0);
@@ -182,9 +180,8 @@ fn slotBox(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: us
     const name = strip.title(a, target);
     const computer = strip.deviceLabel(a, strip.device(a, target));
     const project = strip.folder(a, target);
-    const tooltip = if (project) |f| c.print("{s} · {s} · {s}", .{ name, computer, f.name }) else c.print("{s} · {s}", .{ name, computer });
     var box = ui.div(c).row().size(width, chrome.tab_height).pl(7).pr(4).gap(6).itemsCenter().rounded(6).clip().control();
-    box = tip.on(if (on) box.bg(k.ink(if (k.dark) 0.16 else 0.10)) else box.bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover), k, .{ .text = tooltip, .look = .tab });
+    box = if (on) box.bg(k.ink(if (k.dark) 0.16 else 0.10)) else box.bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover);
     defer box.end();
     const hot = box.hovered() or group_hot;
     const show_controls = hot or c.focus == c.node(box.index).id;
@@ -262,9 +259,9 @@ fn slotBox(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: us
     }
     if (show_controls and width >= 220) {
         ui.key(c, "slot-add");
-        if (kit.iconButton(c, k, .plus, .{ .size = 18, .radius = 4, .icon = 11, .tip = .{ .text = "New tab" } })) {
+        if (kit.iconButton(c, k, .plus, .{ .size = 18, .radius = 4, .icon = 11, .tip = .{ .text = if (target == .chat) "New tab" else "New surface" } })) {
             handled = true;
-            a.newTab();
+            if (target == .chat) a.newTab() else strip.queue(a, .{ .new = target });
         }
     }
     if ((target != .chat and menu_count > 1) or show_controls) {

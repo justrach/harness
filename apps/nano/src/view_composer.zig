@@ -25,6 +25,9 @@ test {
 /// setting, less its 16-point gutters only once the pane is narrower
 /// (shell.rs `composer_target_width`, less the composer's `px(SPACE_LG)`).
 pub fn docked(c: *ui.Context, a: *App, k: theme.Colors) void {
+    // A question that cannot fit this pane has one window-bounded outlet,
+    // rendered after the split tree, never a second squeezed copy here.
+    if (@import("view_question.zig").expanded(c, a)) return;
     const w = dockedWidth(transcript_view.paneWidth(c, a), transcript_view.column_w);
     const queue_view = @import("view_queue.zig");
     const queued = a.queue.items.len > 0;

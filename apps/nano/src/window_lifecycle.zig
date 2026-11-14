@@ -155,7 +155,11 @@ pub const Lifecycle = struct {
             .theme = theme.ui(nanoui.isDark()),
             .on_close = .{ .ctx = self, .func = closed },
             .should_close = .{ .ctx = self, .func = shouldClose },
-            .content = .{ .view = .init(self.state, @import("view.zig").view) },
+            .content = .{ .view = blk: {
+                var view = nanoui.ui.View.init(self.state, @import("view.zig").view);
+                view.after_frame = @import("performance.zig").completed;
+                break :blk view;
+            } },
         });
     }
 

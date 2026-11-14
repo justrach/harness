@@ -55,6 +55,7 @@ const cluster_x: f32 = @import("window_chrome.zig").leading;
 const cluster_w: f32 = 24 * 3 + 8 + 2;
 
 pub fn view(a: *App, c: *ui.Context) void {
+    @import("performance.zig").begin(a, c);
     a.markdown_cache.beginFrame();
     @import("frame_profile.zig").beginPass();
     a.view.in_pre_tree = true;
@@ -265,6 +266,7 @@ pub fn view(a: *App, c: *ui.Context) void {
     if (c.input.released) a.view.sidebar_press_focus = false;
     const popup = surfaces.popup(k);
     trailing(c, a, popup);
+    @import("view_question.zig").overlay(c, a, k);
     @import("view_diffs.zig").overlays(c, a, popup);
     @import("view_actions.zig").overlays(c, a, popup);
     @import("view_menus.zig").menus(c, a, popup);
@@ -714,6 +716,8 @@ fn keys(c: *ui.Context, a: *App) void {
         }
     }
     // A session menu or its dialog, over everything, takes Escape first.
+    // An unobscured question owns Escape (Back); the no-menu fallback
+    // must not consume it before the question's surface can see it.
     if (a.view.link_menu.open and c.shortcut(.{ .key = S.escape })) {
         a.view.link_menu.open = false;
     } else if (@import("view_chat_menu.zig").anyOpen(a) and c.shortcut(.{ .key = S.escape })) {
@@ -721,7 +725,7 @@ fn keys(c: *ui.Context, a: *App) void {
     } else if (a.view.write_open and !a.view.palette.open and a.picker == .none and c.shortcut(.{ .key = S.escape })) {
         // The global fallback must not swallow Write's Save/back gesture.
         @import("view_write.zig").close(a);
-    } else if (c.shortcut(.{ .key = S.escape }) and a.queue_edit == null) {
+    } else if ((a.wizard == null or menuKeepsKeys(a) or a.view.account_menu) and c.shortcut(.{ .key = S.escape }) and a.queue_edit == null) {
         a.picker = .none;
         a.view.filter_menu = false;
         a.view.more_menu = false;

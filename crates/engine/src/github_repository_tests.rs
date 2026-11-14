@@ -15,6 +15,7 @@ fn params(kind: Kind) -> BrowseCheckoutGitHubParams {
         page: None,
         expected_repository: None,
         target_device_id: None,
+        linked_repository: None,
     }
 }
 fn source(remote: Option<&str>) -> CheckoutSourceContext {
@@ -180,6 +181,252 @@ async fn github_repository_endpoints_are_fixed_get_only_and_bounded() {
     assert!(endpoint(&repository(), &p).contains("state=open"));
     p.state = Some(State::Closed);
     assert!(endpoint(&repository(), &p).contains("state=closed"));
+}
+
+fn linked_params(kind: Kind) -> BrowseCheckoutGitHubParams {
+    let mut p = params(kind);
+    p.linked_repository = Some(GitHubRepositoryTarget {
+        owner: "Other-Owner".into(),
+        name: "Linked.Repo".into(),
+    });
+    p
+}
+
+#[tokio::test]
+async fn github_repository_linked_targets_use_fixed_get_endpoints_and_canonical_identity() {
+    let cases = [
+        (Kind::Pulls, None, "/pulls?state=all&per_page=30&page=2"),
+        (Kind::Issues, None, "/issues?state=all&per_page=30&page=2"),
+        (Kind::Pull, Some(7), "/pulls/7"),
+        (Kind::Issue, Some(7), "/issues/7"),
+        (Kind::Files, Some(7), "/pulls/7/files?per_page=30&page=2"),
+        (
+            Kind::Activity,
+            Some(7),
+            "/issues/7/timeline?per_page=30&page=2",
+        ),
+    ];
+    for (kind, number, suffix) in cases {
+        let detail = matches!(kind, Kind::Pull | Kind::Issue);
+        let runner = Runner::with(vec![]);
+        runner.git(
+            "/synthetic/checkout",
+            Some("git@github.com:example/project.git"),
+        );
+        runner.outputs.lock().unwrap().push_back(output(response(
+            if detail {
+                item(7)
+            } else if matches!(kind, Kind::Pulls | Kind::Issues) {
+                json!([item(7)])
+            } else {
+                json!([])
+            },
+            false,
+        )));
+        runner.git(
+            "/synthetic/checkout",
+            Some("git@github.com:example/project.git"),
+        );
+        let mut p = linked_params(kind);
+        p.number = number;
+        p.page = Some(if detail { 1 } else { 2 });
+        p.state = Some(State::All);
+        p.expected_repository = Some("github.com/other-owner/linked.repo".into());
+        let result = browse_with_context(&Browser::new(runner.clone()), &p, || {
+            std::future::ready(Ok(identity()))
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.repository.key, "github.com/other-owner/linked.repo");
+        assert_eq!(result.repository.host, "github.com");
+        assert_eq!(result.repository.owner, "Other-Owner");
+        assert_eq!(result.repository.name, "Linked.Repo");
+        assert_eq!(
+            result.repository.url,
+            "https://github.com/Other-Owner/Linked.Repo"
+        );
+        let resource = if matches!(kind, Kind::Pull | Kind::Pulls) {
+            "pull"
+        } else {
+            "issues"
+        };
+        if let Some(detail) = result.detail {
+            assert_eq!(
+                detail.url,
+                format!("https://github.com/Other-Owner/Linked.Repo/{resource}/7")
+            );
+        }
+        for item in result.items {
+            assert_eq!(
+                item.url,
+                format!("https://github.com/Other-Owner/Linked.Repo/{resource}/7")
+            );
+        }
+        let calls = runner.calls.lock().unwrap();
+        let requests = calls
+            .iter()
+            .filter(|call| call.program == "gh")
+            .collect::<Vec<_>>();
+        assert_eq!(requests.len(), 1);
+        let endpoint = format!("/repos/Other-Owner/Linked.Repo{suffix}");
+        assert_eq!(
+            requests[0].args,
+            [
+                "api",
+                "--hostname",
+                "github.com",
+                "--method",
+                "GET",
+                "--include",
+                "--header",
+                "Accept: application/vnd.github+json",
+                &endpoint,
+            ]
+        );
+        assert_eq!(requests[0].cwd, Path::new("/synthetic/checkout"));
+        assert!(
+            requests[0]
+                .env
+                .contains(&("GH_HOST".into(), "github.com".into()))
+        );
+        assert_eq!(calls.first().unwrap().program, "git");
+        assert_eq!(calls.last().unwrap().program, "git");
+    }
+}
+
+#[tokio::test]
+async fn github_repository_linked_targets_reject_invalid_segments_before_any_process() {
+    for invalid in [
+        "".into(),
+        ".".into(),
+        "..".into(),
+        "../escape".into(),
+        "a/b".into(),
+        "a\\b".into(),
+        "a%2fb".into(),
+        "a?query".into(),
+        "a#fragment".into(),
+        "a b".into(),
+        "a\nb".into(),
+        "a\0b".into(),
+        "https://github.com".into(),
+        "🦀".into(),
+        "a".repeat(101),
+    ] {
+        for owner in [true, false] {
+            let mut p = linked_params(Kind::Pulls);
+            let target = p.linked_repository.as_mut().unwrap();
+            if owner {
+                target.owner = invalid.clone();
+            } else {
+                target.name = invalid.clone();
+            }
+            let runner = Runner::with(vec![]);
+            let mut resolved = false;
+            let result = browse_with_context(&Browser::new(runner.clone()), &p, || {
+                resolved = true;
+                std::future::ready(Ok(identity()))
+            })
+            .await;
+            assert!(!resolved, "invalid linked target resolved a checkout");
+            assert!(result.is_err(), "accepted invalid segment {invalid:?}");
+            assert!(runner.calls.lock().unwrap().is_empty());
+        }
+    }
+    let mut p = linked_params(Kind::Pulls);
+    p.linked_repository = Some(GitHubRepositoryTarget {
+        owner: "a".repeat(100),
+        name: "b".repeat(100),
+    });
+    validate(&p).unwrap();
+}
+
+#[tokio::test]
+async fn github_repository_linked_targets_fence_source_checkout_and_remote_even_on_provider_error()
+{
+    for changed_checkout in [false, true] {
+        for provider_error in [false, true] {
+            let runner = Runner::with(vec![]);
+            runner.git(
+                "/synthetic/checkout",
+                Some("git@github.com:example/project.git"),
+            );
+            runner.outputs.lock().unwrap().push_back(if provider_error {
+                Err(ProcessRunError::Timeout)
+            } else {
+                output(response(json!([]), false))
+            });
+            runner.git(
+                "/synthetic/checkout",
+                Some(if changed_checkout {
+                    "git@github.com:example/project.git"
+                } else {
+                    "git@github.com:example/changed.git"
+                }),
+            );
+            let mut resolutions = 0;
+            let result = browse_with_context(
+                &Browser::new(runner.clone()),
+                &linked_params(Kind::Pulls),
+                || {
+                    resolutions += 1;
+                    let mut checkout = identity();
+                    if changed_checkout && resolutions == 2 {
+                        checkout.git_dir = "/synthetic/other/.git".into();
+                    }
+                    std::future::ready(Ok(checkout))
+                },
+            )
+            .await;
+            assert_eq!(result.unwrap_err().to_string(), STALE);
+            assert_eq!(resolutions, 2);
+            let calls = runner.calls.lock().unwrap();
+            assert_eq!(calls.iter().filter(|call| call.program == "gh").count(), 1);
+            assert_eq!(calls.last().unwrap().program, "git");
+        }
+    }
+}
+
+#[tokio::test]
+async fn github_repository_linked_targets_require_chosen_repository_key_for_detail_and_paging() {
+    for kind in [
+        Kind::Pulls,
+        Kind::Issues,
+        Kind::Pull,
+        Kind::Issue,
+        Kind::Files,
+        Kind::Activity,
+    ] {
+        let mut p = linked_params(kind);
+        if matches!(kind, Kind::Pulls | Kind::Issues) {
+            p.page = Some(2);
+        } else {
+            p.number = Some(7);
+        }
+        assert!(validate(&p).is_err());
+        p.expected_repository = Some("github.com/other-owner/linked.repo".into());
+        validate(&p).unwrap();
+        // A checkout key is not a linked-target key and cannot authorize a detail.
+        p.expected_repository = Some(repository().key);
+        let runner = Runner::with(vec![]);
+        runner.git(
+            "/synthetic/checkout",
+            Some("git@github.com:example/project.git"),
+        );
+        let result = browse_with_context(&Browser::new(runner.clone()), &p, || {
+            std::future::ready(Ok(identity()))
+        })
+        .await;
+        assert_eq!(result.unwrap_err().to_string(), STALE);
+        assert!(
+            runner
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|call| call.program == "git")
+        );
+    }
 }
 
 #[test]

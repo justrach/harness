@@ -19,6 +19,15 @@ pub enum GitHubRepositoryState {
     Closed,
     All,
 }
+/// An explicitly followed GitHub link. It is only a read target: it does not
+/// replace the selected chat's checkout identity or permit mutations.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitHubRepositoryTarget {
+    pub owner: String,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BrowseCheckoutGitHubParams {
@@ -29,6 +38,8 @@ pub struct BrowseCheckoutGitHubParams {
     pub page: Option<usize>,
     pub expected_repository: Option<String>,
     pub target_device_id: Option<String>,
+    #[serde(default)]
+    pub linked_repository: Option<GitHubRepositoryTarget>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -102,4 +113,45 @@ pub struct BrowseCheckoutGitHubResponse {
     pub page: usize,
     pub has_next_page: bool,
     pub truncated: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn github_repository_params_accept_explicit_linked_repository() {
+        let value = json!({
+            "chatId": "synthetic-chat", "kind": "pull", "number": 7,
+            "expectedRepository": "github.com/other/repository",
+            "linkedRepository": {"owner": "Other", "name": "Repository"}
+        });
+        let params: BrowseCheckoutGitHubParams = serde_json::from_value(value.clone()).unwrap();
+        let encoded = serde_json::to_value(params).unwrap();
+        assert_eq!(encoded["linkedRepository"], value["linkedRepository"]);
+        let checkout: BrowseCheckoutGitHubParams = serde_json::from_value(json!({
+            "chatId": "synthetic-chat", "kind": "pulls"
+        }))
+        .unwrap();
+        assert!(serde_json::to_value(checkout).unwrap()["linkedRepository"].is_null());
+    }
+
+    #[test]
+    fn github_repository_params_deny_linked_target_endpoints_and_unknown_fields() {
+        for target in [
+            json!({"owner": "other", "name": "repository", "host": "untrusted.invalid"}),
+            json!({"owner": "other", "name": "repository", "url": "https://untrusted.invalid"}),
+            json!({"owner": "other", "name": "repository", "method": "POST"}),
+            json!({"owner": "other"}),
+            json!({"name": "repository"}),
+        ] {
+            assert!(
+                serde_json::from_value::<BrowseCheckoutGitHubParams>(json!({
+                    "chatId": "synthetic-chat", "kind": "pulls", "linkedRepository": target
+                }))
+                .is_err()
+            );
+        }
+    }
 }

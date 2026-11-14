@@ -54,6 +54,27 @@ fn replace(list: anytype, text: []const u8) !void {
     try list.replace(parsed.value);
 }
 
+test "workspace tab labels do not cover the conversation with hover tooltips" {
+    for ([_]bool{ false, true }) |dark| {
+        var h: Harness = undefined;
+        try h.init(dark);
+        defer h.deinit();
+        for (0..3) |scene| {
+            if (scene == 1) h.a.openChatInTab("b");
+            if (scene == 2) @import("app_git.zig").open(&h.a, .github);
+            h.t.settle(0.2);
+            const title = h.topText(if (scene == 2) "GitHub" else "Alpha") orelse return error.MissingTabTitle;
+            h.t.moveTo(title.x + title.w / 2, title.y + title.h / 2);
+            h.t.advance(0.8);
+            if (std.c.getenv("NANO_TAB_HOVER_SNAP_DIR")) |path| {
+                var buf: [1024]u8 = undefined;
+                try h.t.screenshot(try std.fmt.bufPrint(&buf, "{s}/tab-{s}-{d}.png", .{ std.mem.span(path), if (dark) "dark" else "light", scene }));
+            }
+            try testing.expect(h.t.tooltipText() == null);
+        }
+    }
+}
+
 test "saved GPUI tabs reopen in order with their active chat" {
     var h: Harness = undefined;
     try h.init(true);

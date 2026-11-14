@@ -20,7 +20,12 @@ test {
     _ = @import("tests_git.zig");
     _ = @import("tests_git_workflow.zig");
     _ = @import("tests_github_repository.zig");
+    _ = @import("tests_github_links.zig");
+    _ = @import("tests_remote_markdown.zig");
     _ = @import("tests_scroll_performance.zig");
+    _ = @import("tests_scroll_bounce.zig");
+    _ = @import("tests_sidebar_performance.zig");
+    _ = @import("sidebar_groups.zig");
     _ = @import("tests_link_actions.zig");
     _ = @import("tests_titlebar_clearance.zig");
     _ = @import("wizard.zig");
@@ -46,6 +51,7 @@ test {
     _ = @import("settings.zig");
     _ = @import("shortcuts.zig");
     _ = @import("view_settings.zig");
+    _ = @import("tests_settings_navigation.zig");
     _ = @import("view_settings_devices.zig");
     _ = @import("view_settings_devices_updates.zig");
     _ = @import("view_settings_shortcuts.zig");
@@ -78,9 +84,13 @@ test {
     _ = @import("icons.zig");
     _ = @import("file_icons.zig");
     _ = @import("release.zig");
+    _ = @import("perf_stats.zig");
+    _ = @import("perf_transport.zig");
+    _ = @import("tests_performance.zig");
     _ = @import("view.zig");
     _ = @import("native_menu.zig");
     _ = @import("tests_ui_split.zig");
+    _ = @import("tests_ui_tab_strip.zig");
     _ = @import("tests_streaming.zig");
     _ = @import("tests_ui_streaming_visibility.zig");
     _ = @import("tests_ui_redraw.zig");
@@ -91,6 +101,7 @@ test {
     _ = @import("graff_worktree.zig");
     _ = @import("view_session_footer.zig");
     _ = @import("view_composer.zig");
+    _ = @import("tests_question_surface.zig");
     _ = @import("tests_ui_footer.zig");
     _ = @import("view_rail.zig");
     _ = @import("tests_ui_rail.zig");

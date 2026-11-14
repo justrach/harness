@@ -15,6 +15,36 @@ const kit = @import("view_kit.zig");
 const rules = @import("motion_rules.zig");
 const App = @import("app.zig").App;
 
+/// A question's ordinary inline surface needs room for a readable option
+/// and its fixed controls. Tiny split panes instead use the focused chat's
+/// single window-bounded outlet. No separate wizard or draft state is made.
+pub fn expanded(c: *ui.Context, a: *const App) bool {
+    if (a.wizard == null or a.selected == null or a.view.settings_open or a.view.write_open or a.bots.page != .none) return false;
+    if (a.view.strip.expanded) |slot| if (slot != .chat) return false;
+    const width = @import("view_composer.zig").dockedWidth(@import("view_transcript.zig").paneWidth(c, a), @import("view_transcript.zig").column_w);
+    var height = a.view.chrome.height;
+    if (a.tabs.layout()) |s| {
+        if (!s.zoomed and s.axis == .vertical and a.view.strip.expanded == null) height = @import("panel_chrome.zig").paneSpan(height, s.shares.items[s.focus], s.panes.items.len, false);
+    }
+    const actions = @import("view_actions.zig");
+    return width < 360 or height - actions.toolbarHeight(a) - actions.dockHeight(a) < 320;
+}
+
+/// Outside pane clipping, but below menus/dialogs. Only App's selected-chat
+/// wizard can render here; read-only neighbors never mount an answer field.
+pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
+    if (!expanded(c, a)) return;
+    ui.key(c, c.print("focused-question-{s}-{s}", .{ a.selected.?, a.wizard.?.request_id }));
+    const scrim = ui.div(c).fixed().offset(0, 0).size(c.size.w, c.size.h).layer(3).bg(.{ .a = 0.3 }).center();
+    defer scrim.end();
+    // Consume pointer hits without cancelling: accidental outside clicks
+    // must not dismiss the agent's request or discard an unfinished answer.
+    _ = scrim.interaction();
+    const dock = ui.div(c).column().w(@min(640, @max(0, c.size.w - 32))).maxH(@max(0, c.size.h - 32));
+    defer dock.end();
+    panel(c, a, k, @min(640, @max(0, c.size.w - 32)), .{ .height = c.size.h - 20, .dock = dock.index });
+}
+
 /// Where the panel may grow to (view_composer.zig `docked`).
 pub const Room = struct {
     /// The dock's share of its pane's height.
@@ -57,9 +87,9 @@ fn fadeFoot(c: *ui.Context, k: theme.Colors, view: u32, content_h: f32) void {
 
 pub fn panel(c: *ui.Context, a: *App, k: theme.Colors, w: f32, room: Room) void {
     const wz = if (a.wizard) |*x| x else return;
+    keys(c, a, wz.question().options.len, std.mem.trim(u8, a.composer.text(), " \n\t").len == 0);
     const q = wz.question();
     const typed_empty = std.mem.trim(u8, a.composer.text(), " \n\t").len == 0;
-    keys(c, a, q.options.len, typed_empty);
     // Submit and Cancel close the wizard `wz` and `q` point into, so a
     // button's action waits until the panel is drawn.
     var act: enum { none, advance, back, dismiss } = .none;
@@ -166,13 +196,20 @@ pub fn panel(c: *ui.Context, a: *App, k: theme.Colors, w: f32, room: Room) void 
         const prev_caret: ?usize = if (prev_edit) |e| e.caret else null;
         const prev_anchor: ?usize = if (prev_edit) |e| e.anchor else null;
         const field_index: u32 = @intCast(c.nodes.items.len);
+        const moved = a.view.composer_id != 0 and a.view.composer_id != field_id and c.focus == a.view.composer_id;
+        if ((a.view.focus_composer or moved) and !@import("view.zig").menuKeepsKeys(a)) {
+            c.focus = field_id;
+            a.view.focus_composer = false;
+        }
+        a.view.composer_id = field_id;
+        a.view.composer_frame = c.frame;
         const r = ui.textField(c, &a.composer, .{
             .placeholder = if (any_pick) "Type your own answer, or leave this blank to use the selected option" else "Type your own answer, or pick an option above",
             .width = .fill,
             .bare = true,
             .size = 14,
             .multiline = true,
-            .max_lines = 8,
+            .max_lines = @intFromFloat(std.math.clamp(@floor((max_h - 170) / 23), 1, 8)),
         });
         c.node(field_index).style.scroll_bar = false;
         _ = c.scrollbars.remove(field_id);
@@ -207,6 +244,7 @@ pub fn panel(c: *ui.Context, a: *App, k: theme.Colors, w: f32, room: Room) void 
 
 /// 1–9 pick while the answer box is empty; Escape steps back a page.
 fn keys(c: *ui.Context, a: *App, options: usize, typed_empty: bool) void {
+    if (@import("view.zig").menuKeepsKeys(a) or a.view.account_menu or a.view.close_choice) return;
     if (typed_empty) {
         var i: usize = 0;
         while (i < @min(options, 9)) : (i += 1) {

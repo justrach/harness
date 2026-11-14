@@ -1,5 +1,5 @@
-//! Repository-wide read-only GitHub browsing. Remote text stays plain native
-//! text; no HTML, remote images or provider-supplied URLs are executed.
+//! Repository-wide read-only GitHub browsing with native Markdown prose.
+//! No webview, image loading or provider-supplied executable links.
 const std = @import("std");
 const nanoui = @import("nanoui");
 const ui = nanoui.ui;
@@ -7,6 +7,7 @@ const App = @import("app.zig").App;
 const theme = @import("theme.zig");
 const kit = @import("view_kit.zig");
 const flow = @import("app_github_repository.zig");
+const icons = @import("icons.zig");
 
 pub fn view(c: *ui.Context, a: *App, k: theme.Colors) void {
     const s = &a.panels.github_repository;
@@ -51,9 +52,9 @@ pub fn view(c: *ui.Context, a: *App, k: theme.Colors) void {
         defer content.end();
         switch (s.kind) {
             .pulls, .issues => list(c, a, k, page, ready and s.error_text == null),
-            .pull, .issue => summary(c, k, page),
+            .pull, .issue => summary(c, a, k, page),
             .files => files(c, a, k, page),
-            .activity => activity(c, k, page),
+            .activity => activity(c, a, k, page),
         }
     }
     if (s.kind != .pull and s.kind != .issue) {
@@ -81,8 +82,11 @@ fn detailHeader(c: *ui.Context, a: *App, k: theme.Colors, ready: bool) void {
     if (s.details) |d| if (d.page.detail) |detail| {
         const box = ui.div(c).column().wFull().px(14).pb(10).gap(5);
         defer box.end();
-        ui.text(c, c.print("#{d} · {s}{s}", .{ detail.number, detail.state, if (detail.isDraft) " · draft" else "" }), .{ .size = 11, .color = k.accent });
-        ui.text(c, detail.title, .{ .size = 14, .weight = .semibold, .wrap = true, .color = k.text });
+        stateBadge(c, k, detail.number, detail.state, detail.isDraft);
+        ui.text(c, detail.title, .{ .size = 16, .weight = .semibold, .wrap = true, .color = k.text });
+        ui.text(c, c.print("{s} · opened {s}", .{ detail.author, date(detail.createdAt) }), .{ .size = 11, .color = k.muted, .wrap = true });
+        if (detail.headRef) |head| ui.text(c, c.print("{s} → {s}", .{ head, detail.baseRef orelse "" }), .{ .size = 11, .mono = true, .color = k.muted, .wrap = true });
+        if (detail.changedFiles) |count| ui.text(c, c.print("{d} files · +{d} / −{d}", .{ count, detail.additions orelse 0, detail.deletions orelse 0 }), .{ .size = 11, .color = k.muted });
     };
     {
         const tabs = ui.div(c).row().wFull().px(12).pb(8).gap(6).itemsCenter();
@@ -96,27 +100,34 @@ fn detailHeader(c: *ui.Context, a: *App, k: theme.Colors, ready: bool) void {
 }
 fn list(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page, enabled: bool) void {
     if (page.items.len == 0) {
-        ui.text(c, if (page.hasNextPage) "No matching items on this page. More pages are available." else "No matching items on this page.", .{ .size = 12, .color = k.muted, .wrap = true });
+        const empty = ui.div(c).column().wFull().p(20).gap(8).itemsCenter();
+        defer empty.end();
+        icons.icon(c, if (a.panels.github_repository.list_kind == .pulls) .@"pull-request" else .@"chat-round-line", 24, k.muted, 0);
+        ui.text(c, "No matching items", .{ .size = 14, .weight = .semibold, .color = k.text });
+        ui.text(c, if (page.hasNextPage) "No matches on this page. Try the next page or another filter." else "Try another state filter, or Refresh to check again.", .{ .size = 12, .color = k.muted, .wrap = true });
     }
     for (page.items) |item| {
         ui.key(c, c.print("github-{d}", .{item.number}));
-        const card = ui.div(c).column().wFull().h(98).p(10).gap(6).border(k.border).borderW(1).rounded(8).clip();
+        const card = ui.div(c).column().wFull().p(12).gap(7).border(k.border).borderW(1).rounded(8);
         defer card.end();
         if (enabled) _ = card.hover(k.hover).control();
         if (enabled) _ = kit.focusRing(c, card, k.accent, 2);
-        ui.text(c, c.print("#{d} · {s}{s}", .{ item.number, item.state, if (item.isDraft) " · draft" else "" }), .{ .size = 10.5, .color = k.accent });
-        ui.text(c, item.title, .{ .size = 12, .weight = .medium, .color = k.text, .wrap = true });
+        stateBadge(c, k, item.number, item.state, item.isDraft);
+        ui.text(c, item.title, .{ .size = 13, .weight = .semibold, .color = k.text, .wrap = true });
         ui.text(c, c.print("{s} · updated {s}", .{ item.author, date(item.updatedAt) }), .{ .size = 10.5, .color = k.muted });
         if (enabled and card.clicked()) flow.openItem(a, item.number);
     }
 }
-fn summary(c: *ui.Context, k: theme.Colors, page: flow.Page) void {
+fn summary(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page) void {
     const detail = page.detail orelse return;
-    ui.text(c, c.print("{s} · opened {s}", .{ detail.author, date(detail.createdAt) }), .{ .size = 11, .color = k.muted, .wrap = true });
-    if (detail.headRef) |head| ui.text(c, c.print("{s} → {s}", .{ head, detail.baseRef orelse "" }), .{ .size = 11, .mono = true, .color = k.muted, .wrap = true });
-    if (detail.changedFiles) |count| ui.text(c, c.print("{d} files · +{d} / −{d}", .{ count, detail.additions orelse 0, detail.deletions orelse 0 }), .{ .size = 11, .color = k.muted });
-    rule(c, k);
-    ui.text(c, if (detail.body.len == 0) "No description provided." else detail.body, .{ .size = 12, .color = k.text, .wrap = true });
+    // Zeron's description hierarchy, rendered with our bounded native prose
+    // renderer rather than a webview or provider-controlled HTML surface.
+    const card = ui.div(c).column().wFull().p(16).gap(14).border(k.border).borderW(1).rounded(10);
+    defer card.end();
+    ui.text(c, "Description", .{ .size = 12, .weight = .semibold, .color = k.muted });
+    if (std.mem.trim(u8, detail.body, " \t\r\n").len == 0) {
+        ui.text(c, "No description provided.", .{ .size = 12, .color = k.muted });
+    } else @import("view_markdown.zig").providerMarkdown(c, k, detail.body, a);
 }
 fn files(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page) void {
     const s = &a.panels.github_repository;
@@ -142,7 +153,7 @@ fn files(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page) void {
         }
     }
 }
-fn activity(c: *ui.Context, k: theme.Colors, page: flow.Page) void {
+fn activity(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page) void {
     if (page.events.len == 0) ui.text(c, "No activity on this page.", .{ .size = 12, .color = k.muted });
     for (page.events, 0..) |event, i| {
         ui.key(c, c.print("{s}-{d}", .{ event.id, i }));
@@ -153,8 +164,15 @@ fn activity(c: *ui.Context, k: theme.Colors, page: flow.Page) void {
         ui.text(c, c.print("{s} · {s}", .{ event.author, event.event }), .{ .size = 12, .weight = .medium, .wrap = true, .color = k.text });
         ui.text(c, date(event.createdAt), .{ .size = 10.5, .color = k.muted });
         if (event.commitSha) |sha| ui.text(c, sha[0..@min(12, sha.len)], .{ .size = 11, .mono = true, .color = k.muted });
-        if (event.body) |text| ui.text(c, text, .{ .size = 12, .color = k.text, .wrap = true });
+        if (event.body) |text| @import("view_markdown.zig").providerMarkdown(c, k, text, a);
     }
+}
+fn stateBadge(c: *ui.Context, k: theme.Colors, number: u64, state: []const u8, draft: bool) void {
+    const tone = if (draft) k.muted else if (std.mem.eql(u8, state, "open")) k.success else if (std.mem.eql(u8, state, "closed")) k.danger else k.accent;
+    const badge = ui.div(c).row().px(8).py(3).gap(5).itemsCenter().rounded(10).bg(tone.alpha(0.10));
+    defer badge.end();
+    icons.icon(c, .@"pull-request", 12, tone, 0);
+    ui.text(c, c.print("#{d} · {s}{s}", .{ number, state, if (draft) " · draft" else "" }), .{ .size = 10.5, .weight = .medium, .color = tone });
 }
 fn date(text: []const u8) []const u8 {
     return text[0..@min(10, text.len)];

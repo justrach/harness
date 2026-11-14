@@ -277,6 +277,15 @@ final class TranscriptScrollMatrixTests: XCTestCase {
         let maxOffset = max(-table.contentInset.top, table.contentSize.height - table.bounds.height)
         for step in 1...steps {
             let y = min(max(-table.contentInset.top, start + delta * CGFloat(step) / CGFloat(steps)), maxOffset)
+            // A synthetic offset write does not deliver a real pan sample.
+            // Feed the same explicit finger delta as TranscriptTableView does.
+            let old = TranscriptGeometry(contentHeight: table.contentSize.height,
+                viewportHeight: table.logicalViewportHeight,
+                offset: table.contentOffset.y + table.contentInset.top,
+                bottom: table.contentSize.height - table.contentOffset.y - table.bounds.height)
+            let next = TranscriptGeometry(contentHeight: old.contentHeight, viewportHeight: old.viewportHeight,
+                offset: y + table.contentInset.top, bottom: table.contentSize.height - y - table.bounds.height)
+            harness.scroll.observe(old: old, new: next, dragDelta: y - table.contentOffset.y)
             table.setContentOffset(CGPoint(x: 0, y: y), animated: false)
             try? await Task.sleep(for: .milliseconds(16))
         }
@@ -331,6 +340,25 @@ final class TranscriptScrollMatrixTests: XCTestCase {
             await body(corpus, context)
             unmount()
         }
+    }
+
+    func testNativeBottomBounceRecoversWithoutStealingScrollOwnership() async {
+        await mount(Self.corpora[1])
+        XCTAssertTrue(table.bounces)
+        XCTAssertTrue(table.alwaysBounceVertical)
+        let bottom = max(-table.contentInset.top, table.contentSize.height - table.bounds.height)
+        table.scrollViewWillBeginDragging(table)
+        table.panGestureRecognizer.setTranslation(CGPoint(x: 0, y: -60), in: table)
+        table.setContentOffset(CGPoint(x: 0, y: bottom + 40), animated: false)
+        XCTAssertTrue(harness.scroll.pinned)
+        table.scrollViewDidEndDragging(table, willDecelerate: true)
+        table.setContentOffset(CGPoint(x: 0, y: bottom + 20), animated: false)
+        XCTAssertTrue(harness.scroll.pinned, "Native elastic recovery is not a history pan")
+        XCTAssertFalse(harness.scroll.showJump)
+        table.setContentOffset(CGPoint(x: 0, y: bottom), animated: false)
+        table.scrollViewDidEndDecelerating(table)
+        await settle(120)
+        assertTailVisible("native-bounce-recovered")
     }
 
     // MARK: Scenario 1 — pinned streaming (10 scenarios)
