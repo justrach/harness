@@ -991,7 +991,7 @@ pub fn rowPreview(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat) 
     const r = ui.div(c).row().wFull().h(rowHeight(a, ch)).px(8).pt(6).pb(5).gap(4).itemsCenter();
     defer r.end();
     const now = a.nowMs();
-    statusSlot(c, k, workspace.markOf(ch, workspace.sessionOf(a.sessions.items, ch.id), now));
+    statusSlot(c, k, rowMark(a, ch));
     marks(c, a, k, ch, l, false);
     const time = rules.relativeTime(c.alloc().alloc(u8, 16) catch &.{}, now, ch.timeMs());
     const title_w = widthOf(a) - 16 - 16 - l.marksW() - 4 - 6 - c.text.width(time, .{ .size = 11 });
@@ -1081,9 +1081,16 @@ fn expandedLines(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, l
 fn cornerWidth(c: *ui.Context, a: *const App, ch: workspace.Chat, hovered: bool) f32 {
     const st: ui.TextStyle = .{ .size = 10, .weight = theme.ui_medium_weight };
     if (hovered) return 4 + 11 + 4 + c.text.width(if (ch.archived) "Unarchive" else "Archive", st);
-    const word = statusWord(workspace.markOf(ch, workspace.sessionOf(a.sessions.items, ch.id), a.nowMs()));
+    const word = statusWord(rowMark(a, ch));
     if (word) |w| return 6 + 4 + c.text.width(w, st);
     return c.text.width(rules.relativeTime(c.alloc().alloc(u8, 16) catch &.{}, a.nowMs(), ch.timeMs()), st);
+}
+
+/// A transcript-owned question remains visible after the live session's
+/// 45-second status expires, including while a different pane is active.
+pub fn rowMark(a: *const App, ch: workspace.Chat) workspace.Mark {
+    if (@import("app_question.zig").needsInput(a, ch.id)) return .awaiting_input;
+    return workspace.markOf(ch, workspace.sessionOf(a.sessions.items, ch.id), a.nowMs());
 }
 
 fn statusWord(mark: workspace.Mark) ?[]const u8 {
@@ -1114,8 +1121,7 @@ fn cornerIn(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, hovere
         ui.text(c, if (ch.archived) "Unarchive" else "Archive", .{ .size = 10, .color = k.muted });
         return b.clicked();
     }
-    const now = a.nowMs();
-    const mark = workspace.markOf(ch, workspace.sessionOf(a.sessions.items, ch.id), now);
+    const mark = rowMark(a, ch);
     if (statusWord(mark)) |word| {
         const color = switch (mark) {
             .completed => k.success.alpha(0.9),
@@ -1133,7 +1139,7 @@ fn cornerIn(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, hovere
         ui.text(c, word, .{ .size = 10, .weight = theme.ui_medium_weight, .color = color });
         return false;
     }
-    ui.text(c, rules.relativeTime(c.alloc().alloc(u8, 16) catch &.{}, now, ch.timeMs()), .{ .size = 10, .weight = theme.ui_medium_weight, .color = subline });
+    ui.text(c, rules.relativeTime(c.alloc().alloc(u8, 16) catch &.{}, a.nowMs(), ch.timeMs()), .{ .size = 10, .weight = theme.ui_medium_weight, .color = subline });
     return false;
 }
 
@@ -1223,7 +1229,7 @@ fn compactSearchRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat
     defer r.end();
     const hovered = r.hovered() and !@import("view_drag.zig").dragging(a);
     const now = a.nowMs();
-    statusSlot(c, k, workspace.markOf(ch, workspace.sessionOf(a.sessions.items, ch.id), now));
+    statusSlot(c, k, rowMark(a, ch));
     marks(c, a, k, ch, l, o.lit or hovered);
     const time = rules.relativeTime(c.alloc().alloc(u8, 16) catch &.{}, now, ch.timeMs());
     const time_w = if (hovered) 18 else c.text.width(time, .{ .size = 11 });
@@ -1297,7 +1303,9 @@ fn sessionRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat) void
         ui.div(c).column().wFull().h(rowHeight(a, ch)).px(8).py(6).gap(2).rounded(8).clip();
     // Hovered as GPUI's row is (its `hover_listener`): by the pointer's
     // moves, so its menu opening under a still pointer leaves it hovered.
-    const lh = kit.listenerHover(&a.view.hovers, if (selected) r.bg(k.selected) else r, if (selected) k.selected else k.hover);
+    const waiting = rowMark(a, ch) == .awaiting_input;
+    if (waiting) r = r.border(k.accent.alpha(0.5)).borderW(1).bg(k.accent.alpha(0.08));
+    const lh = kit.listenerHover(&a.view.hovers, if (selected) r.bg(k.selected) else r, if (selected) k.selected else if (waiting) k.accent.alpha(0.13) else k.hover);
     r = lh.div;
     defer r.end();
     // No hover while a session is dragged over the rows.
@@ -1310,7 +1318,7 @@ fn sessionRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat) void
     } else {
         const line = ui.div(c).row().wFull().h(18).gap(4).itemsCenter();
         defer line.end();
-        statusSlot(c, k, workspace.markOf(ch, workspace.sessionOf(a.sessions.items, ch.id), now));
+        statusSlot(c, k, rowMark(a, ch));
         marks(c, a, k, ch, l, selected or hovered);
         // In the frame's memory: the text is drawn after this returns.
         const time = rules.relativeTime(c.alloc().alloc(u8, 16) catch &.{}, now, ch.timeMs());

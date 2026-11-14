@@ -25,6 +25,10 @@ test {
 /// setting, less its 16-point gutters only once the pane is narrower
 /// (shell.rs `composer_target_width`, less the composer's `px(SPACE_LG)`).
 pub fn docked(c: *ui.Context, a: *App, k: theme.Colors) void {
+    // A selected chat can be visible while host/files own the keys. Do not
+    // mount its answer field or replace it with a second prompt editor.
+    const question = @import("app_question.zig");
+    if ((a.wizard != null or question.pendingInput(a) != null) and !question.ownsActivePane(a)) return;
     // A question that cannot fit this pane has one window-bounded outlet,
     // rendered after the split tree, never a second squeezed copy here.
     if (@import("view_question.zig").expanded(c, a)) return;
