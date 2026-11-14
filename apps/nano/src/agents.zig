@@ -99,7 +99,7 @@ pub fn blurb(id: Id) []const u8 {
         .graff => "codegraff's graff agent over ACP (graff CLI).",
         .pi => "The pi coding agent (pi CLI).",
         .opencode => "SST's opencode agent (opencode CLI).",
-        .antigravity => "Google's Antigravity agent (Antigravity ACP server).",
+        .antigravity => "Google's Antigravity agent over ACP (agy acp).",
         .exo => "Exo, the self-improving agent, over ACP via its agent-cli adapter.",
         .mock => "Scripted test harness.",
     };
@@ -164,9 +164,9 @@ pub fn offersInstall(id: Id, installed: bool, can_install: bool) bool {
 /// (`install_hint`).
 pub fn installHint(a: Allocator, id: Id, enabled: bool, can_install: bool) ![]const u8 {
     if (id == .antigravity) return if (can_install)
-        "Needs Antigravity's ACP server (separate from the agy CLI) — click Install"
+        "Install the agy CLI with ACP support, or click Install for the legacy ACP server"
     else
-        "Needs Antigravity's ACP server (separate from the agy CLI) — set ANTIGRAVITY_ACP_EXECUTABLE to it";
+        "Install the agy CLI with ACP support, or set ANTIGRAVITY_ACP_EXECUTABLE to the CLI or legacy ACP server";
     if (id == .exo) return "Start Exo with its agent-cli adapter to enable (`./exo.sh --setup agent-cli`; first install: https://github.com/exoharness/exo)";
     const hint = if (enabled)
         try std.fmt.allocPrint(a, "{s} CLI not installed — turn it off or install it", .{cliName(id)})
@@ -311,7 +311,7 @@ test "install visibility and hint follow target capabilities" {
         };
     }
     try testing.expectEqualStrings("Antigravity", cliName(.antigravity));
-    try testing.expectEqualStrings("Needs Antigravity's ACP server (separate from the agy CLI) — click Install", try installHint(a, .antigravity, false, true));
+    try testing.expectEqualStrings("Install the agy CLI with ACP support, or click Install for the legacy ACP server", try installHint(a, .antigravity, false, true));
     try testing.expect(std.mem.indexOf(u8, try installHint(a, .antigravity, false, false), "ANTIGRAVITY_ACP_EXECUTABLE") != null);
 }
 

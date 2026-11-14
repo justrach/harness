@@ -4,8 +4,8 @@
 //! KEPT ONLY for agents built ground-up on ACP: Grok ([`AcpHarness::grok`],
 //! `grok agent stdio`), Devin ([`AcpHarness::devin`], `devin acp`) and Hermes
 //! ([`AcpHarness::hermes`], `hermes acp`) and Antigravity
-//! ([`AcpHarness::antigravity`], Google's `agy_acp_server`, installed from its
-//! pinned release archive) — and Exo ([`AcpHarness::exo`]) through Harness's
+//! ([`AcpHarness::antigravity`], `agy acp`, with the pinned legacy
+//! `agy_acp_server` archive as a fallback) — and Exo ([`AcpHarness::exo`]) through Harness's
 //! own bridge ([`exo_bridge`], `harness exo-acp`), since Exo only exposes its
 //! agent-cli socket. Pi, Claude, Codex and Cursor use native drivers
 //! ([`crate::PiHarness`], [`crate::ClaudeHarness`], [`crate::CodexHarness`],
@@ -910,7 +910,7 @@ fn antigravity_spec() -> AcpAgentSpec {
         extra_paths: Vec::new,
         cli_executable: "agy_acp_server",
         cli_extra_paths: Vec::new,
-        install_hint: "Antigravity's ACP server is not installed (the agy CLI does not include it): install it from Settings, or set ANTIGRAVITY_ACP_EXECUTABLE to it",
+        install_hint: "Antigravity is not installed: install the agy CLI with ACP support, install the legacy ACP server from Settings, or set ANTIGRAVITY_ACP_EXECUTABLE to either executable",
         models: || {
             use ReasoningLevel::{High, Low, Medium};
             vec![
@@ -1363,6 +1363,11 @@ impl AcpHarness {
     /// managed install of the spec's pinned npm package. `NotInstalled` only
     /// when neither the binary nor the machinery to install it (npm) exists.
     fn find_server(&self) -> Option<PathBuf> {
+        if self.spec.id == HarnessId::Antigravity
+            && let Some(cli) = find_on_paths("agy", Vec::new())
+        {
+            return Some(cli);
+        }
         find_on_paths(self.spec.executable, (self.spec.extra_paths)()).or_else(|| {
             if self.spec.id == HarnessId::Antigravity {
                 ["agy_acp_server.par", "agy_acp_server.exe"]
@@ -1374,20 +1379,39 @@ impl AcpHarness {
         })
     }
 
+    fn launch_args(&self, program: &Path) -> Vec<String> {
+        if self.spec.id == HarnessId::Antigravity
+            && program
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.eq_ignore_ascii_case("agy") || name.eq_ignore_ascii_case("agy.exe")
+                })
+        {
+            return vec!["acp".into()];
+        }
+        self.spec.args.iter().map(|arg| arg.to_string()).collect()
+    }
+
     fn resolve_launch(&self) -> Result<Launch, HarnessError> {
         let spec_args: Vec<String> = self.spec.args.iter().map(|a| a.to_string()).collect();
         if let Some(p) = &self.executable {
-            return crate::executable::validate_native_override(p)
-                .map(|program| Launch::Program(program, spec_args));
+            return crate::executable::validate_native_override(p).map(|program| {
+                let args = self.launch_args(&program);
+                Launch::Program(program, args)
+            });
         }
         if let Some(p) = std::env::var_os(self.spec.env_override)
             && !p.is_empty()
         {
-            return crate::executable::validate_native_override(&PathBuf::from(p))
-                .map(|program| Launch::Program(program, spec_args));
+            return crate::executable::validate_native_override(&PathBuf::from(p)).map(|program| {
+                let args = self.launch_args(&program);
+                Launch::Program(program, args)
+            });
         }
         if let Some(found) = self.find_server() {
-            return Ok(Launch::Program(found, spec_args));
+            let args = self.launch_args(&found);
+            return Ok(Launch::Program(found, args));
         }
         if let Some(pkg) = self.spec.npm_package {
             let pin = crate::adapter_install::NpmPin::parse(pkg);

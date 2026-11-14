@@ -186,7 +186,7 @@ fn cli_and_dir(id: HarnessId) -> (&'static str, &'static str) {
         Hermes => ("hermes", "~/.local/bin or ~/.hermes/bin"),
         Graff => ("graff", "~/.harness/bin"),
         Devin => ("devin", "~/.local/bin"),
-        Antigravity => ("agy_acp_server", "~/.harness/adapters"),
+        Antigravity => ("agy", "~/.local/bin or ~/.harness/adapters"),
         Exo => ("exo-cli", "~/bin"),
         Mock => ("mock", "PATH"),
     }
@@ -215,6 +215,11 @@ pub fn resolve_executable(id: HarnessId) -> Option<PathBuf> {
     if !installed(id) {
         return None;
     }
+    if id == HarnessId::Antigravity {
+        // Version checks and updates must target the same native CLI or legacy
+        // server selected for sessions, including explicit overrides.
+        return crate::AcpHarness::antigravity().launch_program().ok();
+    }
     let (cli, _) = cli_and_dir(id);
     crate::executable::find_on_paths(cli, Vec::new()).or_else(|| {
         if id == HarnessId::Cursor {
@@ -227,7 +232,9 @@ pub fn resolve_executable(id: HarnessId) -> Option<PathBuf> {
 
 fn invalidate_versions(id: HarnessId) {
     let (cli, _) = cli_and_dir(id);
-    if id == HarnessId::Cursor {
+    if id == HarnessId::Antigravity {
+        crate::executable::invalidate_versions(&[cli, "agy_acp_server", "agy_acp_server.par"]);
+    } else if id == HarnessId::Cursor {
         crate::executable::invalidate_versions(&[cli, "agent"]);
     } else {
         crate::executable::invalidate_versions(&[cli]);

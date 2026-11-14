@@ -1,0 +1,18 @@
+{
+  "noticeVisibility": [
+    {"phase":"dormant","canApply":true,"expect":false},
+    {"phase":"checking","canApply":true,"expect":false},
+    {"phase":"current","canApply":true,"expect":false},
+    {"phase":"available","canApply":true,"expect":true},
+    {"phase":"available","canApply":false,"expect":true},
+    {"phase":"waiting-for-idle","canApply":false,"expect":true},
+    {"phase":"preparing","canApply":false,"expect":true},
+    {"phase":"downloading","canApply":false,"expect":true},
+    {"phase":"installing","canApply":false,"expect":true},
+    {"phase":"verifying","canApply":false,"expect":true},
+    {"phase":"updated","canApply":false,"expect":true},
+    {"phase":"failed","canApply":false,"expect":true},
+    {"phase":"manual-action-required","canApply":false,"expect":false},
+    {"phase":"manual-action-required","canApply":true,"expect":true}
+  ]
+}
