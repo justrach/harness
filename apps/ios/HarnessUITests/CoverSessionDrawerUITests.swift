@@ -35,9 +35,14 @@ final class CoverSessionDrawerUITests: XCTestCase {
                 space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
             context.draw(crop, in: CGRect(x: 0, y: 0, width: crop.width, height: crop.height))
         }
-        return stride(from: 0, to: rgba.count, by: 4).filter {
-            Int(rgba[$0]) + Int(rgba[$0 + 1]) + Int(rgba[$0 + 2]) < 300
-        }.count
+        var count = 0
+        for offset in stride(from: 0, to: rgba.count, by: 4) {
+            let red = Int(rgba[offset])
+            let green = Int(rgba[offset + 1])
+            let blue = Int(rgba[offset + 2])
+            if red + green + blue < 300 { count += 1 }
+        }
+        return count
     }
 
     func testDrawerPushesWholeChatAndRestoresIt() throws {
