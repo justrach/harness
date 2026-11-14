@@ -125,27 +125,34 @@ test "desktop performance matches every Lean policy vector" {
     try testing.expectEqual(@as(usize, 5520), policy.counter_slots);
     try testing.expectEqual(@as(u32, 1_000_000), policy.capacity);
     try testing.expectEqual(@as(i64, 600_000), policy.interval_ms);
-    var lines = std.mem.tokenizeScalar(u8, @embedFile("telemetry_policy_vectors.csv"), '\n');
-    var n: usize = 0;
-    while (lines.next()) |line| {
-        var columns = std.mem.splitScalar(u8, line, ',');
-        var v: [11]i64 = undefined;
-        for (&v) |*x| x.* = try std.fmt.parseInt(i64, columns.next() orelse return error.ShortProofVector, 10);
-        try testing.expect(columns.next() == null);
-        try testing.expectEqual(v[8] == 1, policy.shouldRecord(v[0] == 1, v[1] == 1, v[2] == 1));
-        try testing.expectEqual(@as(u8, @intCast(v[9])), policy.updateCount(v[0] == 1, v[1] == 1, v[2] == 1, v[3] == 1));
-        try testing.expectEqual(v[10] == 1, policy.shouldPublish(v[0] == 1, v[1] == 1, v[4] == 1, v[5] == 1, v[6], v[7]));
-        // The real recorder must refine the policy's four/five-update plan.
-        var s: perf.State = .{};
-        s.consent(v[0] == 1, 0);
-        if (v[3] == 1) s.sample(1, v[1] == 1, cohort, 1, 2, 3, true);
-        const before = count(&s.window, .cpu) * 4 + count(&s.window, .interval);
-        s.sample(if (v[2] == 1) 1.01 else std.math.nan(f64), v[1] == 1, cohort, 1, 2, 3, true);
-        const after = count(&s.window, .cpu) * 4 + count(&s.window, .interval);
-        try testing.expectEqual(@as(u32, @intCast(v[9])), after - before);
-        n += 1;
+    const vectors = @embedFile("telemetry_policy_vectors.csv");
+    const crlf = try std.mem.replaceOwned(u8, testing.allocator, vectors, "\n", "\r\n");
+    defer testing.allocator.free(crlf);
+    // Git may check out text fixtures with CRLF on Windows. Both encodings
+    // must refine the same Lean policy, with all 704 cases exercised.
+    for ([_][]const u8{ vectors, crlf }) |encoded| {
+        var lines = std.mem.tokenizeAny(u8, encoded, "\r\n");
+        var n: usize = 0;
+        while (lines.next()) |line| {
+            var columns = std.mem.splitScalar(u8, line, ',');
+            var v: [11]i64 = undefined;
+            for (&v) |*x| x.* = try std.fmt.parseInt(i64, columns.next() orelse return error.ShortProofVector, 10);
+            try testing.expect(columns.next() == null);
+            try testing.expectEqual(v[8] == 1, policy.shouldRecord(v[0] == 1, v[1] == 1, v[2] == 1));
+            try testing.expectEqual(@as(u8, @intCast(v[9])), policy.updateCount(v[0] == 1, v[1] == 1, v[2] == 1, v[3] == 1));
+            try testing.expectEqual(v[10] == 1, policy.shouldPublish(v[0] == 1, v[1] == 1, v[4] == 1, v[5] == 1, v[6], v[7]));
+            // The real recorder must refine the policy's four/five-update plan.
+            var s: perf.State = .{};
+            s.consent(v[0] == 1, 0);
+            if (v[3] == 1) s.sample(1, v[1] == 1, cohort, 1, 2, 3, true);
+            const before = count(&s.window, .cpu) * 4 + count(&s.window, .interval);
+            s.sample(if (v[2] == 1) 1.01 else std.math.nan(f64), v[1] == 1, cohort, 1, 2, 3, true);
+            const after = count(&s.window, .cpu) * 4 + count(&s.window, .interval);
+            try testing.expectEqual(@as(u32, @intCast(v[9])), after - before);
+            n += 1;
+        }
+        try testing.expectEqual(@as(usize, 704), n);
     }
-    try testing.expectEqual(@as(usize, 704), n);
     for ([_]u32{ 0, 1, policy.capacity - 1, policy.capacity, std.math.maxInt(u32) }) |value| {
         try testing.expectEqual(value, policy.nextCount(value, false));
         try testing.expect(policy.nextCount(value, true) <= policy.capacity);
