@@ -12,9 +12,24 @@ const ISSUER = "https://edge.codegraff.com";
 const AUDIENCE = "harness-edge";
 const REFRESH_AUDIENCE = "harness-edge-refresh";
 
+const MAX_KEY_CACHE = 8;
+const signingKeyCache = new Map<string, Uint8Array>();
+const refreshKeyCache = new Map<string, Promise<Uint8Array>>();
+const REFRESH_HKDF_INFO = new TextEncoder().encode("harness-refresh-v2");
+
 const signingKey = (env: Env): Uint8Array | undefined => {
   const value = env.HARNESS_AUTH_SIGNING_KEY;
-  return value && value.length >= 32 ? new TextEncoder().encode(value) : undefined;
+  if (!value || value.length < 32) return undefined;
+  let encoded = signingKeyCache.get(value);
+  if (!encoded) {
+    if (signingKeyCache.size >= MAX_KEY_CACHE) {
+      const oldest = signingKeyCache.keys().next().value;
+      if (oldest !== undefined) signingKeyCache.delete(oldest);
+    }
+    encoded = new TextEncoder().encode(value);
+    signingKeyCache.set(value, encoded);
+  }
+  return encoded;
 };
 
 export const personalOrgId = (userId: string): string => `user-${userId}`;
@@ -43,15 +58,28 @@ const segments = (token: string): number => token.split(".").length;
  * token to anyone who reads the credential. The key is derived from the
  * signing secret under its own HKDF label so the two uses never share a key. */
 const refreshEncryptionKey = async (env: Env): Promise<Uint8Array | undefined> => {
+  const rawSecret = env.HARNESS_AUTH_SIGNING_KEY;
   const secret = signingKey(env);
-  if (!secret) return undefined;
-  const base = await crypto.subtle.importKey("raw", secret, "HKDF", false, ["deriveBits"]);
-  const bits = await crypto.subtle.deriveBits(
-    { name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: new TextEncoder().encode("harness-refresh-v2") },
-    base,
-    256
-  );
-  return new Uint8Array(bits);
+  if (!rawSecret || !secret) return undefined;
+  let derived = refreshKeyCache.get(rawSecret);
+  if (!derived) {
+    if (refreshKeyCache.size >= MAX_KEY_CACHE) {
+      const oldest = refreshKeyCache.keys().next().value;
+      if (oldest !== undefined) refreshKeyCache.delete(oldest);
+    }
+    derived = (async () => {
+      const base = await crypto.subtle.importKey("raw", secret, "HKDF", false, ["deriveBits"]);
+      const bits = await crypto.subtle.deriveBits(
+        { name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: REFRESH_HKDF_INFO },
+        base,
+        256
+      );
+      return new Uint8Array(bits);
+    })();
+    derived.catch(() => refreshKeyCache.delete(rawSecret));
+    refreshKeyCache.set(rawSecret, derived);
+  }
+  return derived;
 };
 
 const refreshClaims = (payload: JWTPayload) => {

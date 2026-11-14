@@ -23,7 +23,7 @@
 import { bearerFromRequest, verifyRefreshCredential, verifyToken } from "./auth";
 import { ACCOUNT_DELETE_URL, CodegraffAuthFailed, codegraffAccess } from "./codegraff";
 import { AUTH_USER_HEADER, type Env } from "./env";
-import { AUTH_ORG_HEADER, roomStore } from "./room-actor";
+import { AUTH_ORG_HEADER, roomActorStub, roomStore, userRoomIds } from "./room-actor";
 
 const json = (value: unknown, status = 200): Response =>
   new Response(JSON.stringify(value), {
@@ -67,11 +67,10 @@ const askCodegraff = async (accessToken: string, dryRun: boolean): Promise<Verdi
 const forgetRooms = async (env: Env, userId: string, orgId: string): Promise<void> => {
   const store = roomStore(env);
   if (!store) return;
-  const [rooms, invites] = await Promise.all([store.listRooms(userId), store.invites(userId)]);
-  const ids = new Set([...rooms.map((r) => r.id), ...invites.map((i) => i.roomId)]);
+  const ids = await userRoomIds(store, userId);
   await Promise.all(
-    [...ids].map(async (id) => {
-      const stub = env.ROOM_ACTORS.get(env.ROOM_ACTORS.idFromName(`room1/${id}`));
+    ids.map(async (id) => {
+      const stub = roomActorStub(env.ROOM_ACTORS, id);
       const res = await stub.fetch(`https://room/forget?room=${encodeURIComponent(id)}`, {
         method: "POST",
         headers: { [AUTH_USER_HEADER]: userId, [AUTH_ORG_HEADER]: orgId }

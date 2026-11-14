@@ -58,7 +58,7 @@ import { ChatRoom } from "./chat-room";
 import { VaultRoom } from "./vault-room";
 import { AccountPurge } from "./account-purge";
 import { RefreshLeeway } from "./refresh-leeway";
-import { AUTH_ORG_HEADER, RoomActor, roomStore } from "./room-actor";
+import { AUTH_ORG_HEADER, RoomActor, roomActorStub, roomStore } from "./room-actor";
 import { ROOM_ID, RoomError, memberKey, newRoomId } from "./room-core";
 import { sweepExpiredRooms } from "./room-store-pg";
 import { crashReportRoute } from "./crash-reports";
@@ -143,7 +143,7 @@ const forwardRoom = async (
     body = await request.arrayBuffer();
     if (body.byteLength > MAX_ROOM_BODY_BYTES) return json({ error: "too_large" }, 413);
   }
-  const stub = env.ROOM_ACTORS.get(env.ROOM_ACTORS.idFromName(`room1/${roomId}`));
+  const stub = roomActorStub(env.ROOM_ACTORS, roomId);
   const url = new URL(request.url);
   url.pathname = path;
   search.set("room", roomId);
@@ -560,7 +560,7 @@ export default {
     const ids = await sweepExpiredRooms(env, Math.floor(Date.now() / 1000));
     await Promise.all(
       ids.map((id) =>
-        env.ROOM_ACTORS.get(env.ROOM_ACTORS.idFromName(`room1/${id}`))
+        roomActorStub(env.ROOM_ACTORS, id)
           .fetch(`https://room/wipe?room=${id}`, { method: "POST" })
           .catch((err) => console.error(JSON.stringify({ event: "room_wipe_failed", room: id, error: String(err) })))
       )

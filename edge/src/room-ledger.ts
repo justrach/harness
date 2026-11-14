@@ -180,12 +180,11 @@ export class LedgerRoomStore implements RoomStore {
       const room: RoomRow = { ...local, archivedAt: pg.room.archivedAt };
       return { room, members: this.members(), access: pg.access, recent: this.recent() };
     }
-    // First wake with a ledger: hydrate from PostgreSQL (a room that predates it).
-    const loaded = await this.pg.loadRoom(id);
-    if (!loaded) return null;
-    const claims = await this.pg.loadClaims(id);
-    this.hydrate(loaded, claims);
-    return loaded;
+    // First wake with a ledger: hydrate from PostgreSQL in one round trip.
+    const hydrated = await this.pg.loadHydration(id);
+    if (!hydrated) return null;
+    this.hydrate(hydrated.loaded, hydrated.claims);
+    return hydrated.loaded;
   }
 
   /**
@@ -208,9 +207,9 @@ export class LedgerRoomStore implements RoomStore {
     const dirtyClaims = this.rows("SELECT row FROM ledger_claims WHERE dirty > 0").map(
       (r) => JSON.parse(r.row as string) as ClaimRow
     );
-    const loaded = await this.pg.loadRoom(id);
-    if (!loaded) return null;
-    const claims = await this.pg.loadClaims(id);
+    const hydrated = await this.pg.loadHydration(id);
+    if (!hydrated) return null;
+    const { loaded, claims } = hydrated;
     console.log(
       JSON.stringify({ event: "room_ledger_rehydrate", room: id, pgSeq: loaded.room.lastSeq, reappended: unflushed.length })
     );
