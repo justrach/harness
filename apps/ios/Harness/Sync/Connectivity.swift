@@ -41,6 +41,25 @@ enum SendState {
         if now - oldestStarted > undeliveredGraceMs { return .waiting }
         return .sending
     }
+
+    /// Distinguishes phone-side offline ("Phone is offline — waiting for connection")
+    /// from host-side offline / waiting for pickup.
+    static func waitingStatusCopy(
+        hostName: String,
+        phoneOnline: Bool,
+        hostOffline: Bool = false,
+        hasAttachments: Bool = false
+    ) -> String {
+        if !phoneOnline {
+            return "Phone is offline — waiting for connection"
+        }
+        if hostOffline {
+            return "\(hostName) is offline — will send when it reconnects"
+        }
+        return hasAttachments
+            ? "Attachments still on their way to \(hostName)"
+            : "Waiting for \(hostName) to start it"
+    }
 }
 
 /// state.rs UNDELIVERED_GRACE_MS: a send unadopted past this stops reading

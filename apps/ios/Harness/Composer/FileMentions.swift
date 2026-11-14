@@ -132,9 +132,20 @@ struct MentionIndex: Equatable, Sendable {
         let maxDepth = max(segments.count, 1)
         var candidateToken = Self.makeToken(segments: segments, depth: depth, fallback: base)
 
-        while depth < maxDepth,
-              let owner = entries[candidateToken],
-              owner.path != file.path {
+        let peerSegments = (pathsByBasename[base] ?? [])
+            .filter { $0 != file.path }
+            .map { Self.trimmedPath($0).split(separator: "/").map(String.init) }
+
+        func collides(_ token: String, at currentDepth: Int) -> Bool {
+            if let owner = entries[token], owner.path != file.path {
+                return true
+            }
+            return peerSegments.contains {
+                Self.makeToken(segments: $0, depth: currentDepth, fallback: base) == token
+            }
+        }
+
+        while depth < maxDepth, collides(candidateToken, at: depth) {
             depth += 1
             candidateToken = Self.makeToken(segments: segments, depth: depth, fallback: base)
         }

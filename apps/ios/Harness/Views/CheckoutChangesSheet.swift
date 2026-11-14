@@ -152,7 +152,7 @@ enum UnifiedDiffParser {
             if line.hasPrefix("diff --git ") {
                 closeFile()
                 let path = filePath(fromGitLine: line) ?? ""
-                current = InspectFile(path: path, additions: nil, deletions: nil, hunks: [])
+                current = InspectFile(path: path, additions: nil, deletions: nil, hunks: nil)
                 continue
             }
             guard current != nil else { continue }

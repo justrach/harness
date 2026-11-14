@@ -84,6 +84,19 @@ struct NewSessionView: View {
         hierarchyProfile.showsGitCheckoutChrome
     }
 
+    private var isGitSpace: Bool {
+        space?.gitDetected == true
+    }
+
+    /// Plain non-git folders always run in the folder directly (`.local`), never in a worktree.
+    static func effectiveCheckoutKind(for space: Space?, selected: CheckoutKind) -> CheckoutKind {
+        space?.gitDetected == true ? selected : .local
+    }
+
+    private var effectiveCheckoutKind: CheckoutKind {
+        Self.effectiveCheckoutKind(for: space, selected: checkoutKind)
+    }
+
     private var deviceId: String? {
         effectiveDestination.deviceId(spaces: model.spaces, devices: model.devices)
     }
@@ -268,7 +281,7 @@ struct NewSessionView: View {
             // Where-it-runs scope row (checkout + base ref), left-aligned
             // above the composer in Developer mode — Zen mode keeps only the
             // prompt and model picker.
-            if showsGitChrome, space?.gitDetected == true {
+            if showsGitChrome, isGitSpace {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         chip(icon: checkoutIcon, label: checkoutLabel) {
@@ -292,7 +305,19 @@ struct NewSessionView: View {
         }
         .background(Theme.bg.ignoresSafeArea())
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { viewWidth = $0 }
-        .onChange(of: space?.id) { refFailure = nil }
+        .onChange(of: space?.id) {
+            refFailure = nil
+            if space?.gitDetected != true {
+                checkoutKind = .local
+                selectedRef = nil
+            }
+        }
+        .onChange(of: space?.gitDetected) { _, detected in
+            if detected != true {
+                checkoutKind = .local
+                selectedRef = nil
+            }
+        }
         .navigationTitle("New session")  // feeds the back menu
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(removing: .title)  // the leading header owns the bar
@@ -625,20 +650,20 @@ struct NewSessionView: View {
 
     /// checkout_label: New worktree / Current worktree / Current checkout.
     private var checkoutLabel: String {
-        switch checkoutKind {
+        switch effectiveCheckoutKind {
         case .newWorktree: return "New worktree"
         case .local: return selectedRefRow?.worktreePath != nil ? "Current worktree" : "Current checkout"
         }
     }
 
     private var checkoutIcon: LineIcon {
-        checkoutKind == .local && selectedRefRow?.worktreePath == nil ? .folder : .folderWithFiles
+        effectiveCheckoutKind == .local && selectedRefRow?.worktreePath == nil ? .folder : .folderWithFiles
     }
 
     /// ref_label: "From <ref>" only when a NEW worktree will be created off it.
     private var refLabel: String {
         guard refCatalog.scope == refsScope, let name = selectedRef else { return "Select ref" }
-        return checkoutKind == .newWorktree ? "From \(name)" : name
+        return effectiveCheckoutKind == .newWorktree ? "From \(name)" : name
     }
 
     /// pick_ref (draft mode): a worktree'd ref flips to "Current worktree";
@@ -737,17 +762,17 @@ struct NewSessionView: View {
                                 sandbox: "workspace-write", chatMode: isChat ? true : nil)
         Task { @MainActor in
             var cwd: String?
-            let branch = space == nil ? nil : selectedRef
+            let branch = isGitSpace ? selectedRef : nil
             var worktree: WorktreeSpec?
             if let space {
-                switch checkoutKind {
+                switch effectiveCheckoutKind {
                 case .newWorktree:
                     // The host materializes the worktree at drain time, so
                     // an offline send never blocks on a relay RPC.
                     worktree = WorktreeSpec(repoPath: space.path, base: selectedRef ?? "HEAD")
                     cwd = space.path
                 case .local:
-                    if let reused = selectedRefRow?.worktreePath {
+                    if isGitSpace, let reused = selectedRefRow?.worktreePath {
                         cwd = reused
                     }
                 }
