@@ -66,6 +66,24 @@ final class MessageFooterTests: XCTestCase {
         }
     }
 
+    func testVisualTailUsesTheSharedFooterAndKeepsScriptOutOfCopiedText() throws {
+        let parts: [MessagePart] = [
+            .text(id: "text", text: "The complete answer."),
+            .visual(id: "visual", title: "Synthetic chart", script: "return function() return ui.text('42') end"),
+        ]
+        let live = try XCTUnwrap(rows(entry(parts, status: .streaming)).last)
+        XCTAssertNil(live.timestamp)
+        XCTAssertNil(live.copyText)
+        let statuses: [MessageStatus?] = [.complete, .aborted, nil]
+        for status in statuses {
+            let footer = try XCTUnwrap(rows(entry(parts, status: status)).last)
+            XCTAssertEqual(footer.id, live.id)
+            XCTAssertEqual(footer.timestamp, 1_000)
+            XCTAssertEqual(footer.copyText, "The complete answer.")
+            XCTAssertNotEqual(footer.version, live.version)
+        }
+    }
+
     func testEarlierTextAndTimestampCorrectionsInvalidateTheFooterRow() {
         let parts: [MessagePart] = [.text(id: "first", text: "First."), .text(id: "last", text: "Last.")]
         let original = rows(entry(parts))

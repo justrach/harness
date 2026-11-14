@@ -242,13 +242,12 @@ enum TranscriptRowBuilder {
 
             case .visual(let partId, let title, let script):
                 flushTools(lastIx: ix - 1)
-                var version = fnv1a("\(title)\0\(script)")
-                if settled, ix == lastPartIx { version ^= 1 << 62 }
+                let version = fnv1a("\(title)\0\(script)")
                 rows.append(TranscriptRow(id: "\(entry.id)#\(partId)", version: version,
                                           turnStart: first,
                                           kind: .visual(title: title, script: script),
                                           entryId: entry.id,
-                                          timestamp: settled && ix == lastPartIx ? entry.createdAt : nil,
+                                          timestamp: nil,
                                           partKey: nil))
                 first = false
 
