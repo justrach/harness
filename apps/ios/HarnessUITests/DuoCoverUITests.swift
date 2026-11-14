@@ -25,6 +25,40 @@ final class DuoCoverUITests: XCTestCase {
         app.descendants(matching: .any)[id].firstMatch
     }
 
+    /// Typing adds the attachment button and model token to the cover's one-line composer.
+    /// Their intrinsic widths must not widen the shared chat column off the screen.
+    func testTypingKeepsComposerAndTranscriptInsideTheCover() throws {
+        launch()
+        let input = app.textViews["composer-input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 15))
+        let initialTranscriptX = element("transcript").frame.minX
+        input.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        input.typeText("Synthetic cover draft")
+        let window = app.windows.firstMatch.frame
+        let back = app.buttons["BackButton"]
+        try XCTSkipUnless(window.width == 466 && back.exists && back.frame.minX > window.width - 84,
+                          "the cover display's vertical bar only")
+        let transcript = element("transcript")
+        let send = app.buttons["composer-send"]
+        let token = app.buttons["composer-token"]
+        XCTAssertGreaterThanOrEqual(transcript.frame.minX, window.minX + 8,
+                                    "composer expansion must not shift the whole transcript left")
+        XCTAssertEqual(transcript.frame.minX, initialTranscriptX, accuracy: 0.5)
+        let attach = app.buttons["Attach photos"]
+        XCTAssertTrue(attach.isHittable)
+        XCTAssertGreaterThanOrEqual(attach.frame.minX, window.minX + 16)
+        XCTAssertGreaterThanOrEqual(input.frame.minX, window.minX + 16)
+        XCTAssertLessThanOrEqual(send.frame.maxX, back.frame.minX - 8)
+        XCTAssertTrue(input.isHittable)
+        XCTAssertTrue(send.isHittable)
+        XCTAssertTrue(token.isHittable)
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "duo-cover-typing-insets"
+        shot.lifetime = .keepAlways
+        add(shot)
+    }
+
     /// The card used to be 398pt whatever the screen. The system clamps the popover to the screen and centers
     /// the card in it, so "Context" started left of the screen and the counts were cut off on the right.
     func testContextCardFitsOnScreen() {
@@ -72,7 +106,8 @@ final class DuoCoverUITests: XCTestCase {
         let back = app.buttons["BackButton"]
         try XCTSkipUnless(window.width == 466 && back.exists && back.frame.minX > window.width - 84,
                           "the cover display's vertical bar only")
-        XCTAssertGreaterThanOrEqual(card.frame.width, 356, "row column \(card.frame)")
+        XCTAssertGreaterThanOrEqual(card.frame.width, 348, "row column \(card.frame)")
+        XCTAssertGreaterThanOrEqual(card.frame.minX, window.minX + 24, "keep a readable leading gutter")
         XCTAssertLessThanOrEqual(card.frame.maxX, back.frame.minX - 16, "row runs into the bar \(card.frame)")
     }
 }

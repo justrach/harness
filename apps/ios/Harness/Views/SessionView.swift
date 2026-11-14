@@ -661,6 +661,10 @@ struct SessionView: View {
                 .allowsHitTesting(false)
             }
         }
+        // Keep cover-display text and the attachment circle away from the physical
+        // left edge, without moving the content into the system's right-side rail.
+        .padding(.leading, CoverLayout.contentLeadingInset(duo: duoChat,
+                    compactWidth: horizontalSizeClass == .compact, paneChrome: paneChrome, flat: flat))
         // Wide, beside the list: a reading width. With Inspect: the chat column ends on the fold (the window's
         // middle), not the middle of what the side bar leaves.
         .frame(maxWidth: flat && !inspectOpen ? DuoV3.readingWidth + 48 : nil)

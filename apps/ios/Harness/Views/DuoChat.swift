@@ -69,6 +69,12 @@ enum DuoChat {
 /// empty edge already separates the text from the controls: the rows keep a smaller gap there, and the scroll
 /// indicator moves into a gutter at the column's edge, short of the bar's controls, instead of over the text.
 enum CoverLayout {
+    /// Additional breathing room for the cover's whole chat column, including
+    /// the focused composer. Ordinary phones and inner-display panes keep theirs.
+    static func contentLeadingInset(duo: Bool, compactWidth: Bool, paneChrome: Bool, flat: Bool) -> CGFloat {
+        duo && compactWidth && !paneChrome && !flat ? 8 : 0
+    }
+
     /// Row padding on each side everywhere else.
     static let standardPadding: CGFloat = 20
     /// Row padding on the side away from the bar.

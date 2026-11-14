@@ -98,13 +98,39 @@ final class DuoChatTests: XCTestCase {
         let insets = CoverLayout.rowInsets(barEdge: .trailing, barInset: coverBarInset)
         let safeWidth = coverWidth - coverBarInset
         XCTAssertEqual(CoverLayout.RowInsets.standard.textWidth(safeWidth: safeWidth), 342)
-        XCTAssertEqual(insets.textWidth(safeWidth: safeWidth), 358)
+        let leading = CoverLayout.contentLeadingInset(duo: true, compactWidth: true, paneChrome: false, flat: false)
+        XCTAssertEqual(insets.textWidth(safeWidth: safeWidth - leading), 350)
         // The text stops short of the safe area; only the scroll indicator's gutter reaches into the column, and
         // it stays clear of the bar's controls (17pt into the column).
         XCTAssertEqual(insets.trailing - insets.bleedTrailing, CoverLayout.barSideGap)
         XCTAssertGreaterThan(insets.bleedTrailing, 0)
         XCTAssertLessThan(insets.bleedTrailing, 17)
         XCTAssertEqual(insets.bleedLeading, 0)
+    }
+
+    func testCoverLeadingBreathingRoomDoesNotChangeOtherPhoneOrInnerDisplayLayouts() {
+        XCTAssertEqual(CoverLayout.contentLeadingInset(duo: true, compactWidth: true, paneChrome: false, flat: false), 8)
+        XCTAssertEqual(CoverLayout.contentLeadingInset(duo: false, compactWidth: true, paneChrome: false, flat: false), 0)
+        XCTAssertEqual(CoverLayout.contentLeadingInset(duo: true, compactWidth: false, paneChrome: false, flat: false), 0)
+        XCTAssertEqual(CoverLayout.contentLeadingInset(duo: true, compactWidth: true, paneChrome: true, flat: false), 0)
+        XCTAssertEqual(CoverLayout.contentLeadingInset(duo: true, compactWidth: true, paneChrome: false, flat: true), 0)
+    }
+
+    func testInlineComposerSharesItsActualBudgetWithoutExpandingTheChatColumn() {
+        // 382pt cover safe area, 8pt leading inset, 20pt focus margins,
+        // 10pt glass padding, two 40pt controls and three 12pt gaps.
+        let available: CGFloat = 382 - 8 - 20 - 10 - 80 - 36
+        let fit = ComposerInlineLayout.flexibleWidths(available: available, hasToken: true)
+        XCTAssertEqual(fit.editor, 140)
+        XCTAssertEqual(fit.token, 88)
+        for width in [CGFloat(0), 40, 80, 140, 228, 400, 800] {
+            let fit = ComposerInlineLayout.flexibleWidths(available: width, hasToken: true)
+            XCTAssertEqual(fit.editor + fit.token, width)
+            XCTAssertGreaterThanOrEqual(fit.editor, 0)
+            XCTAssertGreaterThanOrEqual(fit.token, 0)
+            XCTAssertLessThanOrEqual(fit.token, 220)
+            XCTAssertEqual(ComposerInlineLayout.flexibleWidths(available: width, hasToken: false).editor, width)
+        }
     }
 
     func testABarOnTheLeadingSideMirrorsTheInsets() {

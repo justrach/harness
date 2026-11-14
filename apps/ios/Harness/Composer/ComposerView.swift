@@ -89,7 +89,12 @@ struct ComposerShell<Chips: View>: View {
     // the compact↔expanded flip — an if/else here would tear down and rebuild
     // the TextField, dropping keyboard focus mid-type.
     private var shellLayout: AnyLayout {
-        expanded && !compact && !singleLine
+        if singleLine {
+            let editorIndex = expanded && onAttach != nil ? 1 : 0
+            return AnyLayout(ComposerInlineLayout(editorIndex: editorIndex,
+                                                  tokenIndex: expanded && token != nil ? editorIndex + 1 : nil))
+        }
+        return expanded && !compact
             ? AnyLayout(VStackLayout(alignment: .leading, spacing: 0))
             : AnyLayout(HStackLayout(alignment: .center, spacing: 12))
     }
@@ -141,7 +146,8 @@ struct ComposerShell<Chips: View>: View {
                     .padding(.leading, expanded && !singleLine ? 4 : (singleLine && expanded ? 0 : 13))
                     .padding(.trailing, expanded && !singleLine ? 4 : 0)
                     .padding(.vertical, expanded && !singleLine ? 4 : 5)
-                    .frame(minWidth: compact || singleLine ? 140 : nil,
+                    .frame(minWidth: singleLine ? 0 : (compact ? 140 : nil),
+                           maxWidth: singleLine ? .infinity : nil,
                            minHeight: expanded && !compact && !singleLine ? 64 : nil, alignment: .topLeading)
                     .fixedSize(horizontal: false, vertical: true)
                     .overlay(alignment: .topTrailing) {
