@@ -149,23 +149,41 @@ export const parseUpload = (body: string): Json[] | { error: string; status: num
   return parsed as Json[];
 };
 
-/** Store a batch; a report already stored for this person is skipped. Returns how many were new. */
-export const storeCrashReports = (env: PgEnv, userId: string, rows: CrashRow[]): Promise<number> =>
-  withPg(env, async (pg) => {
-    let stored = 0;
-    for (const r of rows) {
-      const res = await pg.query(
-        `INSERT INTO app.harness_crash_reports (user_id, digest, kind, headline, signature, app_version,
-           app_build, os_version, device_type, crash_count, hang_count, payload)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-         ON CONFLICT (user_id, digest) DO NOTHING`,
-        [userId, r.digest, r.kind, r.headline, r.signature, r.appVersion, r.appBuild, r.osVersion,
-          r.deviceType, r.crashCount, r.hangCount, r.payload]
-      );
-      stored += res.rowCount ?? 0;
-    }
-    return stored;
+/** Store a batch in one round trip; a report already stored for this person is skipped. Returns how many were new. */
+export const storeCrashReports = async (env: PgEnv, userId: string, rows: CrashRow[]): Promise<number> => {
+  if (rows.length === 0) return 0;
+  const serialized = JSON.stringify(
+    rows.map((r) => ({
+      digest: r.digest,
+      kind: r.kind,
+      headline: r.headline,
+      signature: r.signature,
+      app_version: r.appVersion,
+      app_build: r.appBuild,
+      os_version: r.osVersion,
+      device_type: r.deviceType,
+      crash_count: r.crashCount,
+      hang_count: r.hangCount,
+      payload: r.payload
+    }))
+  );
+  return withPg(env, async (pg) => {
+    const res = await pg.query(
+      `INSERT INTO app.harness_crash_reports (user_id, digest, kind, headline, signature, app_version,
+         app_build, os_version, device_type, crash_count, hang_count, payload)
+       SELECT $1, x.digest, x.kind, x.headline, x.signature, x.app_version,
+              x.app_build, x.os_version, x.device_type, x.crash_count, x.hang_count, x.payload
+         FROM jsonb_to_recordset($2::jsonb) AS x(
+           digest text, kind text, headline text, signature text, app_version text,
+           app_build text, os_version text, device_type text, crash_count integer,
+           hang_count integer, payload text
+         )
+       ON CONFLICT (user_id, digest) DO NOTHING`,
+      [userId, serialized]
+    );
+    return res.rowCount ?? 0;
   });
+};
 
 const json = (value: unknown, status = 200): Response =>
   new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
