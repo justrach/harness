@@ -110,6 +110,12 @@ impl QueuedMessage {
 }
 
 impl SessionDoc {
+    fn queue_mutation_guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.queue_mutation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// The queue in send order. Malformed rows skip rather than poison the read.
     pub fn read_queue(&self) -> Result<Vec<QueuedMessage>, DocError> {
         let raw = self
@@ -135,9 +141,13 @@ impl SessionDoc {
         // Publish id last: readers cannot observe or drain partial metadata.
         let map = loro::LoroMap::new();
         write_queued_map(&map, item)?;
+        let mutation = self.queue_mutation_guard();
         let queue = self.doc().get_movable_list("queue");
         let map = queue.push_container(map)?;
         map.insert("id", item.id.as_str())?;
+        // Publish only after releasing the local mutation guard: document
+        // subscribers may read the queue or schedule another queue operation.
+        drop(mutation);
         self.doc().commit();
         Ok(())
     }
@@ -155,9 +165,13 @@ impl SessionDoc {
         }
         let map = loro::LoroMap::new();
         write_queued_map(&map, item)?;
+        let mutation = self.queue_mutation_guard();
         let queue = self.doc().get_movable_list("queue");
         let map = queue.insert_container(index.min(queue.len()), map)?;
         map.insert("id", item.id.as_str())?;
+        // Publish only after releasing the local mutation guard: document
+        // subscribers may read the queue or schedule another queue operation.
+        drop(mutation);
         self.doc().commit();
         Ok(())
     }
@@ -169,6 +183,7 @@ impl SessionDoc {
         if text.trim().is_empty() {
             return self.remove_queued(id);
         }
+        let mutation = self.queue_mutation_guard();
         let queue = self.doc().get_movable_list("queue");
         let Some(index) = index_of(&queue, id) else {
             return Ok(false);
@@ -186,6 +201,9 @@ impl SessionDoc {
         }
         map.insert("text", text)?;
         map.insert("editedAt", now_ms)?;
+        // Publish only after releasing the local mutation guard: document
+        // subscribers may read the queue or schedule another queue operation.
+        drop(mutation);
         self.doc().commit();
         Ok(true)
     }
@@ -197,6 +215,7 @@ impl SessionDoc {
         id: &str,
         gate: Option<&QueueDeliveryGate>,
     ) -> Result<bool, DocError> {
+        let mutation = self.queue_mutation_guard();
         let queue = self.doc().get_movable_list("queue");
         let Some(index) = index_of(&queue, id) else {
             return Ok(false);
@@ -214,6 +233,9 @@ impl SessionDoc {
                 map.delete("deliveryGate")?;
             }
         }
+        // Publish only after releasing the local mutation guard: document
+        // subscribers may read the queue or schedule another queue operation.
+        drop(mutation);
         self.doc().commit();
         Ok(true)
     }
@@ -246,6 +268,7 @@ impl SessionDoc {
         if replacement.is_some_and(|text| text.trim().is_empty()) {
             return self.remove_queued(id);
         }
+        let mutation = self.queue_mutation_guard();
         let queue = self.doc().get_movable_list("queue");
         let Some(index) = index_of(&queue, id) else {
             return Ok(false);
@@ -273,6 +296,9 @@ impl SessionDoc {
             map.insert("editedAt", now_ms)?;
         }
         map.delete("deliveryGate")?;
+        // Publish only after releasing the local mutation guard: document
+        // subscribers may read the queue or schedule another queue operation.
+        drop(mutation);
         self.doc().commit();
         Ok(true)
     }
@@ -280,6 +306,7 @@ impl SessionDoc {
     /// Move a row to `to` (clamped to the queue's bounds). `false` when the row
     /// is missing or already sits there.
     pub fn move_queued(&self, id: &str, to: usize) -> Result<bool, DocError> {
+        let mutation = self.queue_mutation_guard();
         let queue = self.doc().get_movable_list("queue");
         let Some(from) = index_of(&queue, id) else {
             return Ok(false);
@@ -289,17 +316,24 @@ impl SessionDoc {
             return Ok(false);
         }
         queue.mov(from, to)?;
+        // Publish only after releasing the local mutation guard: document
+        // subscribers may read the queue or schedule another queue operation.
+        drop(mutation);
         self.doc().commit();
         Ok(true)
     }
 
     /// Drop a row. `false` when it was already gone (another device took it).
     pub fn remove_queued(&self, id: &str) -> Result<bool, DocError> {
+        let mutation = self.queue_mutation_guard();
         let queue = self.doc().get_movable_list("queue");
         let Some(index) = index_of(&queue, id) else {
             return Ok(false);
         };
         queue.delete(index, 1)?;
+        // Publish only after releasing the local mutation guard: document
+        // subscribers may read the queue or schedule another queue operation.
+        drop(mutation);
         self.doc().commit();
         Ok(true)
     }
@@ -308,6 +342,7 @@ impl SessionDoc {
     /// `None` when it is already gone, which is the race we want: two devices
     /// popping the same row means exactly one of them gets it.
     pub fn take_queued(&self, id: &str) -> Result<Option<QueuedMessage>, DocError> {
+        let mutation = self.queue_mutation_guard();
         let queue = self.doc().get_movable_list("queue");
         let Some(index) = index_of(&queue, id) else {
             return Ok(None);
@@ -323,6 +358,9 @@ impl SessionDoc {
             return Ok(None);
         }
         queue.delete(index, 1)?;
+        // Publish only after releasing the local mutation guard: document
+        // subscribers may read the queue or schedule another queue operation.
+        drop(mutation);
         self.doc().commit();
         Ok(item)
     }

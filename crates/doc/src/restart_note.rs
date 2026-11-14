@@ -25,15 +25,38 @@ pub fn resuming(updated_to: Option<&str>) -> String {
 /// Whether `message` is one of the calm restart notes above (rendered as a
 /// notice, not an error).
 pub fn is_calm(message: &str) -> bool {
-    message == AWAITING_ANSWER
-        || (message.starts_with("Harness restarted — ")
-            || message.starts_with("Harness updated to v"))
-            && message.ends_with(" — picking this run back up")
+    if message == AWAITING_ANSWER || message == "Harness restarted — picking this run back up" {
+        return true;
+    }
+    // Match the complete recovery note, not a broad Harness/restart prefix:
+    // failed recoveries and non-resumed runs must keep their error treatment.
+    let Some(version) = message
+        .strip_prefix("Harness updated to v")
+        .and_then(|s| s.strip_suffix(" — picking this run back up"))
+    else {
+        return false;
+    };
+    version.as_bytes().first().is_some_and(u8::is_ascii_digit)
+        && version
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-' | b'+'))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restart_notices_match_the_shared_presentation_vector() {
+        let vector: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../apps/parity/vectors/restart-notices.json"
+        ))
+        .unwrap();
+        for case in vector["cases"].as_array().unwrap() {
+            let message = case["message"].as_str().unwrap();
+            assert_eq!(is_calm(message), case["expect"].is_string(), "{message}");
+        }
+    }
 
     #[test]
     fn calm_notes_are_told_apart_from_the_error() {

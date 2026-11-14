@@ -30,6 +30,9 @@ pub fn main(init: std.process.Init) !void {
     // pinned its agent for this run.
     if (harness_override == null) @import("composer_defaults.zig").apply(&a);
     a.env = init.environ_map;
+    const gui = if (comptime @hasField(nanoui.App, "gui")) app.gui else true;
+    a.performance.available = !@import("builtin").is_test and @import("builtin").mode != .debug and !app.flags.hidden and app.flags.play == null and app.flags.script.len == 0 and gui;
+    if (a.performance.available) a.performance.start(init.gpa, init.io);
     @import("frame_profile.zig").start(&a);
     // Panics, fatal signals and hangs leave their stacks in ~/.harness/logs.
     if (a.settings.dataDir()) |dir| crash_log.start(init.io, dir);
@@ -63,7 +66,7 @@ pub fn main(init: std.process.Init) !void {
     // window is up.
     if (init.environ_map.get("HARNESS_NANO_CRASH_TEST")) |what| crash_log.selfTest(what);
     a.release.done = .{ .ctx = &a, .func = App.releaseCame };
-    a.release.start();
+    @import("view_updates.zig").checkForUpdates(&a);
     @import("graff_update.zig").start(&a);
     try app.run();
 }

@@ -142,21 +142,23 @@ fn compact(out: []u8, text: []const u8) []const u8 {
     return out[0..n];
 }
 
-/// Same four prefix/substring ranks as the shipped popup, then no match.
+/// Exact (case-folded) names win before prefixes, then the existing substring
+/// and punctuation-insensitive ranks. Equal ranks retain catalog order.
 pub fn matchRank(query: []const u8, name: []const u8) ?u8 {
     var qbuf: [1024]u8 = undefined;
     var nbuf: [1024]u8 = undefined;
     const q = fold.foldBuf(&qbuf, query);
     const n = fold.foldBuf(&nbuf, name);
-    if (std.mem.startsWith(u8, n, q)) return 0;
-    if (std.mem.indexOf(u8, n, q) != null) return 1;
+    if (std.mem.eql(u8, n, q)) return 0;
+    if (std.mem.startsWith(u8, n, q)) return 1;
+    if (std.mem.indexOf(u8, n, q) != null) return 2;
     var cqbuf: [1024]u8 = undefined;
     var cnbuf: [1024]u8 = undefined;
     const cq = compact(&cqbuf, query);
     const cn = compact(&cnbuf, name);
     if (cq.len == 0) return null;
-    if (std.mem.startsWith(u8, cn, cq)) return 2;
-    if (std.mem.indexOf(u8, cn, cq) != null) return 3;
+    if (std.mem.startsWith(u8, cn, cq)) return 3;
+    if (std.mem.indexOf(u8, cn, cq) != null) return 4;
     return null;
 }
 
@@ -179,6 +181,25 @@ pub fn replacementRange(text: []const u8, tok: Token, name: []const u8) Range {
 }
 
 const testing = std.testing;
+test "completion exact names outrank longer prefixes without changing fuzzy match order" {
+    const Case = struct { query: []const u8, exact: []const u8, prefix: []const u8 };
+    for ([_]Case{
+        .{ .query = "compact", .exact = "compact", .prefix = "compact-at" },
+        .{ .query = "COMPACT", .exact = "compact", .prefix = "compact-at" },
+        .{ .query = "review", .exact = "review", .prefix = "review-extra" },
+        .{ .query = "harness:model", .exact = "harness:model", .prefix = "harness:model-extra" },
+        .{ .query = "ÄPFEL", .exact = "äpfel", .prefix = "äpfel-baum" },
+    }) |c| try testing.expect(matchRank(c.query, c.exact).? < matchRank(c.query, c.prefix).?);
+
+    // Partial and empty queries keep stable catalog order within a rank.
+    try testing.expectEqual(matchRank("comp", "compact-at"), matchRank("comp", "compact"));
+    try testing.expectEqual(matchRank("", "compact-at"), matchRank("", "compact"));
+    try testing.expect(matchRank("compact", "compact-at").? < matchRank("compact", "auto-compact").?);
+    try testing.expect(matchRank("compact", "auto-compact").? < matchRank("compact", "com-pact-at").?);
+    try testing.expect(matchRank("compact", "com-pact-at").? < matchRank("compact", "auto-com-pact").?);
+    try testing.expectEqual(@as(?u8, null), matchRank("compact", "review"));
+}
+
 test "completion range preserves issue575 adjacent suffix and consumes only accepted-name continuation" {
     const Case = struct { text: []const u8, caret: usize, name: []const u8, suffix: []const u8 };
     for ([_]Case{

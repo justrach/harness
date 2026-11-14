@@ -619,6 +619,10 @@ test "the composer has the keys after ⌘D, ⌘[ and ⌘]: nothing typed is lost
 }
 
 test "native visual renders interactive Luau widgets 1:1 in transcript" {
+    // This fixture checks native layout and interaction. Host scheduling is
+    // covered by the runtime's real-clock deadline tests, not this UI test.
+    const clock = @import("visual_luau.zig").TestClock.init();
+    defer clock.deinit();
     var h: Harness = undefined;
     try h.init();
     defer h.deinit();
@@ -635,6 +639,9 @@ test "native visual renders interactive Luau widgets 1:1 in transcript" {
     h.t.settle(1);
 
     try testing.expect(h.t.hasText("Capacity planner"));
+    if (h.a.visuals.find("v1")) |entry| {
+        if (entry.err) |err| std.debug.print("Native visual fixture stopped: {s}\n", .{err});
+    }
     try testing.expect(h.t.hasText("Native · Interactive"));
     try testing.expect(h.t.hasText("Monthly estimate: $1036"));
     try testing.expect(h.t.hasText("Capacity: 60 units"));
@@ -670,7 +677,6 @@ test "native visual shows sanitized error card when Luau script fails" {
     try testing.expect(h.t.hasText("This visual could not run"));
     h.snap("native-visual-error");
 }
-
 
 test "a second line makes the docked composer taller and keeps the keys" {
     var h: Harness = undefined;
@@ -2160,7 +2166,7 @@ test "bottom-docked checkout and ref popovers open upward above the composer foo
     try testing.expectEqualStrings("feature/popover-upward", h.a.new_ref.?);
 }
 
-test "Settings Devices and the sidebar footer surface desktop app updates and auto-restart" {
+test "Settings Devices and the sidebar footer surface desktop app updates and hourly checks" {
     var h: Harness = undefined;
     try h.init();
     defer h.deinit();
@@ -2180,19 +2186,16 @@ test "Settings Devices and the sidebar footer surface desktop app updates and au
     // Sidebar footer surfaces the update row immediately when a newer release is known.
     try testing.expect(h.t.hasText("Update to v99.0.0"));
 
-    // Open Settings -> Devices and verify the update card, button, auto-restart toggle, and remote badge.
+    // Open Settings -> Devices and verify the update card, hourly policy and remote badge.
     h.a.settings.setSection(.devices);
     @import("view_settings.zig").open(&h.a);
     h.t.settle(1);
     h.snap("settings-devices-update-card");
     try testing.expect(h.t.hasText("Harness v99.0.0 is available."));
     try testing.expect(h.t.hasText("Update to v99.0.0"));
-    try testing.expect(h.t.hasText("Restart automatically to install updates"));
+    try testing.expect(h.t.hasText("Automatic update checks"));
+    try testing.expect(!h.t.hasText("Restart automatically to install updates"));
     try testing.expect(h.t.hasText("Update available · Details"));
-    try testing.expect(h.a.settings.get(.restart_to_install_updates));
-    try h.t.clickText("Restart automatically to install updates");
-    h.t.settle(1);
-    try testing.expect(!h.a.settings.get(.restart_to_install_updates));
 }
 
 test "model picker row context badges stay valid through paint and clicking Models back button with reasoning slider never panics" {

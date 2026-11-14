@@ -58,6 +58,18 @@ unchanged. The proposal carries the domain-neutral component tests and
 cross-platform checks; Harness's native history tests exercise the consumer.
 No Luau module or runtime is included.
 
+Harness-local responsiveness instrumentation adds an optional `View.after_frame`
+callback in `src/ui/ui.zig`, invoked exactly once by `src/ui/frame.zig` after
+completed CPU-frame work (including retained frames). A null callback leaves
+upstream behavior unchanged. Harness owns the bounded metric recorder and
+background transport; the toolkit hook does not serialize or send data.
+
+Harness-local bottom overscroll changes in `src/ui/scroll.zig` use a bounded
+nonlinear resistance curve and its inverse, preserving event-coalescing and
+reversal behavior. Discrete wheels, native momentum, Reduce Motion and idle
+spring termination retain their explicit paths. Harness's `tests_scroll_bounce`
+module exercises the production consumer.
+
 These changes live in this checked-in package, not an ignored download cache.
 
 To update: start with the pinned upstream distribution, retain the notices,

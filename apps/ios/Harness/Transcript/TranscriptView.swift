@@ -200,7 +200,7 @@ struct TranscriptView: View {
                 // out of usage is labelled, and says where to sign in: the phone has no sign-in for these.
                 let problem = reauth == nil ? RunErrors.providerProblem(message) : nil
                 VStack(alignment: .leading, spacing: 8) {
-                    ErrorChipView(message: message, problem: problem, hostName: hostName)
+                    ErrorChipView(message: message, problem: problem, hostName: hostName, allowNotice: reauth == nil)
                     if let reauth {
                         reauthControls(reauth, row: row, earlier: earlier)
                     }
@@ -249,38 +249,56 @@ final class ScrollState {
     @ObservationIgnored var userScrolling = false
     @ObservationIgnored var userDragging = false
     @ObservationIgnored var distanceFromBottom: CGFloat = 0
-    @ObservationIgnored private var movedAway = false
+    @ObservationIgnored private var movingTowardBottom = false
     @ObservationIgnored private var windowStartID: String?
     @ObservationIgnored private var windowRowCount = 0
 
-    func observe(old: TranscriptGeometry, new: TranscriptGeometry) {
+    /// UIKit supplies finger motion separately: self-sizing rows and native
+    /// rubber-band recovery can change the offset without any user intent.
+    /// Geometry-only callers may infer direction only in a stable layout,
+    /// and only within the content range (never from elastic overscroll).
+    func observe(old: TranscriptGeometry, new: TranscriptGeometry, dragDelta: CGFloat? = nil) {
         distanceFromBottom = new.bottom
-        // Offset direction, not distance direction: growing content can move
-        // the bottom while the user's finger is stationary.
-        if userDragging, new.offset < old.offset - 0.5 {
-            pinned = false
-            movedAway = true
+        let delta: CGFloat
+        if let dragDelta {
+            delta = dragDelta
+        } else if old.contentHeight == new.contentHeight, old.viewportHeight == new.viewportHeight {
+            let end = max(0, new.contentHeight - new.viewportHeight)
+            delta = min(max(0, new.offset), end) - min(max(0, old.offset), end)
+        } else {
+            delta = 0
         }
-        if userDragging, new.offset > old.offset + 0.5,
-           new.bottom <= TranscriptView.stickThreshold {
-            pinned = true
+        if userDragging, delta < -0.5 {
+            pinned = false
+            movingTowardBottom = false
+        }
+        if userDragging, delta > 0.5 {
+            movingTowardBottom = true
+            if new.bottom <= TranscriptView.stickThreshold { pinned = true }
         }
         let show = !pinned && new.bottom > TranscriptView.jumpThreshold
         if showJump != show { showJump = show }
     }
 
+    func beginGesture() {
+        userScrolling = true
+        userDragging = true
+        movingTowardBottom = false
+    }
+
     func endGesture() {
-        if userScrolling, movedAway, distanceFromBottom <= 2 { pinned = true }
+        if userScrolling, movingTowardBottom,
+           distanceFromBottom <= TranscriptView.stickThreshold { pinned = true }
         userScrolling = false
         userDragging = false
-        movedAway = false
+        movingTowardBottom = false
         showJump = !pinned && distanceFromBottom > TranscriptView.jumpThreshold
     }
 
     func arm() {
         pinned = true
         showJump = false
-        movedAway = false
+        movingTowardBottom = false
     }
 
     /// Older rows stay unbuilt until requested. A released reader owns the
@@ -826,15 +844,21 @@ struct ErrorChipView: View {
     let message: String
     var problem: ProviderProblem? = nil
     var hostName = "the execution device"
+    var allowNotice = true
+
+    var notice: RestartNotice? { allowNotice && problem == nil ? RunErrors.restartNotice(message) : nil }
+    var isNotice: Bool { notice != nil }
+    var label: String { notice?.label ?? problem?.label ?? "Error" }
+    private var tone: Color { isNotice ? Theme.textMuted : Theme.danger }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
-                Image(systemName: "exclamationmark.triangle")
+                Image(systemName: isNotice ? "info.circle" : "exclamationmark.triangle")
                     .font(.system(size: 10))
                     .frame(width: 20, height: 20)
-                    .tintedChip(Theme.danger, in: RoundedRectangle(cornerRadius: 6))
-                Text(problem?.label ?? "Error")
+                    .tintedChip(tone, in: RoundedRectangle(cornerRadius: 6))
+                Text(label)
                     .font(Theme.sans(12, weight: .medium))
                     .foregroundStyle(Theme.text)
                     .accessibilityIdentifier("error-chip-label")
@@ -860,7 +884,7 @@ struct ErrorChipView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
         .frame(maxWidth: .infinity, minHeight: 38, alignment: .leading)
-        .background(Theme.danger.opacity(0.06), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(tone.opacity(0.06), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
 

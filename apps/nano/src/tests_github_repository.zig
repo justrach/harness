@@ -214,6 +214,88 @@ test "repository github browser resets context and ignores late host replies aft
     try testing.expect(h.a.panels.github_repository.target == null);
 }
 
+test "repository github presentation renders descriptions as native Markdown" {
+    for ([_]bool{ false, true }) |dark| {
+        var rich = detail;
+        var description = detail.detail.?;
+        description.body = "## Readable description\n\nReview **native formatting** without raw Markdown markers.\n\n- Preserve keyboard focus\n- Keep checkout files unchanged\n\n> A synthetic review note.\n\n```zig\nconst ready = true;\n```\n\n| Check | Result |\n| --- | --- |\n| Native UI | Passed |";
+        rich.detail = description;
+        var h: Harness = undefined;
+        try setup(&h, dark, &.{ pulls, rich });
+        defer h.deinit();
+        try h.t.clickText("Repository");
+        try h.t.clickText("Polish repository navigation");
+        h.t.settle(0.1);
+        try screenshot(&h, if (dark) "formatted-summary-dark" else "formatted-summary-light");
+        try testing.expect(h.t.hasText("Readable description"));
+        try testing.expect(!h.t.hasText(description.body));
+        try testing.expect(h.t.hasText("Description"));
+        h.t.resize(760, 780);
+        h.t.settle(0.2);
+        for ([_][]const u8{ description.title, "Readable description", "Description" }) |label| {
+            const rect = h.t.findText(label) orelse return error.MissingNarrowDescription;
+            try testing.expect(rect.x >= 0 and rect.x + rect.w <= h.t.size.w);
+        }
+        try screenshot(&h, if (dark) "formatted-summary-narrow-dark" else "formatted-summary-narrow-light");
+    }
+}
+
+test "repository github list rows keep long titles and metadata inside the card" {
+    var long = pulls;
+    var entries = [_]flow.Item{pulls.items[0]};
+    entries[0].title = "A long synthetic pull request title that wraps across several lines in a narrow repository panel without losing its author or update metadata";
+    long.items = &entries;
+    var h: Harness = undefined;
+    try setup(&h, false, &.{long});
+    defer h.deinit();
+    try h.t.clickText("Repository");
+    h.t.resize(760, 780);
+    h.t.settle(0.2);
+    const title = h.t.findText(entries[0].title) orelse return error.MissingLongTitle;
+    const author = h.t.findText("demo-author · updated 2026-11-13") orelse return error.MissingAuthor;
+    try testing.expect(author.y >= title.y + title.h);
+    const card = for (h.t.ctx.nodes.items) |node| {
+        const r = node.rect;
+        if (node.interactive and node.style.radius == 8 and r.x <= title.x and r.y <= title.y and r.x + r.w >= title.x + title.w) break r;
+    } else return error.MissingRepositoryCard;
+    try testing.expect(author.y + author.h < card.y + card.h);
+    try screenshot(&h, "repository-long-title-narrow");
+}
+
+test "repository github surface plus opens the surface picker instead of a chat tab" {
+    var h: Harness = undefined;
+    try setup(&h, false, &.{pulls});
+    defer h.deinit();
+    const tabs_before = h.a.tabs.items.items.len;
+    const title = h.t.findText("GitHub") orelse return error.MissingGitHubTab;
+    h.t.moveTo(title.x + title.w / 2, title.y + title.h / 2);
+    h.t.settle(0.1);
+    var plus: ?@import("nanoui").ui.Rect = null;
+    for (h.t.ctx.nodes.items) |node| {
+        const r = node.rect;
+        if (node.interactive and r.y < 38 and r.x > title.x + title.w and r.w == 18 and r.h == 18) {
+            if (plus == null or r.x < plus.?.x) plus = r;
+        }
+    }
+    const target = plus orelse return error.MissingSurfacePlus;
+    h.t.click(target.x + target.w / 2, target.y + target.h / 2);
+    h.t.settle(0.1);
+    try testing.expectEqual(tabs_before, h.a.tabs.items.items.len);
+    try testing.expect(h.t.hasText("Git history"));
+    try testing.expect(h.t.hasText("Browser"));
+    try testing.expectEqualStrings("a", h.a.selected.?);
+}
+
+test "repository github session empty state does not invent an authentication failure" {
+    var h: Harness = undefined;
+    try setup(&h, false, &.{pulls});
+    defer h.deinit();
+    try testing.expect(h.t.hasText("No session-linked pull requests"));
+    try testing.expect(!h.t.hasText("No session pull request is available. The host needs gh installed and signed in to GitHub."));
+    try h.t.clickText("Repository");
+    try testing.expect(h.t.hasText("Polish repository navigation"));
+}
+
 test "repository github browser masks raw errors rejects changed repo replies and unsafe URLs" {
     var h: Harness = undefined;
     try setup(&h, true, &.{pulls});

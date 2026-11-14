@@ -64,9 +64,12 @@ fn validPart(part: []const u8) bool {
     return true;
 }
 const Target = struct { arena: std.heap.ArenaAllocator, chat: []const u8, cwd: []const u8, device: []const u8, branch: []const u8 };
+const Linked = struct { arena: std.heap.ArenaAllocator, repository: Repository };
 pub const State = struct {
     open: bool = false,
     target: ?Target = null,
+    linked: ?Linked = null,
+    after_detail: ?Kind = null,
     list: ?Snapshot = null,
     details: ?Snapshot = null,
     content: ?Snapshot = null,
@@ -81,13 +84,16 @@ pub const State = struct {
     error_text: ?[]u8 = null,
     pub fn deinit(s: *State, gpa: std.mem.Allocator) void {
         if (s.target) |*t| t.arena.deinit();
+        if (s.linked) |*link| link.arena.deinit();
         if (s.list) |*p| p.arena.deinit();
         if (s.details) |*p| p.arena.deinit();
         if (s.content) |*p| p.arena.deinit();
         if (s.error_text) |e| gpa.free(e);
     }
     pub fn repository(s: *const State) ?Repository {
-        return if (s.list) |l| l.page.repository else null;
+        if (s.linked) |link| return link.repository;
+        if (s.list) |l| return l.page.repository;
+        return if (s.details) |d| d.page.repository else null;
     }
     pub fn current(s: *const State) ?Page {
         return switch (s.kind) {
@@ -116,6 +122,7 @@ fn clearSnapshots(a: *App) void {
     s.details = null;
     s.content = null;
     s.number = null;
+    s.after_detail = null;
     s.expanded_file = null;
 }
 pub fn reset(a: *App) void {
@@ -124,6 +131,7 @@ pub fn reset(a: *App) void {
     clearSnapshots(a);
     clearError(a);
     if (s.target) |t| a.retireArena(t.arena);
+    if (s.linked) |link| a.retireArena(link.arena);
     s.* = .{};
 }
 pub fn reconcile(a: *App) void {
@@ -136,6 +144,43 @@ pub fn reconcile(a: *App) void {
     reset(a);
     if (was_open and a.panels.host_open) show(a);
 }
+/// Called pre-tree after the transcript link's conversation owner is revalidated.
+/// Opens a specific item directly: it need not appear on the first open-PR page.
+pub fn openLinked(a: *App, target: @import("github_link.zig").Target) void {
+    if (!validPart(target.owner) or !validPart(target.name) or target.number == 0 or target.number > std.math.maxInt(i64)) return;
+    const link = makeLinked(a.gpa, target) catch return;
+    reset(a);
+    @import("app_git.zig").open(a, .github);
+    a.view.strip.focused = .host;
+    a.view.strip.expanded = null;
+    const s = &a.panels.github_repository;
+    s.linked = link;
+    s.open = true;
+    s.list_kind = if (target.kind == .pull) .pulls else .issues;
+    s.selected_kind = if (target.kind == .pull) .pull else .issue;
+    s.kind = s.selected_kind;
+    s.number = target.number;
+    s.filter = .all;
+    s.after_detail = switch (target.section) {
+        .summary => null,
+        .code => .files,
+        .activity => .activity,
+    };
+    load(a, s.selected_kind, 1);
+}
+
+fn makeLinked(gpa: std.mem.Allocator, target: @import("github_link.zig").Target) !Linked {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    errdefer arena.deinit();
+    const alloc = arena.allocator();
+    const owner = try alloc.dupe(u8, target.owner);
+    const name = try alloc.dupe(u8, target.name);
+    const raw_key = try std.fmt.allocPrint(alloc, "github.com/{s}/{s}", .{ owner, name });
+    const key = try std.ascii.allocLowerString(alloc, raw_key);
+    const url = try std.fmt.allocPrint(alloc, "https://github.com/{s}/{s}", .{ owner, name });
+    return .{ .arena = arena, .repository = .{ .key = key, .host = "github.com", .owner = owner, .name = name, .url = url } };
+}
+
 pub fn show(a: *App) void {
     const s = &a.panels.github_repository;
     s.open = true;
@@ -144,6 +189,11 @@ pub fn show(a: *App) void {
 }
 pub fn hide(a: *App) void {
     const s = &a.panels.github_repository;
+    // Sessions belong to the current checkout, not an explicitly linked repo.
+    if (s.linked != null) {
+        reset(a);
+        return a.redraw();
+    }
     if (s.pending) |id| a.engine.cancel(id);
     s.pending = null;
     s.open = false;
@@ -154,6 +204,14 @@ pub fn hide(a: *App) void {
 pub fn refresh(a: *App) void {
     const s = &a.panels.github_repository;
     if (s.pending != null) return;
+    if (s.linked != null and s.number != null and s.kind != .pulls and s.kind != .issues) {
+        const number = s.number;
+        const after_detail = s.after_detail orelse if (s.kind == .files or s.kind == .activity) s.kind else null;
+        clearSnapshots(a);
+        s.number = number;
+        s.after_detail = after_detail;
+        return load(a, s.selected_kind, 1);
+    }
     clearSnapshots(a);
     load(a, s.list_kind, 1);
 }
@@ -185,7 +243,9 @@ pub fn back(a: *App) void {
     if (s.pending != null) return;
     s.kind = s.list_kind;
     s.number = null;
+    s.after_detail = null;
     s.expanded_file = null;
+    if (s.list == null) return load(a, s.list_kind, 1);
     a.redraw();
 }
 pub fn section(a: *App, kind: Kind) void {
@@ -248,6 +308,7 @@ pub fn load(a: *App, kind: Kind, index: usize) void {
         .page = index,
         .expectedRepository = if (s.repository()) |repo| repo.key else null,
         .targetDeviceId = host,
+        .linkedRepository = if (s.linked) |link| .{ .owner = link.repository.owner, .name = link.repository.name } else null,
     }), .of(App, a, onReply));
     if (s.pending == null) fail(a, "GitHub request could not be sent. Refresh to retry.");
     a.redraw();
@@ -277,6 +338,10 @@ fn onReply(a: *App, id: u64, reply: rpc.Reply) void {
                     }
                     if (s.details) |old| a.retireArena(old.arena);
                     s.details = next;
+                    if (s.after_detail) |kind| {
+                        s.after_detail = null;
+                        return load(a, kind, 1);
+                    }
                 },
                 .files, .activity => {
                     if (s.content) |old| a.retireArena(old.arena);
@@ -284,7 +349,7 @@ fn onReply(a: *App, id: u64, reply: rpc.Reply) void {
                 },
             }
         },
-        .err => return fail(a, "GitHub is unavailable for this checkout. Check gh installation, sign-in and repository permissions on its host, then Refresh. Provider output is hidden for safety."),
+        .err => return fail(a, "GitHub is unavailable on this session's host. Check gh installation, sign-in and repository permissions, then Refresh. Provider output is hidden for safety."),
         .done => return fail(a, "GitHub request ended without a page. Refresh to retry."),
         .item => unreachable,
     }

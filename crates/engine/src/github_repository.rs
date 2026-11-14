@@ -7,7 +7,7 @@ use std::time::Duration;
 use harness_rpc::{
     BrowseCheckoutGitHubParams, BrowseCheckoutGitHubResponse, GitHubRepositoryDetail,
     GitHubRepositoryEvent, GitHubRepositoryFile, GitHubRepositoryIdentity, GitHubRepositoryItem,
-    GitHubRepositoryKind as Kind, GitHubRepositoryState as State, RpcError,
+    GitHubRepositoryKind as Kind, GitHubRepositoryState as State, GitHubRepositoryTarget, RpcError,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -66,7 +66,13 @@ where
         .inspect(&before.root)
         .await
         .map_err(provider_error)?;
-    let repository = repository_identity(&source).map_err(provider_error)?;
+    // The checkout's source repository is a separate fence from an explicitly
+    // linked read target. Never compare the latter with the checkout on return.
+    let source_repository = repository_identity(&source).map_err(provider_error)?;
+    let repository = match &params.linked_repository {
+        Some(target) => linked_repository_identity(target),
+        None => source_repository.clone(),
+    };
     check_expected(params, &repository)?;
     let result = browser
         .query(&source.checkout_root, repository.clone(), params)
@@ -79,7 +85,7 @@ where
         .await
         .map_err(provider_error)?;
     let current_repository = repository_identity(&current).map_err(provider_error)?;
-    check_context(&before, &after, &repository, &current_repository)?;
+    check_context(&before, &after, &source_repository, &current_repository)?;
     result.map_err(provider_error)
 }
 
@@ -136,6 +142,13 @@ fn check_expected(
 fn validate(params: &BrowseCheckoutGitHubParams) -> Result<(), RpcError> {
     if params.chat_id.is_empty() || params.chat_id.len() > 1024 {
         return Err(fail("A valid chat is required"));
+    }
+    if let Some(target) = &params.linked_repository {
+        if !valid_segment(&target.owner) || !valid_segment(&target.name) {
+            return Err(fail(
+                "A valid GitHub repository owner and name are required",
+            ));
+        }
     }
     if !(1..=10_000).contains(&params.page.unwrap_or(1)) {
         return Err(fail("GitHub page must be between 1 and 10000"));
@@ -198,17 +211,27 @@ fn repository_identity(
     if host != "github.com" {
         return Err(ChangeRequestError::UnsupportedRepository);
     }
-    Ok(GitHubRepositoryIdentity {
+    Ok(linked_repository_identity(&GitHubRepositoryTarget {
+        owner: owner.into(),
+        name: name.into(),
+    }))
+}
+
+/// Only call after validating segments, either from the source or the request.
+/// The identity cannot carry a host, URL, or endpoint supplied by the caller.
+fn linked_repository_identity(target: &GitHubRepositoryTarget) -> GitHubRepositoryIdentity {
+    let GitHubRepositoryTarget { owner, name } = target;
+    GitHubRepositoryIdentity {
         key: format!(
             "github.com/{}/{}",
             owner.to_ascii_lowercase(),
             name.to_ascii_lowercase()
         ),
-        host: host.into(),
-        owner: owner.into(),
-        name: name.into(),
+        host: "github.com".into(),
+        owner: owner.clone(),
+        name: name.clone(),
         url: format!("https://github.com/{owner}/{name}"),
-    })
+    }
 }
 
 struct Browser {

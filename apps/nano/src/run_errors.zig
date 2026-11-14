@@ -8,6 +8,36 @@
 //! apps agree on live in apps/parity/vectors/run-errors.json.
 const std = @import("std");
 
+/// Restart recovery notes retain their historical `error` wire kind. Only
+/// these exact successful/answerable recovery messages get a neutral chip.
+/// Rust and iOS run the same restart-notices.json vector.
+pub const RestartNotice = enum {
+    update,
+    restart,
+
+    pub fn label(n: RestartNotice) []const u8 {
+        return switch (n) {
+            .update => "Update",
+            .restart => "Restart",
+        };
+    }
+};
+
+pub fn restartNotice(message: []const u8) ?RestartNotice {
+    if (std.mem.eql(u8, message, "Harness restarted — picking this run back up") or
+        std.mem.eql(u8, message, "Harness restarted — answer the question to pick this run back up")) return .restart;
+    const prefix = "Harness updated to v";
+    const suffix = " — picking this run back up";
+    if (!std.mem.startsWith(u8, message, prefix) or !std.mem.endsWith(u8, message, suffix) or
+        message.len <= prefix.len + suffix.len) return null;
+    const version = message[prefix.len .. message.len - suffix.len];
+    if (!std.ascii.isDigit(version[0])) return null;
+    for (version) |ch| {
+        if (!std.ascii.isAlphanumeric(ch) and ch != '.' and ch != '-' and ch != '+') return null;
+    }
+    return .update;
+}
+
 /// `ProviderProblem`: a reason a turn couldn't run that signing in fixes.
 pub const ProviderProblem = enum {
     /// Not signed in, signed out, or an expired or rejected login.
@@ -140,6 +170,30 @@ pub fn isPlanUsageLimit(message: []const u8) bool {
 }
 
 const testing = std.testing;
+
+test "restart notices: shared recovery presentation vector" {
+    const dir = @import("parity_options").vectors_dir;
+    var ar: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer ar.deinit();
+    const path = try std.fs.path.join(ar.allocator(), &.{ dir, "restart-notices.json" });
+    const text = try std.Io.Dir.cwd().readFileAlloc(testing.io, path, ar.allocator(), .limited(1 << 20));
+    const v = try std.json.parseFromSliceLeaky(std.json.Value, ar.allocator(), text, .{});
+    const cases = v.object.get("cases").?.array.items;
+    try testing.expect(cases.len > 0);
+    const labels = v.object.get("labels").?.object;
+    for (cases) |case| {
+        const message = case.object.get("message").?.string;
+        const notice = restartNotice(message);
+        switch (case.object.get("expect").?) {
+            .string => |expected| {
+                try testing.expect(notice != null);
+                try testing.expectEqualStrings(expected, @tagName(notice.?));
+                try testing.expectEqualStrings(labels.get(expected).?.string, notice.?.label());
+            },
+            else => try testing.expect(notice == null),
+        }
+    }
+}
 
 test "reads the errors the adapters and engine write" {
     for ([_][]const u8{

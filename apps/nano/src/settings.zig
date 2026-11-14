@@ -14,6 +14,7 @@ pub const Section = enum {
     notifications,
     shortcuts,
     files,
+    browsing,
     harnesses,
     agents,
     mcp,
@@ -32,6 +33,7 @@ pub const Section = enum {
             .agents => "Accounts",
             .appearance => "Appearance",
             .files => "Files",
+            .browsing => "Links & browsing",
             .notifications => "Notifications",
             .shortcuts => "Shortcuts",
             .appshots => "Appshots",
@@ -44,7 +46,7 @@ pub const Section = enum {
     /// The heading it sits under in the sidebar.
     pub fn group(s: Section) []const u8 {
         return switch (s) {
-            .appearance, .notifications, .shortcuts, .files => "General",
+            .appearance, .notifications, .shortcuts, .files, .browsing => "General",
             .harnesses, .agents, .mcp, .github_ci => "Agents",
             .devices, .appshots, .archived => "Devices and data",
         };
@@ -57,6 +59,7 @@ pub const Section = enum {
             .agents => .@"key-minimalistic",
             .appearance => .tuning,
             .files => .folder,
+            .browsing => .global,
             .notifications => .bell,
             .shortcuts => .keyboard,
             .archived => .@"archive-minimalistic",
@@ -91,9 +94,12 @@ pub const Prefs = struct {
     notifications_enabled: bool = true,
     notifications_background_only: bool = true,
     share_performance_stats: bool = true,
+    /// Separate opt-in: the old timing-only switch never started Nano uploads.
+    share_desktop_responsiveness: bool = false,
     files_autosave_enabled: bool = false,
     files_word_wrap: bool = false,
     files_show_all: bool = false,
+    open_github_links_in_harness: bool = true,
     archive_sessions_on_close: bool = false,
     /// What ⌘W does to a session was chosen (`archive_on_close_chosen`).
     archive_on_close_chosen: bool = false,
@@ -127,9 +133,11 @@ pub const Flag = enum {
     notifications_enabled,
     notifications_background_only,
     share_performance_stats,
+    share_desktop_responsiveness,
     files_autosave_enabled,
     files_word_wrap,
     files_show_all,
+    open_github_links_in_harness,
     archive_sessions_on_close,
     archive_on_close_chosen,
     escape_stops_active_agent,
@@ -1057,6 +1065,12 @@ test "Nano keeps its own settings and starts by project without rewriting Harnes
 
 test "sections in the GPUI app's order, groups and saved keys" {
     try testing.expectEqual(Section.appearance, Section.all[0]);
+    try testing.expectEqual(Section.files, Section.all[3]);
+    try testing.expectEqual(Section.browsing, Section.all[4]);
+    try testing.expectEqualStrings("Links & browsing", Section.browsing.label());
+    try testing.expectEqualStrings("General", Section.browsing.group());
+    try testing.expectEqual(icons.Name.global, Section.browsing.icon());
+    try testing.expectEqual(@as(?Section, .browsing), Section.fromKey("browsing"));
     try testing.expectEqualStrings("Accounts", Section.agents.label());
     try testing.expectEqualStrings("Agents", Section.harnesses.label());
     try testing.expectEqualStrings("Devices and data", Section.archived.group());
@@ -1140,6 +1154,30 @@ test "Write face loads and persists the shared writeSans boolean without replaci
     defer restored.deinit();
     restored.apply(saved);
     try testing.expect(restored.get(.write_sans));
+}
+
+test "github links preference defaults on and persists both choices without replacing other settings" {
+    const io = testing.io;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = settings_file, .data = "{\"syntheticKeep\":17,\"transcriptCompactDefaultApplied\":true}" });
+    const base = try std.Io.Dir.cwd().realPathFileAlloc(io, try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path}), a);
+    var s = Store.openIn(testing.allocator, io, base);
+    defer s.deinit();
+    try testing.expect(s.get(.open_github_links_in_harness));
+    for ([_]bool{ false, true }) |on| {
+        s.set(.open_github_links_in_harness, on);
+        const saved = try std.Io.Dir.cwd().readFileAlloc(io, s.path.?, a, .limited(1 << 20));
+        const back = try json.parseFromSliceLeaky(json.Value, a, saved, .{});
+        try testing.expectEqual(on, back.object.get("openGithubLinksInHarness").?.bool);
+        try testing.expectEqual(@as(i64, 17), back.object.get("syntheticKeep").?.integer);
+        var restored = Store.openIn(testing.allocator, io, base);
+        defer restored.deinit();
+        try testing.expectEqual(on, restored.get(.open_github_links_in_harness));
+    }
 }
 
 test "compact mode turns on once for a file written before it was the default, then keeps the choice" {

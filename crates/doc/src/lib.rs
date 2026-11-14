@@ -12,6 +12,8 @@ pub mod commands;
 pub mod constants;
 pub mod parts;
 pub mod queue;
+#[cfg(test)]
+mod queue_concurrency_tests;
 pub mod rebuild;
 pub mod registry;
 pub mod restart_note;
