@@ -316,6 +316,49 @@ struct GeneratedImageReference: Hashable {
 enum AgentReauthProvider: String, Hashable, Sendable {
     case chatGPTNew = "chatgpt-new"
     case codex
+    case claudeCode = "claude-code"
+    case cursor
+
+    /// Synced transcript error metadata only permits the two host-typed routes.
+    nonisolated static func syncedWireValue(_ raw: String?) -> AgentReauthProvider? {
+        switch raw {
+        case Self.chatGPTNew.rawValue: return .chatGPTNew
+        case Self.codex.rawValue: return .codex
+        default: return nil
+        }
+    }
+
+    /// Resolve a re-authentication route strictly from the chat's own stored config
+    /// (never from untrusted error message text) when a run fails signed out.
+    nonisolated static func forSignedOutSession(harness rawHarness: String?, model rawModel: String? = nil) -> AgentReauthProvider? {
+        guard let harness = rawHarness?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !harness.isEmpty else { return nil }
+        switch harness {
+        case "claude-code":
+            return .claudeCode
+        case "codex":
+            return .codex
+        case "cursor":
+            return .cursor
+        case "graff":
+            let model = (rawModel ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if model.hasPrefix("gpt-") || model.hasPrefix("chatgpt") || model.hasPrefix("codex")
+                || model.hasPrefix("o1") || model.hasPrefix("o3") || model.hasPrefix("o4") {
+                return .chatGPTNew
+            }
+            return nil
+        default:
+            return nil
+        }
+    }
+
+    var providerDisplayName: String {
+        switch self {
+        case .chatGPTNew, .codex: return "ChatGPT"
+        case .claudeCode: return "Claude Code"
+        case .cursor: return "Cursor"
+        }
+    }
 
     var startParameters: [String: Any] {
         switch self {
@@ -323,6 +366,8 @@ enum AgentReauthProvider: String, Hashable, Sendable {
         case .chatGPTNew: return ["harness": "graff", "provider": "chatgpt-new", "reauthenticate": true,
                                   "relayBrowser": true]
         case .codex: return ["harness": "codex", "reauthenticate": true, "deviceAuth": true]
+        case .claudeCode: return ["harness": "claude-code"]
+        case .cursor: return ["harness": "cursor"]
         }
     }
 }

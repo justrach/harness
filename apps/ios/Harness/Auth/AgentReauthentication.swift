@@ -119,8 +119,44 @@ final class AgentReauthentication {
         }
     }
 
+    /// Claude Code PKCE paste-code sign-in started on the execution host.
+    struct PasteCodeSignIn: Equatable, Sendable {
+        let url: URL
+
+        fileprivate init?(url: String) {
+            guard let parsed = URLComponents(string: url),
+                  parsed.scheme == "https",
+                  parsed.host == "claude.ai" || parsed.host == "console.anthropic.com",
+                  parsed.user == nil, parsed.password == nil, parsed.port == nil,
+                  parsed.fragment == nil, parsed.path == "/oauth/authorize",
+                  let items = parsed.queryItems,
+                  items.contains(where: { $0.name == "state" && !($0.value ?? "").isEmpty }),
+                  items.contains(where: { $0.name == "code_challenge" && !($0.value ?? "").isEmpty }),
+                  let approvedURL = parsed.url else { return nil }
+            self.url = approvedURL
+        }
+    }
+
+    /// Cursor browser sign-in started on the execution host and approved in Safari.
+    struct DirectBrowserSignIn: Equatable, Sendable {
+        let url: URL
+
+        fileprivate init?(url: String) {
+            guard let parsed = URLComponents(string: url),
+                  parsed.scheme == "https",
+                  let host = parsed.host,
+                  host == "cursor.com" || host == "www.cursor.com" || host == "authenticator.cursor.sh",
+                  parsed.user == nil, parsed.password == nil, parsed.port == nil,
+                  parsed.fragment == nil, !parsed.path.isEmpty,
+                  let approvedURL = parsed.url else { return nil }
+            self.url = approvedURL
+        }
+    }
+
     private(set) var approval: Approval?
     private(set) var browserSignIn: BrowserSignIn?
+    private(set) var pasteCodeSignIn: PasteCodeSignIn?
+    private(set) var directBrowserSignIn: DirectBrowserSignIn?
     /// The redirect went to the host, which is now finishing the sign-in.
     private(set) var handedOff = false
     private var loginId: String?
@@ -156,6 +192,8 @@ final class AgentReauthentication {
         loginId = nil
         approval = nil
         browserSignIn = nil
+        pasteCodeSignIn = nil
+        directBrowserSignIn = nil
         handedOff = false
         redirectError = nil
         phase = .idle
@@ -188,6 +226,36 @@ final class AgentReauthentication {
             default:
                 // Host text may echo the redirect; keep a fixed message.
                 redirectError = "The execution device didn't accept this sign-in. Start again."
+            }
+            return false
+        }
+    }
+
+    /// Submit the PKCE authorization code copied from a paste-code OAuth page.
+    @discardableResult
+    func submitAuthorizationCode(_ rawCode: String) async -> Bool {
+        let code = rawCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard phase == .waiting, pasteCodeSignIn != nil, let loginId, let transport,
+              !handedOff else { return false }
+        guard (8...512).contains(code.utf8.count),
+              code.utf8.allSatisfy({ $0 >= 0x21 && $0 <= 0x7E }) else {
+            redirectError = "Paste the full authorization code from the sign-in page without spaces."
+            return false
+        }
+        let attempt = generation
+        redirectError = nil
+        handedOff = true
+        do {
+            try await transport.complete(loginId: loginId, redirect: code)
+            return generation == attempt
+        } catch {
+            guard generation == attempt else { return false }
+            handedOff = false
+            switch error {
+            case RelayError.hostOffline, RelayError.notConnected:
+                redirectError = "The execution device is offline. Reconnect it and try again."
+            default:
+                redirectError = "The execution device didn't accept that authorization code. Try signing in again."
             }
             return false
         }
@@ -241,8 +309,18 @@ final class AgentReauthentication {
                     throw RelayError.rpc("The execution device returned invalid sign-in details.")
                 }
                 browserSignIn = signIn
-            case .browser, .pasteCode:
-                throw RelayError.rpc("Update Harness on the execution device to use supported sign-in recovery.")
+            case .pasteCode:
+                guard provider == .claudeCode, started.code == nil || started.code == "",
+                      let signIn = PasteCodeSignIn(url: started.url) else {
+                    throw RelayError.rpc("The execution device returned invalid authorization details.")
+                }
+                pasteCodeSignIn = signIn
+            case .browser:
+                guard provider == .cursor, started.code == nil || started.code == "",
+                      let signIn = DirectBrowserSignIn(url: started.url) else {
+                    throw RelayError.rpc("The execution device returned invalid browser sign-in details.")
+                }
+                directBrowserSignIn = signIn
             }
             phase = .waiting
             while generation == attempt, phase == .waiting, !Task.isCancelled {
@@ -258,6 +336,8 @@ final class AgentReauthentication {
                     loginId = nil
                     approval = nil
                     browserSignIn = nil
+                    pasteCodeSignIn = nil
+                    directBrowserSignIn = nil
                     handedOff = false
                     phase = .done
                 case .error:
@@ -317,6 +397,16 @@ final class ReauthOutcomes {
 enum ReauthCopy {
     /// The turn Resume sends: a continuation, never the failed prompt.
     static let resumePrompt = "Continue where you left off. The previous turn stopped because ChatGPT needed reconnecting; it is connected again now."
+
+    static func resumePrompt(for provider: AgentReauthProvider) -> String {
+        switch provider {
+        case .chatGPTNew, .codex:
+            return resumePrompt
+        case .claudeCode, .cursor:
+            return "Continue where you left off. The previous turn stopped because \(provider.providerDisplayName) needed reconnecting; it is connected again now."
+        }
+    }
+
     /// Harness has no signal for either case, so this never says one applies, and never suggests
     /// turning account security off.
     static let accountSecurityNote = "If you recently reset your password or enrolled in Advanced Account Security (including Daybreak), ChatGPT may ask you to sign in again."
