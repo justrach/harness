@@ -140,6 +140,24 @@ final class VisualRuntimeTests: XCTestCase {
         XCTAssertThrowsError(try VisualSandbox(source: "return function() return 123 end").render())
     }
 
+    func testAllocationHeavyDeadlineReturnsAnErrorWithoutCrashing() {
+        // Expiration while GC is assisting an allocation must not recursively
+        // format another timeout error from inside the collector's callback.
+        let source = """
+        return function()
+            while true do
+                local garbage = {}
+                for i = 1, 128 do garbage[i] = string.rep(tostring(i), 128) end
+            end
+        end
+        """
+        for _ in 0..<12 {
+            XCTAssertThrowsError(try VisualSandbox(source: source).render()) { error in
+                XCTAssertTrue(error.localizedDescription.contains("20 ms"))
+            }
+        }
+    }
+
     func testSourceMemoryAndDeadlineLimits() {
         let oversized = String(repeating: "a", count: VisualLimits.maxSourceBytes + 1)
         XCTAssertThrowsError(try VisualSandbox(source: oversized)) { err in

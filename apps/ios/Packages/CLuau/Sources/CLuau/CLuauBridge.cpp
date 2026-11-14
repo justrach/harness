@@ -118,12 +118,16 @@ void *alloc_fn(void *ud, void *ptr, size_t osize, size_t nsize) {
     return p;
 }
 
-void interrupt_fn(lua_State *L, int /*gc*/) {
+void interrupt_fn(lua_State *L, int gc) {
     lua_Callbacks *cb = lua_callbacks(L);
     auto *budget = static_cast<Budget *>(cb->userdata);
     if (!budget || !budget->armed) return;
     if (budget->timed_out || elapsed_ns(*budget) >= kCallBudgetNs) {
         budget->timed_out = true;
+        // Formatting a Lua error can allocate and re-enter the GC callback.
+        // Latch expiry there, but raise only at a VM safepoint (gc == -1).
+        // Keep the timeout sticky so a script cannot swallow it with pcall.
+        if (gc >= 0) return;
         luaL_error(L, "visual execution exceeded 20 ms");
     }
 }
