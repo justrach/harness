@@ -264,6 +264,9 @@ pub const raster = @import("raster.zig");
 pub const View = struct {
     ptr: *anyopaque,
     build: *const fn (ptr: *anyopaque, c: *Context) void,
+    /// Once after a completed CPU frame, including retained scroll frames.
+    /// Does not imply GPU completion or presentation; must not mutate the tree.
+    after_frame: ?*const fn (ptr: *anyopaque, c: *Context) void = null,
 
     /// `View.init(&state, State.view)` where `fn view(s: *State, c: *ui.Context) void`.
     pub fn init(ptr: anytype, comptime build_fn: fn (@TypeOf(ptr), *Context) void) View {

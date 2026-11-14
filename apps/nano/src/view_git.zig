@@ -121,7 +121,15 @@ pub fn github(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
     rule(c, k);
     const items = sessionPullRequests(a, c.alloc()) catch return;
-    if (items.len == 0) return empty(c, k, if (a.engine.state != .connected) "Connect to the host to discover session pull requests." else "No session pull request is available. The host needs gh installed and signed in to GitHub.");
+    if (items.len == 0) {
+        const box = ui.div(c).column().wFull().grow().p(24).gap(10).center();
+        defer box.end();
+        icons.icon(c, .@"pull-request", 24, k.muted, 0);
+        ui.text(c, "No session-linked pull requests", .{ .size = 14, .weight = .semibold, .color = k.text, .wrap = true });
+        ui.text(c, if (a.engine.state != .connected) "Connect to the host to discover session pull requests." else "This view only shows PRs linked to session branches. Browse Repository for all pull requests and issues; an empty list does not indicate a sign-in failure.", .{ .size = 12, .wrap = true, .color = k.muted });
+        if (button(c, k, "Browse repository", a.selected != null)) @import("app_github_repository.zig").show(a);
+        return;
+    }
     const list = ui.div(c).column().wFull().grow().h(0).p(14).gap(12).scrollY();
     defer list.end();
     for (items) |item| {

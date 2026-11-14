@@ -55,13 +55,16 @@ pub const State = struct {
     /// True in the desktop app and unit tests; false only in legacy GPUI
     /// parity scenes recorded against an unmanaged binary.
     desktop_update: bool = true,
+    /// Only a production macOS bundle with its own sibling CLI may install.
+    app_install_checked: bool = false,
+    app_can_install: bool = false,
+    /// The CLI has already replaced the bundle on disk; reopening uses it.
     app_ready: bool = false,
     app_downloading: bool = false,
     app_checking: bool = false,
     app_checked_ms: i64 = 0,
     app_failed: [160]u8 = undefined,
     app_failed_len: usize = 0,
-    app_relaunch_when_ready: bool = false,
     app_updated: [32]u8 = undefined,
     app_updated_len: usize = 0,
     app_updated_until: f64 = 0,
@@ -270,7 +273,7 @@ pub fn appUpdateVersion(a: *const App) ?[]const u8 {
     return if (graff_update.newer(latest, current)) latest else null;
 }
 
-/// Staged app update version ready to restart into (`app_restart_version` in
+/// Installed app update version ready to reopen into (`app_restart_version` in
 /// `crates/ui/src/shell/app_update.rs`). Unstaged GitHub releases use the
 /// titlebar indicator instead of crowding the sidebar footer.
 pub fn appRestartVersion(a: *const App) ?[]const u8 {
@@ -333,10 +336,25 @@ pub fn updateSummary(buf: []u8, a: *const App, now_ms: i64) UpdateSummary {
             .action = .none,
         };
     }
+    if (a.updates.app_checking and !a.updates.app_ready and !a.updates.app_downloading) {
+        return .{ .line = "Checking for updates…", .action = .none };
+    }
+    if (a.release.schedule.failures > 0 and !a.updates.app_ready and !a.updates.app_downloading) {
+        return .{ .line = "Couldn't check for updates. Will retry automatically; check your connection.", .action = .check };
+    }
+    if (a.updates.app_install_checked and !a.updates.app_can_install) {
+        return .{
+            .line = if (latest) |ver|
+                std.fmt.bufPrint(buf, "v{s} is available. Update this installation manually; checks run hourly.", .{ver}) catch "Update available; install manually."
+            else
+                "Checks run hourly. This installation must be updated manually.",
+            .action = if (a.updates.app_checking) .none else .check,
+        };
+    }
     if (a.updates.app_ready) {
         const ver = latest orelse @import("build_info").version;
         return .{
-            .line = std.fmt.bufPrint(buf, "Harness v{s} is downloaded and ready to install.", .{ver}) catch "Update downloaded and ready to install.",
+            .line = std.fmt.bufPrint(buf, "Harness v{s} is installed. Restart when you're ready to use it.", .{ver}) catch "Update installed. Restart when ready.",
             .action = .{ .restart = ver },
         };
     }
@@ -378,45 +396,65 @@ pub fn updateSummary(buf: []u8, a: *const App, now_ms: i64) UpdateSummary {
             .action = .check,
         };
     }
-    return .{ .line = "Up to date.", .action = .check };
+    return .{ .line = "No release check completed yet.", .action = .check };
+}
+
+/// Call from App.tick, not a render/scroll callback. The real-clock deadline
+/// survives sleep; minute wakeups also notice clock changes. Checks never
+/// download, apply or restart anything (including with HARNESS_AUTO_UPDATE=0).
+/// Returns seconds until another tick is needed, or null for fixtures/tests.
+pub fn tick(a: *App) ?f32 {
+    if (a.offscreen or builtin.is_test) return null;
+    initialize(a);
+    if (a.release.startIfDue()) {
+        a.updates.app_checking = a.release.schedule.in_flight;
+        a.redraw();
+    }
+    return a.release.schedule.delaySeconds(a.nowMs());
 }
 
 pub fn checkForUpdates(a: *App) void {
-    a.updates.app_checking = true;
     a.updates.app_failed_len = 0;
     if (!a.offscreen and !builtin.is_test) {
+        initialize(a);
         a.release.start();
+        a.updates.app_checking = a.release.schedule.in_flight;
     }
     a.redraw();
 }
 
 pub fn onReleaseChecked(a: *App) void {
     a.updates.app_checking = false;
-    a.updates.app_checked_ms = a.nowMs();
-    if (!a.offscreen and !builtin.is_test and a.updates.desktop_update) {
-        if (appUpdateVersion(a) != null and !a.updates.app_ready and !a.updates.app_downloading) {
-            startAppDownload(a, false);
-            return;
-        }
+    if (a.release.succeeded) {
+        a.updates.app_checked_ms = a.nowMs();
+        a.updates.app_failed_len = 0;
+    } else {
+        a.updates.setAppFailed("Release manifest unavailable. Try again when online.");
     }
+    // `harness update` applies immediately; it is not a background staging API.
+    // Automatic checks must never invoke it or consume restart preferences.
     a.redraw();
 }
 
 pub fn triggerAppUpdate(a: *App, ver: []const u8) void {
     if (std.mem.eql(u8, ver, "preview")) return;
+    initialize(a);
+    if (!a.updates.app_can_install) {
+        openExternalUrl("https://github.com/justrach/harness/releases/latest");
+        return;
+    }
     if (a.updates.app_ready) {
         restartIntoUpdate(a);
         return;
     }
-    startAppDownload(a, true);
+    startAppDownload(a);
 }
 
-fn startAppDownload(a: *App, relaunch_when_ready: bool) void {
+fn startAppDownload(a: *App) void {
     a.updates.acquire();
     const already = a.updates.app_downloading;
     a.updates.app_downloading = true;
     a.updates.app_failed_len = 0;
-    if (relaunch_when_ready) a.updates.app_relaunch_when_ready = true;
     a.updates.release();
     a.redraw();
     if (already or a.offscreen or builtin.is_test) return;
@@ -431,20 +469,72 @@ fn startAppDownload(a: *App, relaunch_when_ready: bool) void {
     t.detach();
 }
 
-fn findHarnessCli(gpa: std.mem.Allocator, io: std.Io, env: ?*const std.process.Environ.Map) ?[]u8 {
-    const app_bin = "/Applications/Harness.app/Contents/MacOS/harness";
-    if (std.Io.Dir.cwd().access(io, app_bin, .{})) |_| {
-        return gpa.dupe(u8, app_bin) catch null;
-    } else |_| {}
-    if (env) |e| return @import("engine_start.zig").find(gpa, io, e);
-    return null;
+/// Pure install identity. Never search /Applications, PATH or an engine
+/// override: those can belong to a different install than the running app.
+pub fn currentBundle(exe: []const u8, os: std.Target.Os.Tag) ?[]const u8 {
+    if (os != .macos or !std.mem.startsWith(u8, exe, "/")) return null;
+    const suffix = "/Contents/MacOS/harness-nano";
+    if (!std.mem.endsWith(u8, exe, suffix)) return null;
+    const bundle = exe[0 .. exe.len - suffix.len];
+    return if (std.mem.endsWith(u8, bundle, ".app")) bundle else null;
+}
+
+pub fn updateCliFor(gpa: std.mem.Allocator, exe: []const u8, os: std.Target.Os.Tag) ?[]u8 {
+    const bundle = currentBundle(exe, os) orelse return null;
+    return std.fmt.allocPrint(gpa, "{s}/Contents/MacOS/harness", .{bundle}) catch null;
+}
+
+pub fn productionBundleId(id: []const u8) bool {
+    return std.mem.eql(u8, std.mem.trim(u8, id, " \t\r\n"), "harness.codegraff.app");
+}
+
+fn productionBundle(gpa: std.mem.Allocator, io: std.Io, bundle: []const u8) bool {
+    if (builtin.os.tag != .macos or builtin.is_test) return false;
+    const plist = std.fmt.allocPrint(gpa, "{s}/Contents/Info.plist", .{bundle}) catch return false;
+    defer gpa.free(plist);
+    // Read binary and XML plists alike; fail closed for dev/standalone bundles.
+    const r = std.process.run(gpa, io, .{
+        .argv = &.{ "/usr/bin/plutil", "-extract", "CFBundleIdentifier", "raw", "-o", "-", plist },
+        .stdout_limit = .limited(256),
+        .stderr_limit = .limited(1024),
+    }) catch return false;
+    defer gpa.free(r.stdout);
+    defer gpa.free(r.stderr);
+    return switch (r.term) {
+        .exited => |code| code == 0 and productionBundleId(r.stdout),
+        else => false,
+    };
+}
+
+fn findHarnessCli(gpa: std.mem.Allocator, io: std.Io) ?[]u8 {
+    if (builtin.os.tag != .macos or builtin.is_test) return null;
+    const exe = std.process.executablePathAlloc(io, gpa) catch return null;
+    defer gpa.free(exe);
+    const bundle = currentBundle(exe, builtin.os.tag) orelse return null;
+    if (!productionBundle(gpa, io, bundle)) return null;
+    const cli = updateCliFor(gpa, exe, builtin.os.tag) orelse return null;
+    std.Io.Dir.cwd().access(io, cli, .{}) catch {
+        gpa.free(cli);
+        return null;
+    };
+    return cli;
+}
+
+/// One install probe per session. Unsupported and source builds still check.
+pub fn initialize(a: *App) void {
+    if (a.updates.app_install_checked) return;
+    a.updates.app_install_checked = true;
+    if (a.offscreen or builtin.is_test) return;
+    const cli = findHarnessCli(a.gpa, a.io) orelse return;
+    a.gpa.free(cli);
+    a.updates.app_can_install = true;
 }
 
 fn appUpdateWorker(a: *App) void {
-    const bin = findHarnessCli(a.gpa, a.io, a.env) orelse {
+    const bin = findHarnessCli(a.gpa, a.io) orelse {
         a.updates.acquire();
         a.updates.app_downloading = false;
-        a.updates.setAppFailed("Harness CLI not found in /Applications/Harness.app");
+        a.updates.setAppFailed("This installation cannot update itself. Install the latest release manually.");
         a.updates.dirty = true;
         a.updates.release();
         _ = nanoui.App.onMain(a, appUpdateDelivered);
@@ -474,13 +564,12 @@ fn appUpdateWorker(a: *App) void {
     a.updates.acquire();
     a.updates.app_downloading = false;
     switch (classifyUpdateOutput(ok, res.stdout, res.stderr)) {
-        .staged => {
+        .installed => {
             a.updates.app_ready = true;
             a.updates.app_failed_len = 0;
         },
         .up_to_date => {
             a.updates.app_ready = false;
-            a.updates.app_relaunch_when_ready = false;
             a.updates.app_failed_len = 0;
         },
         .failed => |line| {
@@ -493,7 +582,7 @@ fn appUpdateWorker(a: *App) void {
 }
 
 pub const UpdateCommandOutcome = union(enum) {
-    staged,
+    installed,
     up_to_date,
     failed: []const u8,
 };
@@ -503,20 +592,13 @@ pub const UpdateCommandOutcome = union(enum) {
 /// (`"is up to date"`) must never mark `app_ready` or trigger a relaunch loop.
 pub fn classifyUpdateOutput(exited_zero: bool, stdout: []const u8, stderr: []const u8) UpdateCommandOutcome {
     if (exited_zero and std.mem.indexOf(u8, stdout, "relaunch Harness to finish") != null) {
-        return .staged;
+        return .installed;
     }
     if (exited_zero and std.mem.indexOf(u8, stdout, "is up to date") != null) {
         return .up_to_date;
     }
     const line = firstLine(stderr) orelse firstLine(stdout) orelse "update exited with an error";
     return .{ .failed = line };
-}
-
-/// Pure guard for whether `appUpdateDelivered` may exit and relaunch the app
-/// immediately (ADR 0008): only when the update is staged AND the user
-/// explicitly requested a relaunch (`relaunch_when_ready`).
-pub fn shouldRelaunchOnDeliver(ready: bool, relaunch_when_ready: bool) bool {
-    return ready and relaunch_when_ready;
 }
 
 fn firstLine(s: []const u8) ?[]const u8 {
@@ -530,38 +612,40 @@ fn firstLine(s: []const u8) ?[]const u8 {
 
 fn appUpdateDelivered(ctx: ?*anyopaque) callconv(.c) void {
     const a: *App = @ptrCast(@alignCast(ctx.?));
-    a.updates.acquire();
-    const ready = a.updates.app_ready;
-    const relaunch = a.updates.app_relaunch_when_ready;
-    a.updates.app_relaunch_when_ready = false;
-    a.updates.release();
+    // Applying an update is not permission to stop agents or close a window.
+    // A separate, explicit Restart click is required after installation.
     a.redraw();
-    if (shouldRelaunchOnDeliver(ready, relaunch)) {
-        restartIntoUpdate(a);
-    }
 }
 
 pub fn restartIntoUpdate(a: *App) void {
     if (builtin.is_test or a.offscreen) return;
-    @import("engine_start.zig").stopForUpdate(a);
     if (builtin.os.tag == .macos) {
-        const pid = std.c.getpid();
-        var cmd_buf: [256]u8 = undefined;
-        const cmd = std.fmt.bufPrint(
-            &cmd_buf,
-            "while /bin/kill -0 {d} 2>/dev/null; do /bin/sleep 0.2; done; /usr/bin/open \"/Applications/Harness.app\"",
-            .{pid},
-        ) catch return;
+        const exe = std.process.executablePathAlloc(a.io, a.gpa) catch return;
+        defer a.gpa.free(exe);
+        const bundle = currentBundle(exe, builtin.os.tag) orelse return;
+        if (!productionBundle(a.gpa, a.io, bundle)) return;
+        var pid_buf: [32]u8 = undefined;
+        const pid = std.fmt.bufPrint(&pid_buf, "{d}", .{std.c.getpid()}) catch return;
+        // Pass the bundle as an argument, never interpolate it into a shell.
+        const cmd = "while /bin/kill -0 \"$1\" 2>/dev/null; do /bin/sleep 0.2; done; /usr/bin/open -n \"$2\"";
         if (std.process.spawn(a.io, .{
-            .argv = &.{ "/bin/sh", "-c", cmd },
+            .argv = &.{ "/bin/sh", "-c", cmd, "harness-relaunch", pid, bundle },
             .stdin = .ignore,
             .stdout = .ignore,
             .stderr = .ignore,
         })) |child| {
             var c = child;
             _ = &c;
+            @import("engine_start.zig").stopForUpdate(a);
             std.process.exit(0);
-        } else |_| {}
+        } else |_| {
+            a.updates.setAppFailed("Couldn't restart Harness. Quit and reopen it manually.");
+            a.redraw();
+        }
+    } else {
+        // No validated portable relaunch: never stop an engine or quit here.
+        a.updates.setAppFailed("Quit and reopen Harness manually to use the update.");
+        a.redraw();
     }
 }
 
@@ -660,11 +744,13 @@ fn sidebarAppUpdateRow(c: *ui.Context, a: *App, k: theme.Colors, ver: []const u8
         const hint = if (ready)
             c.print("Harness v{s} is ready. Click to restart into it.", .{ver})
         else
-            c.print("Harness v{s} is available. Click to update.", .{ver});
+            c.print("Harness v{s} is available. {s}", .{ ver, if (a.updates.app_install_checked and !a.updates.app_can_install) "Click to view the release; install manually." else "Click to update." });
         const label = if (ready)
             "Restart to update"
         else if (a.updates.app_downloading)
             c.print("Downloading v{s}…", .{ver})
+        else if (a.updates.app_install_checked and !a.updates.app_can_install)
+            "View release"
         else
             c.print("Update to v{s}", .{ver});
         ui.key(c, "sidebar-update-restart");
@@ -678,7 +764,7 @@ fn sidebarAppUpdateRow(c: *ui.Context, a: *App, k: theme.Colors, ver: []const u8
     {
         ui.key(c, "sidebar-update-dismiss");
         const close_btn = tip.on(ui.div(c).row().size(18, 18).center().rounded(4).hover(k.ink(0.08)), k, .{
-            .text = "Not now: it installs the next time Harness restarts",
+            .text = if (ready) "Not now: use the update when you reopen Harness" else "Dismiss for this version",
             .delay = tip.quick,
         });
         defer close_btn.end();
@@ -712,7 +798,7 @@ pub fn titlebarControl(c: *ui.Context, a: *App, k: theme.Colors) void {
     const label = if (ready)
         c.print("v{s} is ready — click to restart now.", .{ver})
     else
-        c.print("Harness v{s} is available. Click to update.", .{ver});
+        c.print("Harness v{s} is available. {s}", .{ ver, if (a.updates.app_install_checked and !a.updates.app_can_install) "Click to view the release; install manually." else "Click to update." });
     const b = tip.on(ui.div(c).row().size(24, 24).center().rounded(6).hover(k.hover).control(), k, .{ .text = label, .delay = tip.quick });
     defer b.end();
     icons.icon(c, .refresh, 15, k.accent, 0);
@@ -911,6 +997,56 @@ fn graffNoticeCard(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
 }
 
+test "native updater resolves only the running bundle never a global CLI" {
+    const gpa = std.testing.allocator;
+    const cases = [_]struct { exe: []const u8, cli: []const u8 }{
+        .{ .exe = "/Applications/Harness.app/Contents/MacOS/harness-nano", .cli = "/Applications/Harness.app/Contents/MacOS/harness" },
+        .{ .exe = "/Users/example/Applications/Harness.app/Contents/MacOS/harness-nano", .cli = "/Users/example/Applications/Harness.app/Contents/MacOS/harness" },
+        .{ .exe = "/Volumes/Test's Disk/Harness.app/Contents/MacOS/harness-nano", .cli = "/Volumes/Test's Disk/Harness.app/Contents/MacOS/harness" },
+    };
+    for (cases) |case| {
+        const cli = updateCliFor(gpa, case.exe, .macos) orelse return error.ExpectedSibling;
+        defer gpa.free(cli);
+        try std.testing.expectEqualStrings(case.cli, cli);
+    }
+    for ([_][]const u8{ "/work/zig-out/bin/harness-nano", "/usr/local/bin/harness-nano", "/tmp/not-a-bundle/Contents/MacOS/harness-nano" }) |exe| {
+        try std.testing.expect(updateCliFor(gpa, exe, .macos) == null);
+    }
+    try std.testing.expect(updateCliFor(gpa, "/tmp/Harness.app/Contents/MacOS/harness-nano", .linux) == null);
+    try std.testing.expect(updateCliFor(gpa, "C:\\Harness\\harness-nano.exe", .windows) == null);
+    try std.testing.expect(currentBundle("/tmp/Harness.app/Contents/MacOS/harness-nano", .windows) == null);
+}
+
+test "native updater release completion never installs or uses restart preference" {
+    var a: App = .init(std.testing.allocator, std.testing.io, 1);
+    defer a.deinit();
+    a.settings.set(.restart_to_install_updates, true);
+    a.updates.app_install_checked = true;
+    a.updates.app_can_install = true;
+    const ver = "99.0.0";
+    @memcpy(a.release.latest[0..ver.len], ver);
+    a.release.latest_len = ver.len;
+    a.release.succeeded = true;
+    onReleaseChecked(&a);
+    try std.testing.expect(!a.updates.app_downloading);
+    try std.testing.expect(!a.updates.app_ready);
+    try std.testing.expect(a.settings.get(.restart_to_install_updates));
+    try std.testing.expect(a.updates.app_checked_ms > 0);
+    var buf: [200]u8 = undefined;
+    try std.testing.expect(updateSummary(&buf, &a, a.nowMs()).action == .update);
+    a.updates.app_can_install = false;
+    try std.testing.expect(updateSummary(&buf, &a, a.nowMs()).action == .check);
+    a.release.schedule.failures = 1;
+    try std.testing.expect(std.mem.startsWith(u8, updateSummary(&buf, &a, a.nowMs()).line, "Couldn't check"));
+}
+
+test "native updater rejects dev and standalone bundle identities" {
+    try std.testing.expect(productionBundleId("harness.codegraff.app\n"));
+    try std.testing.expect(!productionBundleId("harness.codegraff.app.dev"));
+    try std.testing.expect(!productionBundleId("com.justrach.harness-nano"));
+    try std.testing.expect(!productionBundleId(""));
+}
+
 test "olderEngineNotice reports only older engines" {
     var buf: [320]u8 = undefined;
     const n1 = olderEngineNotice(&buf, "0.2.170", "0.2.169") orelse return error.ExpectedNotice;
@@ -971,23 +1107,19 @@ test "restartPlace chooses sidebar row when open and titlebar when collapsed" {
     try std.testing.expectEqual(RestartPlace.none, restartPlace("0.2.175", true, "0.2.175"));
 }
 
-test "classifyUpdateOutput and shouldRelaunchOnDeliver prevent no-op relaunch loops (ADR 0008)" {
+test "classifyUpdateOutput distinguishes an installed bundle from a no-op (ADR 0008)" {
     try std.testing.expectEqual(
         UpdateCommandOutcome.up_to_date,
         classifyUpdateOutput(true, "Harness 0.2.178 is up to date (latest: 0.2.178).\n", ""),
     );
     try std.testing.expectEqual(
-        UpdateCommandOutcome.staged,
+        UpdateCommandOutcome.installed,
         classifyUpdateOutput(true, "downloading harness-0.2.178-macos-arm64-app.tar.gz…\nupdated /Applications/Harness.app — relaunch Harness to finish.\n", ""),
     );
     switch (classifyUpdateOutput(false, "", "network timeout\n")) {
         .failed => |msg| try std.testing.expectEqualStrings("network timeout", msg),
         else => return error.ExpectedFailure,
     }
-    // Background downloads (`relaunch_when_ready = false`) never auto-exit the window.
-    try std.testing.expect(!shouldRelaunchOnDeliver(true, false));
-    try std.testing.expect(!shouldRelaunchOnDeliver(false, true));
-    try std.testing.expect(shouldRelaunchOnDeliver(true, true));
     // Verify build_info.version tracks Cargo.toml and is never a stale 0.2.175 cache.
     try std.testing.expect(!std.mem.eql(u8, @import("build_info").version, "0.2.175"));
     try std.testing.expect(!std.mem.eql(u8, @import("build_info").version, "0.0.0"));

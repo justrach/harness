@@ -57,6 +57,41 @@ final class MobilePolishTests: XCTestCase {
         }
     }
 
+    func testCanReadHistoryDuringStreamingAndExplicitlyJumpBack() {
+        launch(["-route", "chat:chat-tabs", "-huge", "-slowstream", "-longreply"])
+        XCTAssertTrue(composer.waitForExistence(timeout: 8))
+        composer.tap()
+        composer.typeText("Synthetic streaming scroll check.")
+        app.buttons["composer-send"].tap()
+        let reply = app.textViews.matching(NSPredicate(format: "label BEGINSWITH %@", "Here’s how")).firstMatch
+        XCTAssertTrue(reply.waitForExistence(timeout: 10))
+        reply.tap() // Dismiss keyboard before the history pan.
+        let transcript = app.otherElements["transcript"]
+        transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.55, dy: 0.3))
+            .press(forDuration: 0.05,
+                   thenDragTo: transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.55, dy: 0.85)),
+                   withVelocity: .slow, thenHoldForDuration: 0)
+        let jump = app.buttons["jump-to-latest"]
+        XCTAssertTrue(jump.waitForExistence(timeout: 5), "A history pan must release follow while the reply streams")
+        let anchor = transcript.cells.allElementsBoundByIndex.first {
+            $0.frame.minY > transcript.frame.minY + 50 && $0.frame.maxY < transcript.frame.maxY - 50
+        }
+        XCTAssertNotNil(anchor)
+        let initialY = anchor?.frame.minY ?? 0
+        capture("streaming-history-reader")
+        Thread.sleep(forTimeInterval: 2) // Several more offline streaming deltas.
+        XCTAssertTrue(jump.exists, "Incoming deltas must not rearm follow")
+        if let anchor {
+            XCTAssertTrue(anchor.exists)
+            XCTAssertEqual(anchor.frame.minY, initialY, accuracy: 4, "Streaming must preserve the reader anchor")
+        }
+        capture("streaming-history-anchor-retained")
+        jump.tap()
+        let hidden = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: jump)
+        XCTAssertEqual(XCTWaiter.wait(for: [hidden], timeout: 5), .completed)
+        capture("streaming-explicit-jump-restored")
+    }
+
     func testLongUserMessageShowMoreAndLess() {
         launch(["-route", "chat:chat-tabs", "-longprompt"])
         let more = app.buttons["Show more"]

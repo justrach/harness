@@ -1,0 +1,326 @@
+{
+  "title": "Harness desktop \u00b7 anonymous responsiveness",
+  "uid": "harness-desktop-responsiveness",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "tags": [
+    "harness",
+    "performance"
+  ],
+  "timezone": "browser",
+  "refresh": "5m",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "type": "datasource",
+        "query": "prometheus",
+        "label": "Metrics backend"
+      },
+      {
+        "name": "os",
+        "label": "OS",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "query": "label_values(harness_desktop_frame_cpu_milliseconds_count, os_type)",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 1,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "arch",
+        "label": "Architecture",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "query": "label_values(harness_desktop_frame_cpu_milliseconds_count, host_arch)",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 1,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "version",
+        "label": "App version",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "query": "label_values(harness_desktop_frame_cpu_milliseconds_count, service_version)",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 1,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "panes",
+        "label": "Panes",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "query": "label_values(harness_desktop_frame_cpu_milliseconds_count, harness_panes)",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 1,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "renderer",
+        "label": "Renderer",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "query": "label_values(harness_desktop_frame_cpu_milliseconds_count, harness_renderer)",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 1,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Scroll CPU cost \u00b7 p50",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "description": "Aggregate CPU-side timing, not presented FPS. At least 100 frame samples per OS; empty means no data. Ten-minute uploads can arrive late.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (le, os_type) (increase(harness_desktop_frame_cpu_milliseconds_bucket{os_type=~\"$os\",host_arch=~\"$arch\",service_version=~\"$version\",harness_panes=~\"$panes\",harness_renderer=~\"$renderer\",harness_interaction=\"scroll\"}[$__range]))) and on (os_type) (sum by (os_type) (increase(harness_desktop_frame_cpu_milliseconds_count{os_type=~\"$os\",host_arch=~\"$arch\",service_version=~\"$version\",harness_panes=~\"$panes\",harness_renderer=~\"$renderer\",harness_interaction=\"scroll\"}[$__range])) >= 100)",
+          "legendFormat": "{{os_type}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Scroll CPU cost \u00b7 p95",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "description": "Aggregate CPU-side timing, not presented FPS. At least 100 frame samples per OS; empty means no data. Ten-minute uploads can arrive late.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, os_type) (increase(harness_desktop_frame_cpu_milliseconds_bucket{os_type=~\"$os\",host_arch=~\"$arch\",service_version=~\"$version\",harness_panes=~\"$panes\",harness_renderer=~\"$renderer\",harness_interaction=\"scroll\"}[$__range]))) and on (os_type) (sum by (os_type) (increase(harness_desktop_frame_cpu_milliseconds_count{os_type=~\"$os\",host_arch=~\"$arch\",service_version=~\"$version\",harness_panes=~\"$panes\",harness_renderer=~\"$renderer\",harness_interaction=\"scroll\"}[$__range])) >= 100)",
+          "legendFormat": "{{os_type}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Active scroll frame gap \u00b7 p50",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "description": "Aggregate CPU-side timing, not presented FPS. At least 100 frame samples per OS; empty means no data. Ten-minute uploads can arrive late.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (le, os_type) (increase(harness_desktop_frame_interval_milliseconds_bucket{os_type=~\"$os\",host_arch=~\"$arch\",service_version=~\"$version\",harness_panes=~\"$panes\",harness_renderer=~\"$renderer\",harness_interaction=\"scroll\"}[$__range]))) and on (os_type) (sum by (os_type) (increase(harness_desktop_frame_interval_milliseconds_count{os_type=~\"$os\",host_arch=~\"$arch\",service_version=~\"$version\",harness_panes=~\"$panes\",harness_renderer=~\"$renderer\",harness_interaction=\"scroll\"}[$__range])) >= 100)",
+          "legendFormat": "{{os_type}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Active scroll frame gap \u00b7 p95",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "description": "Aggregate CPU-side timing, not presented FPS. At least 100 frame samples per OS; empty means no data. Ten-minute uploads can arrive late.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, os_type) (increase(harness_desktop_frame_interval_milliseconds_bucket{os_type=~\"$os\",host_arch=~\"$arch\",service_version=~\"$version\",harness_panes=~\"$panes\",harness_renderer=~\"$renderer\",harness_interaction=\"scroll\"}[$__range]))) and on (os_type) (sum by (os_type) (increase(harness_desktop_frame_interval_milliseconds_count{os_type=~\"$os\",host_arch=~\"$arch\",service_version=~\"$version\",harness_panes=~\"$panes\",harness_renderer=~\"$renderer\",harness_interaction=\"scroll\"}[$__range])) >= 100)",
+          "legendFormat": "{{os_type}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "title": "Scroll frame samples \u00b7 selected window",
+      "type": "barchart",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 24,
+        "h": 8
+      },
+      "description": "Frame counts, not people or installations. Missing platforms mean no reports, not zero latency.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (os_type) (increase(harness_desktop_frame_cpu_milliseconds_count{os_type=~\"$os\",host_arch=~\"$arch\",service_version=~\"$version\",harness_panes=~\"$panes\",harness_renderer=~\"$renderer\",harness_interaction=\"scroll\"}[$__range]))",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "showValue": "always",
+        "legend": {
+          "showLegend": false
+        }
+      }
+    }
+  ],
+  "description": "Opt-in aggregate CPU timings for macOS, Windows and Linux. No user or installation IDs. Percentiles require 100 frame samples, not 100 people. Promote coarse OTLP resource attributes at the collector; see desktop-responsiveness.md. No hosted dashboard is deployed by this file."
+}

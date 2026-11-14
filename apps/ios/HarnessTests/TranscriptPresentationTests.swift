@@ -73,6 +73,35 @@ final class TranscriptPresentationTests: XCTestCase {
         XCTAssertEqual(ordinary.chipDetail, "Message agentic service")
     }
 
+    func testRestartNoticesMatchTheSharedPresentationVector() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let data = try Data(contentsOf: root.appendingPathComponent("apps/parity/vectors/restart-notices.json"))
+        let vector = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let labels = try XCTUnwrap(vector["labels"] as? [String: String])
+        for item in try XCTUnwrap(vector["cases"] as? [[String: Any]]) {
+            let message = try XCTUnwrap(item["message"] as? String)
+            let expected = item["expect"] as? String
+            let notice = RunErrors.restartNotice(message)
+            XCTAssertEqual(notice?.rawValue, expected, message)
+            let chip = ErrorChipView(message: message)
+            XCTAssertEqual(chip.isNotice, expected != nil, message)
+            XCTAssertEqual(chip.label, expected.flatMap { labels[$0] } ?? "Error", message)
+            if let notice { XCTAssertEqual(notice.label, labels[notice.rawValue], message) }
+        }
+    }
+
+    func testTypedAuthenticationFailuresKeepTheirErrorPresentation() {
+        let message = "Harness updated to v0.2.190 — picking this run back up"
+        let typed = ErrorChipView(message: message, allowNotice: false)
+        XCTAssertFalse(typed.isNotice)
+        XCTAssertEqual(typed.label, "Error")
+        let auth = ErrorChipView(message: "Authentication failed", problem: .signedOut)
+        XCTAssertFalse(auth.isNotice)
+        XCTAssertEqual(auth.label, "Signed out")
+    }
+
     func testDesktopUserMessageCollapseThresholds() {
         XCTAssertFalse(UserBubble.needsCollapse("A short prompt."))
         XCTAssertFalse(UserBubble.needsCollapse(String(repeating: "x", count: 400)))

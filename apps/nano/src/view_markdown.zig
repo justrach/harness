@@ -20,13 +20,14 @@ const veil_mod = @import("veil.zig");
 var body: ui.TextStyle = .{ .size = 15, .leading = 1.5, .wrap = true };
 
 /// The colors of the Markdown being drawn (the UI thread draws one at a time).
-var k: theme.Colors = undefined;
+var k: theme.Colors = theme.fallback(true);
 const LinkOwner = struct { app: *@import("app.zig").App, parent: []const u8 };
 var link_owner: ?LinkOwner = null;
 var active_veil: ?*veil_mod.RowVeil = null;
 var active_streaming: bool = false;
 var veil_now_ms: f64 = 0;
 var current_elem_ix: usize = 0;
+var provider_mode: bool = false;
 var mermaid_source_ids: [32]u64 = @splat(0);
 var mermaid_source_len: usize = 0;
 
@@ -91,6 +92,41 @@ pub fn withLinksVeil(
     markdown(c, colors, src);
 }
 
+/// Native provider prose, without transcript or navigation capabilities.
+/// Cached parses remain immutable: only the rendered inline views lose their
+/// image/link metadata, retaining selectable labels, alt text and formatting.
+/// Opening the canonical provider page belongs to the caller's explicit action.
+pub fn providerMarkdown(c: *ui.Context, colors: theme.Colors, src: []const u8, a: *@import("app.zig").App) void {
+    const old_cache = active_cache;
+    const old_owner = link_owner;
+    const old_veil = active_veil;
+    const old_streaming = active_streaming;
+    const old_now = veil_now_ms;
+    const old_elem = current_elem_ix;
+    const old_mode = provider_mode;
+    const old_colors = k;
+    const old_body = body;
+    defer {
+        active_cache = old_cache;
+        link_owner = old_owner;
+        active_veil = old_veil;
+        active_streaming = old_streaming;
+        veil_now_ms = old_now;
+        current_elem_ix = old_elem;
+        provider_mode = old_mode;
+        k = old_colors;
+        body = old_body;
+    }
+    active_cache = &a.markdown_cache;
+    link_owner = null;
+    active_veil = null;
+    active_streaming = false;
+    veil_now_ms = 0;
+    current_elem_ix = 0;
+    provider_mode = true;
+    markdown(c, colors, src);
+}
+
 /// Draws the Markdown `src`.
 pub fn markdown(c: *ui.Context, colors: theme.Colors, src: []const u8) void {
     k = colors;
@@ -119,6 +155,12 @@ pub fn markdown(c: *ui.Context, colors: theme.Colors, src: []const u8) void {
 }
 
 fn rich(c: *ui.Context, in: md.Inline, style: ui.TextStyle) void {
+    if (provider_mode and (in.images.len > 0 or in.links.len > 0)) {
+        var prose = in;
+        prose.images = &.{};
+        prose.links = &.{};
+        return rich(c, prose, style);
+    }
     if (in.images.len > 0) {
         // Preserve the exact selectable text, styled runs, links and native
         // equations. Pictures follow that prose instead of replacing ranges
@@ -480,6 +522,68 @@ fn tableRow(c: *ui.Context, cells: []const md.Inline, widths: []const f32, head:
         st = kit.style(c, 13, 20, st);
         rich(c, cell, st);
     }
+}
+
+test "remote markdown scopes inherited transcript state and restores it exactly" {
+    const testing = std.testing;
+    const Fixture = struct {
+        app: @import("app.zig").App,
+        cache: cache_mod.Cache = .{},
+        veil: veil_mod.RowVeil = .{ .seeding = true },
+        restored: bool = false,
+
+        fn view(f: *@This(), c: *ui.Context) void {
+            const previous = .{ active_cache, link_owner, active_veil, active_streaming, veil_now_ms, current_elem_ix, provider_mode, k, body };
+            defer {
+                active_cache = previous[0];
+                link_owner = previous[1];
+                active_veil = previous[2];
+                active_streaming = previous[3];
+                veil_now_ms = previous[4];
+                current_elem_ix = previous[5];
+                provider_mode = previous[6];
+                k = previous[7];
+                body = previous[8];
+            }
+            const old_colors = theme.fallback(false);
+            const old_body: ui.TextStyle = .{ .size = 17, .leading = 1.25 };
+            active_cache = &f.cache;
+            link_owner = .{ .app = &f.app, .parent = "synthetic-owner" };
+            active_veil = &f.veil;
+            active_streaming = true;
+            veil_now_ms = 123;
+            current_elem_ix = 19;
+            provider_mode = false;
+            k = old_colors;
+            body = old_body;
+            providerMarkdown(c, theme.fallback(true), "*Provider tail\n\n![Retained alt](picture.png) [Label](https://example.invalid)", &f.app);
+            f.restored = active_cache == &f.cache and active_veil == &f.veil and
+                active_streaming and veil_now_ms == 123 and current_elem_ix == 19 and
+                !provider_mode and std.meta.eql(k, old_colors) and std.meta.eql(body, old_body);
+            if (link_owner) |owner| {
+                f.restored = f.restored and owner.app == &f.app and std.mem.eql(u8, owner.parent, "synthetic-owner");
+            } else f.restored = false;
+        }
+    };
+    theme.registerFonts();
+    var f: Fixture = .{ .app = .init(testing.allocator, testing.io, 1) };
+    defer f.app.deinit();
+    defer f.cache.deinit();
+    defer f.veil.deinit(testing.allocator);
+    f.app.offscreen = true;
+    var tester: ui.Tester = undefined;
+    try tester.init(testing.allocator, .init(&f, Fixture.view), .{ .width = 620, .height = 500 });
+    defer tester.deinit();
+    tester.settle(3);
+    try testing.expect(f.restored);
+    try testing.expect(f.cache.arena == null);
+    try testing.expect(f.app.markdown_cache.arena != null);
+    try testing.expect(f.veil.seeding);
+    try testing.expectEqual(@as(usize, 0), f.veil.elems.count());
+    try testing.expect(tester.hasText("*Provider tail"));
+    try testing.expect(tester.containsText("Retained alt"));
+    try testing.expectEqual(@as(usize, 0), tester.ctx.hits.items.len);
+    try testing.expectEqual(@as(usize, 0), f.app.attachments.images.items.items.len);
 }
 
 test "a wide table cell keeps its share instead of an equal slice" {

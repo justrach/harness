@@ -405,6 +405,13 @@ fn prepareItems(c: *ui.Context, a: *App, pins: []const []const u8, grouped: bool
     const last_activity = a.settings.lastActivity();
     const l = Look.of(a);
     const show_updated = a.settings.get(.sidebar_show_updated);
+    // Project existence is shared by every session in a project. Avoid a
+    // full project-list scan per chat on every Cmd+B display frame.
+    var spaces: std.StringHashMapUnmanaged(void) = .empty;
+    if (a.spaces.items.len > 8) {
+        spaces.ensureTotalCapacity(gpa, @intCast(a.spaces.items.len)) catch {};
+        for (a.spaces.items) |space| spaces.put(gpa, space.id, {}) catch {};
+    }
     var session_map: std.StringHashMapUnmanaged(workspace.Session) = .empty;
     if ((grouped or last_activity != .all) and a.sessions.items.len > 8) {
         session_map.ensureTotalCapacity(gpa, @intCast(a.sessions.items.len)) catch {};
@@ -417,7 +424,7 @@ fn prepareItems(c: *ui.Context, a: *App, pins: []const []const u8, grouped: bool
             out[idx] = .{};
             continue;
         }
-        if (ch.space_id) |sid| if (a.findSpace(sid) == null) {
+        if (ch.space_id) |sid| if (if (a.spaces.items.len > 8) !spaces.contains(sid) else a.findSpace(sid) == null) {
             out[idx] = .{};
             continue;
         };
@@ -718,39 +725,15 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
 fn groups(c: *ui.Context, a: *App, k: theme.Colors, items: []const ChatItem, by: Grouping, moving: ?[]const u8, window: *Window) void {
     const by_project = by.org == .by_project;
     const gpa = c.alloc();
-    var keys: std.ArrayList([]const u8) = .empty;
-    for (a.chats.items, items) |ch, it| if (it.listed and !ch.archived and !it.pinned) {
-        const key = it.group_key;
-        for (keys.items) |have| {
-            if (std.mem.eql(u8, have, key)) break;
-        } else keys.append(gpa, key) catch {};
-    };
-    if (by.org == .by_status) std.mem.sort([]const u8, keys.items, {}, struct {
-        fn lt(_: void, x: []const u8, y: []const u8) bool {
-            return @backingInt(workspace.StatusGroup.fromKey(x).?) < @backingInt(workspace.StatusGroup.fromKey(y).?);
-        }
-    }.lt);
-    if (by.org == .by_device) if (a.device_id) |me| for (keys.items, 0..) |key, i| if (std.mem.eql(u8, key, me)) {
-        std.mem.copyBackwards([]const u8, keys.items[1 .. i + 1], keys.items[0..i]);
-        keys.items[0] = me;
-        break;
-    };
-    // Attention escapes project/device grouping and always comes first.
-    for (keys.items, 0..) |key, i| if (std.mem.eql(u8, key, "needs")) {
-        std.mem.copyBackwards([]const u8, keys.items[1 .. i + 1], keys.items[0..i]);
-        keys.items[0] = key;
-        break;
-    };
+    var index = @import("sidebar_groups.zig").Index.build(gpa, a.chats.items, items) catch return;
+    index.order(by.org, a.device_id);
     a.view.sessions_header = null;
     a.view.session_rows = null;
     var omitted: Rows = .{};
-    for (keys.items) |key| {
-        var count: usize = 0;
-        var height: f32 = 0;
-        for (a.chats.items, items) |ch, it| if (it.listed and !ch.archived and !it.pinned and std.mem.eql(u8, it.group_key, key)) {
-            count += 1;
-            height += it.row_h + 2;
-        };
+    for (index.groups.items) |group| {
+        const key = group.key;
+        const count = group.count;
+        const height = group.height;
         const collapse = c.print("{s}:{s}", .{ by.prefix(), key });
         var open = a.view.groupOpen(collapse, true);
         const extent: f32 = 14 + 28 + (if (open) 4 + @max(0, height - 2) else @as(f32, 0));
@@ -807,10 +790,12 @@ fn groups(c: *ui.Context, a: *App, k: theme.Colors, items: []const ChatItem, by:
         var inside = window.*;
         inside.y = start + 14 + 28 + 4;
         var rows: Rows = .{};
-        for (a.chats.items, items) |ch, it| if (it.listed and !ch.archived and !it.pinned and std.mem.eql(u8, it.group_key, key)) {
+        var member: ?usize = group.first;
+        while (member) |i| : (member = index.next[i]) {
+            const ch = a.chats.items[i];
             const held = moving != null and std.mem.eql(u8, moving.?, ch.id);
-            if (rows.include(c, &inside, it.row_h)) slotRow(c, a, k, ch, 0, held);
-        };
+            if (rows.include(c, &inside, items[i].row_h)) slotRow(c, a, k, ch, 0, held);
+        }
         rows.flush(c);
     }
     omitted.flush(c);
@@ -832,34 +817,13 @@ pub fn visibleSessionIds(c: *ui.Context, a: *App) []const []const u8 {
         }
     }
     if (grouped) {
-        var keys: std.ArrayList([]const u8) = .empty;
-        for (a.chats.items, items) |ch, it| if (it.listed and !ch.archived and !it.pinned) {
-            const key = it.group_key;
-            for (keys.items) |have| {
-                if (std.mem.eql(u8, have, key)) break;
-            } else keys.append(gpa, key) catch {};
-        };
-        if (by.org == .by_status) std.mem.sort([]const u8, keys.items, {}, struct {
-            fn lt(_: void, x: []const u8, y: []const u8) bool {
-                return @backingInt(workspace.StatusGroup.fromKey(x).?) < @backingInt(workspace.StatusGroup.fromKey(y).?);
-            }
-        }.lt);
-        if (by.org == .by_device) if (a.device_id) |me| for (keys.items, 0..) |key, i| if (std.mem.eql(u8, key, me)) {
-            std.mem.copyBackwards([]const u8, keys.items[1 .. i + 1], keys.items[0..i]);
-            keys.items[0] = me;
-            break;
-        };
-        for (keys.items, 0..) |key, i| if (std.mem.eql(u8, key, "needs")) {
-            std.mem.copyBackwards([]const u8, keys.items[1 .. i + 1], keys.items[0..i]);
-            keys.items[0] = key;
-            break;
-        };
-        for (keys.items) |key| {
-            const collapse = c.print("{s}:{s}", .{ by.prefix(), key });
+        var index = @import("sidebar_groups.zig").Index.build(gpa, a.chats.items, items) catch return out.items;
+        index.order(by.org, a.device_id);
+        for (index.groups.items) |group| {
+            const collapse = c.print("{s}:{s}", .{ by.prefix(), group.key });
             if (!a.view.groupOpen(collapse, true)) continue;
-            for (a.chats.items, items) |ch, it| if (it.listed and !ch.archived and !it.pinned and std.mem.eql(u8, it.group_key, key)) {
-                out.append(gpa, ch.id) catch {};
-            };
+            var member: ?usize = group.first;
+            while (member) |i| : (member = index.next[i]) out.append(gpa, a.chats.items[i].id) catch {};
         }
     } else if (a.view.sessions_open) {
         for (a.chats.items, items) |ch, it| if (it.listed and !ch.archived and !it.pinned) {

@@ -58,6 +58,24 @@ pub fn wheelAt(c: *const Context) bool {
     return false;
 }
 
+/// Finger travel becomes a bounded displacement: responsive at the edge,
+/// progressively firmer on a long pull. Keep this separate from the logical
+/// scroll offset, so stretching the bottom never releases `follow_end`.
+fn rubberBand(travel: f32, limit: f32) f32 {
+    const resisted = @abs(travel) * 0.55;
+    const shown = limit * (resisted / (limit + resisted));
+    return if (travel < 0) -shown else shown;
+}
+
+/// Recover finger travel before adding another event. Applying resistance
+/// independently to each delta would make a coalesced gesture feel different
+/// from the same pull delivered as many small events, and break reversal.
+fn rubberTravel(shown: f32, limit: f32) f32 {
+    const magnitude = @min(@abs(shown), limit - 0.001);
+    const travel = magnitude * limit / (0.55 * (limit - magnitude));
+    return if (shown < 0) -travel else travel;
+}
+
 /// Scrolls the innermost scrolling box under the pointer.
 pub fn applyScroll(c: *Context, dy: f32) bool {
     var i = c.hits.items.len;
@@ -79,23 +97,27 @@ pub fn applyScroll(c: *Context, dy: f32) bool {
             var over = ov_gop.value_ptr.*;
             var cur = gop.value_ptr.*;
             var delta = -dy;
-            if (over < 0 and delta > 0) {
-                const step = @min(-over, delta * 0.35);
-                over += step;
-                delta -= step / 0.35;
-            } else if (over > 0 and delta < 0) {
-                const step = @min(over, -delta * 0.35);
-                over -= step;
-                delta += step / 0.35;
+            // Use the viewport, not the history height, and never let a long
+            // gesture pull the transcript hundreds of points off its edge.
+            const limit = @max(1, @min(160, h.rect.h * 0.35));
+            if (over != 0) {
+                const travel = rubberTravel(over, limit) + delta;
+                if ((over < 0 and travel <= 0) or (over > 0 and travel >= 0)) {
+                    over = rubberBand(travel, limit);
+                    delta = 0;
+                } else {
+                    over = 0;
+                    delta = travel;
+                }
             }
             const max_s = c.scroll_max.get(h.id) orelse std.math.inf(f32);
             const next = cur + delta;
             if (next < 0) {
                 cur = 0;
-                over += next * 0.35;
+                over = rubberBand(next, limit);
             } else if (next > max_s) {
                 cur = max_s;
-                over += (next - max_s) * 0.35;
+                over = rubberBand(next - max_s, limit);
             } else {
                 cur = next;
             }

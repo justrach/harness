@@ -155,7 +155,11 @@ pub const Lifecycle = struct {
             .theme = theme.ui(nanoui.isDark()),
             .on_close = .{ .ctx = self, .func = closed },
             .should_close = .{ .ctx = self, .func = shouldClose },
-            .content = .{ .view = .init(self.state, @import("view.zig").view) },
+            .content = .{ .view = blk: {
+                var view = nanoui.ui.View.init(self.state, @import("view.zig").view);
+                view.after_frame = @import("performance.zig").completed;
+                break :blk view;
+            } },
         });
     }
 
@@ -455,12 +459,12 @@ test "file editor production native lifecycle vetoes Quit and defers window disp
             try testing.expect(h.a.window != null);
             e.buffer.set("later edit before disposal");
             e.changed();
-            nanoui.runFor(0.05);
+            try waitForTestExit(&lifecycle, .queue_drained);
             try testing.expect(h.a.window != null);
             try testing.expectEqual(file_editor.Intent.window, h.a.panels.file_close.intent.?);
             file_editor.decide(&h.a, .discard);
         }
-        nanoui.runFor(0.05);
+        try waitForTestExit(&lifecycle, if (quitting) .quit else .window_closed);
         if (quitting) {
             try testing.expect(native.stopping);
             try testing.expect(!e.dirty());
@@ -471,6 +475,27 @@ test "file editor production native lifecycle vetoes Quit and defers window disp
         lifecycle.detach();
         try testing.expect(deferred_head == null);
         nanoui.runFor(0.01); // detached queued callbacks have no borrowed owner
+    }
+}
+
+// A loaded CI runner may spend the old 50 ms wait in one render or return
+// early from a stopped CF loop. Pump until the native transition, not a
+// guessed number of frames; retain a real deadline so failures still fail.
+fn waitForTestExit(lifecycle: *Lifecycle, until: enum { queue_drained, window_closed, quit }) !void {
+    if (comptime builtin.os.tag != .macos) return;
+    const Clock = struct {
+        extern "c" fn CFAbsoluteTimeGetCurrent() f64;
+    };
+    const end = Clock.CFAbsoluteTimeGetCurrent() + 2;
+    while (true) {
+        const done = switch (until) {
+            .queue_drained => !lifecycle.exit_queued,
+            .window_closed => lifecycle.state.window == null,
+            .quit => lifecycle.native.?.stopping,
+        };
+        if (done) return;
+        if (Clock.CFAbsoluteTimeGetCurrent() >= end) return error.NativeExitTimedOut;
+        nanoui.runFor(0.01);
     }
 }
 

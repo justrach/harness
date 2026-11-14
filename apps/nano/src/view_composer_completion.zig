@@ -77,7 +77,7 @@ pub fn menu(c: *ui.Context, a: *App, k: theme.Colors, width: f32) void {
     const start = if (active >= shown and shown > 0) active - shown + 1 else 0;
     for (list[start..@min(list.len, start + shown)], start..) |entry, ix| {
         ui.keyInt(c, ix);
-        const row = ui.div(c).column().wFull().h(46).px(8).justifyCenter().rounded(7).bg(if (ix == active) k.selected else .{}).hover(k.selected);
+        const row = ui.div(c).column().wFull().h(46).px(8).justifyCenter().rounded(7).bg(if (ix == active) k.selected else .transparent).hover(k.selected);
         {
             defer row.end();
             ui.text(c, c.print("{c}{s}", .{ entry.prefix(), entry.name }), .{ .size = 13, .color = k.text });

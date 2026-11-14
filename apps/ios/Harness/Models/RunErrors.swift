@@ -50,7 +50,32 @@ enum ProviderProblem: String, Equatable, Sendable {
     }
 }
 
+/// Recovery is still stored as an error part on the wire, including in old
+/// transcripts. Classify its presentation here, never by changing that schema.
+/// Shared with restart_note.rs and Nano via restart-notices.json.
+enum RestartNotice: String, Equatable {
+    case update, restart
+
+    var label: String { self == .update ? "Update" : "Restart" }
+}
+
 enum RunErrors {
+    static func restartNotice(_ message: String) -> RestartNotice? {
+        if message == "Harness restarted — picking this run back up"
+            || message == "Harness restarted — answer the question to pick this run back up" {
+            return .restart
+        }
+        let prefix = "Harness updated to v"
+        let suffix = " — picking this run back up"
+        guard message.hasPrefix(prefix), message.hasSuffix(suffix),
+              message.utf8.count > prefix.utf8.count + suffix.utf8.count else { return nil }
+        let version = message.dropFirst(prefix.count).dropLast(suffix.count)
+        guard let first = version.utf8.first, (48...57).contains(first),
+              version.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0)
+                  || (97...122).contains($0) || $0 == 46 || $0 == 45 || $0 == 43 }) else { return nil }
+        return .update
+    }
+
     /// graff's own words for a rejected API key. Checked first, before
     /// `notTheProvider` too. graff's older generic "sign in again or check the
     /// API key" can't say which credential failed and stays `signedOut`.

@@ -179,21 +179,17 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
             }
         }
         {
-            ui.key(c, "restart-to-install-updates");
-            const r = set.row(c, k, false, true);
+            ui.key(c, "automatic-update-checks");
+            const r = set.row(c, k, false, false);
             defer r.end();
-            set.tile(c, k, .restart);
+            set.tile(c, k, .refresh);
             set.words(
                 c,
                 k,
-                "Restart automatically to install updates",
-                "Once an update has downloaded, Harness restarts into it when no agent is running, nothing is unsaved and you've stepped away. Your windows, tabs and chats come back. Off, it installs when you quit.",
-                56,
+                "Automatic update checks",
+                "Harness checks for new releases every hour, including across sleep. Installing an update and restarting are separate actions you choose; checks never restart the app or interrupt agents.",
+                0,
             );
-            if (set.toggle(c, k, a.settings.get(.restart_to_install_updates), true) or r.clicked()) {
-                a.settings.toggle(.restart_to_install_updates);
-                a.redraw();
-            }
         }
     } else {
         const r = set.row(c, k, true, false);
@@ -369,6 +365,22 @@ fn action(c: *ui.Context, k: theme.Colors, icon: ?icons.Name, label: []const u8,
 }
 
 const testing = std.testing;
+
+test "native updater settings describe hourly checks without an inert restart toggle" {
+    theme.registerFonts();
+    var a: App = .init(std.testing.allocator, std.testing.io, 1);
+    defer a.deinit();
+    a.settings.set(.restart_to_install_updates, true);
+    a.settings.setSection(.devices);
+    set.open(&a);
+    var t: ui.Tester = undefined;
+    try t.init(std.testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 1200, .height = 780 });
+    defer t.deinit();
+    t.settle(1);
+    try std.testing.expect(t.hasText("Automatic update checks"));
+    try std.testing.expect(!t.hasText("Restart automatically to install updates"));
+    try std.testing.expect(a.settings.get(.restart_to_install_updates));
+}
 
 test "presence, last seen, the subtitle and the id chip as the GPUI app's" {
     try testing.expect(online(1_000_000, 1_000_000 + 70_000));

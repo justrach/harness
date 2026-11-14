@@ -1,0 +1,21 @@
+{
+  "labels": {"update": "Update", "restart": "Restart"},
+  "cases": [
+    {"message": "Harness updated to v0.2.190 — picking this run back up", "expect": "update"},
+    {"message": "Harness updated to v0.2.135 — picking this run back up", "expect": "update"},
+    {"message": "Harness updated to v0.2.191-rc.1 — picking this run back up", "expect": "update"},
+    {"message": "Harness restarted — picking this run back up", "expect": "restart"},
+    {"message": "Harness restarted — answer the question to pick this run back up", "expect": "restart"},
+    {"message": "Run interrupted by engine restart", "expect": null},
+    {"message": "Run interrupted by engine restart — resuming", "expect": null},
+    {"message": "Harness restarted the agent: exit code 1", "expect": null},
+    {"message": "Harness restarted — recovery failed — picking this run back up", "expect": null},
+    {"message": "Harness updated to v — picking this run back up", "expect": null},
+    {"message": "Harness updated to v0.2.190 — recovery failed", "expect": null},
+    {"message": "Harness updated to v0.2.190 — picking this run back up\nRecovery failed", "expect": null},
+    {"message": "Authentication failed — sign in again", "expect": null},
+    {"message": "Request failed (401) Unauthorized", "expect": null},
+    {"message": "The update failed: permission denied", "expect": null},
+    {"message": "", "expect": null}
+  ]
+}

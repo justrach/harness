@@ -187,6 +187,12 @@ pub fn openExternalLink(a: *App, parent: []const u8, url: []const u8) void {
 /// link never falls through to an OS opener or a privileged URL scheme.
 pub fn openLink(a: *App, parent: []const u8, url: []const u8) void {
     if (linkOwner(a, parent, url) == null) return;
+    // Honor the GitHub preference before the test/offscreen browser fallback.
+    // Explicit internal/external actions bypass this default dispatcher.
+    if (@import("github_link.zig").parse(url) != null) {
+        if (a.settings.get(.open_github_links_in_harness)) return openInternalLink(a, parent, url);
+        return openExternalLink(a, parent, url);
+    }
     if (!builtin.is_test and a.window != null and !a.offscreen) {
         openExternalLink(a, parent, url);
         return;
@@ -251,6 +257,11 @@ pub fn settleFrame(a: *App) void {
         if (a.selected == null or !std.mem.eql(u8, a.selected.?, b.parent)) return b.destroy();
     }
     b.pending_source = null;
+    if (@import("github_link.zig").parse(b.url)) |target| {
+        @import("app_github_repository.zig").openLinked(a, target);
+        b.destroy();
+        return;
+    }
     const p = &a.panels;
     p.tabs.append(p.gpa, .{ .kind = .browser, .browser = b, .shown = p.bumpShown() }) catch return b.destroy();
     p.active = p.tabs.items.len - 1;

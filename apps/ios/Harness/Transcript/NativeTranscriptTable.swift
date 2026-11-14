@@ -141,6 +141,7 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
     private var animatingFollow = false
     private var followAnimationGeneration: UInt64 = 0
     private var hasPositioned = false
+    private var dragTranslation: CGFloat = 0
     private var lastGeometry = TranscriptGeometry(contentHeight: 0, viewportHeight: 0, offset: 0, bottom: 0)
     private let runway = UIView()
     private var resizeScheduled = false
@@ -172,6 +173,7 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
         contentInsetAdjustmentBehavior = .never
         automaticallyAdjustsScrollIndicatorInsets = false
         keyboardDismissMode = .interactive
+        bounces = true
         alwaysBounceVertical = true
         clipsToBounds = false
         topEdgeEffect.isHidden = true // SessionView owns the color fade, without blur.
@@ -665,8 +667,8 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
         perfFrames.refresh()
         cancelFollowAnimation()
         follow.interactionEpoch &+= 1
-        follow.userScrolling = true
-        follow.userDragging = true
+        follow.beginGesture()
+        dragTranslation = 0
         updatePerformanceInterest()
     }
 
@@ -674,7 +676,12 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
         perfFrames.refresh()
         let geometry = TranscriptGeometry(contentHeight: contentSize.height, viewportHeight: viewportHeight,
             offset: contentOffset.y + contentInset.top, bottom: contentSize.height - contentOffset.y - bounds.height)
-        follow.observe(old: lastGeometry, new: geometry)
+        // The pan, not contentOffset, owns intent. Streaming self-sizing and
+        // bounce recovery both move contentOffset without a finger reversal.
+        let translation = panGestureRecognizer.translation(in: self).y
+        let delta = follow.userDragging ? dragTranslation - translation : 0
+        dragTranslation = translation
+        follow.observe(old: lastGeometry, new: geometry, dragDelta: delta)
         lastGeometry = geometry
         // Reading into history: grow the tail window as the top edge nears.
         if follow.userScrolling { scheduleTopGrowth() }
@@ -745,6 +752,7 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
 
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
         perfFrames.refresh()
+        follow.userDragging = false
         if !decelerate { finishGesture() }
     }
 

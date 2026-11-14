@@ -95,6 +95,34 @@ fn movedOn(comptime error_part: []const u8) []const u8 {
     ;
 }
 
+test "restart notices: historical update error parts are neutral while failures stay errors" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    try h.show("graff-here", failed(
+        \\{"kind":"error","id":"e","message":"Harness updated to v0.2.190 — picking this run back up"}
+    ));
+    h.snap("restart-update-before-or-after");
+    try h.expectText("Update");
+    try testing.expect(!h.t.hasText("Error"));
+    try testing.expect(!h.t.hasText("Log in"));
+    try h.show("graff-here", failed(
+        \\{"kind":"error","id":"e","message":"Harness restarted — picking this run back up"}
+    ));
+    try h.expectText("Restart");
+    try testing.expect(!h.t.hasText("Error"));
+    try h.show("graff-here", failed(
+        \\{"kind":"error","id":"e","message":"Harness restarted — answer the question to pick this run back up"}
+    ));
+    try h.expectText("Restart");
+    try testing.expect(!h.t.hasText("Error"));
+    try h.show("graff-here", failed(
+        \\{"kind":"error","id":"e","message":"Run interrupted by engine restart"}
+    ));
+    try h.expectText("Error");
+    h.snap("restart-not-resumed");
+}
+
 const signed_out = failed(
     \\{"kind":"error","id":"e","message":"Claude Code isn't signed in.\nUse Settings → Agents → Sign in."}
 );

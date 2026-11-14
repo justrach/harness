@@ -87,9 +87,51 @@ with status/addition/deletion counts and one expandable patch at a time.
 Missing/binary/clipped patches are clearly marked incomplete. Activity shows
 paged GitHub timeline entries, comments and review summaries; it is not an
 inline review-thread editor. Issues have their own description and activity.
-Remote text is rendered as plain native text: no HTML, remote image loading
-or executable provider links. **Open on GitHub** constructs a validated
-canonical URL for the selected item.
+Descriptions and activity bodies render as native Markdown in readable
+cards: headings, emphasis, lists, quotes, tables and fenced code. Provider
+prose has no transcript attachment authority, image loading or clickable
+provider-link hit areas; link labels and image alt text remain readable.
+There is no webview or executable HTML. **Open on GitHub** constructs a
+validated canonical URL for the selected item.
+
+### Transcript PR and issue links
+
+**Settings → General → Links & browsing → Open GitHub links in Harness**
+controls the default click destination (on by default, saved per desktop).
+Turn it off to use the default browser. The link menu's explicit **Open in
+Harness** still opens the native panel regardless of the preference. Search
+Settings for `GitHub links` or `external PR` to find this control.
+
+With the preference on, clicking a canonical `https://github.com/<owner>/<repo>/pull/<number>` or
+`.../issues/<number>` link in a transcript opens that exact item in the native
+GitHub surface beside the conversation. This also works for closed items and
+other repositories; it does not search only the first page of open session PRs.
+PR `/files` links select Code after the item loads. The existing GitHub surface
+is reused, not a new chat, WebKit page or external browser window.
+
+The deferred link action revalidates its conversation/pane owner before opening;
+a stale, deleted or hidden source cannot navigate a different chat. Cross-repo
+navigation carries only validated owner/name/item fields, not a provider URL or
+API endpoint. Requests still use the selected session's host authentication, and
+the original checkout and remote stay independently fenced across the request.
+The linked repository is named visibly; browsing does not change the checkout.
+Back loads that repository's listing, Refresh retries the linked item, and
+Sessions returns to the current checkout's session PRs.
+
+**Open on GitHub** and the link menu's **Open in browser** remain explicit
+external-browser actions. Other website links retain their existing behavior.
+Bare `#123` text without a URL is not guessed into a repository navigation.
+Enterprise hosts and unsupported GitHub URL shapes are not intercepted.
+
+The presentation follows the hierarchy of Zeron's native PR viewer: a
+state/number badge, title and author/branch/change metadata above the
+**Summary / Code / Activity** tabs, followed by a **Description** card.
+List rows size to their content rather than clipping long titles to a fixed
+height. Empty session-linked results offer **Browse repository** and do not
+claim that GitHub authentication failed. A surface panel's header **+** opens
+its surface picker instead of creating an unrelated chat tab. This is a
+focused visual/navigation match, not full parity with Zeron's search, review,
+checks, image rendering or wide split-diff features.
 
 The browser reuses the host's installed/authenticated `gh`, bounded process
 runner and remote resolution; no token store or hidden sign-in is added.
@@ -97,7 +139,8 @@ All new API calls are GET-only and occur on explicit navigation/refresh, not
 a new polling loop. Repo keys fence subsequent pages/details; the host
 rechecks checkout/repository identity after a provider request. Chat,
 checkout/branch changes and panel closure cancel subscriptions and reject
-late replies. Refresh starts a fresh repository listing.
+late replies. Refresh starts a fresh repository listing, or reloads the current
+item for an explicit transcript link.
 
 This slice supports `github.com` repositories on a branch; enterprise hosts
 and detached HEAD require a browser/terminal. It does not create PRs/issues,

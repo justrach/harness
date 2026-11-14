@@ -903,18 +903,24 @@ fn singleLine(c: *ui.Context, s: []const u8) []const u8 {
 /// Copy, then the message wrapped. The caller adds what goes under it and
 /// ends it.
 pub fn noticeChip(c: *ui.Context, k: theme.Colors, label: []const u8, message: []const u8) ui.Div {
+    return messageChip(c, k, label, message, false);
+}
+
+fn messageChip(c: *ui.Context, k: theme.Colors, label: []const u8, message: []const u8, calm: bool) ui.Div {
+    const tone = if (calm) k.muted else k.danger;
+    const ink = if (calm) k.muted else k.danger_muted;
     // GPUI's edge insets what's inside it; here it's drawn over the box.
-    const chip = ui.div(c).column().wFull().rounded(10).px(10 + 1).py(8 + 1).gap(6).border(k.danger.alpha(0.16)).borderW(1).bg(k.danger.alpha(0.05));
+    const chip = ui.div(c).column().wFull().rounded(10).px(10 + 1).py(8 + 1).gap(6).border(tone.alpha(0.16)).borderW(1).bg(tone.alpha(0.05));
     {
         const h = ui.div(c).row().wFull().gap(8).itemsCenter().control();
         defer h.end();
-        const tile = ui.div(c).row().size(20, 20).center().rounded(6).bg(k.danger.alpha(0.12));
-        icons.icon(c, .@"danger-triangle", 12, k.danger_muted.alpha(0.8), 0);
+        const tile = ui.div(c).row().size(20, 20).center().rounded(6).bg(tone.alpha(0.12));
+        icons.icon(c, if (calm) .restart else .@"danger-triangle", 12, ink.alpha(0.8), 0);
         tile.end();
-        ui.text(c, label, .{ .size = 12, .weight = .medium, .color = k.danger_muted.alpha(0.8) });
+        ui.text(c, label, .{ .size = 12, .weight = .medium, .color = ink.alpha(0.8) });
         ui.spacer(c);
-        const copy = ui.div(c).row().size(20, 20).center().rounded(6).hover(k.danger.alpha(0.12));
-        icons.icon(c, .copy, 12, k.danger_muted.alpha(0.8), 0);
+        const copy = ui.div(c).row().size(20, 20).center().rounded(6).hover(tone.alpha(0.12));
+        icons.icon(c, .copy, 12, ink.alpha(0.8), 0);
         copy.end();
         if (copy.clicked()) c.clipboard.write(c.clipboard.ctx, message);
     }
@@ -930,10 +936,11 @@ fn errorChip(c: *ui.Context, a: *App, k: theme.Colors, chat_id: ?[]const u8, mes
     const run_errors = @import("run_errors.zig");
     // The ChatGPT plan's own limit has its plan-usage card in the GPUI app,
     // never "Log in".
-    const problem = if (run_errors.isPlanUsageLimit(message)) null else run_errors.providerProblem(message);
+    const notice = run_errors.restartNotice(message);
+    const problem = if (notice != null or run_errors.isPlanUsageLimit(message)) null else run_errors.providerProblem(message);
     const outer = ui.div(c).column().wFull().py(4);
     defer outer.end();
-    const chip = noticeChip(c, k, if (problem) |p| p.label() else "Error", message);
+    const chip = messageChip(c, k, if (notice) |n| n.label() else if (problem) |p| p.label() else "Error", message, notice != null);
     defer chip.end();
     const p = problem orelse return;
     const id = chat_id orelse return;
