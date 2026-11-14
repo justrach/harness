@@ -149,6 +149,50 @@ struct HomeView: View {
 
     /// Remembered once this device shows a fold or its inner display: the session uses the Duo chat.
     @AppStorage(DuoChat.foldableKey) private var foldableDevice = false
+    @State private var coverSessionsShown = false
+    @State private var coverSessionSelection: String?
+    @State private var coverPageSnapshot = CoverPageSnapshot()
+
+    private var coverSessionsAvailable: Bool {
+        CoverSessionDrawer.isAvailable(duo: foldableDevice,
+                                        compactWidth: horizontalSizeClass == .compact, fold: fold)
+    }
+
+    private func closeCoverSessions() {
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        withAnimation(Motion.collapse, completionCriteria: .logicallyComplete) {
+            coverSessionsShown = false
+        } completion: {
+            if !coverSessionsShown { coverPageSnapshot.clear() }
+        }
+    }
+
+    private func toggleCoverSessions() {
+        if coverSessionsShown { closeCoverSessions(); return }
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        guard coverPageSnapshot.capture() else { return }
+        withAnimation(Motion.collapse) { coverSessionsShown = true }
+    }
+
+    private var coverSessionsDrawer: some View {
+        NavigationStack {
+            CoverSessionsList(current: coverSessionSelection ?? "", close: closeCoverSessions) { id in
+                withAnimation(Motion.collapse) { coverSessionSelection = id }
+                closeCoverSessions()
+            }
+            .navigationTitle("Sessions")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(.hidden, for: .navigationBar)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(action: closeCoverSessions) {
+                        Label("Close sessions", systemImage: "xmark")
+                    }
+                    .accessibilityIdentifier("duo-cover-close-sessions")
+                }
+            }
+        }
+    }
 
     private func noteFoldable() {
         guard !foldableDevice else { return }
@@ -367,33 +411,42 @@ struct HomeView: View {
             } else {
                 // One stack in every pose, so folding keeps the session (draft, scroll) in place. Wide (an iPhone
                 // Duo lying flat), the list stands beside an open session until Inspect takes its place.
-                HStack(spacing: 0) {
-                    if flatSidebar {
-                        NavigationStack {
-                            // A switcher beside the chat: new, settings and profile stay on the full list, and in
-                            // a column this narrow the bar's buttons stood in a rail over the rows.
-                            sidebar.toolbar(.hidden, for: .navigationBar)
-                        }
-                            // The narrow column lays the list out as a phone's.
-                            .environment(\.horizontalSizeClass, .compact)
-                            .frame(width: DuoV3.sidebarWidth)
-                            .transition(.move(edge: .leading).combined(with: .opacity))
-                            .accessibilityIdentifier("wide-sidebar")
-                        Rectangle().fill(Theme.border).frame(width: 1).ignoresSafeArea()
-                    }
-                    NavigationStack(path: $path) {
-                        sidebar
-                            .navigationDestination(for: Route.self) {
-                                // iPhone Duo lying flat: the session beside the list, or chat and Inspect.
-                                destination($0)
-                                .environment(\.duoFlat, flatDuo)
-                                .environment(\.toggleFlatList, flatDuo ? {
-                                    withAnimation(Motion.collapse) { flatListShown.toggle() }
-                                } : nil)
+                CoverSessionDrawerContainer(available: coverSessionsAvailable,
+                                            shown: coverSessionsShown, close: closeCoverSessions,
+                                            snapshot: coverPageSnapshot) {
+                    HStack(spacing: 0) {
+                        if flatSidebar {
+                            NavigationStack {
+                                // A switcher beside the chat: new, settings and profile stay on the full list, and in
+                                // a column this narrow the bar's buttons stood in a rail over the rows.
+                                sidebar.toolbar(.hidden, for: .navigationBar)
                             }
+                                // The narrow column lays the list out as a phone's.
+                                .environment(\.horizontalSizeClass, .compact)
+                                .frame(width: DuoV3.sidebarWidth)
+                                .transition(.move(edge: .leading).combined(with: .opacity))
+                                .accessibilityIdentifier("wide-sidebar")
+                            Rectangle().fill(Theme.border).frame(width: 1).ignoresSafeArea()
+                        }
+                        NavigationStack(path: $path) {
+                            sidebar
+                                .navigationDestination(for: Route.self) {
+                                    // iPhone Duo lying flat: the session beside the list, or chat and Inspect.
+                                    destination($0)
+                                    .environment(\.duoFlat, flatDuo)
+                                    .environment(\.toggleFlatList, flatDuo ? {
+                                        withAnimation(Motion.collapse) { flatListShown.toggle() }
+                                    } : nil)
+                                }
+                        }
                     }
+                    .environment(\.coverSessionSelection, coverSessionsAvailable ? $coverSessionSelection : nil)
+                    .environment(\.coverSessionsShown, coverSessionsShown)
+                    .environment(\.toggleCoverSessions, coverSessionsAvailable ? toggleCoverSessions : nil)
+                    .animation(Motion.collapse, value: flatSidebar)
+                } drawer: {
+                    coverSessionsDrawer
                 }
-                .animation(Motion.collapse, value: flatSidebar)
             }
         }
         // Laptop pose: the keyboard lands on the lower half, below the fold. The whole layout ignores it (the
@@ -424,6 +477,10 @@ struct HomeView: View {
         .onChange(of: path) { _, _ in
             // A row picked from the list over the upper half opens there; the list gets out of the way.
             if laptopListShown { withAnimation(Motion.collapse) { laptopListShown = false } }
+            if coverSessionsShown { closeCoverSessions() }
+        }
+        .onChange(of: coverSessionsAvailable) { _, available in
+            if !available { coverSessionsShown = false; coverPageSnapshot.clear() }
         }
         .onChange(of: laptopPose) { _, isLaptop in
             if !isLaptop { laptopListShown = false; laptopTyping = false }
@@ -456,10 +513,6 @@ struct HomeView: View {
             case .chat(let id):
                 if splitLayout { SessionView(chatId: id) } else {
                     SessionPagerHost(chatId: id)
-                        .environment(\.coverSessionsAvailable,
-                                     CoverSessionDrawer.isAvailable(duo: foldableDevice,
-                                                                     compactWidth: horizontalSizeClass == .compact,
-                                                                     fold: fold))
                 }
             case .newSession(let destination): NewSessionView(destination: destination, path: $path)
             }

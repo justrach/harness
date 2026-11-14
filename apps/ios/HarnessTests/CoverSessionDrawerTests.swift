@@ -12,12 +12,17 @@ final class CoverSessionDrawerTests: XCTestCase {
                                                      fold: .stacked(top: 300, gap: 20)))
     }
 
-    func testDrawerLeavesATappableChatStripAndNeverConsumesTheControlRail() {
-        // The 466pt cover has an 84pt system control rail; use only the remaining safe width.
-        let safeWidth: CGFloat = 466 - 84
-        XCTAssertEqual(CoverSessionDrawer.width(in: safeWidth), 318)
-        XCTAssertEqual(safeWidth - CoverSessionDrawer.width(in: safeWidth), 64)
-        XCTAssertLessThan(CoverSessionDrawer.width(in: safeWidth), safeWidth)
+    func testWholeNavigationPageMovesWithoutShrinkingTheChat() {
+        // The drawer includes its own 84pt native rail. Translate the full old
+        // page so Back (at x 418) lands in the 64pt strip at x 16.
+        let width: CGFloat = 466
+        let drawer = CoverSessionDrawer.width(in: width)
+        XCTAssertEqual(drawer, 402)
+        XCTAssertEqual(width - drawer, 64)
+        XCTAssertEqual(drawer - 84, 318)
+        XCTAssertEqual(CoverSessionDrawer.chatOffset(shown: false, width: width), 0)
+        XCTAssertEqual(CoverSessionDrawer.chatOffset(shown: true, width: width), -drawer)
+        XCTAssertEqual(418 + CoverSessionDrawer.chatOffset(shown: true, width: width), 16)
         XCTAssertEqual(CoverSessionDrawer.width(in: 200), 164)
         XCTAssertEqual(CoverSessionDrawer.width(in: 0), 0)
     }
