@@ -129,6 +129,7 @@ test {
     _ = @import("tests_ui_input.zig");
     _ = @import("tests_attachments.zig");
     _ = @import("tests_reply_images.zig");
+    _ = @import("tests_image_orientation.zig");
     _ = @import("tests_ui_feedback.zig");
     _ = @import("tests_ui_glass.zig");
     _ = @import("surface_palette.zig");

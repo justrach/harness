@@ -70,6 +70,13 @@ reversal behavior. Discrete wheels, native momentum, Reduce Motion and idle
 spring termination retain their explicit paths. Harness's `tests_scroll_bounce`
 module exercises the production consumer.
 
+Harness-local ImageIO orientation handling in `src/ui/image.zig` reports
+EXIF-oriented dimensions for both header layout and transformed thumbnails.
+Small rotated/mirrored images also use ImageIO's transformed thumbnail path,
+so their decoded pixels and layout agree. Harness's native headless
+`image orientation` regression checks small and large synthetic PNGs and
+actual rendered quadrant positions; ordinary reply-image tests remain intact.
+
 These changes live in this checked-in package, not an ignored download cache.
 
 To update: start with the pinned upstream distribution, retain the notices,
