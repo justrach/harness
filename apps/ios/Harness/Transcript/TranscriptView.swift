@@ -104,20 +104,26 @@ struct TranscriptView: View {
                 AgentReauthenticationSheet(
                     provider: request.provider, hostName: request.hostName, relay: request.relay,
                     onSignedIn: { ReauthOutcomes.shared.resolve(request.key) },
-                    resume: canResume ? { resume(request.key) } : nil)
+                    resume: canResume ? { resume(request.key, provider: request.provider) } : nil)
             }
     }
 
     /// Reconnect rows from earlier in the conversation: a user message came after them, so the
     /// chat has moved on (that is also how a sent Resume stops being offered).
-    static func earlierReauthRows(_ rows: [TranscriptRow]) -> Set<String> {
+    static func earlierReauthRows(_ rows: [TranscriptRow],
+                                  sessionReauth: AgentReauthProvider? = nil) -> Set<String> {
         var earlier: Set<String> = []
         var userSince = false
         for row in rows.reversed() {
             switch row.kind {
-            case .user: userSince = true
-            case .errorChip(_, let reauth) where reauth != nil && userSince: earlier.insert(row.id)
-            default: break
+            case .user:
+                userSince = true
+            case .errorChip(let message, let reauth) where userSince:
+                if reauth != nil || (sessionReauth != nil && RunErrors.providerProblem(message) == .signedOut) {
+                    earlier.insert(row.id)
+                }
+            default:
+                break
             }
         }
         return earlier
@@ -130,31 +136,41 @@ struct TranscriptView: View {
     /// Resume conversation: a new turn in this chat with its own agent and model, from its
     /// existing session. The failed prompt and finished tools are not replayed, and the composer's
     /// draft and attachments are untouched.
-    private func resume(_ key: String) -> Bool {
+    private func resume(_ key: String, provider: AgentReauthProvider = .chatGPTNew) -> Bool {
         guard let chat, chat.config?.model != nil, !runLive,
               ReauthOutcomes.shared.claimResume(key) else { return false }
-        store.sendRun(prompt: ReauthCopy.resumePrompt, chat: chat)
+        store.sendRun(prompt: ReauthCopy.resumePrompt(for: provider), chat: chat)
         return true
     }
 
     @ViewBuilder
-    private func reauthControls(_ reauth: AgentReauthProvider, row: TranscriptRow, earlier: Bool) -> some View {
+    private func reauthControls(_ reauth: AgentReauthProvider, isHostTyped: Bool = true,
+                                row: TranscriptRow, earlier: Bool) -> some View {
         let key = ReauthOutcomes.key(chatId: chatId, rowId: row.id)
         let outcomes = ReauthOutcomes.shared
         if outcomes.resolved.contains(key) {
-            Label("ChatGPT reconnected on \(hostName)", systemImage: "checkmark.circle")
+            Label("\(reauth.providerDisplayName) reconnected on \(hostName)", systemImage: "checkmark.circle")
                 .font(Theme.sans(14, weight: .medium))
                 .foregroundStyle(Theme.textMuted)
             if !earlier, !outcomes.resumed.contains(key), canResume {
-                Button("Resume conversation") { _ = resume(key) }
+                Button("Resume conversation") { _ = resume(key, provider: reauth) }
                     .font(Theme.sans(14, weight: .medium))
                     .buttonStyle(.bordered)
                     .accessibilityIdentifier("agent-reauth-resume")
             }
         } else if !earlier {
-            Button(reauth == .chatGPTNew ? "Continue with ChatGPT" : "Reconnect ChatGPT") {
+            let buttonLabel = isHostTyped
+                ? (reauth == .chatGPTNew ? "Continue with ChatGPT" : "Reconnect ChatGPT")
+                : "Re-authenticate"
+            Button {
                 reauthRequest = AgentReauthRequest(provider: reauth, hostName: hostName,
                                                   relay: store.hostRelayClient(), key: key)
+            } label: {
+                if isHostTyped {
+                    Text(buttonLabel)
+                } else {
+                    Label(buttonLabel, systemImage: "arrow.triangle.2.circlepath")
+                }
             }
             .font(Theme.sans(14, weight: .medium))
             .buttonStyle(.bordered)
@@ -196,13 +212,18 @@ struct TranscriptView: View {
             case .inputChip(let header, let resolved):
                 InputChipView(header: header, resolved: resolved)
             case .errorChip(let message, let reauth):
-                // A host-typed failure keeps its reconnect controls. Plain text that reads as signed out or
-                // out of usage is labelled, and says where to sign in: the phone has no sign-in for these.
+                // A host-typed failure keeps its reconnect controls. Plain signed-out errors also offer
+                // inline re-authentication when the chat's own stored harness supports host OAuth login.
                 let problem = reauth == nil ? RunErrors.providerProblem(message) : nil
+                let inferredReauth = (reauth == nil && problem == .signedOut)
+                    ? AgentReauthProvider.forSignedOutSession(harness: chat?.config?.harness, model: chat?.config?.model)
+                    : nil
                 VStack(alignment: .leading, spacing: 8) {
                     ErrorChipView(message: message, problem: problem, hostName: hostName, allowNotice: reauth == nil)
                     if let reauth {
-                        reauthControls(reauth, row: row, earlier: earlier)
+                        reauthControls(reauth, isHostTyped: true, row: row, earlier: earlier)
+                    } else if let inferredReauth {
+                        reauthControls(inferredReauth, isHostTyped: false, row: row, earlier: earlier)
                     }
                 }
             }

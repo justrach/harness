@@ -29,7 +29,7 @@ struct AgentReauthenticationSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    Text("Reconnect ChatGPT")
+                    Text("Reconnect \(provider.providerDisplayName)")
                         .font(Theme.sans(22, weight: .semibold))
                     Text("Credentials will be saved on \(hostName), where this session runs. This does not sign you out of Harness.")
                         .font(Theme.sans(14))
@@ -64,6 +64,10 @@ struct AgentReauthenticationSheet: View {
                             }
                         } else if let signIn = recovery.browserSignIn {
                             phoneSignIn(signIn)
+                        } else if let signIn = recovery.pasteCodeSignIn {
+                            pasteCodeView(signIn)
+                        } else if let signIn = recovery.directBrowserSignIn {
+                            directBrowserView(signIn)
                         } else {
                             Text("Complete sign-in on \(hostName)")
                                 .font(Theme.sans(16, weight: .medium))
@@ -77,7 +81,7 @@ struct AgentReauthenticationSheet: View {
                         Text("Credentials are saved on \(hostName), not your iPhone. Sign-in will not resend or replay the failed message.")
                             .foregroundStyle(Theme.textMuted)
                     case .done:
-                        Label("ChatGPT reconnected on \(hostName)", systemImage: "checkmark.circle")
+                        Label("\(provider.providerDisplayName) reconnected on \(hostName)", systemImage: "checkmark.circle")
                         Text("Nothing was resent. Resume the conversation when you're ready, or go back and send something new.")
                             .foregroundStyle(Theme.textMuted)
                         if let resume {
@@ -97,7 +101,7 @@ struct AgentReauthenticationSheet: View {
                         Button(provider == .chatGPTNew ? "Continue with ChatGPT" : "Try again") { attempt += 1 }
                             .buttonStyle(.borderedProminent)
                     }
-                    if recovery.phase != .done {
+                    if recovery.phase != .done, provider == .chatGPTNew || provider == .codex {
                         Text(ReauthCopy.accountSecurityNote)
                             .font(Theme.sans(12))
                             .foregroundStyle(Theme.textMuted)
@@ -177,6 +181,60 @@ struct AgentReauthenticationSheet: View {
                 }
                 .padding(.top, 8)
             }
+        }
+    }
+
+    @ViewBuilder
+    private func pasteCodeView(_ signIn: AgentReauthentication.PasteCodeSignIn) -> some View {
+        if recovery.handedOff {
+            HStack(spacing: 10) {
+                ProgressView()
+                Text("Finishing sign-in on \(hostName)…")
+            }
+        } else {
+            Text("Authorize \(provider.providerDisplayName) on your iPhone")
+                .font(Theme.sans(16, weight: .medium))
+            Text("Open the authorization page in Safari, sign in, and paste the authorization code shown at the end.")
+                .foregroundStyle(Theme.textMuted)
+            Button("Open \(provider.providerDisplayName) sign-in") {
+                openURL(signIn.url)
+            }
+            .buttonStyle(.borderedProminent)
+            .accessibilityIdentifier("agent-reauth-open-oauth")
+            if let error = recovery.redirectError {
+                Text(error).foregroundStyle(Theme.danger)
+            }
+            TextField("Paste authorization code", text: $pasted)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier("agent-reauth-pasted-code")
+            Button("Submit code") {
+                let code = pasted
+                Task {
+                    if await recovery.submitAuthorizationCode(code) { pasted = "" }
+                }
+            }
+            .buttonStyle(.bordered)
+            .disabled(pasted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .accessibilityIdentifier("agent-reauth-submit-code")
+        }
+    }
+
+    @ViewBuilder
+    private func directBrowserView(_ signIn: AgentReauthentication.DirectBrowserSignIn) -> some View {
+        Text("Approve \(provider.providerDisplayName) on your iPhone")
+            .font(Theme.sans(16, weight: .medium))
+        Text("Open the sign-in page and approve access for \(hostName). Only approve a sign-in you started.")
+            .foregroundStyle(Theme.textMuted)
+        Button("Open \(provider.providerDisplayName) sign-in") {
+            openURL(signIn.url)
+        }
+        .buttonStyle(.borderedProminent)
+        .accessibilityIdentifier("agent-reauth-open-browser")
+        HStack(spacing: 10) {
+            ProgressView()
+            Text("Waiting for approval and host sign-in…")
         }
     }
 }
