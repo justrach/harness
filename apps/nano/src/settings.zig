@@ -119,7 +119,8 @@ pub const Prefs = struct {
     // Settings › Appshots.
     appshots_enabled: bool = false,
     appshot_sound_enabled: bool = true,
-    // Settings › Devices.
+    // Settings › Devices. Installation defaults on, independently of the legacy restart switch.
+    automatically_install_updates: bool = true,
     restart_to_install_updates: bool = true,
 };
 
@@ -153,6 +154,7 @@ pub const Flag = enum {
     sidebar_show_archived,
     appshots_enabled,
     appshot_sound_enabled,
+    automatically_install_updates,
     restart_to_install_updates,
 };
 
@@ -1177,6 +1179,41 @@ test "github links preference defaults on and persists both choices without repl
         var restored = Store.openIn(testing.allocator, io, base);
         defer restored.deinit();
         try testing.expectEqual(on, restored.get(.open_github_links_in_harness));
+    }
+}
+
+test "native updater automatic installation defaults on independently of legacy restart and persists explicit choices" {
+    const io = testing.io;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try std.Io.Dir.cwd().realPathFileAlloc(io, try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path}), a);
+    {
+        var fresh = Store.openIn(testing.allocator, io, base);
+        defer fresh.deinit();
+        try testing.expect(fresh.get(.automatically_install_updates));
+    }
+    for ([_][]const u8{
+        "{\"syntheticKeep\":17,\"transcriptCompactDefaultApplied\":true}",
+        "{\"restartToInstallUpdates\":true,\"syntheticKeep\":17,\"transcriptCompactDefaultApplied\":true}",
+        "{\"restartToInstallUpdates\":false,\"syntheticKeep\":17,\"transcriptCompactDefaultApplied\":true}",
+    }) |data| {
+        try tmp.dir.writeFile(io, .{ .sub_path = settings_file, .data = data });
+        var s = Store.openIn(testing.allocator, io, base);
+        defer s.deinit();
+        // A missing install field defaults on; the legacy restart choice is unrelated.
+        try testing.expect(s.get(.automatically_install_updates));
+        const restart = s.get(.restart_to_install_updates);
+        for ([_]bool{ false, true, false }) |on| {
+            s.set(.automatically_install_updates, on);
+            var restored = Store.openIn(testing.allocator, io, base);
+            defer restored.deinit();
+            try testing.expectEqual(on, restored.get(.automatically_install_updates));
+            try testing.expectEqual(restart, restored.get(.restart_to_install_updates));
+            try testing.expectEqual(@as(?f64, 17), restored.number("syntheticKeep"));
+        }
     }
 }
 

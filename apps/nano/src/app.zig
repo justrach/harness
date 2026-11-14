@@ -1834,6 +1834,7 @@ pub const App = struct {
     /// At a frame's start, before anything is drawn: what `select` let go
     /// of, freed.
     pub fn reap(a: *App) void {
+        a.panels.github_repository.images.reap();
         @import("app_attachments.zig").reap(a);
         @import("app_send_feedback.zig").reap(a);
         a.spaces.reap();

@@ -64,6 +64,15 @@ const fail = (err: RoomError): Response => json({ error: err.code, message: err.
  * behaves like a shared database for local testing. Never used in prod. */
 export const devStore = new MemoryRoomStore();
 
+/** Place RoomActor DOs in APAC next to PlanetScale Singapore PostgreSQL so
+ * room wakes, wake checks and 1s ledger flushes avoid cross-ocean round trips,
+ * while chat/device/registry DOs stay near each user at the global edge. */
+export const ROOM_ACTOR_LOCATION_HINT: DurableObjectLocationHint = "apac";
+
+export function roomActorStub(ns: DurableObjectNamespace, roomId: string): DurableObjectStub {
+  return ns.get(ns.idFromName(`room1/${roomId}`), { locationHint: ROOM_ACTOR_LOCATION_HINT });
+}
+
 export function roomStore(env: Env): RoomStore | undefined {
   if (env.HYPERDRIVE) return new PgRoomStore(env);
   return env.AUTH_MODE === "dev" ? devStore : undefined;
@@ -71,8 +80,17 @@ export function roomStore(env: Env): RoomStore | undefined {
 
 /** Run `fn` inside a store session when the store has them (one database
  * connection for the whole request). */
-const inSession = <T>(store: RoomStore | undefined, fn: () => Promise<T>): Promise<T> =>
+export const inSession = <T>(store: RoomStore | undefined, fn: () => Promise<T>): Promise<T> =>
   store instanceof PgRoomStore || store instanceof LedgerRoomStore ? store.session(fn) : fn();
+
+/** Every room id a person belongs to or has an open invite to, over one DB session. */
+export async function userRoomIds(store: RoomStore, userId: string): Promise<string[]> {
+  return inSession(store, async () => {
+    const rooms = await store.listRooms(userId);
+    const invites = await store.invites(userId);
+    return [...new Set([...rooms.map((r) => r.id), ...invites.map((i) => i.roomId)])];
+  });
+}
 
 /** A flush after the first write of a quiet spell goes out at once; later
  * writes ride the alarm this long after the last flush. */
@@ -128,8 +146,12 @@ export class RoomActor implements DurableObject {
   /** The ledger (the room's state in this actor's SQLite, written behind to
    * PostgreSQL) unless ROOM_LEDGER=off; without Hyperdrive, the dev store. */
   private makeStore(): RoomStore | undefined {
-    if (this.env.HYPERDRIVE && this.env.ROOM_LEDGER !== "off") {
-      return new LedgerRoomStore(this.ctx.storage, new PgRoomStore(this.env), () => this.onLedgerWrite());
+    if (this.env.HYPERDRIVE) {
+      const pg = new PgRoomStore(this.env, { maxIdle: 2, idleMs: 5_000 });
+      if (this.env.ROOM_LEDGER !== "off") {
+        return new LedgerRoomStore(this.ctx.storage, pg, () => this.onLedgerWrite());
+      }
+      return pg;
     }
     return roomStore(this.env);
   }

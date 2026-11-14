@@ -263,6 +263,15 @@ final class DemoDataset {
                     parts: [.text(id: "t0", text: "Bare: http://127.0.0.1:3777/bare and markdown: [the preview](http://127.0.0.1:3777/md).")],
                     createdAt: nowMs(), deviceId: "demo", status: .complete, continuationOf: nil)
             ])
+        } else if ProcessInfo.processInfo.arguments.contains("-demo-reauth") {
+            store.setEntries([
+                MessageEntry(id: "reauth-ask", role: .user,
+                    parts: [.text(id: "t0", text: "Add a retry to the upload step.")],
+                    createdAt: nowMs() - 12_000, deviceId: "demo", status: .complete, continuationOf: nil),
+                MessageEntry(id: "reauth-signed-out", role: .assistant,
+                    parts: [.error(id: "e0", message: "Not logged in · Please run /login")],
+                    createdAt: nowMs() - 4_000, deviceId: "demo", status: .aborted, continuationOf: nil),
+            ])
         } else if ProcessInfo.processInfo.arguments.contains("-errors") {
             // Error-card checks: signed out and a usage limit read as such;
             // a plain failure stays an Error.

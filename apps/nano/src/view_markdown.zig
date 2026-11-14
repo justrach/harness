@@ -28,6 +28,7 @@ var active_streaming: bool = false;
 var veil_now_ms: f64 = 0;
 var current_elem_ix: usize = 0;
 var provider_mode: bool = false;
+var github_images_app: ?*@import("app.zig").App = null;
 var mermaid_source_ids: [32]u64 = @splat(0);
 var mermaid_source_len: usize = 0;
 
@@ -127,6 +128,15 @@ pub fn providerMarkdown(c: *ui.Context, colors: theme.Colors, src: []const u8, a
     markdown(c, colors, src);
 }
 
+/// GitHub descriptions/reviews may show bounded raster previews, but never
+/// inherit transcript filesystem, RPC attachment or executable link authority.
+pub fn githubMarkdown(c: *ui.Context, colors: theme.Colors, src: []const u8, a: *@import("app.zig").App) void {
+    const old = github_images_app;
+    github_images_app = a;
+    defer github_images_app = old;
+    providerMarkdown(c, colors, src, a);
+}
+
 /// Draws the Markdown `src`.
 pub fn markdown(c: *ui.Context, colors: theme.Colors, src: []const u8) void {
     k = colors;
@@ -155,9 +165,9 @@ pub fn markdown(c: *ui.Context, colors: theme.Colors, src: []const u8) void {
 }
 
 fn rich(c: *ui.Context, in: md.Inline, style: ui.TextStyle) void {
-    if (provider_mode and (in.images.len > 0 or in.links.len > 0)) {
+    if (provider_mode and (in.links.len > 0 or (in.images.len > 0 and github_images_app == null))) {
         var prose = in;
-        prose.images = &.{};
+        if (github_images_app == null) prose.images = &.{};
         prose.links = &.{};
         return rich(c, prose, style);
     }
@@ -171,7 +181,9 @@ fn rich(c: *ui.Context, in: md.Inline, style: ui.TextStyle) void {
         for (in.images, 0..) |image, i| {
             ui.key(c, c.print("md-picture-{d}", .{i}));
             const alt = in.text[image.start..image.end];
-            if (link_owner) |owner| {
+            if (github_images_app) |app| {
+                @import("github_images.zig").draw(c, app, k, image.src, alt, image.width);
+            } else if (link_owner) |owner| {
                 @import("view_reply_images.zig").draw(c, owner.app, k, owner.parent, image.src, alt, image.width);
             } else {
                 ui.text(c, c.print("Image unavailable{s}{s}", .{ if (alt.len > 0) ": " else "", alt }), .{ .size = 12, .color = k.muted, .wrap = true });

@@ -22,6 +22,9 @@ test {
     _ = @import("tests_github_repository.zig");
     _ = @import("tests_github_links.zig");
     _ = @import("tests_remote_markdown.zig");
+    _ = @import("github_image_url.zig");
+    _ = @import("github_image_transport.zig");
+    _ = @import("github_images.zig");
     _ = @import("tests_scroll_performance.zig");
     _ = @import("tests_scroll_bounce.zig");
     _ = @import("tests_sidebar_performance.zig");
