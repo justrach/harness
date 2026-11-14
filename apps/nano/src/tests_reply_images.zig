@@ -43,9 +43,11 @@ fn reset(a: *App, markdown: bool) !void {
 }
 
 fn view(a: *App, c: *ui.Context) void {
+    _ = @import("view_image_preview.zig").keys(c, a);
     const root = ui.div(c).column().wFull().hFull();
     defer root.end();
     _ = @import("view_transcript.zig").entries(c, a, @import("theme.zig").colors(true), &a.transcript, 620, false, 0);
+    @import("view_image_preview.zig").draw(c, a, @import("theme.zig").colors(true), .{ .x = 0, .y = 0, .w = c.size.w, .h = c.size.h });
 }
 
 fn initTester(a: *App, tester: *ui.Tester) !void {
@@ -229,4 +231,120 @@ test "reply images unavailable engine resources and remote URLs show explicit fa
     try t.expect(!tester.hasText("Loading image…"));
     try t.expectEqual(@as(usize, 1), a.attachments.images.items.items.len);
     try expectOwner(&a);
+}
+
+fn clickPicture(tester: *ui.Tester) !void {
+    for (tester.ctx.nodes.items) |n| switch (n.content) {
+        .image => {
+            if (n.rect.w < 100 or n.rect.h < 100) continue;
+            tester.click(n.rect.x + n.rect.w / 2, n.rect.y + n.rect.h / 2);
+            tester.settle(3);
+            return;
+        },
+        else => {},
+    };
+    return error.MissingPicture;
+}
+
+test "reply images actual native and Markdown pictures open an inspection preview" {
+    for ([_]bool{ false, true }) |markdown| {
+        var a: App = undefined;
+        try setup(&a, false);
+        defer a.deinit();
+        try reset(&a, markdown);
+        var tester: ui.Tester = undefined;
+        try initTester(&a, &tester);
+        defer tester.deinit();
+        _ = a.engine.pump();
+        tester.settle(3);
+        const requests = a.engine.sent.items.len;
+        try clickPicture(&tester);
+        try t.expect(tester.hasText("Image preview"));
+        try t.expectEqualStrings("reply-owner", a.attachments.images.preview_chat.?);
+        try tester.clickText("Zoom in");
+        tester.settle(3);
+        try t.expect(a.attachments.images.zoom > 1);
+        try tester.clickText("Fit");
+        tester.settle(3);
+        try t.expectEqual(@as(f32, 1), a.attachments.images.zoom);
+        // Background inspectors do not capture another pane's keyboard.
+        a.view.strip.focused = .host;
+        tester.settle(3);
+        try t.expect(!tester.hasText("Image preview"));
+        _ = tester.shortcut(.{ .key = ui.Shortcut.escape });
+        try t.expect(a.attachments.images.preview != null);
+        a.view.strip.focused = .{ .chat = 0 };
+        tester.settle(3);
+        try t.expect(tester.hasText("Image preview"));
+        _ = tester.shortcut(.{ .key = ui.Shortcut.escape });
+        tester.settle(3);
+        try t.expect(a.attachments.images.preview == null);
+        try t.expect(!tester.hasText("Image preview"));
+        try t.expectEqual(requests, a.engine.sent.items.len);
+    }
+}
+
+test "reply images production pane opens and closes assistant and sent pictures" {
+    for (0..3) |kind| {
+        var a: App = undefined;
+        try setup(&a, false);
+        defer a.deinit();
+        a.openChat("reply-owner", null);
+        a.view.sidebar_open = false;
+        if (kind < 2) {
+            try reset(&a, kind == 1);
+        } else {
+            const sent = try std.json.parseFromSlice(std.json.Value, a.gpa,
+                \\{"reset":[{"id":"sent","role":"user","parts":[{"kind":"text","text":"Synthetic picture\n\nAttached images (local files — open them to view):\n- /synthetic/workspace/picture.png"}]}]}
+            , .{});
+            defer sent.deinit();
+            try a.transcript.apply(sent.value);
+        }
+        @import("theme.zig").registerFonts();
+        var tester: ui.Tester = undefined;
+        try tester.init(a.gpa, .init(&a, @import("view.zig").view), .{ .width = 1000, .height = 700, .dark = true });
+        defer tester.deinit();
+        tester.ctx.reduced_motion = true;
+        tester.settle(3);
+        _ = a.engine.pump();
+        tester.settle(3);
+        const picture = for (tester.ctx.nodes.items) |n| {
+            if (n.content == .image and n.rect.w >= 50 and n.rect.h >= 20) break n.rect;
+        } else return error.MissingPicture;
+        tester.click(picture.x + picture.w / 2, picture.y + picture.h / 2);
+        tester.settle(3);
+        try t.expect(tester.hasText("Image preview"));
+        if (kind == 0) if (std.c.getenv("NANO_SNAP_DIR")) |dir| {
+            var buffer: [1024]u8 = undefined;
+            try tester.screenshot(try std.fmt.bufPrint(&buffer, "{s}/chat-image-preview.png", .{std.mem.span(dir)}));
+        };
+        try tester.clickText("Close preview");
+        tester.settle(3);
+        try t.expect(!tester.hasText("Image preview"));
+        try t.expect(a.attachments.images.preview == null);
+    }
+}
+
+test "reply images open preview pins cached bytes until explicitly closed" {
+    var a: App = undefined;
+    try setup(&a, false);
+    defer a.deinit();
+    const owner = images.get(&a, "reply-owner", path).?;
+    _ = a.engine.pump();
+    @import("view_image_preview.zig").open(&a, "reply-owner", owner);
+    for (0..66) |i| {
+        const other = try std.fmt.allocPrint(a.gpa, "/synthetic/workspace/extra-{d}.png", .{i});
+        defer a.gpa.free(other);
+        _ = images.getDevice(&a, "remote-synthetic", other);
+    }
+    images.reap(&a);
+    images.reap(&a);
+    try t.expect(a.attachments.images.preview == owner);
+    try t.expectEqualSlices(u8, bytes, owner.bytes.items);
+    @import("view_image_preview.zig").close(&a);
+    // Drop another old entry to prove the budget resumes normal eviction.
+    const extra = images.getDevice(&a, "remote-synthetic", "/synthetic/workspace/overflow.png").?;
+    images.reap(&a);
+    try t.expect(a.attachments.images.items.items[0] != owner);
+    try t.expect(a.attachments.images.items.items[a.attachments.images.items.items.len - 1] == extra);
 }

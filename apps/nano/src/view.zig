@@ -144,7 +144,7 @@ pub fn view(a: *App, c: *ui.Context) void {
     }
     strip.settle(a);
     @import("view_attachment_drop.zig").prepare(a);
-    if (!@import("github_images.zig").keys(c, a)) keys(c, a);
+    if (!@import("view_image_preview.zig").keys(c, a) and !@import("github_images.zig").keys(c, a)) keys(c, a);
     c.setZoom(a.settings.uiFontSize() / 16.0);
     if (!a.offscreen and c.time < a.view.resize_until) c.frameIn(1.0 / 120.0);
     a.syncPeers();
@@ -365,6 +365,8 @@ fn focused(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (a.view.write_open) return @import("view_write.zig").page(c, a, k, transcript_view.paneWidth(c, a));
     // The catch-up, a bot's details or the new-bot form take it the same way.
     if (a.bots.page != .none) return @import("view_bots_page.zig").page(c, a, k, transcript_view.paneWidth(c, a));
+    const parent = c.stack.items[c.stack.items.len - 1];
+    defer @import("view_image_preview.zig").draw(c, a, k, c.rects.get(c.node(parent).id));
     if (a.selected == null) {
         @import("view_newchat.zig").canvas(c, a, k);
     } else {
