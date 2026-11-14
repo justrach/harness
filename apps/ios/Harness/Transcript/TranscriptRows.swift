@@ -37,6 +37,9 @@ struct TranscriptRow: Identifiable {
     /// "{entryId}#{partId}" for markdown rows, nil otherwise — two adjacent
     /// rows sharing it are blocks of the same part (the tighter gap).
     var partKey: String?
+    /// Whole authored message, attached only to the timestamp-bearing row.
+    /// Never a rendered block, tool trace, or transport-only attachment trailer.
+    var copyText: String? = nil
     /// Leading gap, resolved at build time. It depends on the PREVIOUS row, so
     /// deriving it in the view body forced an `enumerated()` copy of the whole
     /// row array on every frame; now the body just reads it.
@@ -157,7 +160,6 @@ enum TranscriptRowBuilder {
                                      completed: inout [String: CompletedParse],
                                      live: inout Set<String>) {
         let streaming = entry.status == .streaming
-        let settled = entry.status != nil && !streaming
 
         if entry.role == .user {
             // One bubble row per user message.
@@ -166,10 +168,10 @@ enum TranscriptRowBuilder {
                 return nil
             }.joined(separator: "\n")
             guard !text.isEmpty else { return }
-            rows.append(TranscriptRow(id: entry.id, version: fnv1a(text),
+            rows.append(TranscriptRow(id: entry.id, version: fnv1a("\(entry.createdAt)\0\(text)"),
                                       turnStart: true, kind: .user(text: text),
                                       entryId: entry.id, timestamp: entry.createdAt,
-                                      partKey: nil))
+                                      partKey: nil, copyText: copyText(for: entry)))
             return
         }
 
@@ -216,42 +218,36 @@ enum TranscriptRowBuilder {
                 let blocks = parse(text: text, key: key, streaming: isLiveTail,
                                    parsers: &parsers, completed: &completed)
                 for (blockIx, top) in blocks.enumerated() {
-                    var version = (top.fingerprint << 1) | (isLiveTail && blockIx == blocks.count - 1 ? 1 : 0)
-                    if settled, ix == lastPartIx, blockIx == blocks.count - 1 {
-                        version ^= 1 << 62  // timestamp attach keeps the diff key honest
-                    }
+                    let version = (top.fingerprint << 1) | (isLiveTail && blockIx == blocks.count - 1 ? 1 : 0)
                     rows.append(TranscriptRow(
                         id: "\(key).\(blockIx)", version: version, turnStart: first,
                         kind: .markdown(block: top.block,
                                         streaming: isLiveTail && blockIx == blocks.count - 1),
                         entryId: entry.id,
-                        timestamp: settled && ix == lastPartIx && blockIx == blocks.count - 1
-                            ? entry.createdAt : nil,
+                        timestamp: nil,
                         partKey: key))
                     first = false
                 }
 
             case .image(let partId, let reference):
                 flushTools(lastIx: ix - 1)
-                var version = fnv1a("\(entry.deviceId)\0\(reference.path)\0\(reference.name)\0\(reference.mimeType)")
-                if settled, ix == lastPartIx { version ^= 1 << 62 }
+                let version = fnv1a("\(entry.deviceId)\0\(reference.path)\0\(reference.name)\0\(reference.mimeType)")
                 rows.append(TranscriptRow(id: "\(entry.id)#\(partId)", version: version,
                                           turnStart: first,
                                           kind: .generatedImage(owner: entry.deviceId, reference: reference),
                                           entryId: entry.id,
-                                          timestamp: settled && ix == lastPartIx ? entry.createdAt : nil,
+                                          timestamp: nil,
                                           partKey: nil))
                 first = false
 
             case .visual(let partId, let title, let script):
                 flushTools(lastIx: ix - 1)
-                var version = fnv1a("\(title)\0\(script)")
-                if settled, ix == lastPartIx { version ^= 1 << 62 }
+                let version = fnv1a("\(title)\0\(script)")
                 rows.append(TranscriptRow(id: "\(entry.id)#\(partId)", version: version,
                                           turnStart: first,
                                           kind: .visual(title: title, script: script),
                                           entryId: entry.id,
-                                          timestamp: settled && ix == lastPartIx ? entry.createdAt : nil,
+                                          timestamp: nil,
                                           partKey: nil))
                 first = false
 
@@ -276,6 +272,33 @@ enum TranscriptRowBuilder {
             }
         }
         flushTools(lastIx: lastPartIx)
+        // Match desktop: one footer on the last visible row, regardless of
+        // its kind or an empty trailing part. Do not add one while streaming.
+        if !streaming, let last = rows.indices.last {
+            let text = copyText(for: entry)
+            rows[last].timestamp = entry.createdAt
+            rows[last].copyText = text
+            // Earlier text parts and timestamp corrections can change the
+            // footer without changing the final block/chip itself.
+            rows[last].version ^= fnv1a("\(entry.createdAt)\0\(text ?? "")") ^ (1 << 62)
+        }
+    }
+
+    /// Preserve authored Markdown, indentation and hard-break whitespace.
+    /// Structured tools, thinking, images and input/error chips are not text.
+    static func copyText(for entry: MessageEntry) -> String? {
+        let parts = entry.parts.compactMap { part -> String? in
+            if case .text(_, let text) = part { return text }
+            return nil
+        }
+        let text: String
+        if entry.role == .user {
+            text = parseUserMessageImages(parts.joined(separator: "\n")).text
+        } else {
+            text = parts.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                .joined(separator: "\n\n")
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : text
     }
 
     private static func parse(text: String, key: String, streaming: Bool,
