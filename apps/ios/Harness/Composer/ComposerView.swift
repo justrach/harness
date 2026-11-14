@@ -40,11 +40,19 @@ struct ComposerShell<Chips: View>: View {
     /// Staged image attachments (attachment-ui.tsx AttachmentStrip inside the
     /// pill). Non-empty forces the expanded layout, like focus.
     var attachments: [StagedAttachment] = []
+    /// Staged non-image file attachments rendered as chips inside the pill.
+    var fileAttachments: [StagedFileAttachment] = []
     /// Present the photo picker; nil hides the attach button.
     var onAttach: (() -> Void)? = nil
+    /// Optional rich attach menu replacing the plain `+` photo button.
+    var attachMenuView: AnyView? = nil
+    /// Optional external editor controller so callers can inspect/update cursor
+    /// position (e.g. `@file` mention replacement).
+    var externalEditor: ComposerEditorController? = nil
     /// Images pasted into the box; nil pastes text only.
     var onPasteImages: (([Data]) -> Void)? = nil
     var onRemoveAttachment: (String) -> Void = { _ in }
+    var onRemoveFileAttachment: (String) -> Void = { _ in }
     var attachmentDraft: AttachmentDraft? = nil
     /// Screenshot rig (-focuscomposer): take keyboard focus shortly after
     /// appearing, so the keyboard-up transcript states can be driven headless.
@@ -64,12 +72,13 @@ struct ComposerShell<Chips: View>: View {
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     private var compact: Bool { verticalSizeClass == .compact }
     @State private var focused = false
-    @State private var editor = ComposerEditorController()
+    @State private var fallbackEditor = ComposerEditorController()
+    private var editor: ComposerEditorController { externalEditor ?? fallbackEditor }
     /// Above the fold in laptop pose: where this composer reports its keyboard focus (HomeView).
     @Environment(\.foldComposerFocus) private var foldComposerFocus
 
     private var expanded: Bool {
-        alwaysExpanded || keepExpanded || focused || !attachments.isEmpty
+        alwaysExpanded || keepExpanded || focused || !attachments.isEmpty || !fileAttachments.isEmpty
             || draft.contains("\n") || draft.count > 26
     }
 
@@ -126,18 +135,36 @@ struct ComposerShell<Chips: View>: View {
     private var surface: some View {
         VStack(alignment: .leading, spacing: 6) {
             // The one-line composer (iPhone Duo) has no room beside the text, so
-            // staged images sit above the line, still inside the glass.
-            if singleLine, !attachments.isEmpty {
-                AttachmentStripView(attachments: attachments, remove: onRemoveAttachment)
-                    .padding([.horizontal, .top], 7)
+            // staged attachments sit above the line, still inside the glass.
+            if singleLine, !attachments.isEmpty || !fileAttachments.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    if !attachments.isEmpty {
+                        AttachmentStripView(attachments: attachments, remove: onRemoveAttachment)
+                    }
+                    if !fileAttachments.isEmpty {
+                        FileAttachmentStripView(files: fileAttachments, remove: onRemoveFileAttachment)
+                    }
+                }
+                .padding([.horizontal, .top], 7)
             }
             shellLayout {
-                if expanded, !attachments.isEmpty, !singleLine {
-                    AttachmentStripView(attachments: attachments, remove: onRemoveAttachment)
-                        .padding(.bottom, 10)
+                if expanded, !singleLine, !attachments.isEmpty || !fileAttachments.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        if !attachments.isEmpty {
+                            AttachmentStripView(attachments: attachments, remove: onRemoveAttachment)
+                        }
+                        if !fileAttachments.isEmpty {
+                            FileAttachmentStripView(files: fileAttachments, remove: onRemoveFileAttachment)
+                        }
+                    }
+                    .padding(.bottom, 10)
                 }
-                if singleLine, expanded, onAttach != nil {
-                    attachButton
+                if singleLine, expanded {
+                    if let attachMenuView {
+                        attachMenuView
+                    } else if onAttach != nil {
+                        attachButton
+                    }
                 }
                 input
                     .padding(.leading, expanded && !singleLine ? 4 : (singleLine && expanded ? 0 : 13))
@@ -157,7 +184,9 @@ struct ComposerShell<Chips: View>: View {
                     actionButton
                 } else if expanded {
                     HStack(spacing: 8) {
-                        if onAttach != nil {
+                        if let attachMenuView {
+                            attachMenuView
+                        } else if onAttach != nil {
                             attachButton
                         }
                         // Chips scroll; the send button stays pinned.
@@ -271,10 +300,10 @@ struct ComposerShell<Chips: View>: View {
         .accessibilityLabel("Attach photos")
     }
 
-    /// Attachments count as content: an image-only send is a send, never a stop.
+    /// Attachments count as content: an image- or file-only send is a send, never a stop.
     private var hasContent: Bool {
         allowEmptySend || !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || !attachments.isEmpty
+            || !attachments.isEmpty || !fileAttachments.isEmpty
     }
 
     private var actionButton: some View {
@@ -372,6 +401,11 @@ struct ComposerView: View {
     }
     @State private var pickerItems: [PhotosPickerItem] = []
     @State private var showPicker = false
+    @State private var showCamera = false
+    @State private var showDocumentPicker = false
+    @State private var fileAttachments: [StagedFileAttachment] = []
+    @State private var editor = ComposerEditorController()
+    @State private var mentionIndex = MentionIndex()
     @State private var uploading = false
     @State private var uploadProgress: Double?
     @State private var uploadError: String?
@@ -575,6 +609,16 @@ struct ComposerView: View {
                 .disabled(queueEditBusy)
                 .accessibilityHint(queueEdit?.terminal == true ? "Copies the edit and restores your previous draft" : "")
             }
+            if let active = activeMention {
+                MentionSuggestionsBar(
+                    query: active.query,
+                    deviceId: chat.deviceId,
+                    chatId: chat.id,
+                    spaceId: chat.spaceId,
+                    onCandidatesLoaded: { mentionIndex.observe($0) },
+                    onSelect: { applyMention($0, replacing: active.range) }
+                )
+            }
             ComposerShell(
                 draft: $text,
                 placeholder: editingQueuedId == nil ? "Message" : "Edit queued message",
@@ -585,16 +629,26 @@ struct ComposerView: View {
                 // A Duo stops from the status pill above the composer, never next to Send.
                 showStop: runLive && !duoChat,
                 busy: uploading || queueEditBusy || attachmentDraft.loading,
-                keepExpanded: showModelPicker || showTraitPicker || showOptionPicker != nil || showWrite || showVoiceMode,
+                keepExpanded: showModelPicker || showTraitPicker || showOptionPicker != nil
+                    || showWrite || showCamera || showDocumentPicker || showVoiceMode,
                 onSend: send,
                 onStop: { store.sendInterrupt() },
                 onAdvanceQueue: advanceQueue,
                 questionClosedAtMs: questionClosedAtMs,
                 // While a queued row is retyped, these are images to add to it.
                 attachments: attachments,
+                fileAttachments: editingQueuedId == nil ? fileAttachments : [],
                 onAttach: { showPicker = true },
+                attachMenuView: editingQueuedId == nil ? AnyView(
+                    ComposerAttachMenu(
+                        singleLine: duoChat,
+                        enabled: !(uploading || queueEditBusy || attachmentDraft.loading)
+                    ) { handleAttachSource($0) }
+                ) : nil,
+                externalEditor: editor,
                 onPasteImages: { stagePasted($0) },
                 onRemoveAttachment: { id in attachments.removeAll { $0.id == id } },
+                onRemoveFileAttachment: { id in fileAttachments.removeAll { $0.id == id } },
                 attachmentDraft: attachmentDraft,
                 autoFocus: model.launchFocusComposer,
                 singleLine: duoChat,
@@ -631,6 +685,17 @@ struct ComposerView: View {
         .onChange(of: pickerItems) { _, items in
             guard !items.isEmpty else { return }
             stage(items)
+        }
+        .sheet(isPresented: $showCamera) {
+            CameraCapture { data in
+                if let data { stagePasted([data]) }
+            }
+            .ignoresSafeArea()
+        }
+        .sheet(isPresented: $showDocumentPicker) {
+            DocumentFilePicker { urls in
+                stagePickedURLs(urls)
+            }
         }
         .sheet(item: $attachmentEdit, onDismiss: releaseAttachmentLease) { edit in
             QueuedImageEditor(draft: edit.draft, deviceId: queueImageDeviceId) { draft in
@@ -832,6 +897,61 @@ struct ComposerView: View {
         attachments.append(contentsOf: staged)
         AttachSound.play(added: staged.count)
         uploadError = StagedAttachment.failureMessage(failed)
+    }
+
+    private var activeMention: (range: NSRange, query: String)? {
+        guard editingQueuedId == nil else { return nil }
+        let cursor = editor.view?.selectedRange.location ?? text.utf16.count
+        return MentionIndex.activeQuery(in: text, cursor: cursor)
+    }
+
+    private func applyMention(_ file: WorkspaceFileCandidate, replacing range: NSRange) {
+        let token = mentionIndex.token(for: file)
+        let ns = text as NSString
+        guard range.location + range.length <= ns.length else { return }
+        let replacement = "\(token) "
+        let updated = ns.replacingCharacters(in: range, with: replacement)
+        let newCursor = range.location + (replacement as NSString).length
+        text = updated
+        editor.apply(text: updated)
+        editor.view?.selectedRange = NSRange(location: newCursor, length: 0)
+    }
+
+    private func handleAttachSource(_ source: ComposerAttachSource) {
+        switch source {
+        case .photoLibrary:
+            showPicker = true
+        case .camera:
+            if CameraCapture.isAvailable { showCamera = true }
+        case .file:
+            showDocumentPicker = true
+        case .pasteImage:
+            let images = ComposerTextView.imageData(from: UIPasteboard.general)
+            if !images.isEmpty {
+                stagePasted(images)
+            }
+        }
+    }
+
+    private func stagePickedURLs(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        uploadError = nil
+        let classified = PickedAttachmentClassifier.classify(urls: urls)
+        var addedCount = 0
+        if !classified.images.isEmpty, attachmentDraft.canImport {
+            attachments.append(contentsOf: classified.images)
+            addedCount += classified.images.count
+        }
+        if !classified.files.isEmpty {
+            fileAttachments.append(contentsOf: classified.files)
+            addedCount += classified.files.count
+        }
+        if addedCount > 0 {
+            AttachSound.play(added: addedCount)
+        }
+        if classified.failedCount > 0 {
+            uploadError = StagedAttachment.failureMessage(classified.failedCount)
+        }
     }
 
     /// Retype a queued message in the composer. Whatever was already in the box
@@ -1065,20 +1185,24 @@ struct ComposerView: View {
             return
         }
         let submittedText = text
-        let prompt = submittedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawPrompt = submittedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prompt = mentionIndex.encode(rawPrompt)
         let staged = attachments
+        let stagedFiles = fileAttachments
         guard !runLive || model.hostSupportsMessageQueue(chat, attachments: !staged.isEmpty) else {
             uploadError = "Update the chat's engine to queue messages during a response."
             return
         }
-        guard !prompt.isEmpty || !staged.isEmpty else { return }
+        guard !prompt.isEmpty || !staged.isEmpty || !stagedFiles.isEmpty else { return }
 
-        if staged.isEmpty {
+        if staged.isEmpty && stagedFiles.isEmpty {
             Perf.measure(PerfSpan.sendApply) { deliver(content: prompt, paths: []) }
+            mentionIndex.clear()
             clearDraft(matching: submittedText)
             return
         }
-        if model.hostSupportsQueuedAttachments(chat)
+        if stagedFiles.isEmpty
+            && model.hostSupportsQueuedAttachments(chat)
             && !(runLive && model.hostSupportsMessageQueue(chat, attachments: true)) {
             // Queued flow (host ≥ 0.2.12): the send is a durable local write
             // NOW — pending:// refs in the doc, bytes escorted afterwards
@@ -1099,13 +1223,12 @@ struct ComposerView: View {
             store.sendWithTransfers(prompt: prompt, chat: chat, live: runLive,
                                     transfers: transfers)
             attachments = []
+            mentionIndex.clear()
             clearDraft(matching: submittedText)
             return
         }
-        // Legacy host-staged flow (host < 0.2.12): upload first, send after —
-        // the refs trailer needs the committed paths. Bounded by the
-        // whole-attachment deadline; progress narrates instead of a bare
-        // spinner (a lawful crawl must never read as a hang).
+        // Upload non-image files (and/or legacy images) to the host via chunked
+        // upload first, then compose the file + image trailers.
         uploading = true
         uploadError = nil
         uploadProgress = 0
@@ -1116,20 +1239,55 @@ struct ComposerView: View {
                 uploadProgress = nil
             }
             do {
-                var paths: [String] = []
-                let total = staged.count
-                for (ix, att) in staged.enumerated() {
-                    let path = try await store.uploadAttachment(name: att.name, data: att.data) { fraction in
-                        progressBinding.wrappedValue = (Double(ix) + fraction) / Double(total)
+                let total = stagedFiles.count + staged.count
+                var completed = 0
+                var filePaths: [String] = []
+                for file in stagedFiles {
+                    let path: String
+                    if model.demo != nil {
+                        path = "/demo/files/\(file.name)"
+                    } else {
+                        let baseIndex = completed
+                        path = try await store.uploadAttachment(name: file.name, data: file.data) { fraction in
+                            progressBinding.wrappedValue = (Double(baseIndex) + fraction) / Double(max(total, 1))
+                        }
+                    }
+                    filePaths.append(path)
+                    completed += 1
+                    progressBinding.wrappedValue = Double(completed) / Double(max(total, 1))
+                }
+
+                var imagePaths: [String] = []
+                for att in staged {
+                    let path: String
+                    if model.demo != nil {
+                        path = "/demo/images/\(att.name)"
+                    } else {
+                        let baseIndex = completed
+                        path = try await store.uploadAttachment(name: att.name, data: att.data) { fraction in
+                            progressBinding.wrappedValue = (Double(baseIndex) + fraction) / Double(max(total, 1))
+                        }
                     }
                     // Seed the cache so our own bubble renders from local
                     // bytes instead of a round-trip.
                     AttachmentImageCache.shared.seed(deviceId: chat.deviceId, path: path,
                                                      name: att.name, data: att.data)
-                    paths.append(path)
+                    imagePaths.append(path)
+                    completed += 1
+                    progressBinding.wrappedValue = Double(completed) / Double(max(total, 1))
                 }
-                deliver(content: withAttachments(text: prompt, paths: paths), paths: paths)
+
+                var content = prompt
+                if !filePaths.isEmpty {
+                    content = withFileAttachments(text: content, paths: filePaths)
+                }
+                if !imagePaths.isEmpty {
+                    content = withAttachments(text: content, paths: imagePaths)
+                }
+                deliver(content: content, paths: imagePaths)
                 attachments = []
+                fileAttachments = []
+                mentionIndex.clear()
                 clearDraft(matching: submittedText)
             } catch {
                 uploadError = "Attachment upload failed — \(error.localizedDescription)"
@@ -1196,15 +1354,19 @@ struct ComposerView: View {
 
 struct QuestionPanel: View {
     @AppStorage(DuoChat.foldableKey) private var duoChat = false
+    @Environment(AppModel.self) private var model: AppModel?
     let requestId: String
     let questions: [UserInputQuestion]
     let respond: (String, [UserInputAnswer]) -> Void
+    var onDismiss: (() -> Void)? = nil
 
     @State private var page = 0
     @State private var picked: [String: Set<String>] = [:]  // questionId → labels
     @State private var typed: [String: String] = [:]
     @State private var autoAdvanceTask: Task<Void, Never>?
     @State private var promptHeight: CGFloat = 0
+    @State private var dismissed = false
+    @State private var submittedSummary: [(header: String, labels: [String])]?
     @FocusState private var typing: Bool
     @Environment(\.verticalSizeClass) private var verticalSizeClass
 
@@ -1219,13 +1381,97 @@ struct QuestionPanel: View {
         // so this crashed the app on any session holding one.
         if questions.isEmpty {
             EmptyView()
+        } else if let submittedSummary {
+            answeredSummaryCard(submittedSummary)
+        } else if dismissed {
+            dismissedCard
         } else {
             panel(for: questions[min(max(page, 0), questions.count - 1)])
         }
     }
 
+    private func answeredSummaryCard(_ summary: [(header: String, labels: [String])]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Theme.accent)
+                Text("Answered")
+                    .font(Theme.sans(13, weight: .semibold))
+                    .foregroundStyle(Theme.text)
+                Spacer()
+            }
+            ForEach(Array(summary.enumerated()), id: \.offset) { _, item in
+                HStack(alignment: .top, spacing: 6) {
+                    Text(item.header)
+                        .font(Theme.sans(11.5, weight: .medium))
+                        .foregroundStyle(Theme.textMuted)
+                    Text(item.labels.joined(separator: ", "))
+                        .font(Theme.sans(12))
+                        .foregroundStyle(Theme.text)
+                        .lineLimit(2)
+                }
+            }
+        }
+        .padding(14)
+        .modifier(SolidOrGlass(solid: duoChat, shape: RoundedRectangle(cornerRadius: 22)))
+        .overlay(RoundedRectangle(cornerRadius: 22).strokeBorder(hairline(0.05), lineWidth: 1))
+        .padding(.horizontal, 12)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("question-answered-summary")
+        .transition(.opacity)
+    }
+
+    private var dismissedCard: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "xmark.circle")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Theme.textMuted)
+            Text("Question dismissed")
+                .font(Theme.sans(12.5, weight: .medium))
+                .foregroundStyle(Theme.textMuted)
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .modifier(SolidOrGlass(solid: duoChat, shape: RoundedRectangle(cornerRadius: 22)))
+        .overlay(RoundedRectangle(cornerRadius: 22).strokeBorder(hairline(0.05), lineWidth: 1))
+        .padding(.horizontal, 12)
+        .accessibilityIdentifier("question-dismissed-summary")
+        .transition(.opacity)
+    }
+
     private func panel(for question: UserInputQuestion) -> some View {
         VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Text(question.header.uppercased())
+                    .font(Theme.sans(10.5, weight: .medium))
+                    .kerning(1)
+                    .foregroundStyle(Theme.textMuted.opacity(0.6))
+                Spacer()
+                if questions.count > 1 {
+                    Text("\(page + 1)/\(questions.count)")
+                        .font(Theme.sans(10))
+                        .foregroundStyle(Theme.textMuted)
+                        .padding(.horizontal, 6)
+                        .frame(height: 20)
+                        .background(ink(0.06), in: RoundedRectangle(cornerRadius: 6))
+                }
+                Button {
+                    dismissQuestion()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Theme.textMuted)
+                        .frame(width: 26, height: 26)
+                        .background(ink(0.06), in: Circle())
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Dismiss question")
+                .accessibilityIdentifier("question-dismiss")
+            }
+
             ScrollView {
                 prompt(for: question)
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { promptHeight = $0 }
@@ -1276,25 +1522,9 @@ struct QuestionPanel: View {
         .transition(.opacity)
     }
 
-    /// Header, question and options: the part that scrolls.
+    /// Question text and options: the part that scrolls.
     private func prompt(for question: UserInputQuestion) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text(question.header.uppercased())
-                    .font(Theme.sans(10.5, weight: .medium))
-                    .kerning(1)
-                    .foregroundStyle(Theme.textMuted.opacity(0.6))
-                Spacer()
-                if questions.count > 1 {
-                    Text("\(page + 1)/\(questions.count)")
-                        .font(Theme.sans(10))
-                        .foregroundStyle(Theme.textMuted)
-                        .padding(.horizontal, 6)
-                        .frame(height: 20)
-                        .background(ink(0.06), in: RoundedRectangle(cornerRadius: 6))
-                }
-            }
-
             Text(question.question)
                 .font(Theme.sans(15, weight: .medium))
                 .foregroundStyle(Theme.text)
@@ -1369,6 +1599,17 @@ struct QuestionPanel: View {
         !(typed[question.id] ?? "").isEmpty || !picked[question.id, default: []].isEmpty
     }
 
+    private func dismissQuestion() {
+        autoAdvanceTask?.cancel()
+        typing = false
+        dismissed = true
+        if let onDismiss {
+            onDismiss()
+        } else {
+            model?.dismissInput(requestId: requestId)
+        }
+    }
+
     private func advance() {
         let question = questions[min(page, questions.count - 1)]
         guard canAdvance(question) else { return }
@@ -1382,6 +1623,9 @@ struct QuestionPanel: View {
                 return UserInputAnswer(questionId: q.id, labels: [typedAnswer])
             }
             return UserInputAnswer(questionId: q.id, labels: Array(picked[q.id, default: []]))
+        }
+        submittedSummary = zip(questions, answers).map { q, ans in
+            (header: q.header.isEmpty ? q.question : q.header, labels: ans.labels)
         }
         typing = false
         respond(requestId, answers)

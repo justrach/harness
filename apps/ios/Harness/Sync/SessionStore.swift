@@ -846,7 +846,7 @@ final class SessionStore {
                           resolved: m["resolved"]?.boolValue ?? false)
         case "error":
             return .error(id: id, message: m["message"]?.stringValue ?? "",
-                          reauth: m["reauth"]?.stringValue.flatMap(AgentReauthProvider.init(rawValue:)))
+                          reauth: AgentReauthProvider.syncedWireValue(m["reauth"]?.stringValue))
         default:
             return nil
         }

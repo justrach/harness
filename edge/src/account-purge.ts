@@ -27,7 +27,7 @@ import { personalOrgId } from "./auth";
 import { deleteCrashReports } from "./crash-reports";
 import { AUTH_USER_HEADER, ROOM_KIND_HEADER, type Env } from "./env";
 import { PURGE_PATH } from "./purge";
-import { AUTH_ORG_HEADER, roomStore } from "./room-actor";
+import { AUTH_ORG_HEADER, roomActorStub, roomStore, userRoomIds } from "./room-actor";
 
 /** The second pass waits out the longest-lived access token, plus slack. */
 export const SECOND_PASS_MS = 65 * 60 * 1000;
@@ -233,9 +233,8 @@ export class AccountPurge implements DurableObject {
       case "rooms": {
         const store = roomStore(this.env);
         if (!store) return true;
-        const [rooms, invites] = await Promise.all([store.listRooms(job.userId), store.invites(job.userId)]);
-        const ids = new Set([...rooms.map((r) => r.id), ...invites.map((i) => i.roomId)]);
-        await this.enqueue([...ids].map((id): Target => ({ t: "room", id })), true);
+        const ids = await userRoomIds(store, job.userId);
+        await this.enqueue(ids.map((id): Target => ({ t: "room", id })), true);
         return true;
       }
       case "crashes":
@@ -247,7 +246,7 @@ export class AccountPurge implements DurableObject {
         return true;
       }
       case "room": {
-        const stub = this.env.ROOM_ACTORS.get(this.env.ROOM_ACTORS.idFromName(`room1/${target.id}`));
+        const stub = roomActorStub(this.env.ROOM_ACTORS, target.id);
         const res = await stub.fetch(`https://room/forget?room=${encodeURIComponent(target.id)}`, {
           method: "POST",
           headers: { [AUTH_USER_HEADER]: job.userId, [AUTH_ORG_HEADER]: job.orgs[0] }

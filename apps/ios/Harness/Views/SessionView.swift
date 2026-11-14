@@ -19,6 +19,8 @@ struct SessionView: View {
     @Environment(\.duoFlat) private var duoFlat
     /// Flat Duo: bring the session list in beside this session, or put it away (HomeView).
     @Environment(\.toggleFlatList) private var toggleFlatList
+    @Environment(\.toggleCoverSessions) private var toggleCoverSessions
+    @Environment(\.coverSessionsShown) private var coverSessionsShown
     /// Beside the list: the session's page is lifted (ContentPlane).
     @Environment(\.liftedPlane) private var liftedPlane
     /// Flat Duo: the chat column's width, for the rounded seam at the fold.
@@ -64,6 +66,9 @@ struct SessionView: View {
     @State private var renamingSession = false
     @State private var renameChatId: String?
     @State private var renameTitle = ""
+    @State private var showingCheckoutChanges = false
+    @State private var companionsSection: CompanionSection?
+    @State private var activeSideChatId: String?
 
 
     /// On a Max (split screen available) every session draws its own compact header strip and the navigation
@@ -167,6 +172,25 @@ struct SessionView: View {
                 }
                 .buttonStyle(.plain)
                 .contextMenu {
+                    Button {
+                        showingCheckoutChanges = true
+                    } label: {
+                        Label("Checkout Changes", systemImage: "arrow.left.arrow.right")
+                    }
+                    .accessibilityIdentifier("menu-checkout-changes")
+                    Button {
+                        companionsSection = .terminals
+                    } label: {
+                        Label("Host Terminal", systemImage: "terminal")
+                    }
+                    .accessibilityIdentifier("menu-host-terminal")
+                    Button {
+                        companionsSection = .subagents
+                    } label: {
+                        Label("Subagents & Side Chats", systemImage: "person.2")
+                    }
+                    .accessibilityIdentifier("menu-companions")
+                    Divider()
                     HomeExperienceMenuContent(uiModeRaw: $uiModeRaw, uiPartOverridesRaw: $uiPartOverridesRaw)
                 }
                 .accessibilityLabel("Toggle Zen or Developer mode")
@@ -268,7 +292,9 @@ struct SessionView: View {
         .labelStyle(.iconOnly)
     }
 
-    private var chat: Chat? { model.chat(id: chatId) }
+    private var chat: Chat? {
+        model.chat(id: chatId) ?? (model.demo?.chats ?? model.workspace?.chats)?.first { $0.id == chatId }
+    }
 
     /// The transcript's row padding: beside the cover display's vertical bar the text takes the width the bar's
     /// column leaves (CoverLayout); everywhere else 20pt a side.
@@ -339,6 +365,16 @@ struct SessionView: View {
         .toolbarBackground(.hidden, for: .navigationBar)
         .toolbar(paneChrome ? .hidden : .automatic, for: .navigationBar)  // a Max draws its own header
         .toolbar {
+            if !paneChrome, let toggleCoverSessions {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(action: toggleCoverSessions) {
+                        Label(coverSessionsShown ? "Close sessions" : "Show sessions",
+                              systemImage: coverSessionsShown ? "xmark" : "sidebar.trailing")
+                    }
+                    .accessibilityIdentifier("duo-cover-toggle-sessions")
+                    .accessibilityValue(coverSessionsShown ? "Expanded" : "Collapsed")
+                }
+            }
             if !paneChrome, let toggleFlatList {
                 ToolbarItem(placement: .topBarLeading) {
                     Button(action: toggleFlatList) {
@@ -353,7 +389,15 @@ struct SessionView: View {
                 // Tap the session header to rename — model/effort changes
                 // moved into the composer's picker chips.
                 ToolbarItem(placement: .topBarTrailing) {
-                    headerTitle(chat)
+                    Group {
+                        if coverSessionsShown {
+                            Text("Sessions")
+                                .font(Theme.sans(16, weight: .semibold))
+                                .foregroundStyle(Theme.text)
+                        } else {
+                            headerTitle(chat)
+                        }
+                    }
                         // Claim the remaining bar width: the title expands before
                         // the fixed-size navigation and status marks. The title and
                         // pager carry their own swipe (headerControls).
@@ -377,6 +421,32 @@ struct SessionView: View {
             .disabled(renameTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         } message: {
             Text("This name is shared across your devices.")
+        }
+        .sheet(isPresented: $showingCheckoutChanges) {
+            if let chat {
+                CheckoutChangesSheet(chat: chat)
+            }
+        }
+        .sheet(item: $companionsSection) { section in
+            if let chat {
+                SessionCompanionsSheet(chat: chat, initialSection: section) { openedId in
+                    companionsSection = nil
+                    activeSideChatId = openedId
+                }
+            }
+        }
+        .sheet(isPresented: Binding(
+            get: { activeSideChatId != nil },
+            set: { if !$0 { activeSideChatId = nil } }
+        )) {
+            if let sideId = activeSideChatId {
+                NavigationStack {
+                    SessionView(chatId: sideId)
+                }
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+                .harnessAppearance()
+            }
         }
         .onAppear {
             model.attachSessionView(chatId: chatId)
@@ -483,11 +553,24 @@ struct SessionView: View {
                     }
                     .transition(.opacity)
                 }
+                companionBar(chat: chat, store: store)
                 Group {
                     if let request = store.openInputRequest {
-                        QuestionPanel(requestId: request.requestId, questions: request.questions) { requestId, answers in
-                            store.respondInput(requestId: requestId, answers: answers)
-                        }
+                        QuestionPanel(
+                            requestId: request.requestId,
+                            questions: request.questions,
+                            respond: { requestId, answers in
+                                store.respondInput(requestId: requestId, answers: answers)
+                            },
+                            onDismiss: {
+                                model.dismissInput(
+                                    chatId: chat.id,
+                                    deviceId: store.hostDeviceId ?? chat.deviceId,
+                                    requestId: request.requestId,
+                                    store: store
+                                )
+                            }
+                        )
                     } else {
                         ComposerView(store: store, chat: chat, runLive: running,
                                      attachmentDraft: attachmentDraft,
@@ -611,11 +694,24 @@ struct SessionView: View {
                             .padding(.trailing, 20)
                         }
                 }
+                companionBar(chat: chat, store: store)
                 Group {
                     if let request = store.openInputRequest {
-                        QuestionPanel(requestId: request.requestId, questions: request.questions) { requestId, answers in
-                            store.respondInput(requestId: requestId, answers: answers)
-                        }
+                        QuestionPanel(
+                            requestId: request.requestId,
+                            questions: request.questions,
+                            respond: { requestId, answers in
+                                store.respondInput(requestId: requestId, answers: answers)
+                            },
+                            onDismiss: {
+                                model.dismissInput(
+                                    chatId: chat.id,
+                                    deviceId: store.hostDeviceId ?? chat.deviceId,
+                                    requestId: request.requestId,
+                                    store: store
+                                )
+                            }
+                        )
                     } else {
                         ComposerView(store: store, chat: chat, runLive: status == .working,
                                      attachmentDraft: attachmentDraft,
@@ -830,15 +926,44 @@ struct SessionView: View {
         }
     }
 
+    @ViewBuilder
+    private func companionBar(chat: Chat, store: SessionStore) -> some View {
+        let allChats = model.demo?.chats ?? model.workspace?.chats ?? []
+        let terminals = HostTerminalStore.shared.sessions(for: chat.id)
+        let state = CompanionStripState.resolve(
+            chat: chat,
+            allChats: allChats,
+            entries: store.entries,
+            terminals: terminals
+        )
+        let isDeveloper = HomeHierarchyProfile.resolved(
+            baseModeRaw: uiModeRaw,
+            overridesRaw: uiPartOverridesRaw
+        ).effectiveMode == .developer
+        CompanionStripView(
+            state: state,
+            showNewTerminalButton: isDeveloper && state.terminals == 0,
+            onSelect: { section in companionsSection = section },
+            onNewTerminal: {
+                companionsSection = .terminals
+                Task { @MainActor in
+                    _ = try? await HostTerminalStore.shared.openTerminal(chat: chat, model: model)
+                }
+            }
+        )
+    }
+
     /// "Waiting for Mac to start it · sent 9m 57s ago". The age counts from the original
     /// submission, which a retry keeps; only the delivery grace restarts.
     private func waitingLabel(chat: Chat, store: SessionStore) -> String {
         let host = model.deviceName(store.hostDeviceId ?? chat.deviceId)
         let sent = store.pendingSends.map(\.at).min() ?? nowMs()
         let age = Motion.formatElapsed((nowMs() - sent) / 1000)
-        let what = store.transferProgress != nil
-            ? "Attachments still on their way to \(host)"
-            : "Waiting for \(host) to start it"
+        let what = SendState.waitingStatusCopy(
+            hostName: host,
+            phoneOnline: model.connectivity.state != .offline,
+            hasAttachments: store.transferProgress != nil
+        )
         return "\(what) · sent \(age) ago"
     }
 

@@ -4,8 +4,14 @@
  * Times are unix seconds; bigints come back from `pg` as strings and are
  * narrowed here (seqs, ids and seconds stay far below 2^53).
  */
-import { Client } from "pg";
-import { withPg, type PgEnv } from "./pg";
+import {
+  PgPool,
+  isSqlError,
+  withPg,
+  type PgClient,
+  type PgEnv,
+  type PgPoolOptions
+} from "./pg";
 import {
   ROOM_LIMITS,
   type AccessRow,
@@ -132,52 +138,91 @@ const MESSAGE_COLUMNS = [
 const MESSAGE_SELECT = MESSAGE_COLUMNS.join(", ");
 const qualified = (alias: string): string => MESSAGE_COLUMNS.map((c) => `${alias}.${c}`).join(", ");
 
-/** A PostgreSQL error answer (a SQLSTATE), as opposed to a broken connection. */
-const isSqlError = (err: unknown): boolean =>
-  typeof (err as { code?: unknown })?.code === "string" && /^[0-9A-Z]{5}$/.test((err as { code: string }).code);
+const claimFrom = (r: Row): ClaimRow => ({
+  claimKey: r.claim_key as string,
+  member: r.member as string,
+  userId: r.user_id as string,
+  claimedSeq: num(r.claimed_seq),
+  state: r.state as ClaimRow["state"],
+  updatedAt: num(r.updated_at)
+});
+
+const jsonRows = (v: unknown): Row[] => {
+  if (Array.isArray(v)) return v as Row[];
+  if (typeof v === "string" && v.length > 0) return JSON.parse(v) as Row[];
+  return [];
+};
 
 export class PgRoomStore implements RoomStore {
   /** Held across the store calls of one busy stretch (see {@link session}). */
-  private client: Promise<Client> | null = null;
+  private client: Promise<PgClient> | null = null;
   private held = 0;
+  private readonly pool: PgPool;
 
-  constructor(private readonly env: PgEnv) {}
+  /**
+   * Default pool options (`maxIdle: 0`) close connections immediately when a
+   * stateless Worker request finishes (Workers cannot share sockets across
+   * incoming requests). Durable Objects pass `{ maxIdle: 2, idleMs: 5_000 }`
+   * so wakes, posts and 1s ledger flushes reuse warm connections while idle
+   * actors still drop to zero connections.
+   */
+  constructor(
+    env: PgEnv,
+    poolOptions: PgPoolOptions = { maxIdle: 0, idleMs: 0 }
+  ) {
+    this.pool = new PgPool(env, poolOptions);
+  }
+
+  /** Drain any parked idle connections immediately. */
+  close(): Promise<void> {
+    return this.pool.close();
+  }
 
   /**
    * Run `fn` with one connection for every store call inside it, instead of
    * a fresh Hyperdrive connect per call (a post is several calls: append,
-   * wake checks, claims). Overlapping sessions share the connection; it
-   * closes when the last one ends, so an idle actor holds none. pg runs one
-   * query at a time per client, which the actor's own serialization already
-   * implies.
+   * wake checks, claims). Overlapping sessions share the connection; when the
+   * last one ends, the connection returns to {@link pool} (closed immediately
+   * in stateless routes, or kept warm briefly inside a RoomActor).
    */
   async session<T>(fn: () => Promise<T>): Promise<T> {
     this.held++;
     try {
       return await fn();
     } finally {
-      if (--this.held === 0) await this.disconnect();
+      if (--this.held === 0) await this.releaseSession(false);
     }
   }
 
-  private async disconnect(): Promise<void> {
-    const client = this.client;
+  private async releaseSession(broken: boolean): Promise<void> {
+    const pending = this.client;
     this.client = null;
-    if (client) await client.then((c) => c.end()).catch(() => {});
-  }
-
-  private connect(): Promise<Client> {
-    if (!this.env.HYPERDRIVE) throw new Error("postgres is not configured (no HYPERDRIVE binding)");
-    const client = new Client({ connectionString: this.env.HYPERDRIVE.connectionString });
-    return client.connect().then(() => client);
-  }
-
-  private async run<T>(fn: (client: Client) => Promise<T>): Promise<T> {
-    if (this.held === 0) return withPg(this.env, fn);
-    this.client ??= this.connect();
-    let client: Client;
+    if (!pending) return;
     try {
-      client = await this.client;
+      const c = await pending;
+      if (broken) this.pool.discard(c);
+      else this.pool.release(c);
+    } catch {
+      // Connection failed before it opened; nothing to release.
+    }
+  }
+
+  private async run<T>(
+    fn: (client: PgClient) => Promise<T>,
+    options: { retryIdleDisconnect?: boolean } = {}
+  ): Promise<T> {
+    if (this.held === 0) return this.pool.withClient(fn, options);
+    const fresh = this.client === null;
+    let reused = false;
+    if (fresh) {
+      this.client = this.pool.acquire().then((a) => {
+        reused = a.reused;
+        return a.client;
+      });
+    }
+    let client: PgClient;
+    try {
+      client = await this.client!;
     } catch (err) {
       this.client = null;
       throw err;
@@ -185,38 +230,61 @@ export class PgRoomStore implements RoomStore {
     try {
       return await fn(client);
     } catch (err) {
-      // A dropped connection is replaced on the next call; a SQL error
-      // leaves the connection usable.
-      if (!isSqlError(err)) await this.disconnect();
+      // A dropped connection is discarded and replaced on the next call; a SQL
+      // error leaves the connection synchronized and usable.
+      if (!isSqlError(err)) {
+        await this.releaseSession(true);
+        if (fresh && reused && options.retryIdleDisconnect) {
+          return this.run(fn, { retryIdleDisconnect: false });
+        }
+      }
       throw err;
     }
   }
 
+  /** Single-round-trip atomic room + owner grant + owner member insert. */
   createRoom(room: RoomRow, owner: MemberRow): Promise<void> {
     return this.run(async (pg) => {
-      await pg.query("BEGIN");
-      try {
-        await pg.query(
-          `INSERT INTO app.agent_rooms (id, org_id, created_by, name, kind, parent_chat, idle_ttl_s,
+      await pg.query(
+        `WITH ins_room AS (
+           INSERT INTO app.agent_rooms (id, org_id, created_by, name, kind, parent_chat, idle_ttl_s,
              project_ref, last_seq, created_at, last_activity_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, $9, $9)`,
-          [room.id, room.orgId, room.createdBy, room.name, room.kind, room.parentChat, room.idleTtlS, room.projectRef, room.createdAt]
-        );
-        await pg.query(
-          `INSERT INTO app.agent_room_access (room_id, user_id, role, invited_by, invited_at, accepted_at)
-           VALUES ($1, $2, 'owner', $2, $3, $3)`,
-          [room.id, room.createdBy, room.createdAt]
-        );
-        await this.insertMember(pg, room.id, owner);
-        await pg.query("COMMIT");
-      } catch (err) {
-        await pg.query("ROLLBACK").catch(() => {});
-        throw err;
-      }
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, $9, $9)
+           RETURNING id
+         ),
+         ins_access AS (
+           INSERT INTO app.agent_room_access (room_id, user_id, role, invited_by, invited_at, accepted_at)
+           SELECT id, $3, 'owner', $3, $9, $9 FROM ins_room
+         )
+         INSERT INTO app.agent_room_members (room_id, member, member_kind, member_ref, device_id, user_id, role, read_seq, joined_at)
+         SELECT id, $10, $11, $12, $13, $14, $15, $16, $17 FROM ins_room
+         ON CONFLICT (room_id, member, device_id)
+         DO UPDATE SET member_kind = excluded.member_kind, member_ref = excluded.member_ref
+         WHERE app.agent_room_members.user_id = excluded.user_id`,
+        [
+          room.id,
+          room.orgId,
+          room.createdBy,
+          room.name,
+          room.kind,
+          room.parentChat,
+          room.idleTtlS,
+          room.projectRef,
+          room.createdAt,
+          owner.member,
+          owner.memberKind,
+          owner.memberRef,
+          owner.deviceId,
+          owner.userId,
+          owner.role,
+          owner.readSeq,
+          owner.joinedAt
+        ]
+      );
     });
   }
 
-  private async insertMember(pg: Client, roomId: string, m: MemberRow): Promise<void> {
+  private async insertMember(pg: PgClient, roomId: string, m: MemberRow): Promise<void> {
     await pg.query(
       `INSERT INTO app.agent_room_members (room_id, member, member_kind, member_ref, device_id, user_id, role, read_seq, joined_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -227,165 +295,264 @@ export class PgRoomStore implements RoomStore {
     );
   }
 
+  /** Single-round-trip room + members + grants + recent messages load. */
   loadRoom(id: string): Promise<LoadedRoom | null> {
-    return this.run(async (pg) => {
-      const rooms = await pg.query("SELECT * FROM app.agent_rooms WHERE id = $1", [id]);
-      if (rooms.rows.length === 0) return null;
-      const [members, access, recent] = await Promise.all([
-        pg.query("SELECT * FROM app.agent_room_members WHERE room_id = $1 ORDER BY joined_at, member", [id]),
-        pg.query("SELECT * FROM app.agent_room_access WHERE room_id = $1 ORDER BY invited_at", [id]),
-        pg.query(`SELECT ${MESSAGE_SELECT} FROM app.agent_room_messages WHERE room_id = $1 ORDER BY seq DESC LIMIT $2`, [
-          id,
-          ROOM_LIMITS.ring
-        ])
-      ]);
-      return {
-        room: roomFrom(rooms.rows[0]),
-        members: members.rows.map(memberFrom),
-        access: access.rows.map(accessFrom),
-        recent: recent.rows.map(messageFrom).reverse()
-      };
-    });
+    return this.run(
+      async (pg) => {
+        const res = await pg.query(
+          `SELECT r.*,
+                  COALESCE(
+                    (SELECT json_agg(m ORDER BY m.joined_at, m.member)
+                       FROM app.agent_room_members m
+                      WHERE m.room_id = r.id),
+                    '[]'::json
+                  ) AS members_json,
+                  COALESCE(
+                    (SELECT json_agg(a ORDER BY a.invited_at)
+                       FROM app.agent_room_access a
+                      WHERE a.room_id = r.id),
+                    '[]'::json
+                  ) AS access_json,
+                  COALESCE(
+                    (SELECT json_agg(t ORDER BY t.seq ASC)
+                       FROM (
+                         SELECT ${MESSAGE_SELECT}
+                           FROM app.agent_room_messages
+                          WHERE room_id = r.id
+                          ORDER BY seq DESC
+                          LIMIT $2
+                       ) t),
+                    '[]'::json
+                  ) AS recent_json
+             FROM app.agent_rooms r
+            WHERE r.id = $1`,
+          [id, ROOM_LIMITS.ring]
+        );
+        if (res.rows.length === 0) return null;
+        const row = res.rows[0];
+        return {
+          room: roomFrom(row),
+          members: jsonRows(row.members_json).map(memberFrom),
+          access: jsonRows(row.access_json).map(accessFrom),
+          recent: jsonRows(row.recent_json).map(messageFrom)
+        };
+      },
+      { retryIdleDisconnect: true }
+    );
   }
 
-  /** The room row and its grants only: what a ledger-backed actor needs from
-   * PostgreSQL on wake (members, messages and claims live in the actor). */
+  /** Single-round-trip full hydration (room + members + grants + recent + claims). */
+  loadHydration(id: string): Promise<{ loaded: LoadedRoom; claims: ClaimRow[] } | null> {
+    return this.run(
+      async (pg) => {
+        const res = await pg.query(
+          `SELECT r.*,
+                  COALESCE(
+                    (SELECT json_agg(m ORDER BY m.joined_at, m.member)
+                       FROM app.agent_room_members m
+                      WHERE m.room_id = r.id),
+                    '[]'::json
+                  ) AS members_json,
+                  COALESCE(
+                    (SELECT json_agg(a ORDER BY a.invited_at)
+                       FROM app.agent_room_access a
+                      WHERE a.room_id = r.id),
+                    '[]'::json
+                  ) AS access_json,
+                  COALESCE(
+                    (SELECT json_agg(t ORDER BY t.seq ASC)
+                       FROM (
+                         SELECT ${MESSAGE_SELECT}
+                           FROM app.agent_room_messages
+                          WHERE room_id = r.id
+                          ORDER BY seq DESC
+                          LIMIT $2
+                       ) t),
+                    '[]'::json
+                  ) AS recent_json,
+                  COALESCE(
+                    (SELECT json_agg(c)
+                       FROM (
+                         SELECT claim_key, member, user_id, claimed_seq, state, updated_at
+                           FROM app.agent_room_claims
+                          WHERE room_id = r.id
+                       ) c),
+                    '[]'::json
+                  ) AS claims_json
+             FROM app.agent_rooms r
+            WHERE r.id = $1`,
+          [id, ROOM_LIMITS.ring]
+        );
+        if (res.rows.length === 0) return null;
+        const row = res.rows[0];
+        return {
+          loaded: {
+            room: roomFrom(row),
+            members: jsonRows(row.members_json).map(memberFrom),
+            access: jsonRows(row.access_json).map(accessFrom),
+            recent: jsonRows(row.recent_json).map(messageFrom)
+          },
+          claims: jsonRows(row.claims_json).map(claimFrom)
+        };
+      },
+      { retryIdleDisconnect: true }
+    );
+  }
+
+  /** Single-round-trip room row + grants load for ledger-backed actors on wake. */
   loadAccess(id: string): Promise<{ room: RoomRow; access: AccessRow[] } | null> {
-    return this.run(async (pg) => {
-      const rooms = await pg.query("SELECT * FROM app.agent_rooms WHERE id = $1", [id]);
-      if (rooms.rows.length === 0) return null;
-      const access = await pg.query("SELECT * FROM app.agent_room_access WHERE room_id = $1 ORDER BY invited_at", [id]);
-      return { room: roomFrom(rooms.rows[0]), access: access.rows.map(accessFrom) };
-    });
+    return this.run(
+      async (pg) => {
+        const res = await pg.query(
+          `SELECT r.*,
+                  COALESCE(
+                    (SELECT json_agg(a ORDER BY a.invited_at)
+                       FROM app.agent_room_access a
+                      WHERE a.room_id = r.id),
+                    '[]'::json
+                  ) AS access_json
+             FROM app.agent_rooms r
+            WHERE r.id = $1`,
+          [id]
+        );
+        if (res.rows.length === 0) return null;
+        const row = res.rows[0];
+        return {
+          room: roomFrom(row),
+          access: jsonRows(row.access_json).map(accessFrom)
+        };
+      },
+      { retryIdleDisconnect: true }
+    );
   }
 
   /** Every claim in a room (a ledger hydrating a room that predates it). */
   loadClaims(roomId: string): Promise<ClaimRow[]> {
-    return this.run(async (pg) => {
-      const res = await pg.query(
-        "SELECT claim_key, member, user_id, claimed_seq, state, updated_at FROM app.agent_room_claims WHERE room_id = $1",
-        [roomId]
-      );
-      return res.rows.map((r: Row) => ({
-        claimKey: r.claim_key as string,
-        member: r.member as string,
-        userId: r.user_id as string,
-        claimedSeq: num(r.claimed_seq),
-        state: r.state as ClaimRow["state"],
-        updatedAt: num(r.updated_at)
-      }));
-    });
+    return this.run(
+      async (pg) => {
+        const res = await pg.query(
+          "SELECT claim_key, member, user_id, claimed_seq, state, updated_at FROM app.agent_room_claims WHERE room_id = $1",
+          [roomId]
+        );
+        return res.rows.map(claimFrom);
+      },
+      { retryIdleDisconnect: true }
+    );
   }
 
   /**
-   * Write a slice of an actor's ledger behind, in one transaction on its own
-   * connection (never the request session: a BEGIN there would swallow the
-   * actor's other queries). Idempotent: messages insert-or-skip by seq,
-   * read cursors only move forward, counters take the greater value, so a
-   * retried or overlapping flush changes nothing twice. "gone" means the room
-   * row no longer exists (destroyed or swept): the actor wipes, never recreates.
+   * Write a slice of an actor's ledger behind in a single atomic CTE statement
+   * on its own pooled connection (never the request session). Idempotent:
+   * messages insert-or-skip by seq unless diverged (in which case no write CTE
+   * runs), read cursors only move forward, counters take the greater value.
+   * "gone" means the room row no longer exists (destroyed or swept).
    */
   applyLedger(roomId: string, batch: LedgerBatch): Promise<"ok" | "gone" | "diverged"> {
-    return withPg(this.env, async (pg) => {
-      await pg.query("BEGIN");
-      try {
-        const room = await pg.query("SELECT 1 FROM app.agent_rooms WHERE id = $1 FOR UPDATE", [roomId]);
-        if (room.rows.length === 0) {
-          await pg.query("ROLLBACK");
-          return "gone";
-        }
-        if (batch.messages.length) {
-          const inserted = await pg.query(
-            `INSERT INTO app.agent_room_messages (room_id, ${MESSAGE_SELECT})
+    const msgsJson = JSON.stringify(batch.messages.map(messageTo));
+    const membersJson = JSON.stringify(batch.members.map(memberTo));
+    const removedJson = JSON.stringify(
+      batch.removed.map((k) => ({ member: k.member, device_id: k.deviceId }))
+    );
+    const claimsJson = JSON.stringify(
+      batch.claims.map((c) => ({
+        claim_key: c.claimKey,
+        member: c.member,
+        user_id: c.userId,
+        claimed_seq: c.claimedSeq,
+        state: c.state,
+        updated_at: c.updatedAt
+      }))
+    );
+    return this.pool.withClient(
+      async (pg) => {
+        const res = await pg.query(
+          `WITH locked AS (
+             SELECT id FROM app.agent_rooms WHERE id = $1 FOR UPDATE
+           ),
+           incoming_msgs AS (
+             SELECT *
+               FROM jsonb_to_recordset($2::jsonb) AS x(
+                 seq bigint, sender text, sender_device text, sender_user_id text,
+                 from_user boolean, kind text, to_member text, body text, reply_to bigint,
+                 mentions text[], hop smallint, client_id text, claim_key text, created_at bigint
+               )
+              WHERE EXISTS (SELECT 1 FROM locked)
+           ),
+           divergence AS (
+             SELECT 1
+               FROM incoming_msgs m
+               JOIN app.agent_room_messages e ON e.room_id = $1 AND e.seq = m.seq
+              WHERE e.sender_user_id IS DISTINCT FROM m.sender_user_id
+                 OR e.created_at IS DISTINCT FROM m.created_at
+                 OR e.body IS DISTINCT FROM m.body
+              LIMIT 1
+           ),
+           guard AS (
+             SELECT id FROM locked WHERE NOT EXISTS (SELECT 1 FROM divergence)
+           ),
+           ins_msgs AS (
+             INSERT INTO app.agent_room_messages (room_id, ${MESSAGE_SELECT})
              SELECT $1, ${MESSAGE_SELECT}
-               FROM jsonb_to_recordset($2::jsonb) AS x(seq bigint, sender text, sender_device text,
-                 sender_user_id text, from_user boolean, kind text, to_member text, body text, reply_to bigint,
-                 mentions text[], hop smallint, client_id text, claim_key text, created_at bigint)
+               FROM incoming_msgs
+              WHERE EXISTS (SELECT 1 FROM guard)
              ON CONFLICT (room_id, seq) DO NOTHING
-             RETURNING seq`,
-            [roomId, JSON.stringify(batch.messages.map(messageTo))]
-          );
-          // A seq that already exists is fine when it's this same post (a
-          // retried flush); a different post there means the ledger and
-          // PostgreSQL diverged, and skipping it would lose ours silently.
-          if (inserted.rows.length < batch.messages.length) {
-            const landed = new Set(inserted.rows.map((r: Row) => num(r.seq)));
-            const skipped = batch.messages.filter((m) => !landed.has(m.seq));
-            const existing = await pg.query(
-              `SELECT seq, sender_user_id, created_at, body FROM app.agent_room_messages
-                WHERE room_id = $1 AND seq = ANY($2::bigint[])`,
-              [roomId, skipped.map((m) => m.seq)]
-            );
-            const bySeq = new Map(existing.rows.map((r: Row) => [num(r.seq), r]));
-            const diverged = skipped.some((m) => {
-              const r = bySeq.get(m.seq);
-              return !r || r.sender_user_id !== m.senderUserId || num(r.created_at) !== m.createdAt || r.body !== m.body;
-            });
-            if (diverged) {
-              await pg.query("ROLLBACK");
-              return "diverged";
-            }
-          }
-        }
-        await pg.query(
-          `UPDATE app.agent_rooms SET last_seq = GREATEST(last_seq, $2),
-                  last_activity_at = GREATEST(last_activity_at, $3)
-            WHERE id = $1`,
-          [roomId, batch.lastSeq, batch.lastActivityAt]
-        );
-        if (batch.members.length) {
-          await pg.query(
-            `INSERT INTO app.agent_room_members (room_id, member, member_kind, member_ref, device_id, user_id, role, read_seq, joined_at)
-             SELECT $1, member, member_kind, member_ref, device_id, user_id, role, read_seq, joined_at
-               FROM jsonb_to_recordset($2::jsonb) AS x(member text, member_kind text, member_ref text, device_id text,
-                 user_id text, role text, read_seq bigint, joined_at bigint)
+           ),
+           upd_room AS (
+             UPDATE app.agent_rooms
+                SET last_seq = GREATEST(last_seq, $3),
+                    last_activity_at = GREATEST(last_activity_at, $4)
+              WHERE id = $1 AND EXISTS (SELECT 1 FROM guard)
+           ),
+           removed_keys AS (
+             SELECT member, device_id
+               FROM jsonb_to_recordset($6::jsonb) AS x(member text, device_id text)
+           ),
+           ins_members AS (
+             INSERT INTO app.agent_room_members (room_id, member, member_kind, member_ref, device_id, user_id, role, read_seq, joined_at)
+             SELECT $1, x.member, x.member_kind, x.member_ref, x.device_id, x.user_id, x.role, x.read_seq, x.joined_at
+               FROM jsonb_to_recordset($5::jsonb) AS x(
+                 member text, member_kind text, member_ref text, device_id text,
+                 user_id text, role text, read_seq bigint, joined_at bigint
+               )
+              WHERE EXISTS (SELECT 1 FROM guard)
+                AND NOT EXISTS (
+                  SELECT 1 FROM removed_keys r WHERE r.member = x.member AND r.device_id = x.device_id
+                )
              ON CONFLICT (room_id, member, device_id) DO UPDATE
                SET member_kind = excluded.member_kind, member_ref = excluded.member_ref,
                    read_seq = GREATEST(app.agent_room_members.read_seq, excluded.read_seq)
-             WHERE app.agent_room_members.user_id = excluded.user_id`,
-            [roomId, JSON.stringify(batch.members.map(memberTo))]
-          );
-        }
-        if (batch.removed.length) {
-          await pg.query(
-            `DELETE FROM app.agent_room_members m
-              USING jsonb_to_recordset($2::jsonb) AS x(member text, device_id text)
-              WHERE m.room_id = $1 AND m.member = x.member AND m.device_id = x.device_id`,
-            [roomId, JSON.stringify(batch.removed.map((k) => ({ member: k.member, device_id: k.deviceId })))]
-          );
-        }
-        if (batch.claims.length) {
-          await pg.query(
-            `INSERT INTO app.agent_room_claims (room_id, claim_key, member, user_id, claimed_seq, state, updated_at)
+             WHERE app.agent_room_members.user_id = excluded.user_id
+           ),
+           del_members AS (
+             DELETE FROM app.agent_room_members m
+              USING removed_keys r
+              WHERE m.room_id = $1 AND m.member = r.member AND m.device_id = r.device_id
+                AND EXISTS (SELECT 1 FROM guard)
+           ),
+           ins_claims AS (
+             INSERT INTO app.agent_room_claims (room_id, claim_key, member, user_id, claimed_seq, state, updated_at)
              SELECT $1, claim_key, member, user_id, claimed_seq, state, updated_at
-               FROM jsonb_to_recordset($2::jsonb) AS x(claim_key text, member text, user_id text,
-                 claimed_seq bigint, state text, updated_at bigint)
+               FROM jsonb_to_recordset($7::jsonb) AS x(
+                 claim_key text, member text, user_id text,
+                 claimed_seq bigint, state text, updated_at bigint
+               )
+              WHERE EXISTS (SELECT 1 FROM guard)
              ON CONFLICT (room_id, claim_key) DO UPDATE
                SET member = excluded.member, user_id = excluded.user_id, claimed_seq = excluded.claimed_seq,
                    state = excluded.state, updated_at = excluded.updated_at
-             WHERE app.agent_room_claims.updated_at <= excluded.updated_at`,
-            [
-              roomId,
-              JSON.stringify(
-                batch.claims.map((c) => ({
-                  claim_key: c.claimKey,
-                  member: c.member,
-                  user_id: c.userId,
-                  claimed_seq: c.claimedSeq,
-                  state: c.state,
-                  updated_at: c.updatedAt
-                }))
-              )
-            ]
-          );
-        }
-        await pg.query("COMMIT");
+             WHERE app.agent_room_claims.updated_at <= excluded.updated_at
+           )
+           SELECT (SELECT count(*)::int FROM locked) AS room_found,
+                  (SELECT count(*)::int FROM divergence) AS diverged`,
+          [roomId, msgsJson, batch.lastSeq, batch.lastActivityAt, membersJson, removedJson, claimsJson]
+        );
+        const row = res.rows[0];
+        if (!row || num(row.room_found) === 0) return "gone";
+        if (num(row.diverged) > 0) return "diverged";
         return "ok";
-      } catch (err) {
-        await pg.query("ROLLBACK").catch(() => {});
-        throw err;
-      }
-    });
+      },
+      { retryIdleDisconnect: true }
+    );
   }
 
   /** One statement, so the row and the room's counters commit together.
@@ -518,37 +685,27 @@ export class PgRoomStore implements RoomStore {
 
   removePerson(roomId: string, userId: string): Promise<void> {
     return this.run(async (pg) => {
-      await pg.query("BEGIN");
-      try {
-        await pg.query("DELETE FROM app.agent_room_members WHERE room_id = $1 AND user_id = $2", [roomId, userId]);
-        await pg.query("DELETE FROM app.agent_room_access WHERE room_id = $1 AND user_id = $2", [roomId, userId]);
-        await pg.query("COMMIT");
-      } catch (err) {
-        await pg.query("ROLLBACK").catch(() => {});
-        throw err;
-      }
+      await pg.query(
+        `WITH del_members AS (
+           DELETE FROM app.agent_room_members WHERE room_id = $1 AND user_id = $2
+         )
+         DELETE FROM app.agent_room_access WHERE room_id = $1 AND user_id = $2`,
+        [roomId, userId]
+      );
     });
   }
 
   redactPerson(roomId: string, userId: string, body: string, now: number): Promise<void> {
     return this.run(async (pg) => {
-      await pg.query("BEGIN");
-      try {
-        await pg.query(
-          `UPDATE app.agent_room_messages SET body = $3, mentions = '{}'
-            WHERE room_id = $1 AND sender_user_id = $2`,
-          [roomId, userId, body]
-        );
-        await pg.query(
-          `UPDATE app.agent_room_claims SET state = 'released', updated_at = $3
-            WHERE room_id = $1 AND user_id = $2 AND state = 'held'`,
-          [roomId, userId, now]
-        );
-        await pg.query("COMMIT");
-      } catch (err) {
-        await pg.query("ROLLBACK").catch(() => {});
-        throw err;
-      }
+      await pg.query(
+        `WITH upd_msgs AS (
+           UPDATE app.agent_room_messages SET body = $3, mentions = '{}'
+            WHERE room_id = $1 AND sender_user_id = $2
+         )
+         UPDATE app.agent_room_claims SET state = 'released', updated_at = $4
+          WHERE room_id = $1 AND user_id = $2 AND state = 'held'`,
+        [roomId, userId, body, now]
+      );
     });
   }
 

@@ -189,7 +189,7 @@ Theme/                  theme.rs port: oklch→sRGB converter, exact palette,
 | Harness/model picker popover + curated catalogs | Brand-mark cards + catalog menu + reasoning-ladder chips (`HarnessCatalog.swift`, ported from crates/harness) |
 | Add-space palette (device + folder browser) | New-space sheet: device tabs + remote folder browser (ListFolders over the device-room relay, git repos badged) |
 | ControlRpc over device-room relay | `DeviceRelayClient` — binary `uleb128(len)+header+payload` frames, `{"s","k","to","from"}` header, ndjson ControlRpc; used for ListFolders + direct-to-host `Mutate {createSpace}` (local doc-write fallback when the host is offline) |
-| Hover timestamps / copy | Context menus |
+| Hover timestamps / copy | Always-visible timestamp and whole-message copy footer; prompt context menus remain available |
 | Long user messages: Show more / Show less | Five-line preview, 44pt disclosure target, expansion retained per session |
 | gpui `list()` sum-tree virtualization | Native table row reuse with SwiftUI content, stable row ids and version fingerprints |
 | Stick-to-bottom spring, wheel-up breaks pin | Gesture-owned follow, composer-sized viewport with glass underlap, retained local prompt runway |
