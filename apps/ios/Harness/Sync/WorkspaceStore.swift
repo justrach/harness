@@ -552,7 +552,7 @@ final class WorkspaceStore {
     @ObservationIgnored private var changeRequestTasks: [ChangeRequestWatchKey: Task<Void, Never>] = [:]
     @ObservationIgnored private var unsupportedChangeRequestDevices: Set<String> = []
 
-    private func relay(for deviceId: String) -> DeviceRelayClient {
+    func relay(for deviceId: String) -> DeviceRelayClient {
         if let existing = relayClients[deviceId] { return existing }
         let client = DeviceRelayClient(deviceId: deviceId, config: config,
                                        liveness: { [weak self] in

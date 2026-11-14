@@ -20,6 +20,16 @@ struct DiffLine: Equatable, Identifiable {
     var id: Int
     var kind: Kind
     var text: String
+    var oldNumber: Int?
+    var newNumber: Int?
+
+    init(id: Int, kind: Kind, text: String, oldNumber: Int? = nil, newNumber: Int? = nil) {
+        self.id = id
+        self.kind = kind
+        self.text = text
+        self.oldNumber = oldNumber
+        self.newNumber = newNumber
+    }
 }
 
 struct DiffHunk: Equatable, Identifiable {
@@ -168,18 +178,31 @@ enum FileTree {
 /// Inspect's selection, kept per session outside the view so it survives the fold changing the layout.
 @MainActor @Observable
 final class InspectState {
+    let chatId: String?
     var segment: InspectSegment = .diff
     var selectedFile: String?
     /// The terminal's scrollback position (the command block at the top of the view).
     var terminalAnchor: String?
     /// Wide Duo: Inspect has taken the session list's place (a diff card or a tool row was opened).
     var open = false
+    /// Live checkout diff scope and cached host payloads for this session.
+    var diffMode: CheckoutDiffMode = .workingTree
+    var checkoutSnapshot: CheckoutDiffSnapshot?
+    var checkoutDiffLoading = false
+    var checkoutDiffError: String?
+    var workspaceFiles: [String]?
+    var workspaceFilesLoading = false
+    var workspaceFilesError: String?
+
+    init(chatId: String? = nil) {
+        self.chatId = chatId
+    }
 
     private static var bySession: [String: InspectState] = [:]
 
     static func of(_ chatId: String) -> InspectState {
         if let state = bySession[chatId] { return state }
-        let state = InspectState()
+        let state = InspectState(chatId: chatId)
         bySession[chatId] = state
         return state
     }
@@ -250,49 +273,157 @@ struct InspectDiffView: View {
     let files: [InspectFile]
     @Bindable var state: InspectState
     @Environment(\.inspectMono) private var mono
+    @Environment(AppModel.self) private var appModel: AppModel?
+
+    @State private var selection: DiffLineSelection?
+    @State private var rangeMode = false
+    @State private var composing = false
+    @State private var draftNote = ""
+    @State private var editingComment: DiffReviewComment?
+    @StateObject private var reviewStore: DiffReviewDraftStore
+
+    init(files: [InspectFile], state: InspectState) {
+        self.files = files
+        self.state = state
+        _reviewStore = StateObject(wrappedValue: DiffReviewDraftStore.of(state.chatId ?? ""))
+    }
+
+    private var chat: Chat? {
+        guard let chatId = state.chatId else { return nil }
+        return appModel?.chat(id: chatId)
+    }
+
+    private var reviewChatId: String { state.chatId ?? "" }
+
+    private var displayedFiles: [InspectFile] {
+        if let snapshot = state.checkoutSnapshot {
+            let parsed = snapshot.parsedFiles
+            if !parsed.isEmpty { return parsed }
+            if files.isEmpty { return [] }
+        }
+        return files
+    }
 
     private var selected: InspectFile? {
-        files.first { $0.path == state.selectedFile } ?? files.first
+        displayedFiles.first { $0.path == state.selectedFile } ?? displayedFiles.first
+    }
+
+    private var comments: [DiffReviewComment] {
+        reviewStore.comments(for: reviewChatId)
     }
 
     var body: some View {
-        if files.isEmpty {
-            HostOnlyNote(text: "No edits in this session yet.")
-        } else {
-            VStack(alignment: .leading, spacing: 0) {
-                if let file = selected { fileHeader(file) }
+        VStack(alignment: .leading, spacing: 0) {
+            if chat != nil {
+                modeStrip
                 Rectangle().fill(Theme.border).frame(height: 1)
-                if let file = selected {
-                    if let hunks = file.hunks {
-                        // Lines keep their shape: the diff scrolls sideways instead of wrapping.
-                        ScrollView([.vertical, .horizontal]) {
-                            VStack(alignment: .leading, spacing: 0) {
-                                ForEach(hunks) { hunk in
-                                    Text(hunk.header)
-                                        .font(mono)
-                                        .foregroundStyle(Theme.textFaint)
-                                        .padding(.horizontal, 12)
-                                        .padding(.vertical, 6)
-                                    let numbers = DiffNumbers.numbers(hunk)
-                                    ForEach(hunk.lines) { line in
-                                        diffLine(line, number: numbers.indices.contains(line.id) ? numbers[line.id] : nil)
-                                    }
+            }
+            if let file = selected {
+                fileHeader(file)
+                Rectangle().fill(Theme.border).frame(height: 1)
+                if let hunks = file.hunks, !hunks.isEmpty {
+                    // Lines keep their shape: the diff scrolls sideways instead of wrapping.
+                    ScrollView([.vertical, .horizontal]) {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(hunks) { hunk in
+                                Text(hunk.header)
+                                    .font(mono)
+                                    .foregroundStyle(Theme.textFaint)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 6)
+                                let numbers = DiffNumbers.numbers(hunk)
+                                ForEach(hunk.lines) { line in
+                                    let fallback = numbers.indices.contains(line.id) ? numbers[line.id] : nil
+                                    diffLine(file: file, hunk: hunk, line: line, fallbackNumber: fallback)
                                 }
                             }
-                            .padding(.vertical, 8)
                         }
-                        .accessibilityIdentifier("inspect-diff-lines")
-                    } else {
-                        HostOnlyNote(text: "Line diffs stay on the host for now. iOS shows which files changed\(file.additions == nil ? "" : " and by how much").")
+                        .padding(.vertical, 8)
                     }
+                    .accessibilityIdentifier("inspect-diff-lines")
+                } else if state.checkoutDiffLoading {
+                    ProgressView("Loading diff…")
+                        .font(DuoType.sans(small: true))
+                        .foregroundStyle(Theme.textMuted)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let error = state.checkoutDiffError, chat != nil {
+                    HostOnlyNote(text: "Couldn't load live diff: \(error)")
+                } else if file.hunks != nil {
+                    HostOnlyNote(text: "No line diff for this file (binary or truncated on the host).")
+                } else {
+                    HostOnlyNote(text: "Line diffs stay on the host for now. iOS shows which files changed\(file.additions == nil ? "" : " and by how much").")
                 }
+            } else if state.checkoutDiffLoading {
+                ProgressView("Loading diff…")
+                    .font(DuoType.sans(small: true))
+                    .foregroundStyle(Theme.textMuted)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let error = state.checkoutDiffError, chat != nil {
+                VStack(alignment: .leading, spacing: 8) {
+                    HostOnlyNote(text: "Couldn't load live diff: \(error)")
+                    Button("Try again") { Task { await loadCheckoutDiff() } }
+                        .font(DuoType.sans(small: true, medium: true))
+                        .buttonStyle(.bordered)
+                        .padding(.horizontal, 16)
+                }
+            } else if state.checkoutSnapshot != nil {
+                HostOnlyNote(text: "The checkout is clean for \(state.diffMode.label.lowercased()).")
+            } else {
+                HostOnlyNote(text: "No edits in this session yet.")
             }
+
+            if (rangeMode && selection != nil) || !comments.isEmpty {
+                Rectangle().fill(Theme.border).frame(height: 1)
+                reviewTray
+            }
+        }
+        .sheet(isPresented: $composing) { composerSheet }
+        .task(id: "\(state.chatId ?? "")-\(state.diffMode.rawValue)") {
+            await loadCheckoutDiff()
         }
     }
 
-    /// The file's path and counts, and a pager through the session's edited files.
+    private var modeStrip: some View {
+        HStack(spacing: 8) {
+            Picker("Scope", selection: $state.diffMode) {
+                ForEach(CheckoutDiffMode.allCases) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            if state.checkoutDiffLoading {
+                ProgressView()
+                    .controlSize(.small)
+            }
+            Button {
+                if rangeMode {
+                    rangeMode = false
+                    if let selection {
+                        self.selection = .line(selection.bounds.lowerBound, in: selection.path)
+                    }
+                } else {
+                    rangeMode = true
+                }
+            } label: {
+                Image(systemName: "arrow.up.and.down.text.horizontal")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(rangeMode ? Theme.accent : Theme.textMuted)
+                    .frame(width: 28, height: 28)
+                    .background(rangeMode ? Theme.accent.opacity(0.14) : Theme.text.opacity(0.06),
+                                in: RoundedRectangle(cornerRadius: 7))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(rangeMode ? "Exit range selection" : "Range selection")
+            .accessibilityIdentifier("inspect-range-mode")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+
+    /// The file's path and counts, and a pager through the edited files.
     private func fileHeader(_ file: InspectFile) -> some View {
-        let index = files.firstIndex { $0.path == file.path } ?? 0
+        let currentFiles = displayedFiles
+        let index = currentFiles.firstIndex { $0.path == file.path } ?? 0
         return HStack(spacing: 10) {
             Text(file.path)
                 .font(DuoType.mono)
@@ -302,11 +433,11 @@ struct InspectDiffView: View {
             Spacer(minLength: 8)
             if let adds = file.additions { Text("+\(adds)").font(DuoType.mono).foregroundStyle(Theme.statusCompleted) }
             if let dels = file.deletions { Text("-\(dels)").font(DuoType.mono).foregroundStyle(Theme.danger) }
-            if files.count > 1 {
-                pageButton("chevron.left", enabled: index > 0) { state.selectedFile = files[index - 1].path }
-                Text("\(index + 1) / \(files.count)").font(DuoType.mono).foregroundStyle(Theme.textMuted)
+            if currentFiles.count > 1 {
+                pageButton("chevron.left", enabled: index > 0) { state.selectedFile = currentFiles[index - 1].path }
+                Text("\(index + 1) / \(currentFiles.count)").font(DuoType.mono).foregroundStyle(Theme.textMuted)
                     .monospacedDigit()
-                pageButton("chevron.right", enabled: index < files.count - 1) { state.selectedFile = files[index + 1].path }
+                pageButton("chevron.right", enabled: index < currentFiles.count - 1) { state.selectedFile = currentFiles[index + 1].path }
             }
         }
         .padding(.leading, 14)
@@ -330,31 +461,306 @@ struct InspectDiffView: View {
         .accessibilityLabel(symbol == "chevron.left" ? "Previous file" : "Next file")
     }
 
-    private func diffLine(_ line: DiffLine, number: Int?) -> some View {
+    private func diffLine(file: InspectFile, hunk: DiffHunk, line: DiffLine, fallbackNumber: Int?) -> some View {
+        let number = line.newNumber ?? line.oldNumber ?? fallbackNumber
+        let selected = selection.map { $0.path == file.path && $0.bounds.contains(number ?? -1) } ?? false
+        let commented = comments.contains {
+            $0.selection.path == file.path && $0.selection.bounds.contains(number ?? -1)
+        }
         let tint: Color
         switch line.kind {
         case .added: tint = Theme.statusCompleted
         case .removed: tint = Theme.danger
         case .context: tint = .clear
         }
-        return HStack(spacing: 10) {
-            Text(number.map(String.init) ?? "")
+        let hasSplitNumbers = line.oldNumber != nil || line.newNumber != nil
+        let marker = line.kind == .context ? " " : (line.kind == .added ? "+" : "-")
+        let markerColor = line.kind == .added ? Theme.statusCompleted
+            : line.kind == .removed ? Theme.danger : Theme.textFaint
+        return Button {
+            tap(file: file, line: line, number: number)
+        } label: {
+            HStack(spacing: 6) {
+                if hasSplitNumbers {
+                    HStack(spacing: 2) {
+                        Text(line.oldNumber.map(String.init) ?? "")
+                            .frame(width: 24, alignment: .trailing)
+                        Text(line.newNumber.map(String.init) ?? "")
+                            .frame(width: 24, alignment: .trailing)
+                    }
+                    .font(Theme.mono(10))
+                    .foregroundStyle(Theme.textFaint)
+                    .monospacedDigit()
+                } else {
+                    Text(number.map(String.init) ?? "")
+                        .font(mono)
+                        .foregroundStyle(Theme.textFaint)
+                        .frame(width: 30, alignment: .trailing)
+                        .monospacedDigit()
+                }
+                HStack(alignment: .firstTextBaseline, spacing: 0) {
+                    Text(marker).foregroundStyle(markerColor)
+                    HighlightedCodeLine(text: line.text, language: language(for: file.path))
+                }
                 .font(mono)
-                .foregroundStyle(Theme.textFaint)
-                .frame(width: 30, alignment: .trailing)
-            Text(line.text)
-                .font(mono)
-                .foregroundStyle(line.kind == .context ? Theme.text : tint)
                 .fixedSize()
+                Spacer(minLength: 0)
+                if commented {
+                    Image(systemName: "text.bubble.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Theme.accent)
+                        .padding(.trailing, 8)
+                }
+            }
+            .padding(.horizontal, 8)
+            .frame(minWidth: 600, alignment: .leading)
+            .padding(.vertical, 1)
+            .background(selected ? Theme.accent.opacity(0.18) : tint.opacity(0.12))
+            .overlay(alignment: .leading) {
+                if line.kind != .context { Rectangle().fill(tint).frame(width: 2) }
+            }
+            .overlay(alignment: .trailing) {
+                if selected { Rectangle().fill(Theme.accent).frame(width: 2) }
+            }
+            .contentShape(Rectangle())
         }
-        .padding(.horizontal, 8)
-        .frame(minWidth: 600, alignment: .leading)
-        .padding(.vertical, 1)
-        .background(tint.opacity(0.12))
-        .overlay(alignment: .leading) {
-            if line.kind != .context { Rectangle().fill(tint).frame(width: 2) }
-        }
+        .buttonStyle(.plain)
+        .disabled(number == nil)
         .accessibilityLabel((line.kind == .added ? "Added: " : line.kind == .removed ? "Removed: " : "") + line.text)
+        .accessibilityHint("Tap to select for a review comment")
+        .accessibilityIdentifier("inspect-diff-line")
+    }
+
+    private func language(for path: String) -> HighlightLanguage {
+        HighlightLanguage.forTag((path as NSString).pathExtension)
+            ?? HighlightLanguage.forTag("txt") ?? .swift
+    }
+
+    private func tap(file: InspectFile, line: DiffLine, number: Int?) {
+        guard let number else { return }
+        UISelectionFeedbackGenerator().selectionChanged()
+        guard rangeMode else {
+            if selection == .line(number, in: file.path) {
+                selection = nil
+            } else {
+                selection = .line(number, in: file.path)
+                draftNote = ""
+                editingComment = nil
+                composing = true
+            }
+            return
+        }
+        if let current = selection, current.path == file.path,
+           current.bounds.contains(number),
+           number == current.bounds.lowerBound || number == current.bounds.upperBound {
+            selection = current.excluding(number, in: file.path)
+        } else if let current = selection, current.path == file.path {
+            selection = current.including(number, in: file.path)
+        } else {
+            selection = .line(number, in: file.path)
+        }
+    }
+
+    private func quotedLines(for selection: DiffLineSelection) -> [String] {
+        guard let file = displayedFiles.first(where: { $0.path == selection.path }),
+              let hunks = file.hunks else { return [] }
+        var rows: [String] = []
+        for hunk in hunks {
+            let numbers = DiffNumbers.numbers(hunk)
+            for line in hunk.lines {
+                let fallback = numbers.indices.contains(line.id) ? numbers[line.id] : nil
+                let number = line.newNumber ?? line.oldNumber ?? fallback
+                guard let number, selection.bounds.contains(number) else { continue }
+                let marker = line.kind == .added ? "+" : line.kind == .removed ? "-" : " "
+                rows.append(marker + line.text)
+            }
+        }
+        return rows
+    }
+
+    private var reviewTray: some View {
+        VStack(spacing: 6) {
+            if let selection, rangeMode {
+                Button {
+                    draftNote = ""
+                    editingComment = nil
+                    composing = true
+                } label: {
+                    Label("Comment on \(selection.label)", systemImage: "text.bubble")
+                        .font(DuoType.sans(small: true, medium: true))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 36)
+                }
+                .buttonStyle(.bordered)
+                .tint(Theme.accent)
+                .accessibilityIdentifier("inspect-comment-range")
+            }
+            if !comments.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(comments) { comment in
+                        HStack(alignment: .top, spacing: 8) {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(comment.selection.label)
+                                    .font(Theme.mono(10.5))
+                                    .foregroundStyle(Theme.textMuted)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Text(comment.note)
+                                    .font(DuoType.sans(small: true))
+                                    .foregroundStyle(Theme.text)
+                                    .lineLimit(2)
+                            }
+                            Spacer(minLength: 6)
+                            Button {
+                                editingComment = comment
+                                draftNote = comment.note
+                                composing = true
+                            } label: {
+                                Image(systemName: "pencil")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(Theme.textMuted)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Edit comment")
+                            Button {
+                                reviewStore.remove(id: comment.id, chatId: reviewChatId)
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(Theme.textMuted)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Remove comment")
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+                HStack(spacing: 8) {
+                    Button(role: .destructive) {
+                        reviewStore.clear(chatId: reviewChatId)
+                    } label: {
+                        Text("Discard")
+                            .font(DuoType.sans(small: true))
+                    }
+                    .buttonStyle(.bordered)
+                    Spacer()
+                    if chat != nil {
+                        Button {
+                            sendComments()
+                        } label: {
+                            Text("Send \(comments.count) comment\(comments.count == 1 ? "" : "s")")
+                                .font(DuoType.sans(small: true, medium: true))
+                                .foregroundStyle(Theme.bg)
+                                .padding(.horizontal, 14)
+                                .frame(height: 32)
+                                .background(Theme.text, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("inspect-send-comments")
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Theme.surface)
+    }
+
+    private var composerSheet: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 12) {
+                if let target = editingComment?.selection ?? selection {
+                    Text(target.label)
+                        .font(Theme.mono(12))
+                        .foregroundStyle(Theme.textMuted)
+                    ScrollView([.horizontal]) {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(quotedLines(for: target), id: \.self) { row in
+                                Text(row)
+                                    .font(Theme.mono(12))
+                                    .foregroundStyle(row.hasPrefix("+") ? Theme.statusCompleted
+                                        : row.hasPrefix("-") ? Theme.danger : Theme.textMuted)
+                                    .fixedSize()
+                            }
+                        }
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(ink(0.035), in: RoundedRectangle(cornerRadius: 8))
+                    }
+                    .frame(maxHeight: 140)
+                }
+                TextEditor(text: $draftNote)
+                    .font(Theme.sans(15))
+                    .frame(maxHeight: .infinity)
+                    .padding(4)
+                    .background(ink(0.02), in: RoundedRectangle(cornerRadius: 8))
+                    .accessibilityIdentifier("inspect-comment-editor")
+                Spacer(minLength: 0)
+            }
+            .padding(16)
+            .navigationTitle(editingComment == nil ? "Review comment" : "Edit comment")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { composing = false }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(editingComment == nil ? "Add" : "Save") {
+                        saveComment()
+                    }
+                    .disabled(draftNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .accessibilityIdentifier("inspect-comment-save")
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .harnessAppearance()
+    }
+
+    private func saveComment() {
+        let note = draftNote.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !note.isEmpty else { return }
+        if let editing = editingComment {
+            reviewStore.update(note: note, for: editing.id, chatId: reviewChatId)
+        } else if let selection {
+            reviewStore.add(DiffReviewComment(selection: selection, note: note,
+                                              quotedLines: quotedLines(for: selection)),
+                            for: reviewChatId)
+        }
+        editingComment = nil
+        composing = false
+        selection = nil
+        rangeMode = false
+    }
+
+    private func sendComments() {
+        guard let appModel, let chat else { return }
+        let prompt = DiffReviewPrompt.prompt(comments: comments, mode: state.diffMode)
+        appModel.sendReviewPrompt(prompt, for: chat)
+        reviewStore.clear(chatId: reviewChatId)
+        selection = nil
+        rangeMode = false
+    }
+
+    private func loadCheckoutDiff() async {
+        guard let appModel, let chat else { return }
+        state.checkoutDiffLoading = true
+        state.checkoutDiffError = nil
+        do {
+            let next = try await appModel.fetchCheckoutDiff(for: chat, mode: state.diffMode)
+            if !Task.isCancelled {
+                state.checkoutSnapshot = next
+            }
+        } catch {
+            if !Task.isCancelled {
+                state.checkoutDiffError = error.localizedDescription
+            }
+        }
+        if !Task.isCancelled {
+            state.checkoutDiffLoading = false
+        }
     }
 }
 
@@ -410,14 +816,45 @@ struct InspectFilesView: View {
     let rows: [FileTreeRow]
     let detailed: Bool
     @Bindable var state: InspectState
+    @Environment(AppModel.self) private var appModel: AppModel?
+
+    private var chat: Chat? {
+        guard let chatId = state.chatId else { return nil }
+        return appModel?.chat(id: chatId)
+    }
+
+    private var mergedRows: [FileTreeRow] {
+        guard let workspaceFiles = state.workspaceFiles else { return rows }
+        var marks: [String: FileTreeRow.Mark] = [:]
+        for row in rows where !row.isDirectory {
+            marks[row.path] = row.mark
+        }
+        for path in workspaceFiles where marks[path] == nil {
+            marks[path] = .untouched
+        }
+        return FileTree.rows(marks)
+    }
+
+    private var hasDetails: Bool {
+        detailed || state.workspaceFiles != nil
+    }
 
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
-                if !detailed {
-                    HostOnlyNote(text: "The files this session touched. The full project tree stays on the host for now.")
+                if state.workspaceFilesLoading && !hasDetails {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Loading project files…")
+                            .font(DuoType.sans(small: true))
+                            .foregroundStyle(Theme.textMuted)
+                    }
+                    .padding(16)
+                } else if !hasDetails {
+                    HostOnlyNote(text: state.workspaceFilesError.map { "Couldn't load project files: \($0)" }
+                                 ?? "The files this session touched. The full project tree stays on the host for now.")
                 }
-                ForEach(rows) { row in
+                ForEach(mergedRows) { row in
                     Button {
                         guard !row.isDirectory else { return }
                         state.selectedFile = row.path
@@ -429,6 +866,28 @@ struct InspectFilesView: View {
             .padding(.vertical, 6)
         }
         .accessibilityIdentifier("inspect-files")
+        .task(id: state.chatId ?? "") {
+            await loadWorkspaceFiles()
+        }
+    }
+
+    private func loadWorkspaceFiles() async {
+        guard let appModel, let chat else { return }
+        state.workspaceFilesLoading = true
+        state.workspaceFilesError = nil
+        do {
+            let paths = try await appModel.fetchWorkspaceFiles(for: chat)
+            if !Task.isCancelled {
+                state.workspaceFiles = paths
+            }
+        } catch {
+            if !Task.isCancelled {
+                state.workspaceFilesError = error.localizedDescription
+            }
+        }
+        if !Task.isCancelled {
+            state.workspaceFilesLoading = false
+        }
     }
 
     private func line(_ row: FileTreeRow) -> some View {

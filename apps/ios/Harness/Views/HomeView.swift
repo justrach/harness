@@ -32,6 +32,11 @@ struct HomeView: View {
     @State private var showProfile = false
     /// A session whose Delete is waiting on its confirmation.
     @State private var pendingDelete: Chat?
+    /// A session whose Sleep sheet is open.
+    @State private var pendingSleep: Chat?
+    @AppStorage(ActivitySleepRules.archiveAfterKey) private var archiveAfterDays: Int = 0
+    @Environment(\.scenePhase) private var scenePhase
+    private var sleepStore: SessionSleepStore { .shared }
     // "" = All. Sticky across launches; falls back to All if the space is gone.
     @AppStorage("homeSpaceFilter") private var spaceFilter: String = ""
     // Start with Time each launch; a saved grouping can hide recent sessions
@@ -508,9 +513,16 @@ struct HomeView: View {
     }
 
     private var sidebar: some View {
-        ScrollViewReader { proxy in
+        let scope = filteredScopeChats
+        return ScrollViewReader { proxy in
             List {
-                sessionsSection
+                sessionsSection(chats: scope.active, asleepCount: scope.asleep.count, totalScoped: scope.totalScoped)
+                AsleepShelf(
+                    chats: scope.asleep,
+                    sleepStore: sleepStore,
+                    onSelect: { open(.chat($0.id)) },
+                    onSleep: { pendingSleep = $0 }
+                )
                 // The desktop's archived shelf sits under the active list,
                 // scoped by the same space filter and search.
                 ArchivedSection(spaceId: shelfScope, query: searchText, path: sidebarPath)
@@ -669,8 +681,26 @@ struct HomeView: View {
                 open(.newSession(hostPickerForChat ? .chat(deviceId: deviceId) : .projectless(deviceId: deviceId)))
             }
         }
+        .sheet(item: $pendingSleep) { chat in
+            SessionSleepSheet(chat: chat, sleepStore: sleepStore)
+        }
         .task(id: model.overviewChats.map(\.id).joined()) {
             model.preloadSessions()
+        }
+        .task(id: sleepSweepTrigger) {
+            sweepSleepAndAutoArchive()
+        }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(30))
+                guard !Task.isCancelled else { break }
+                sweepSleepAndAutoArchive()
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                sweepSleepAndAutoArchive()
+            }
         }
         .onChange(of: model.launchRoute) { _, route in
             // A deep link while Home is already up (Live Activity tap).
@@ -679,6 +709,7 @@ struct HomeView: View {
             path = [route]
         }
         .onAppear {
+            sweepSleepAndAutoArchive()
             if let route = model.launchRoute {
                 model.launchRoute = nil
                 // Push the whole stack atomically — appending from a child's
@@ -895,13 +926,55 @@ struct HomeView: View {
 
     // MARK: Sessions
 
-    @ViewBuilder private var sessionsSection: some View {
+    private var filteredScopeChats: (active: [Chat], asleep: [Chat], totalScoped: Int) {
         let scoped = selectedSpace.map { model.chats(in: $0.id) }
             ?? (projectlessSelected ? HomeListControls.projectless(model.overviewChats) : model.overviewChats)
         let activityFiltered = HomeActivityWindow.apply(scoped, window: activityWindow,
                                                         indicator: { model.indicator(for: $0) },
                                                         nowMs: nowMs())
-        let chats = HomeFilter.apply(activityFiltered, query: searchText, names: model.homeFilterNames)
+        let matched = HomeFilter.apply(activityFiltered, query: searchText, names: model.homeFilterNames)
+        let active = matched.filter { !sleepStore.isSleeping($0.id) }
+        let asleep = matched.filter { sleepStore.isSleeping($0.id) }
+        return (active, asleep, scoped.count)
+    }
+
+    private var sleepSweepTrigger: String {
+        let chatStates = model.overviewChats.map {
+            "\($0.id):\($0.archived):\($0.lastMessageAt ?? 0):\(model.indicator(for: $0).rawValue)"
+        }.joined(separator: "|")
+        return "\(archiveAfterDays)|\(sleepStore.sleepingUntil.count)|\(chatStates)"
+    }
+
+    private func isChatOpen(_ chatId: String) -> Bool {
+        selectedChatId == chatId || secondChatId == chatId || path.contains(.chat(chatId))
+    }
+
+    @MainActor
+    private func sweepSleepAndAutoArchive() {
+        let now = Date()
+        sleepStore.autoWakeIfNeeded(
+            chats: model.overviewChats,
+            indicator: { model.indicator(for: $0) },
+            now: now
+        )
+        guard archiveAfterDays > 0 else { return }
+        for chat in model.overviewChats {
+            if ActivitySleepRules.archivesWhenIdle(
+                chat: chat,
+                indicator: model.indicator(for: chat),
+                isPinned: model.isPinned(chatId: chat.id),
+                isOpen: isChatOpen(chat.id),
+                isSleeping: sleepStore.isSleeping(chat.id),
+                wokeRecently: sleepStore.wokeRecently(chat.id),
+                archiveAfterDays: archiveAfterDays,
+                now: now
+            ) {
+                model.archive(chatId: chat.id)
+            }
+        }
+    }
+
+    @ViewBuilder private func sessionsSection(chats: [Chat], asleepCount: Int, totalScoped: Int) -> some View {
         let grouping: HomeGroupBy = hierarchyProfile.flatSessionList
             ? .none
             : (HomeGroupBy(rawValue: groupByRaw) ?? .none)
@@ -909,7 +982,7 @@ struct HomeView: View {
                                      hasProjects: !model.spaces.isEmpty,
                                      projectSelected: selectedSpace != nil || projectlessSelected) {
             Section {
-                listControls(showsGrouping: HomeListControls.showsGrouping(sessionsInScope: scoped.count))
+                listControls(showsGrouping: HomeListControls.showsGrouping(sessionsInScope: totalScoped))
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
                     .listRowInsets(EdgeInsets(top: 0, leading: Theme.gutter, bottom: 4, trailing: Theme.gutter))
@@ -917,12 +990,12 @@ struct HomeView: View {
             .listSectionSeparator(.hidden)
         }
         if chats.isEmpty {
-            // A search can still hit the archived shelf below.
+            // A search can still hit the asleep or archived shelf below.
             let archivedHit = !searchText.isEmpty
                 && !model.archivedMatches(in: shelfScope, query: searchText).isEmpty
-            if !archivedHit {
+            if !archivedHit && asleepCount == 0 {
                 Section {
-                    if scoped.isEmpty {
+                    if totalScoped == 0 {
                         // Nothing started yet: until an agent is ready on a computer, say how to bring one in.
                         BringYourAgentView()
                             .listRowBackground(Color.clear)
@@ -995,9 +1068,12 @@ struct HomeView: View {
     }
 
     private func sessionRow(_ chat: Chat) -> some View {
+        let canArchive = ActivitySleepRules.canManualArchive(indicator: model.indicator(for: chat))
+        let pinned = model.isPinned(chatId: chat.id)
+        let sleeping = sleepStore.isSleeping(chat.id)
         // Location shows even when scoped — without it the row's
         // first line is just a floating dot and a timestamp.
-        ChatRow(chat: chat, showLocation: true, showsCodeDetails: hierarchyProfile.showsRowTechBadges) {
+        return ChatRow(chat: chat, showLocation: true, showsCodeDetails: hierarchyProfile.showsRowTechBadges) {
             open(.chat(chat.id))
         }
         .listRowBackground(
@@ -1010,8 +1086,9 @@ struct HomeView: View {
         .listRowInsets(EdgeInsets(top: 1, leading: Theme.gutter - ChatRow.insetH,
                                   bottom: 1, trailing: Theme.gutter - ChatRow.insetH))
         .sessionPinAction(chat: chat, model: model)
-        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+        .swipeActions(edge: .trailing, allowsFullSwipe: canArchive) {
             Button {
+                guard ActivitySleepRules.canManualArchive(indicator: model.indicator(for: chat)) else { return }
                 // withAnimation, not a value-keyed .animation: the row
                 // leaves THIS section and lands in the archived shelf
                 // — one coordinated List diff, or the hand-off jumps.
@@ -1022,6 +1099,13 @@ struct HomeView: View {
                 Label("Archive", systemImage: "archivebox")
             }
             .tint(Theme.surfaceRaised)
+            .disabled(!canArchive)
+            Button {
+                pendingSleep = chat
+            } label: {
+                Label(sleeping ? "Wake up" : "Sleep", systemImage: sleeping ? "sun.max" : "moon.zzz")
+            }
+            .tint(Theme.accent)
             // No destructive role: SwiftUI would slide the row out before the
             // confirmation is answered.
             Button {
@@ -1031,6 +1115,42 @@ struct HomeView: View {
             }
             .tint(Theme.danger)
             .accessibilityIdentifier("session-delete")
+        }
+        .contextMenu {
+            Button {
+                withAnimation(Motion.resort) {
+                    model.setPinned(chatId: chat.id, pinned: !pinned)
+                }
+            } label: {
+                Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
+            }
+            .disabled(!model.pinsReady)
+
+            if sleeping {
+                Button("Wake up", systemImage: "sun.max") {
+                    withAnimation(Motion.resort) {
+                        sleepStore.wake(chatId: chat.id)
+                    }
+                }
+            } else {
+                Button("Sleep…", systemImage: "moon.zzz") {
+                    pendingSleep = chat
+                }
+            }
+
+            Button("Archive", systemImage: "archivebox") {
+                guard ActivitySleepRules.canManualArchive(indicator: model.indicator(for: chat)) else { return }
+                withAnimation(Motion.resort) {
+                    model.archive(chatId: chat.id)
+                }
+            }
+            .disabled(!canArchive)
+
+            Button(role: .destructive) {
+                pendingDelete = chat
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
         }
     }
 
