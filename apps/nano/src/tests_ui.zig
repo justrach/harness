@@ -619,6 +619,10 @@ test "the composer has the keys after ⌘D, ⌘[ and ⌘]: nothing typed is lost
 }
 
 test "native visual renders interactive Luau widgets 1:1 in transcript" {
+    // This fixture checks native layout and interaction. Host scheduling is
+    // covered by the runtime's real-clock deadline tests, not this UI test.
+    const clock = @import("visual_luau.zig").TestClock.init();
+    defer clock.deinit();
     var h: Harness = undefined;
     try h.init();
     defer h.deinit();
@@ -635,6 +639,9 @@ test "native visual renders interactive Luau widgets 1:1 in transcript" {
     h.t.settle(1);
 
     try testing.expect(h.t.hasText("Capacity planner"));
+    if (h.a.visuals.find("v1")) |entry| {
+        if (entry.err) |err| std.debug.print("Native visual fixture stopped: {s}\n", .{err});
+    }
     try testing.expect(h.t.hasText("Native · Interactive"));
     try testing.expect(h.t.hasText("Monthly estimate: $1036"));
     try testing.expect(h.t.hasText("Capacity: 60 units"));

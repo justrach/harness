@@ -332,7 +332,31 @@ fn performanceCounterNs(counter: i64, frequency: i64) i128 {
     return @divTrunc(@as(i128, counter) * std.time.ns_per_s, frequency);
 }
 
+// Transcript widget tests exercise layout and callbacks, not host scheduling.
+// Keep their clock deterministic without changing the production 20 ms budget
+// or the real-clock sandbox tests. Advancing on every probe still stops loops.
+pub const TestClock = if (@import("builtin").is_test) struct {
+    previous: ?i128,
+    threadlocal var time_ns: ?i128 = null;
+
+    pub fn init() @This() {
+        const previous = time_ns;
+        time_ns = 0;
+        return .{ .previous = previous };
+    }
+
+    pub fn deinit(clock: @This()) void {
+        time_ns = clock.previous;
+    }
+} else struct {};
+
 fn nowNs() i128 {
+    if (@import("builtin").is_test) {
+        if (TestClock.time_ns) |time| {
+            TestClock.time_ns = time + std.time.ns_per_us;
+            return time;
+        }
+    }
     if (@import("builtin").os.tag == .windows) {
         const windows = std.os.windows;
         var counter: windows.LARGE_INTEGER = undefined;
@@ -1066,6 +1090,34 @@ test "visual deadline clock is monotonic and advances" {
         previous = current;
     }
     try testing.expect(previous > start);
+}
+
+test "transcript fixture clock ignores host pauses but still enforces the budget" {
+    const clock = TestClock.init();
+    defer clock.deinit();
+    var v: Visual = .{ .gpa = testing.allocator };
+    v.armBudget();
+    // A descheduled CI runner can pause for longer than the entire sandbox
+    // budget even though the script has done no work.
+    try std.Io.sleep(testing.io, .fromMilliseconds(25), .awake);
+    try testing.expect(v.checkBudget() == null);
+    TestClock.time_ns.? += call_budget_ns;
+    try testing.expectEqualStrings("visual execution exceeded 20 ms", v.checkBudget().?);
+}
+
+test "transcript fixture clock still interrupts runaway scripts" {
+    const clock = TestClock.init();
+    defer clock.deinit();
+    switch (Visual.init(testing.allocator, "while true do end")) {
+        .ok => |v| {
+            v.deinit();
+            return error.TestUnexpectedResult;
+        },
+        .err => |err| {
+            defer testing.allocator.free(err);
+            try testing.expectEqualStrings("visual execution exceeded 20 ms", err);
+        },
+    }
 }
 
 test "setup render and handler loops time out" {
