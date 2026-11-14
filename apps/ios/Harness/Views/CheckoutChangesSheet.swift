@@ -42,6 +42,30 @@ struct CheckoutDiffFileSummary: Decodable, Equatable {
     var additions: Int
     var deletions: Int
     var binary: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case path, oldPath, status, additions, deletions, binary
+    }
+
+    init(path: String, oldPath: String? = nil, status: String,
+         additions: Int, deletions: Int, binary: Bool = false) {
+        self.path = path
+        self.oldPath = oldPath
+        self.status = status
+        self.additions = additions
+        self.deletions = deletions
+        self.binary = binary
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        path = try c.decode(String.self, forKey: .path)
+        oldPath = try c.decodeIfPresent(String.self, forKey: .oldPath)
+        status = try c.decode(String.self, forKey: .status)
+        additions = try c.decode(Int.self, forKey: .additions)
+        deletions = try c.decode(Int.self, forKey: .deletions)
+        binary = try c.decodeIfPresent(Bool.self, forKey: .binary) ?? false
+    }
 }
 
 /// harness-proto CheckoutDiff — the host's answer to GetCheckoutDiff.
@@ -119,7 +143,11 @@ enum UnifiedDiffParser {
             hunks = []
         }
 
-        for rawLine in patch.split(separator: "\n", omittingEmptySubsequences: false) {
+        var rawLines = patch.split(separator: "\n", omittingEmptySubsequences: false)
+        if patch.hasSuffix("\n"), rawLines.last?.isEmpty == true {
+            rawLines.removeLast()
+        }
+        for rawLine in rawLines {
             let line = String(rawLine)
             if line.hasPrefix("diff --git ") {
                 closeFile()
@@ -400,21 +428,42 @@ extension WorkspaceStore {
 
     /// ListWorkspaceDirectory for the chat's checkout (workspace_files.rs):
     /// one directory per page, cursor-paginated, dotfiles and .git hidden by
-    /// the host. Returns workspace-relative file paths.
+    /// the host. Walks subdirectories with a tight bound so Inspect's Files
+    /// tree shows real project files without ever pinning the phone.
     func listWorkspaceFiles(chatId: String, deviceId: String,
                             directory: String = "") async throws -> [String] {
         var paths: [String] = []
-        var cursor: String? = nil
-        // The host caps a checkout's listing; stop at our own bound too so a
-        // huge tree can never pin the phone.
-        for _ in 0..<20 {
-            var params: [String: Any] = ["chatId": chatId, "directory": directory]
-            if let cursor { params["cursor"] = cursor }
-            let page: WorkspaceDirectoryPage = try await relay(for: deviceId).call(
-                method: "ListWorkspaceDirectory", params: params)
-            paths += page.entries.filter { $0.kind == "file" }.map(\.path)
-            guard let next = page.nextCursor else { break }
-            cursor = next
+        var queue: [String] = [directory]
+        var visitedDirs = 0
+        let maxDirectories = 16
+        let maxFiles = 500
+
+        while !queue.isEmpty, visitedDirs < maxDirectories, paths.count < maxFiles {
+            let currentDir = queue.removeFirst()
+            visitedDirs += 1
+            var cursor: String? = nil
+            for _ in 0..<20 {
+                var params: [String: Any] = ["chatId": chatId, "directory": currentDir]
+                if let cursor { params["cursor"] = cursor }
+                let page: WorkspaceDirectoryPage
+                do {
+                    page = try await relay(for: deviceId).call(
+                        method: "ListWorkspaceDirectory", params: params)
+                } catch {
+                    if currentDir == directory && paths.isEmpty { throw error }
+                    break
+                }
+                for entry in page.entries {
+                    if entry.kind == "file" {
+                        paths.append(entry.path)
+                        if paths.count >= maxFiles { break }
+                    } else if entry.kind == "directory", visitedDirs + queue.count < maxDirectories {
+                        queue.append(entry.path)
+                    }
+                }
+                guard paths.count < maxFiles, let next = page.nextCursor else { break }
+                cursor = next
+            }
         }
         return paths
     }
@@ -797,7 +846,7 @@ struct CheckoutChangesSheet: View {
                     .foregroundStyle(Theme.textFaint)
                     .frame(width: 26, alignment: .trailing)
                     .monospacedDigit()
-                highlightedText(line)
+                highlightedText(line, path: file.path)
                     .font(Theme.mono(12))
                     .fixedSize()
                 Spacer(minLength: 0)
@@ -828,13 +877,13 @@ struct CheckoutChangesSheet: View {
     /// diff tint, the code after it is tokenized (Highlight) in the file's
     /// language.
     @ViewBuilder
-    private func highlightedText(_ line: DiffLine) -> some View {
+    private func highlightedText(_ line: DiffLine, path: String?) -> some View {
         let marker = line.kind == .context ? " " : (line.kind == .added ? "+" : "-")
         let markerColor = line.kind == .added ? Theme.statusCompleted
             : line.kind == .removed ? Theme.danger : Theme.textFaint
         HStack(alignment: .firstTextBaseline, spacing: 0) {
             Text(marker).foregroundStyle(markerColor)
-            HighlightedCodeLine(text: line.text, language: language(for: nil))
+            HighlightedCodeLine(text: line.text, language: language(for: path))
         }
     }
 
@@ -1104,42 +1153,22 @@ struct HighlightedCodeLine: View {
         var out = AttributedString(text)
         out.foregroundColor = Theme.text
         let spans = Highlighter.highlight(code: text, language: language).first ?? []
-        let chars = Array(text.utf16)
+        let charCount = text.count
         for span in spans {
-            guard span.range.upperBound <= chars.count,
-                  let lower = text.utf16.index(text.utf16.startIndex, offsetBy: span.range.lowerBound)
-                    .samePosition(in: text),
-                  let upper = text.utf16.index(text.utf16.startIndex, offsetBy: span.range.upperBound)
-                    .samePosition(in: text),
-                  let range = Range<String.Index>(lower..<upper) else { continue }
-            var attributes = AttributeContainer()
+            guard span.range.lowerBound >= 0, span.range.lowerBound < charCount else { continue }
+            let upper = min(span.range.upperBound, charCount)
+            guard let lower = out.characters.index(out.startIndex, offsetBy: span.range.lowerBound, limitedBy: out.endIndex),
+                  let end = out.characters.index(out.startIndex, offsetBy: upper, limitedBy: out.endIndex),
+                  lower < end else { continue }
+            let color: Color
             switch span.cls {
-            case .keyword: attributes.foregroundColor = Theme.tokenKeyword
-            case .stringLit: attributes.foregroundColor = Theme.tokenString
-            case .comment: attributes.foregroundColor = Theme.textFaint
-            case .number: attributes.foregroundColor = Theme.tokenNumber
+            case .keyword: color = Theme.tokenKeyword
+            case .stringLit: color = Theme.tokenString
+            case .comment: color = Theme.textFaint
+            case .number: color = Theme.tokenNumber
             }
-            out[AttributedString(range).map { _ in range } ?? AttributedString(text).runs[...].range, id: \.self] = attributes
-        }
-        // The above attribute-write is awkward through the UTF16 bridge; use
-        // the direct AttributedString range instead.
-        var direct = AttributedString(text)
-        direct.foregroundColor = Theme.text
-        for span in spans {
-            guard let swiftRange = utf16RangeToSwift(span.range) else { continue }
-            let attrRange = AttributedString(text[swiftRange]).runs.startIndex...
-                ..<AttributedString(text[swiftRange]).runs.endIndex
-            _ = attrRange  // placeholder, replaced below
+            out[lower..<end].foregroundColor = color
         }
         return out
-    }
-
-    /// UTF-16 offsets (Highlighter counts Characters) → String.Index range.
-    private func utf16RangeToSwift(_ range: Range<Int>) -> Range<String.Index>? {
-        let chars = Array(text.utf16)
-        guard range.upperBound <= chars.count else { return nil }
-        let lower = text.utf16.index(text.utf16.startIndex, offsetBy: range.lowerBound)
-        let upper = text.utf16.index(text.utf16.startIndex, offsetBy: range.upperBound)
-        return Range(uncheckedBounds: (lower, upper))
     }
 }
