@@ -172,7 +172,7 @@ impl HarnessUpdateStatus {
                 | HarnessUpdatePhase::Verifying
                 | HarnessUpdatePhase::Updated
                 | HarnessUpdatePhase::Failed
-        )
+        ) || (self.phase == HarnessUpdatePhase::ManualActionRequired && self.can_apply)
     }
 }
 
@@ -928,6 +928,26 @@ pub enum AgentEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_update_notice_visibility_matches_shared_vectors() {
+        let vectors: serde_json::Value =
+            serde_json::from_str(include_str!("../../../protocol/desktop/agent-updates.json"))
+                .unwrap();
+        for case in vectors["noticeVisibility"].as_array().unwrap() {
+            let status: HarnessUpdateStatus = serde_json::from_value(serde_json::json!({
+                "harness": "antigravity",
+                "phase": case["phase"],
+                "canApply": case["canApply"],
+            }))
+            .unwrap();
+            assert_eq!(
+                status.show_update_notice(),
+                case["expect"].as_bool().unwrap(),
+                "{case}"
+            );
+        }
+    }
 
     #[test]
     fn context_label_is_short_and_rounded() {

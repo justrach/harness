@@ -389,15 +389,7 @@ struct SessionView: View {
                 // Tap the session header to rename — model/effort changes
                 // moved into the composer's picker chips.
                 ToolbarItem(placement: .topBarTrailing) {
-                    Group {
-                        if coverSessionsShown {
-                            Text("Sessions")
-                                .font(Theme.sans(16, weight: .semibold))
-                                .foregroundStyle(Theme.text)
-                        } else {
-                            headerTitle(chat)
-                        }
-                    }
+                    headerTitle(chat)
                         // Claim the remaining bar width: the title expands before
                         // the fixed-size navigation and status marks. The title and
                         // pager carry their own swipe (headerControls).

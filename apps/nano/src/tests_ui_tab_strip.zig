@@ -54,6 +54,37 @@ fn replace(list: anytype, text: []const u8) !void {
     try list.replace(parsed.value);
 }
 
+test "question tab attention remains visible with hidden sidebar without selecting the question chat" {
+    for (0..3) |mode| {
+        var h: Harness = undefined;
+        try h.init(true);
+        defer h.deinit();
+        h.a.view.sidebar_open = false;
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+            \\{"reset":[{"id":"synthetic-ask","role":"assistant","parts":[{"kind":"input","requestId":"synthetic-question","resolved":false,"questions":[{"id":"choice","header":"Plan","question":"Choose a synthetic plan","options":["Keep it","Simplify it"]}]}]}]}
+        , .{});
+        defer parsed.deinit();
+        try h.a.transcript.apply(parsed.value);
+        @import("app_question.zig").syncWizard(&h.a);
+        if (mode == 1) h.a.newTab();
+        if (mode == 2) h.a.splitPane(.horizontal);
+        const selected = if (h.a.selected) |id| try testing.allocator.dupe(u8, id) else null;
+        defer if (selected) |id| testing.allocator.free(id);
+        h.t.settle(1);
+        var markers: usize = 0;
+        for (h.t.ctx.nodes.items) |node| switch (node.content) {
+            .text => |tx| if (std.mem.eql(u8, tx.str, "?") and node.rect.y < 42) {
+                markers += 1;
+            },
+            else => {},
+        };
+        try testing.expect(markers > 0);
+        try testing.expectEqual(@as(f32, 0), h.a.view.sidebar_width);
+        if (selected) |id| try testing.expectEqualStrings(id, h.a.selected.?) else try testing.expect(h.a.selected == null);
+        if (mode != 0) try testing.expect(!h.t.hasText("Cancel question"));
+    }
+}
+
 test "workspace tab labels do not cover the conversation with hover tooltips" {
     for ([_]bool{ false, true }) |dark| {
         var h: Harness = undefined;

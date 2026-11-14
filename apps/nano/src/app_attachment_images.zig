@@ -8,8 +8,15 @@ const refs = @import("attachment_refs.zig");
 pub const Cache = struct {
     items: std.ArrayList(*Image) = .empty,
     generation: u64 = 0,
+    /// The open inspector pins already loaded bytes; no second host read.
+    preview: ?*Image = null,
+    preview_chat: ?[]u8 = null,
+    zoom: f32 = 1,
+    center: @import("nanoui").ui.Point = .{ .x = 0.5, .y = 0.5 },
+    drag: ?@import("nanoui").ui.Point = null,
 
     pub fn deinit(cache: *Cache, gpa: std.mem.Allocator) void {
+        if (cache.preview_chat) |chat| gpa.free(chat);
         for (cache.items.items) |image| image.destroy();
         cache.items.deinit(gpa);
     }
@@ -198,7 +205,7 @@ pub fn reap(a: *App) void {
     var i: usize = 0;
     while (i < cache.items.items.len) {
         const image = cache.items.items[i];
-        if ((bytes > 2 * attachments.max_bytes or cache.items.items.len > 64) and image.used + 1 < cache.generation) {
+        if ((bytes > 2 * attachments.max_bytes or cache.items.items.len > 64) and image.used + 1 < cache.generation and cache.preview != image) {
             if (image.request) |id| a.engine.cancel(id);
             bytes -= image.bytes.items.len + image.encoded.items.len;
             _ = cache.items.orderedRemove(i);

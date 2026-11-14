@@ -229,6 +229,29 @@ test "github links second transcript click reuses the native panel for an issue"
     try testing.expect(!h.t.hasText("Code"));
 }
 
+test "github child linked PR keeps its item and originating split after neighboring chat focus" {
+    var h: Harness = undefined;
+    try setup(&h, &.{pull});
+    defer h.deinit();
+    h.a.splitPane(.horizontal);
+    h.a.openChat("b", null);
+    h.a.focusPane(0);
+    flow.openLinked(&h.a, links.parse(pull_url).?);
+    h.t.settle(0.2);
+    try testing.expect(h.t.hasText(pull.detail.?.title));
+    const calls = try githubCalls(&h);
+    h.a.focusPane(1);
+    h.t.settle(0.2);
+    try testing.expect(h.t.hasText(pull.detail.?.title));
+    try testing.expectEqual(flow.Kind.pull, h.a.panels.github_repository.kind);
+    try testing.expectEqualStrings("a", h.a.panels.github_repository.owner.?);
+    try testing.expectEqual(calls, try githubCalls(&h));
+    try h.t.clickText("Sessions");
+    h.t.settle(0.2);
+    try testing.expect(h.t.hasText("Split from Synthetic source"));
+    try testing.expect(h.t.hasText("No session-linked pull requests"));
+}
+
 test "github links replacing pending detail cancels the old reply and reuses one native tab" {
     Opener.count = 0;
     var h: Harness = undefined;

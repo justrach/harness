@@ -64,6 +64,99 @@ fn textRect(t: *ui.Tester, text: []const u8) ?ui.Rect {
     return null;
 }
 
+test "question focus inactive host never mounts an answer or consumes its keyboard" {
+    var h: Harness = undefined;
+    try h.init(1000, 700, 7);
+    defer h.deinit();
+    h.a.composer.set("Answer stays with its owner");
+    try @import("app_attachments.zig").stage(&h.a, "synthetic.txt", "synthetic attachment");
+    h.a.panels.host_open = true;
+    h.a.view.strip.focused = .host;
+    h.a.wizard.?.advance_at = h.a.now + 0.01;
+    h.draw();
+    try h.snap("inactive-host");
+    try testing.expectEqual(@as(usize, 0), textCount(&h.t, "Cancel question"));
+    try testing.expect(!@import("view_question.zig").expanded(&h.t.ctx, &h.a));
+    try testing.expectEqualStrings("Answer stays with its owner", h.a.composer.text());
+    try testing.expect(h.a.wizard.?.advance_at == null);
+    _ = h.t.shortcut(.{ .key = '1' });
+    h.draw();
+    try testing.expect(!h.a.wizard.?.picked(0));
+    try testing.expectEqual(@as(usize, 0), h.a.wizard.?.page);
+    try testing.expectEqual(@as(usize, 1), @import("app_attachments.zig").count(&h.a));
+    h.a.view.strip.focused = .{ .chat = 0 };
+    h.draw();
+    try testing.expectEqual(@as(usize, 1), textCount(&h.t, "Cancel question"));
+    try testing.expectEqualStrings("Answer stays with its owner", h.a.composer.text());
+    try testing.expectEqual(@as(usize, 1), @import("app_attachments.zig").count(&h.a));
+}
+
+test "question focus new pending input cannot borrow an inactive panes composer" {
+    var h: Harness = undefined;
+    try h.init(1000, 700, 7);
+    defer h.deinit();
+    question.suspendQuestion(&h.a);
+    h.a.panels.files_open = true;
+    h.a.view.strip.focused = .files;
+    h.a.composer.set("Original prompt stays untouched");
+    question.syncWizard(&h.a);
+    try testing.expect(h.a.wizard == null);
+    try testing.expectEqualStrings("Original prompt stays untouched", h.a.composer.text());
+    h.a.view.strip.focused = .{ .chat = 0 };
+    question.syncWizard(&h.a);
+    try testing.expect(h.a.wizard != null);
+}
+
+test "question focus expanded surface leaves neighboring pane clickable" {
+    var h: Harness = undefined;
+    try h.init(1000, 700, 7);
+    defer h.deinit();
+    try h.snap("active-owner");
+    // Outside the floating card, inside the last (empty) split pane.
+    h.t.click(970, 200);
+    h.draw();
+    try testing.expectEqual(@as(usize, 7), h.a.tabs.layout().?.focus);
+    try testing.expect(h.a.wizard == null);
+    try testing.expectEqual(@as(usize, 0), textCount(&h.t, "Cancel question"));
+}
+
+test "question focus sidebar search owns digits and pending chat stays highlighted" {
+    var h: Harness = undefined;
+    try h.init(1000, 700, 3);
+    defer h.deinit();
+    const chats = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[ {"id":"synthetic-owner","title":"Question owner","archived":false},
+        \\  {"id":"synthetic-neighbor","title":"Synthetic neighbor","archived":false} ]
+    , .{});
+    defer chats.deinit();
+    try h.a.chats.replace(chats.value);
+    h.a.view.sidebar_open = true;
+    h.draw();
+    // There is no live session status: the transcript alone keeps attention.
+    try testing.expectEqual(@import("workspace.zig").Mark.awaiting_input, @import("view_sidebar.zig").rowMark(&h.a, h.a.findChat("synthetic-owner").?));
+    @import("view_sidebar_search.zig").toggle(&h.a);
+    h.draw();
+    h.t.typeText("1");
+    h.draw();
+    try testing.expectEqualStrings("1", h.a.view.search.query.text());
+    try testing.expect(!h.a.wizard.?.picked(0));
+    @import("view_sidebar_search.zig").close(&h.a);
+    h.a.focusPane(1);
+    h.draw();
+    try testing.expect(question.needsInput(&h.a, "synthetic-owner"));
+    try testing.expectEqual(@as(usize, 0), textCount(&h.t, "Cancel question"));
+    // Keep this locator short enough for native Windows font metrics too:
+    // fadeText deliberately truncates overflowing titles before creating a node.
+    // The inactive owner's row has an accent outline, not merely a status dot.
+    const label = textRect(&h.t, "Question owner") orelse return error.MissingOwnerRow;
+    var highlighted = false;
+    for (h.t.ctx.nodes.items) |n| {
+        if (n.rect.x <= label.x and n.rect.y <= label.y and n.rect.x + n.rect.w >= label.x + label.w and n.rect.y + n.rect.h >= label.y + label.h and n.style.border_width == 1) highlighted = true;
+    }
+    try testing.expect(highlighted);
+    try h.snap("inactive-owner-highlight");
+}
+
 test "question surface narrow split keeps options readable and controls window bounded" {
     var h: Harness = undefined;
     try h.init(1000, 700, 7);
@@ -162,6 +255,7 @@ test "question surface escape back and cancel keep original prompt and owner fen
     h.draw();
     try testing.expectEqual(@as(usize, 0), h.a.wizard.?.page);
     h.t.typeText("Parked answer from owning session");
+    try @import("app_attachments.zig").stage(&h.a, "answer-note.txt", "Synthetic answer attachment");
     h.draw();
     h.a.focusPane(1);
     h.draw();
@@ -173,6 +267,7 @@ test "question surface escape back and cancel keep original prompt and owner fen
     h.draw();
     try testing.expectEqualStrings("synthetic-owner", h.a.selected.?);
     try testing.expectEqualStrings("Parked answer from owning session", h.a.composer.text());
+    try testing.expectEqual(@as(usize, 1), @import("app_attachments.zig").count(&h.a));
     try testing.expect(h.a.wizard.?.picked(0));
     try h.t.clickText("Cancel question");
     h.draw();

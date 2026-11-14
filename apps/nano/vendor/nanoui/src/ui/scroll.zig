@@ -88,7 +88,25 @@ pub fn applyScroll(c: *Context, dy: f32) bool {
             const gop = c.scroll.getOrPut(c.gpa, h.id) catch return false;
             if (!gop.found_existing) gop.value_ptr.* = 0;
             if (!isHolding(c)) {
-                gop.value_ptr.* = @max(0, gop.value_ptr.* - dy);
+                const previous = gop.value_ptr.*;
+                const next = @max(0, previous - dy);
+                gop.value_ptr.* = next;
+                const max_s = c.scroll_max.get(h.id) orelse std.math.inf(f32);
+                // A native fling gets one bounded impact when it crosses the
+                // bottom. Later momentum deltas at that edge must not keep
+                // pumping the spring or move the logical follow-end offset.
+                if (c.input.precise and c.input.scroll_phase == .momentum and
+                    !c.reduced_motion and !c.reduce_motion and previous < max_s and next > max_s)
+                {
+                    const limit = @max(1, @min(160, h.rect.h * 0.35));
+                    const over = rubberBand(next - max_s, limit);
+                    gop.value_ptr.* = max_s;
+                    c.overscroll.put(c.gpa, h.id, over) catch {};
+                    motion.jump(c, h.id, salt_overscroll, over);
+                    // A retained scene only translates the logical offset;
+                    // the impact and its recovery need fresh layout/paint.
+                    c.retain.scroll_scene_ok = false;
+                }
                 c.retain.scroll_delta = true;
                 return true;
             }

@@ -11,7 +11,11 @@ const App = @import("app.zig").App;
 /// Later assistant status messages do not resolve an earlier input. Only a
 /// successful acknowledgement or a resolved transcript part does that.
 pub fn latestInput(a: *const App) ?*const tr.Part {
-    const entries = a.transcript.entries.items;
+    return latestIn(&a.transcript);
+}
+
+fn latestIn(transcript: *const tr.Transcript) ?*const tr.Part {
+    const entries = transcript.entries.items;
     var i = entries.len;
     while (i > 0) {
         i -= 1;
@@ -36,6 +40,36 @@ pub fn pendingInput(a: *const App) ?*const tr.Part {
     return p;
 }
 
+/// Selection identifies the transcript, not keyboard ownership: a host or
+/// files pane can be active while the selected chat remains on screen.
+pub fn ownsActivePane(a: *const App) bool {
+    if (a.selected == null or a.view.settings_open or a.view.write_open or a.bots.page != .none) return false;
+    const pane = if (a.tabs.layout()) |s| s.focus else 0;
+    const owner: @import("view_tab_strip.zig").Panel = .{ .chat = pane };
+    if (!@import("view_tab_strip.zig").same(a.view.strip.focused, owner)) return false;
+    if (a.view.strip.expanded) |expanded| if (!@import("view_tab_strip.zig").same(expanded, owner)) return false;
+    return true;
+}
+
+/// Durable attention for rows (and panel tabs), even after session status
+/// freshness expires. Never select the chat just to discover its question.
+pub fn needsInput(a: *const App, chat: []const u8) bool {
+    if (a.selected) |id| if (std.mem.eql(u8, id, chat)) return pendingInput(a) != null;
+    for (a.peers.items) |*peer| {
+        if (!std.mem.eql(u8, peer.id, chat)) continue;
+        if (latestIn(&peer.transcript)) |p| {
+            if (p.resolved) return false;
+            if (a.question_drafts.find(chat, p.request_id)) |saved| return saved.phase == .draft;
+            return true;
+        }
+        break;
+    }
+    for (a.question_drafts.entries.items) |saved| {
+        if (std.mem.eql(u8, saved.chat, chat) and saved.phase == .draft and saved.wizard != null) return true;
+    }
+    return false;
+}
+
 /// Opens or closes the wizard as questions come and go; each frame. Queue
 /// editing has exclusive ownership of the composer until its lease finishes.
 pub fn syncWizard(a: *App) void {
@@ -44,9 +78,15 @@ pub fn syncWizard(a: *App) void {
     if (a.queue_edit != null) return;
     const pending = pendingInput(a);
     if (a.wizard) |*w| {
-        if (pending != null and std.mem.eql(u8, pending.?.request_id, w.request_id)) return;
+        if (pending != null and std.mem.eql(u8, pending.?.request_id, w.request_id)) {
+            // Retain the exact answer, page, picks and attachments while
+            // another surface owns input, but never advance it offscreen.
+            if (!ownsActivePane(a)) w.advance_at = null;
+            return;
+        }
         closeWizard(a);
     }
+    if (!ownsActivePane(a)) return;
     const p = pending orelse return;
     const chat = a.selected orelse return;
     const saved = a.question_drafts.find(chat, p.request_id);
@@ -150,6 +190,7 @@ pub fn tick(a: *App, now: f64) ?f64 {
     }
     syncWizard(a);
     const w = if (a.wizard) |*w| w else return next;
+    if (!ownsActivePane(a)) return next;
     const at = w.advance_at orelse return next;
     if (now < at) return if (next) |old| @min(old, at) else at;
     w.advance_at = null;

@@ -430,6 +430,13 @@ fn sentAttachment(c: *ui.Context, a: *App, k: theme.Colors, chat_id: ?[]const u8
         const thumb = ui.div(c).row().size(56, 56).center().rounded(8).border(k.border).bg(k.hover).clip();
         defer thumb.end();
         tiles.picture(c, k, c.print("{s}:{s}", .{ chat_id orelse "", path }), name, bytes);
+        if (image) |loaded| if (loaded.status == .ready) {
+            const leaf = c.nodes.items.len - 1;
+            if (c.nodes.items[leaf].content == .image) {
+                const picture = c.interact(@intCast(leaf), .{ .focusable = true });
+                if (picture.clicked or thumb.clicked()) @import("view_image_preview.zig").open(a, chat_id, loaded);
+            }
+        };
     }
     kit.ellipsisText(c, name, .{ .size = 10, .line_height = 12, .color = k.muted }, 56);
 }

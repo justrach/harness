@@ -19,8 +19,7 @@ const App = @import("app.zig").App;
 /// and its fixed controls. Tiny split panes instead use the focused chat's
 /// single window-bounded outlet. No separate wizard or draft state is made.
 pub fn expanded(c: *ui.Context, a: *const App) bool {
-    if (a.wizard == null or a.selected == null or a.view.settings_open or a.view.write_open or a.bots.page != .none) return false;
-    if (a.view.strip.expanded) |slot| if (slot != .chat) return false;
+    if (a.wizard == null or !@import("app_question.zig").ownsActivePane(a)) return false;
     const width = @import("view_composer.zig").dockedWidth(@import("view_transcript.zig").paneWidth(c, a), @import("view_transcript.zig").column_w);
     var height = a.view.chrome.height;
     if (a.tabs.layout()) |s| {
@@ -35,11 +34,11 @@ pub fn expanded(c: *ui.Context, a: *const App) bool {
 pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (!expanded(c, a)) return;
     ui.key(c, c.print("focused-question-{s}-{s}", .{ a.selected.?, a.wizard.?.request_id }));
-    const scrim = ui.div(c).fixed().offset(0, 0).size(c.size.w, c.size.h).layer(3).bg(.{ .a = 0.3 }).center();
-    defer scrim.end();
-    // Consume pointer hits without cancelling: accidental outside clicks
-    // must not dismiss the agent's request or discard an unfinished answer.
-    _ = scrim.interaction();
+    // Nonmodal: the card gets room outside its tiny split, not ownership
+    // of the whole window. Sidebar, tabs and neighboring panes stay usable.
+    // Clicking another pane hides this outlet without discarding its draft.
+    const outlet = ui.div(c).fixed().offset(0, 0).size(c.size.w, c.size.h).layer(3).center();
+    defer outlet.end();
     const dock = ui.div(c).column().w(@min(640, @max(0, c.size.w - 32))).maxH(@max(0, c.size.h - 32));
     defer dock.end();
     panel(c, a, k, @min(640, @max(0, c.size.w - 32)), .{ .height = c.size.h - 20, .dock = dock.index });
@@ -86,6 +85,7 @@ fn fadeFoot(c: *ui.Context, k: theme.Colors, view: u32, content_h: f32) void {
 }
 
 pub fn panel(c: *ui.Context, a: *App, k: theme.Colors, w: f32, room: Room) void {
+    if (!@import("app_question.zig").ownsActivePane(a)) return;
     const wz = if (a.wizard) |*x| x else return;
     keys(c, a, wz.question().options.len, std.mem.trim(u8, a.composer.text(), " \n\t").len == 0);
     const q = wz.question();
@@ -101,6 +101,9 @@ pub fn panel(c: *ui.Context, a: *App, k: theme.Colors, w: f32, room: Room) void 
     };
     const box = kit.shadowLg(ui.div(c).column().w(w).bg(k.composer).border(k.border).borderW(1).rounded(@import("view_composer.zig").radius));
     defer box.end();
+    // Only the card consumes hits; its transparent window-sized outlet
+    // deliberately does not block navigation to a different pane.
+    _ = box.interaction();
     // What the dock holds besides this panel, as both were last laid out
     // (its 40-point foot before the panel has been).
     const dock_h = laidHeight(c, room.dock, 0);
@@ -244,6 +247,7 @@ pub fn panel(c: *ui.Context, a: *App, k: theme.Colors, w: f32, room: Room) void 
 
 /// 1–9 pick while the answer box is empty; Escape steps back a page.
 fn keys(c: *ui.Context, a: *App, options: usize, typed_empty: bool) void {
+    if (!@import("app_question.zig").ownsActivePane(a) or c.focus == 0 or c.focus != a.view.composer_id) return;
     if (@import("view.zig").menuKeepsKeys(a) or a.view.account_menu or a.view.close_choice) return;
     if (typed_empty) {
         var i: usize = 0;

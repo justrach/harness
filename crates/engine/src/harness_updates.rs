@@ -262,6 +262,17 @@ fn detect_npm_global(executable: &Path) -> Option<(PathBuf, PathBuf)> {
 
 fn build_update_plan(harness: HarnessId, executable: &Path) -> Result<UpdatePlan, String> {
     let spec = provider(harness);
+    if harness == HarnessId::Antigravity {
+        // Only the native CLI documents `update`. Never send it (or a package
+        // manager update) to a legacy or custom ACP server.
+        return match executable.file_name().and_then(|name| name.to_str()) {
+            Some("agy" | "agy.exe") => Ok(UpdatePlan::Command {
+                executable: executable.to_path_buf(),
+                args: &["update"],
+            }),
+            _ => Err(spec.manual_command.into()),
+        };
+    }
     if let Some((brew, cask, token)) = detect_homebrew(executable) {
         return Ok(UpdatePlan::Homebrew { brew, cask, token });
     }
@@ -594,6 +605,12 @@ impl HarnessUpdateCoordinator {
                 } else {
                     HarnessUpdatePhase::ManualActionRequired
                 }
+            }
+            // The native CLI has no documented read-only latest-version query.
+            // Offer an explicit check/install action without claiming an update
+            // exists or scheduling an automatic apply.
+            None if harness == HarnessId::Antigravity && can_apply => {
+                HarnessUpdatePhase::ManualActionRequired
             }
             _ => HarnessUpdatePhase::Current,
         };
@@ -958,6 +975,150 @@ mod tests {
         assert!(is_newer_version("2.1.319", "2.1.322"));
         assert!(!is_newer_version("2.1.322", "2.1.322"));
         assert!(!is_newer_version("2.1.322", "2.1.319"));
+    }
+
+    #[test]
+    fn antigravity_native_update_plan_uses_the_resolved_executable() {
+        for name in ["agy", "agy.exe"] {
+            let executable = Path::new("synthetic-install").join(name);
+            let plan = build_update_plan(HarnessId::Antigravity, &executable).unwrap();
+            match plan {
+                UpdatePlan::Command {
+                    executable: actual,
+                    args,
+                } => {
+                    assert_eq!(actual, executable);
+                    assert_eq!(args, &["update"]);
+                }
+                other => panic!("expected a native update command, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn antigravity_legacy_and_custom_servers_remain_manual_even_in_homebrew() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("brew"), "synthetic brew").unwrap();
+        let cellar = dir.path().join("Cellar/antigravity/1.5.7/bin");
+        std::fs::create_dir_all(&cellar).unwrap();
+        for name in [
+            "agy_acp_server",
+            "agy_acp_server.exe",
+            "custom-server",
+            "agy-custom",
+        ] {
+            let executable = cellar.join(name);
+            std::fs::write(&executable, "synthetic server").unwrap();
+            assert!(detect_homebrew(&executable).is_some());
+            assert_eq!(
+                build_update_plan(HarnessId::Antigravity, &executable).unwrap_err(),
+                "Update the configured Antigravity ACP server"
+            );
+        }
+        let native = cellar.join("agy");
+        std::fs::write(&native, "synthetic native CLI").unwrap();
+        assert!(matches!(
+            build_update_plan(HarnessId::Antigravity, &native).unwrap(),
+            UpdatePlan::Command { executable, args } if executable == native && args == ["update"]
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn antigravity_native_check_and_apply_only_use_documented_commands() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state_file = dir.path().join("ver.txt");
+        let calls_file = dir.path().join("calls.txt");
+        std::fs::write(&state_file, "1.5.7").unwrap();
+        let cli = dir.path().join("agy");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\n[ \"$#\" -eq 1 ] || exit 2\ncase \"$1\" in\n  --version) cat \"{}\";;\n  update) printf '1.5.8' > \"{}\";;\n  *) exit 2;;\nesac\n",
+            calls_file.display(),
+            state_file.display(),
+            state_file.display()
+        );
+        std::fs::write(&cli, script).unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let registry = Arc::new(crate::default_registry());
+        registry.load_prefs(dir.path());
+        let cli_path = cli.clone();
+        let coord = HarnessUpdateCoordinator::with_resolver(
+            dir.path(),
+            registry,
+            Arc::new(move |id| (id == HarnessId::Antigravity).then(|| cli_path.clone())),
+        );
+
+        coord.check_one(HarnessId::Antigravity).await.unwrap();
+        let status = coord
+            .snapshot()
+            .into_iter()
+            .find(|s| s.harness == HarnessId::Antigravity)
+            .unwrap();
+        assert_eq!(status.installed_version.as_deref(), Some("1.5.7"));
+        assert_eq!(status.latest_version, None);
+        assert_eq!(status.phase, HarnessUpdatePhase::ManualActionRequired);
+        assert!(status.show_update_notice());
+        assert!(status.can_apply);
+        assert_eq!(status.manual_command, None);
+        assert_eq!(std::fs::read_to_string(&calls_file).unwrap(), "--version\n");
+
+        assert_eq!(
+            coord
+                .apply(HarnessId::Antigravity)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("1.5.8")
+        );
+        let status = coord
+            .snapshot()
+            .into_iter()
+            .find(|s| s.harness == HarnessId::Antigravity)
+            .unwrap();
+        assert_eq!(status.phase, HarnessUpdatePhase::Updated);
+        assert_eq!(status.installed_version.as_deref(), Some("1.5.8"));
+        assert_eq!(
+            std::fs::read_to_string(&calls_file).unwrap(),
+            "--version\nupdate\n--version\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn antigravity_legacy_apply_never_runs_the_server() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let calls_file = dir.path().join("calls.txt");
+        let cli = dir.path().join("agy_acp_server");
+        std::fs::write(
+            &cli,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\n",
+                calls_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let registry = Arc::new(crate::default_registry());
+        registry.load_prefs(dir.path());
+        let coord = HarnessUpdateCoordinator::with_resolver(
+            dir.path(),
+            registry,
+            Arc::new(move |id| (id == HarnessId::Antigravity).then(|| cli.clone())),
+        );
+        assert_eq!(
+            coord.apply(HarnessId::Antigravity).await.unwrap_err(),
+            "Update the configured Antigravity ACP server"
+        );
+        assert!(
+            !calls_file.exists(),
+            "legacy server must not receive an update command"
+        );
     }
 
     #[cfg(unix)]

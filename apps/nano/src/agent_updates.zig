@@ -46,21 +46,6 @@ pub const Phase = enum {
         return .dormant;
     }
 
-    pub fn showUpdateNotice(p: Phase) bool {
-        return switch (p) {
-            .available,
-            .waiting_for_idle,
-            .preparing,
-            .downloading,
-            .installing,
-            .verifying,
-            .updated,
-            .failed,
-            => true,
-            .dormant, .checking, .current, .manual_action_required => false,
-        };
-    }
-
     pub fn isActive(p: Phase) bool {
         return switch (p) {
             .waiting_for_idle, .preparing, .downloading, .installing, .verifying => true,
@@ -88,7 +73,40 @@ pub const Status = struct {
     progress_message: ?[]const u8 = null,
     error_message: ?[]const u8 = null,
     error_kind: FailureKind = .check,
+
+    pub fn showUpdateNotice(st: Status) bool {
+        return switch (st.phase) {
+            .available,
+            .waiting_for_idle,
+            .preparing,
+            .downloading,
+            .installing,
+            .verifying,
+            .updated,
+            .failed,
+            => true,
+            .manual_action_required => st.can_apply,
+            .dormant, .checking, .current => false,
+        };
+    }
 };
+
+test "agent update notice visibility matches shared vectors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const path = try std.fs.path.join(alloc, &.{ @import("parity_options").protocol_dir, "agent-updates.json" });
+    const text = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, alloc, .limited(1 << 20));
+    const vectors = try json.parseFromSliceLeaky(json.Value, alloc, text, .{});
+    for (vectors.object.get("noticeVisibility").?.array.items) |case| {
+        const st: Status = .{
+            .harness = "antigravity",
+            .phase = Phase.fromWire(case.object.get("phase").?.string),
+            .can_apply = case.object.get("canApply").?.bool,
+        };
+        try std.testing.expectEqual(case.object.get("expect").?.bool, st.showUpdateNotice());
+    }
+}
 
 pub const Tween = struct {
     from: f32,
@@ -333,7 +351,7 @@ pub const VisibleRow = struct {
 fn noticeCount(a: *const App) usize {
     var n: usize = 0;
     for (a.agent_updates.devices.items) |w| {
-        for (w.statuses) |st| if (st.phase.showUpdateNotice()) {
+        for (w.statuses) |st| if (st.showUpdateNotice()) {
             n += 1;
         };
     }
@@ -345,11 +363,11 @@ fn noticeCount(a: *const App) usize {
 pub fn visibleSignature(a: *const App) u64 {
     var h = std.hash.Wyhash.init(0);
     for (a.agent_updates.devices.items) |w| {
-        for (w.statuses) |st| if (st.phase.showUpdateNotice()) {
+        for (w.statuses) |st| if (st.showUpdateNotice()) {
             h.update(w.device_id);
             h.update(&.{0});
             h.update(st.harness);
-            h.update(&.{ 0, @intFromEnum(st.phase), 0 });
+            h.update(&.{ 0, @backingInt(st.phase), 0 });
             h.update(st.latest_version orelse "");
             h.update(&.{0});
         };
@@ -390,7 +408,7 @@ pub fn collectVisible(a: *const App, alloc: Allocator) []const VisibleRow {
     for (a.agent_updates.devices.items) |w| {
         const name = resolveDeviceName(a, w.device_id);
         for (w.statuses) |st| {
-            if (!st.phase.showUpdateNotice()) continue;
+            if (!st.showUpdateNotice()) continue;
             out.append(alloc, .{
                 .device_id = w.device_id,
                 .device_name = name,

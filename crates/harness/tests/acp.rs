@@ -887,6 +887,37 @@ fn antigravity_harness() -> AcpHarness {
     AcpHarness::antigravity().with_executable(path)
 }
 
+#[tokio::test]
+async fn antigravity_native_cli_runs_discovery_and_turns_through_acp() {
+    use std::os::unix::fs::PermissionsExt;
+    let workspace = tempfile::tempdir().unwrap();
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-antigravity-acp.sh");
+    for name in ["agy", "agy.exe"] {
+        let cli = workspace.path().join(name);
+        std::fs::write(
+            &cli,
+            format!(
+                "#!/bin/sh\n[ \"$#\" -eq 1 ] && [ \"$1\" = acp ] || exit 12\nexec /bin/sh '{}'\n",
+                fixture.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let harness = AcpHarness::antigravity().with_executable(cli);
+        assert!(!harness.models().await.unwrap().is_empty());
+        assert!(!harness.commands().await.unwrap().is_empty());
+        let mut req = request("synthetic native ACP turn");
+        req.model = None;
+        req.cwd = workspace.path().display().to_string();
+        let (ctl, _steer, _) = controls();
+        assert_eq!(
+            dones(&run_to_end(&harness, req, ctl).await),
+            vec![(DoneStatus::Completed, None)]
+        );
+    }
+}
+
 async fn antigravity_config_sets(
     model: &str,
     reasoning: Option<ReasoningLevel>,
@@ -2731,11 +2762,13 @@ fn antigravity_detection_and_missing_server_never_install() {
     use std::os::unix::fs::PermissionsExt;
     for scenario in [
         "cli-only",
+        "cli-and-server",
         "partial",
         "server",
         "par",
         "exe",
         "override",
+        "cli-override",
         "invalid-override",
     ] {
         let dir = tempfile::tempdir().unwrap();
@@ -2746,11 +2779,16 @@ fn antigravity_detection_and_missing_server_never_install() {
             "par" => "agy_acp_server.par",
             "exe" => "agy_acp_server.exe",
             "override" => "custom-server",
+            "partial" => "unrelated",
             _ => "agy",
         };
         let exe = bin.join(name);
         std::fs::write(&exe, "#!/bin/sh\nexit 0\n").unwrap();
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if scenario == "cli-and-server" {
+            let legacy = bin.join("agy_acp_server");
+            std::fs::copy(&exe, &legacy).unwrap();
+        }
         let adapters = dir.path().join("adapters");
         if scenario == "partial" {
             let partial = adapters.join("antigravity-acp/1.2.1");
@@ -2766,7 +2804,7 @@ fn antigravity_detection_and_missing_server_never_install() {
             .env("HARNESS_ADAPTERS_DIR", &adapters)
             .env("HARNESS_TEST_DETECTION", scenario)
             .env_remove("ANTIGRAVITY_ACP_EXECUTABLE");
-        if scenario == "override" {
+        if matches!(scenario, "override" | "cli-override") {
             child.env("ANTIGRAVITY_ACP_EXECUTABLE", &exe);
         }
         if scenario == "invalid-override" {
@@ -2789,10 +2827,26 @@ async fn antigravity_detection_subprocess() {
         return;
     };
     let harness = AcpHarness::antigravity();
-    let installed = matches!(scenario.as_str(), "server" | "par" | "exe" | "override");
+    let native = matches!(
+        scenario.as_str(),
+        "cli-only" | "cli-and-server" | "cli-override"
+    );
+    let installed = native || matches!(scenario.as_str(), "server" | "par" | "exe" | "override");
     assert_eq!(harness.installed(), installed);
     if installed {
-        assert!(harness.resolve_program(false).await.is_ok());
+        let (program, args) = harness.resolve_program(false).await.unwrap();
+        if native {
+            assert_eq!(program.file_name().unwrap(), "agy");
+            assert_eq!(args, ["acp"]);
+            assert_eq!(
+                harness_adapters::install::resolve_executable(HarnessId::Antigravity),
+                Some(program)
+            );
+        } else if cfg!(target_os = "linux") {
+            assert_eq!(args, ["--uid="]);
+        } else {
+            assert!(args.is_empty());
+        }
         return;
     }
     for block in [false, true] {

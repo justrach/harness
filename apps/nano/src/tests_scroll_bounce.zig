@@ -137,7 +137,7 @@ test "transcript scroll bounce reverses a pull before releasing bottom follow on
     try testing.expectApproxEqAbs(@as(f32, 0), overscroll(&f, &t), 0.001);
 }
 
-test "transcript scroll bounce leaves discrete wheels and native momentum unbounced" {
+test "transcript scroll bounce leaves discrete wheels unbounced" {
     var f: Fixture = undefined;
     try f.init();
     defer f.a.deinit();
@@ -151,9 +151,80 @@ test "transcript scroll bounce leaves discrete wheels and native momentum unboun
     t.scroll(500, 350, 24);
     try testing.expectEqual(max - 24, t.ctx.scroll.get(f.box).?);
     try testing.expect(!t.ctx.scroll_follow.get(f.box).?);
-    gesture(&t, .momentum, -120);
-    try testing.expectEqual(max, t.ctx.scroll.get(f.box).?);
-    try testing.expectEqual(@as(f32, 0), overscroll(&f, &t));
+}
+
+test "transcript scroll bounce responds once when momentum reaches the bottom" {
+    for ([_]bool{ false, true }) |reduced| {
+        var f: Fixture = undefined;
+        try f.init();
+        defer f.a.deinit();
+        var t: ui.Tester = undefined;
+        try warm(&f, &t);
+        defer t.deinit();
+        t.ctx.reduced_motion = reduced;
+        t.ctx.reduce_motion = reduced;
+        const base = f.bodyY(&t);
+        const max = t.ctx.scroll_max.get(f.box).?;
+        gesture(&t, .began, 24);
+        gesture(&t, .ended, 0);
+        gesture(&t, .momentum, -120);
+        const impact = overscroll(&f, &t);
+        try testing.expectEqual(max, t.ctx.scroll.get(f.box).?);
+        try testing.expect(t.ctx.scroll_follow.get(f.box).?);
+        if (reduced) {
+            try testing.expectEqual(@as(f32, 0), impact);
+        } else {
+            try testing.expect(impact > 16 and impact < 64);
+            try testing.expectApproxEqAbs(base - impact, f.bodyY(&t), 0.1);
+            gesture(&t, .momentum, -80);
+            try testing.expect(overscroll(&f, &t) < impact);
+        }
+        t.settle(2);
+        try testing.expectEqual(@as(f32, 0), overscroll(&f, &t));
+        try testing.expectApproxEqAbs(base, f.bodyY(&t), 0.1);
+        // Ordinary scrolling flashes the overlay scroller on a delayed timer;
+        // advance through that hold too, not only the actively running spring.
+        t.advance(2);
+        try testing.expect(!t.ctx.animating);
+        try testing.expect(t.ctx.frame_in == null);
+    }
+}
+
+fn bouncePixels(full_tree: bool) ![6]u64 {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.a.deinit();
+    f.a.offscreen = full_tree;
+    var t: ui.Tester = undefined;
+    try warm(&f, &t);
+    defer t.deinit();
+    const pulses = [_]struct { phase: ui.ScrollPhase, dy: f32 }{
+        .{ .phase = .began, .dy = 48 },
+        .{ .phase = .ended, .dy = 0 },
+        .{ .phase = .momentum, .dy = -240 },
+        .{ .phase = .momentum, .dy = -80 },
+        .{ .phase = .none, .dy = 0 },
+        .{ .phase = .none, .dy = 0 },
+    };
+    var hashes: [6]u64 = undefined;
+    for (pulses, 0..) |pulse, i| {
+        gesture(&t, pulse.phase, pulse.dy);
+        if (i == 5) t.settle(2);
+        const pixels = try t.render(testing.allocator);
+        defer pixels.deinit(testing.allocator);
+        hashes[i] = std.hash.Wyhash.hash(0, pixels.bytes);
+        if (std.c.getenv("NANO_SCROLL_SNAP_DIR")) |dir| {
+            var path: [1024]u8 = undefined;
+            try t.screenshot(try std.fmt.bufPrint(&path, "{s}/bounce-{s}-{d}.png", .{ std.mem.span(dir), if (full_tree) "full" else "culled", i }));
+        }
+    }
+    return hashes;
+}
+
+test "transcript scroll bounce culling preserves pixels through impact and recovery" {
+    const full = try bouncePixels(true);
+    const culled = try bouncePixels(false);
+    try testing.expectEqualSlices(u64, &full, &culled);
 }
 
 test "transcript scroll bounce respects Reduce Motion on release" {

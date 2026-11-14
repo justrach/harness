@@ -67,6 +67,8 @@ const Target = struct { arena: std.heap.ArenaAllocator, chat: []const u8, cwd: [
 const Linked = struct { arena: std.heap.ArenaAllocator, repository: Repository };
 pub const State = struct {
     images: @import("github_images.zig").Cache = .{},
+    /// Surface identity is the opening chat, never whichever split has focus.
+    owner: ?[]u8 = null,
     open: bool = false,
     target: ?Target = null,
     linked: ?Linked = null,
@@ -85,6 +87,7 @@ pub const State = struct {
     error_text: ?[]u8 = null,
     pub fn deinit(s: *State, gpa: std.mem.Allocator) void {
         s.images.deinit();
+        if (s.owner) |id| gpa.free(id);
         if (s.target) |*t| t.arena.deinit();
         if (s.linked) |*link| link.arena.deinit();
         if (s.list) |*p| p.arena.deinit();
@@ -134,6 +137,7 @@ pub fn reset(a: *App) void {
     clearSnapshots(a);
     clearError(a);
     if (s.target) |t| a.retireArena(t.arena);
+    if (s.owner) |id| a.retireSlice(id);
     if (s.linked) |link| a.retireArena(link.arena);
     const images = s.images;
     s.* = .{ .images = images };
@@ -141,12 +145,14 @@ pub fn reset(a: *App) void {
 pub fn reconcile(a: *App) void {
     const s = &a.panels.github_repository;
     const t = s.target orelse return;
-    const ch = if (a.selected) |id| a.findChat(id) else null;
+    const ch = if (s.owner) |id| a.findChat(id) else null;
     if (ch) |chat| if (std.mem.eql(u8, t.chat, chat.id) and std.mem.eql(u8, t.cwd, chat.cwd orelse "") and
         std.mem.eql(u8, t.device, chat.device_id orelse "") and std.mem.eql(u8, t.branch, chat.branch orelse "")) return;
     const was_open = s.open;
+    const owner = if (s.owner) |id| a.gpa.dupe(u8, id) catch null else null;
     reset(a);
-    if (was_open and a.panels.host_open) show(a);
+    s.owner = owner;
+    if (was_open and ch != null and a.panels.host_open) show(a);
 }
 /// Called pre-tree after the transcript link's conversation owner is revalidated.
 /// Opens a specific item directly: it need not appear on the first open-PR page.
@@ -185,17 +191,58 @@ fn makeLinked(gpa: std.mem.Allocator, target: @import("github_link.zig").Target)
     return .{ .arena = arena, .repository = .{ .key = key, .host = "github.com", .owner = owner, .name = name, .url = url } };
 }
 
+/// Explicit opening may reparent the one GitHub surface. Ordinary focus,
+/// hide/reopen and repository navigation must not.
+pub fn bind(a: *App) void {
+    const id = a.selected orelse return;
+    const s = &a.panels.github_repository;
+    if (s.owner) |owner| if (std.mem.eql(u8, owner, id)) return;
+    const owned = a.gpa.dupe(u8, id) catch return;
+    reset(a);
+    s.owner = owned;
+}
+
+pub fn surface(a: *const App) bool {
+    const t = a.panels.activeTab() orelse return false;
+    return t.kind == .github;
+}
+
+/// Only attach to a visible instance of the owning chat. A different global
+/// workspace, parked panel tab or zoomed neighbor must not inherit its child.
+pub fn parentPane(a: *const App) ?usize {
+    const id = a.panels.github_repository.owner orelse return null;
+    if (a.tabs.layout()) |s| {
+        for (s.panes.items, 0..) |parked, ix| {
+            if (s.zoomed and ix != s.focus) continue;
+            const chat = (if (ix == s.focus) a.selected else parked) orelse continue;
+            if (std.mem.eql(u8, chat, id)) return ix;
+        }
+        return null;
+    }
+    return if (a.selected != null and std.mem.eql(u8, a.selected.?, id)) 0 else null;
+}
+
+pub fn ownerTitle(a: *const App) []const u8 {
+    const id = a.panels.github_repository.owner orelse return "Conversation";
+    const chat = a.findChat(id) orelse return "Conversation";
+    return @import("view_sidebar.zig").chatLabel(chat);
+}
+
 pub fn show(a: *App) void {
     const s = &a.panels.github_repository;
     s.open = true;
-    if (s.list == null) load(a, s.list_kind, 1);
+    // Re-showing a child after split focus must not turn a linked detail
+    // into a list request just because that list was never loaded.
+    if (s.current() == null and s.pending == null) load(a, s.kind, 1);
     a.redraw();
 }
 pub fn hide(a: *App) void {
     const s = &a.panels.github_repository;
     // Sessions belong to the current checkout, not an explicitly linked repo.
     if (s.linked != null) {
+        const owner = if (s.owner) |id| a.gpa.dupe(u8, id) catch null else null;
         reset(a);
+        s.owner = owner;
         return a.redraw();
     }
     if (s.pending) |id| a.engine.cancel(id);
@@ -274,7 +321,7 @@ pub fn turnPage(a: *App, next: bool) void {
 pub fn load(a: *App, kind: Kind, index: usize) void {
     const s = &a.panels.github_repository;
     if (s.pending != null) return;
-    const id = a.selected orelse return fail(a, "Open a repository session to browse GitHub.");
+    const id = s.owner orelse a.selected orelse return fail(a, "Open a repository session to browse GitHub.");
     const chat = a.findChat(id) orelse return;
     const cwd = chat.cwd orelse return fail(a, "This session has no repository checkout.");
     if (s.target == null) {

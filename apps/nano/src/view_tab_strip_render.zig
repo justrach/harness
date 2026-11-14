@@ -19,12 +19,19 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
     var widths: [tabs.max_panes + 2]f32 = undefined;
     var n: usize = 0;
     const split = a.tabs.layout();
+    const github = @import("app_github_repository.zig");
+    const child_parent = if (strip.hasHost(a) and github.surface(a)) github.parentPane(a) else null;
     for (0..strip.chatCount(a)) |ix| {
         targets[n] = .{ .chat = ix };
         widths[n] = if (split) |s| chrome.paneSpan(a.view.chrome.chat_width, s.shares.items[ix], s.panes.items.len, true) else a.view.chrome.chat_width;
         n += 1;
+        if (child_parent != null and child_parent.? == ix) {
+            targets[n] = .host;
+            widths[n] = a.view.chrome.host_width;
+            n += 1;
+        }
     }
-    if (strip.hasHost(a)) {
+    if (strip.hasHost(a) and child_parent == null) {
         targets[n] = .host;
         widths[n] = a.view.chrome.host_width;
         n += 1;
@@ -80,6 +87,28 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (kit.iconButton(c, k, .plus, .{ .icon = 14, .tip = .{ .text = "New tab", .look = .tab } })) a.newTab();
 }
 
+fn chatNeedsInput(a: *const App, id: ?[]const u8) bool {
+    return if (id) |chat| @import("app_question.zig").needsInput(a, chat) else false;
+}
+
+fn workspaceNeedsInput(a: *const App, ws: usize) bool {
+    if (chatNeedsInput(a, workspaceChatId(a, ws))) return true;
+    if (ws < a.tabs.splits.items.len) if (a.tabs.splits.items[ws]) |s| {
+        for (s.panes.items) |id| if (chatNeedsInput(a, id)) return true;
+        for (&s.groups) |*g| for (g.items.items) |tab| if (chatNeedsInput(a, tab.chat)) return true;
+    };
+    return false;
+}
+
+fn questionMark(c: *ui.Context, k: theme.Colors, pending: bool) bool {
+    if (!pending) return false;
+    ui.key(c, "tab-question-attention");
+    const badge = ui.div(c).size(14, 14).center().rounded(5).bg(k.warning.alpha(0.15));
+    defer badge.end();
+    ui.text(c, "?", .{ .size = 11, .weight = .semibold, .color = k.warning });
+    return true;
+}
+
 fn workspaceChatId(a: *const App, ws: usize) ?[]const u8 {
     const primary = if (ws == a.tabs.active) a.selected else a.tabs.items.items[ws];
     if (primary != null) return primary;
@@ -104,7 +133,7 @@ fn topWorkspacePill(c: *ui.Context, a: *App, k: theme.Colors, ws: usize, pill_w:
     const pill = ui.div(c).row().size(pill_w, chrome.tab_height).px(8).gap(6).itemsCenter().rounded(6).bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover).clip().control();
     defer pill.end();
     const pill_hot = pill.hovered();
-    icons.icon(c, if (panes_n > 1) .widget else .@"chat-round-line", 13, k.muted, 0);
+    if (!questionMark(c, k, workspaceNeedsInput(a, ws))) icons.icon(c, if (panes_n > 1) .widget else .@"chat-round-line", 13, k.muted, 0);
     kit.ellipsisText(c, t_name, .{ .size = 11.5, .line_height = 14, .color = k.muted }, @max(0, pill_w - (if (pill_hot) @as(f32, 46) else 28)));
     var closed = false;
     if (pill_hot) {
@@ -158,7 +187,7 @@ fn inactiveTabPill(c: *ui.Context, a: *App, k: theme.Colors, slot_ix: usize, pan
     const pill = ui.div(c).row().size(pill_w, chrome.tab_height).px(7).gap(5).itemsCenter().rounded(6).bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover).clip().control();
     defer pill.end();
     const pill_hot = pill.hovered();
-    icons.icon(c, .@"chat-round-line", 13, k.muted, 0);
+    if (!questionMark(c, k, chatNeedsInput(a, chat_id))) icons.icon(c, .@"chat-round-line", 13, k.muted, 0);
     kit.ellipsisText(c, t_name, .{ .size = 11.5, .line_height = 14, .color = k.muted }, @max(0, pill_w - (if (pill_hot) @as(f32, 44) else 26)));
     var pill_closed = false;
     if (pill_hot) {
@@ -178,16 +207,20 @@ fn slotBox(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: us
     ui.key(c, c.print("instrument-slot-{d}", .{ix}));
     const on = strip.same(strip.active(a), target);
     const name = strip.title(a, target);
-    const computer = strip.deviceLabel(a, strip.device(a, target));
+    const github_child = target == .host and @import("app_github_repository.zig").surface(a);
+    const computer = if (github_child) c.print("↳ {s}", .{@import("app_github_repository.zig").ownerTitle(a)}) else strip.deviceLabel(a, strip.device(a, target));
     const project = strip.folder(a, target);
     var box = ui.div(c).row().size(width, chrome.tab_height).pl(7).pr(4).gap(6).itemsCenter().rounded(6).clip().control();
     box = if (on) box.bg(k.ink(if (k.dark) 0.16 else 0.10)) else box.bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover);
+    if (github_child) box = box.border(k.accent.alpha(0.28)).borderW(1);
     defer box.end();
     const hot = box.hovered() or group_hot;
     const show_controls = hot or c.focus == c.node(box.index).id;
     const menu_count = strip.tabCount(a, target);
     var handled = false;
-    if (strip.attention(a, target, k)) |color| {
+    if (questionMark(c, k, if (target == .chat) chatNeedsInput(a, strip.chatId(a, target.chat)) else false)) {
+        // The question remains dormant; this badge never requests focus.
+    } else if (strip.attention(a, target, k)) |color| {
         const mark = ui.div(c).row().size(14, 14).center();
         defer mark.end();
         ui.div(c).size(7, 7).rounded(3.5).bg(color).end();
@@ -213,7 +246,7 @@ fn slotBox(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: us
             if (device_editable and a.view.strip.menu == .device and strip.same(a.view.strip.target, target)) {
                 if (dev_rect) |r| a.view.strip.device_anchor = r;
             }
-            icons.icon(c, .monitor, 10, k.muted, 0);
+            icons.icon(c, if (github_child) .@"split-columns" else .monitor, 10, k.muted, 0);
             kit.ellipsisText(c, computer, .{ .size = 10, .line_height = 12, .color = k.muted }, chips.dev_text_max);
             if (device_editable) {
                 icons.icon(c, .@"alt-arrow-down", 9, k.muted, 0);
@@ -331,7 +364,8 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
         if (ix != selected) cap = cap.bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover);
         defer cap.end();
         const hot = cap.hovered();
-        icons.icon(c, if (panes_n > 1) .widget else .@"chat-round-line", 14, if (ix == selected) k.text else k.muted, 0);
+        const pending_question = if (group != null) chatNeedsInput(a, chat) else workspaceNeedsInput(a, ix);
+        if (!questionMark(c, k, pending_question)) icons.icon(c, if (panes_n > 1) .widget else .@"chat-round-line", 14, if (ix == selected) k.text else k.muted, 0);
         {
             const labels = ui.div(c).column().grow().w(0).clip();
             defer labels.end();

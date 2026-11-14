@@ -87,7 +87,7 @@ pub const PullRequest = struct { chat_id: []const u8, summary: cr.Summary, prove
 pub fn sessionPullRequests(a: *const App, allocator: std.mem.Allocator) ![]PullRequest {
     var result: std.ArrayList(PullRequest) = .empty;
     errdefer result.deinit(allocator);
-    const id = a.selected orelse return result.toOwnedSlice(allocator);
+    const id = a.panels.github_repository.owner orelse a.selected orelse return result.toOwnedSlice(allocator);
     const selected = a.findChat(id) orelse return result.toOwnedSlice(allocator);
     const source = selected.source orelse return result.toOwnedSlice(allocator);
     const selected_pr = prs.forChat(a, selected);

@@ -1382,7 +1382,7 @@ mod tests {
         registry.register(Arc::new(harness_adapters::AcpHarness::antigravity()));
         let expected = expected == "true";
         assert_eq!(registry.descriptors()[0].installed, expected);
-        // Off by default either way; only an installed server can opt in.
+        // Off by default either way; only an installed CLI/server can opt in.
         assert!(!registry.enabled_set().contains(&HarnessId::Antigravity));
         assert_eq!(
             registry.set_enabled(HarnessId::Antigravity, true).is_ok(),
@@ -1397,17 +1397,20 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn antigravity_server_path_controls_detection_and_enablement() {
+    fn antigravity_native_or_server_path_controls_detection_and_enablement() {
         use std::os::unix::fs::PermissionsExt;
-        let home = tempfile::tempdir().unwrap();
-        let bin = home.path().join("bin");
-        std::fs::create_dir(&bin).unwrap();
-        let cli = bin.join("agy");
-        std::fs::write(&cli, "#!/bin/sh\nexit 91\n").unwrap();
-        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let server = bin.join("agy_acp_server.par");
-        for installed in [false, true] {
-            if installed {
+        for (native, legacy) in [(false, false), (true, false), (false, true), (true, true)] {
+            let home = tempfile::tempdir().unwrap();
+            let bin = home.path().join("bin");
+            std::fs::create_dir(&bin).unwrap();
+            if native {
+                let cli = bin.join("agy");
+                std::fs::write(&cli, "#!/bin/sh\nexit 91\n").unwrap();
+                std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let server = bin.join("agy_acp_server.par");
+            let installed = native || legacy;
+            if legacy {
                 std::fs::write(&server, "#!/bin/sh\nexit 91\n").unwrap();
                 std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).unwrap();
             }

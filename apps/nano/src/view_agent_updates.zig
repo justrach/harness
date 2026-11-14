@@ -33,6 +33,10 @@ fn actionFor(st: updates.Status) ?ActionSpec {
             .{ .label = "Update", .method = "ApplyHarnessUpdate" }
         else
             .{ .label = "View steps", .method = null },
+        .manual_action_required => if (st.can_apply)
+            .{ .label = "Check and update", .method = "ApplyHarnessUpdate" }
+        else
+            null,
         .waiting_for_idle, .preparing, .downloading => .{ .label = "Cancel", .method = "CancelHarnessUpdate" },
         .failed => if (st.can_apply and st.error_kind == .install)
             .{ .label = "Retry update", .method = "ApplyHarnessUpdate" }
@@ -50,6 +54,7 @@ fn detailText(c: *ui.Context, st: updates.Status) []const u8 {
             c.print("Version {s} available", .{lat})
         else
             "Update available",
+        .manual_action_required => "Latest version unavailable; updater will check and install if needed",
         .waiting_for_idle => "Waiting for the current run",
         .preparing => "Preparing update…",
         .downloading => st.progress_message orelse "Downloading…",
@@ -187,6 +192,7 @@ pub fn island(c: *ui.Context, a: *App, k: theme.Colors, pane_w: f32, pane_h: f32
         (if (all_updated) c.print("{d} agents updated", .{rows.len}) else c.print("{d} agent updates", .{rows.len}))
     else switch (first.status.phase) {
         .available => if (first.status.latest_version) |v| c.print("{s} {s} available", .{ first_name, v }) else c.print("{s} update available", .{first_name}),
+        .manual_action_required => c.print("{s} · latest version unavailable", .{first_name}),
         .waiting_for_idle => c.print("{s} · waiting for idle", .{first_name}),
         .preparing => c.print("Preparing {s}…", .{first_name}),
         .downloading => c.print("Downloading {s}…", .{first_name}),
@@ -339,6 +345,13 @@ pub fn island(c: *ui.Context, a: *App, k: theme.Colors, pane_w: f32, pane_h: f32
             div_row.end();
         }
         const label = if (row.connected) detailText(c, row.status) else "Disconnected · reconnect to update";
+        const action_w: f32 = if (actionFor(row.status)) |act|
+            @ceil(c.text.width(act.label, .{ .size = 11.5, .weight = theme.ui_medium_weight })) + 22
+        else
+            0;
+        // Account for this action's actual width; “Check and update” is wider
+        // than the ordinary Update button and must not overlap the copy.
+        const text_w = @max(0, list_w - 2 - 24 - 20 - 20 - action_w);
         const tip_text = c.print("{s} · {s}\n{s}", .{ updates.agentName(row.status.harness), row.device_name, row.status.manual_command orelse label });
         const inner = tip.on(ui.div(c).row().wFull().grow().px(12).gap(10).itemsCenter(), k, .{ .text = tip_text, .delay = tip.quick });
         defer inner.end();
@@ -347,21 +360,133 @@ pub fn island(c: *ui.Context, a: *App, k: theme.Colors, pane_w: f32, pane_h: f32
         {
             const col = ui.div(c).column().grow().w(0).gap(2);
             defer col.end();
-            kit.ellipsisText(c, updates.agentName(row.status.harness), .{ .size = 12.5, .line_height = 16, .weight = theme.ui_medium_weight, .color = k.text }, @max(60, list_w - 150));
+            kit.ellipsisText(c, updates.agentName(row.status.harness), .{ .size = 12.5, .line_height = 16, .weight = theme.ui_medium_weight, .color = k.text }, text_w);
             if (unique_devices > 1) {
-                kit.ellipsisText(c, row.device_name, .{ .size = 11, .line_height = 14, .color = k.muted }, @max(60, list_w - 150));
+                kit.ellipsisText(c, row.device_name, .{ .size = 11, .line_height = 14, .color = k.muted }, text_w);
             }
-            kit.ellipsisText(c, label, .{
-                .size = 11,
-                .line_height = 14,
-                .color = if (row.status.phase == .failed) k.danger else k.muted,
-            }, @max(60, list_w - 150));
+            if (row.connected and row.status.phase == .manual_action_required) {
+                kit.ellipsisText(c, "Latest unavailable", .{ .size = 11, .line_height = 14, .color = k.muted }, text_w);
+                kit.ellipsisText(c, "Updater checks / installs", .{ .size = 11, .line_height = 14, .color = k.muted }, text_w);
+            } else {
+                kit.ellipsisText(c, label, .{
+                    .size = 11,
+                    .line_height = 14,
+                    .color = if (row.status.phase == .failed) k.danger else k.muted,
+                }, text_w);
+            }
         }
         if (row.status.phase == .updated) {
             icons.icon(c, .check, 14, k.success, 0);
         }
         actionButton(c, a, k, row, expanded and row_reveal >= 0.90);
     }
+}
+
+// No platform app, window, live profile or engine connection: only the island
+// rendered by nanoui's in-process headless tester.
+const TestHarness = struct {
+    app: App,
+    tester: ui.Tester,
+
+    fn init(h: *TestHarness) !void {
+        theme.registerFonts();
+        h.app = .init(std.testing.allocator, std.testing.io, 1);
+        h.app.offscreen = true;
+        h.app.dark = true;
+        try h.tester.init(std.testing.allocator, .init(&h.app, testView), .{
+            .width = 1100,
+            .height = 400,
+            .dark = true,
+            .theme = theme.ui(true),
+        });
+    }
+
+    fn testView(a: *App, c: *ui.Context) void {
+        const root = ui.div(c).column().wFull().hFull();
+        defer root.end();
+        const anchor = ui.div(c).column().absolute().offset(0, 400).wFull();
+        defer anchor.end();
+        island(c, a, theme.colors(true), 1100, 400);
+    }
+
+    fn snap(h: *TestHarness, name: []const u8) !void {
+        const dir = std.c.getenv("NANO_UPDATE_SNAP_DIR") orelse return;
+        var buf: [1024]u8 = undefined;
+        const path = try std.fmt.bufPrint(&buf, "{s}/{s}.png", .{ std.mem.span(dir), name });
+        try h.tester.screenshot(path);
+    }
+
+    fn deinit(h: *TestHarness) void {
+        h.tester.deinit();
+        h.app.deinit();
+    }
+};
+
+test "Antigravity checklist shows an honest native check and update action" {
+    var h: TestHarness = undefined;
+    try h.init();
+    defer h.deinit();
+    try updates.setTestStatuses(&h.app, "synthetic-device", true,
+        \\[{"harness":"antigravity","installedVersion":"1.5.7","phase":"manual-action-required","canApply":true}]
+    );
+    h.tester.settle(1);
+    try std.testing.expectEqual(@as(usize, 1), updates.visibleCount(&h.app));
+    try std.testing.expect(h.tester.hasText("Antigravity · latest version unavailable · synthetic-device"));
+    try std.testing.expect(h.tester.hasText("Check and update"));
+    try std.testing.expect(!h.tester.hasText("Antigravity update available"));
+    try h.snap("antigravity-checklist-native");
+    try h.tester.clickText("Check and update");
+    h.tester.settle(0.3);
+    const action = h.app.agent_updates.last_action orelse return error.MissingNativeUpdateAction;
+    try std.testing.expectEqualStrings("ApplyHarnessUpdate", action.method);
+    try std.testing.expectEqualStrings("antigravity", action.harness);
+    try std.testing.expectEqualStrings("synthetic-device", action.device_id);
+}
+
+test "Antigravity checklist expanded row explains the unknown latest version and stays dismissible" {
+    var h: TestHarness = undefined;
+    try h.init();
+    defer h.deinit();
+    try updates.setTestStatuses(&h.app, "synthetic-device", true,
+        \\[{"harness":"antigravity","installedVersion":"1.5.7","phase":"manual-action-required","canApply":true},
+        \\ {"harness":"pi","installedVersion":"1.5.0","latestVersion":"1.5.2","phase":"available","canApply":true}]
+    );
+    h.tester.settle(1);
+    updates.setExpanded(&h.app, true, h.tester.time, false);
+    h.tester.settle(1);
+    try std.testing.expect(h.tester.hasText("Antigravity"));
+    try std.testing.expect(h.tester.hasText("Latest unavailable"));
+    const explanation = h.tester.findText("Updater checks / installs") orelse return error.MissingUpdaterExplanation;
+    const button = h.tester.findText("Check and update") orelse return error.MissingUpdaterButton;
+    try std.testing.expect(explanation.x + explanation.w < button.x);
+    const rows = updates.collectVisible(&h.app, h.tester.ctx.alloc());
+    try std.testing.expectEqual(@as(usize, 2), rows.len);
+    try std.testing.expectEqualStrings("Latest version unavailable; updater will check and install if needed", detailText(&h.tester.ctx, rows[0].status));
+    try h.snap("antigravity-checklist-expanded");
+    updates.dismiss(&h.app);
+    h.tester.settle(1);
+    try std.testing.expectEqual(@as(usize, 0), updates.visibleCount(&h.app));
+    try std.testing.expect(!h.tester.hasText("Check and update"));
+}
+
+test "Antigravity checklist keeps legacy manual servers hidden and disconnect disables native action" {
+    var h: TestHarness = undefined;
+    try h.init();
+    defer h.deinit();
+    try updates.setTestStatuses(&h.app, "synthetic-device", true,
+        \\[{"harness":"antigravity","phase":"manual-action-required","canApply":false,"manualCommand":"Update the configured Antigravity ACP server"}]
+    );
+    h.tester.settle(1);
+    try std.testing.expectEqual(@as(usize, 0), updates.visibleCount(&h.app));
+    try std.testing.expect(!h.tester.hasText("Check and update"));
+    try updates.setTestStatuses(&h.app, "synthetic-device", false,
+        \\[{"harness":"antigravity","phase":"manual-action-required","canApply":true}]
+    );
+    h.tester.settle(1);
+    try std.testing.expect(h.tester.hasText("Check and update"));
+    try h.tester.clickText("Check and update");
+    h.tester.settle(0.3);
+    try std.testing.expect(h.app.agent_updates.last_action == null);
 }
 
 fn retargetTween(old: ?updates.Tween, target: f32, now: f64, reduced: bool) updates.Tween {

@@ -1,5 +1,5 @@
-// The Duo cover display's session list: a trailing drawer over the chat, not a second cramped column.
-// The native toolbar owns the control rail; the drawer stays inside its safe area.
+// The Duo cover display's sessions drawer pushes the whole navigation page left.
+// Back, the title, transcript and composer travel together; the drawer gets its own native rail.
 
 import SwiftUI
 
@@ -8,20 +8,26 @@ enum CoverSessionDrawer {
         duo && compactWidth && fold == .none
     }
 
-    /// Keep a tappable sliver of the chat visible. Use the safe width, never the status/control rail's inset.
+    /// The drawer's full navigation width, including its native control rail.
+    /// Keep a tappable sliver of the previous page visible rather than resizing that page.
     static func width(in available: CGFloat) -> CGFloat {
         max(0, available - min(64, available * 0.18))
+    }
+
+    static func chatOffset(shown: Bool, width: CGFloat) -> CGFloat {
+        shown ? -Self.width(in: width) : 0
     }
 }
 
 extension EnvironmentValues {
-    @Entry var coverSessionsAvailable = false
-    /// Only on the Duo cover display. Set by the pager, used by the session's native vertical toolbar.
+    /// Only on the Duo cover display. Set by Home, used by the session's native vertical toolbar.
     @Entry var toggleCoverSessions: (() -> Void)? = nil
     @Entry var coverSessionsShown = false
+    /// Home's drawer and the pager share selection without pushing another navigation destination.
+    @Entry var coverSessionSelection: Binding<String?>? = nil
 }
 
-/// Home's rows and ordering, without a nested navigation stack (which would replace the native side rail).
+/// Home's rows and ordering. The reveal host supplies a sibling navigation stack, not a nested one.
 struct CoverSessionsList: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openNewSession) private var openNewSession
@@ -98,30 +104,65 @@ struct CoverSessionsList: View {
     }
 }
 
-struct CoverSessionDrawerOverlay<Content: View>: View {
+struct CoverSessionDrawerContainer<Page: View, Drawer: View>: View {
+    let available: Bool
+    let shown: Bool
     let close: () -> Void
-    @ViewBuilder var content: Content
+    let snapshot: CoverPageSnapshot
+    @ViewBuilder var page: Page
+    @ViewBuilder var drawer: Drawer
 
     var body: some View {
         GeometryReader { proxy in
-            HStack(spacing: 0) {
-                Button(action: close) {
-                    Color.black.opacity(0.12)
-                        .contentShape(Rectangle())
+            let open = available && shown
+            let drawerWidth = CoverSessionDrawer.width(in: proxy.size.width)
+            ZStack(alignment: .trailing) {
+                // Keep the live navigation stack mounted in its original geometry.
+                // Its native rail would reflow if the live stack crossed the window edge.
+                page
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                    .background(CoverPageSnapshotSource(snapshot: snapshot).accessibilityHidden(true))
+                    .opacity(snapshot.image == nil ? 1 : 0)
+                    .accessibilityHidden(snapshot.image != nil)
+                    .allowsHitTesting(!open)
+                if let image = snapshot.image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .offset(x: CoverSessionDrawer.chatOffset(shown: open, width: proxy.size.width))
+                        .transition(.asymmetric(insertion: .offset(x: drawerWidth), removal: .identity))
+                        .allowsHitTesting(false)
+                        .accessibilityLabel("Current session preview")
+                        .accessibilityIdentifier("cover-moving-page")
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Return to current session")
-                .accessibilityIdentifier("cover-sessions-backdrop")
-                content
-                    .frame(width: CoverSessionDrawer.width(in: proxy.size.width))
-                    .background(Theme.surface)
-                    .clipShape(UnevenRoundedRectangle(topLeadingRadius: 24, bottomLeadingRadius: 24))
-                    .shadow(color: .black.opacity(0.12), radius: 16, x: -4)
+                if open {
+                    HStack(spacing: 0) {
+                        Button(action: close) {
+                            Color.black.opacity(0.12)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Return to current session")
+                        .accessibilityIdentifier("cover-sessions-backdrop")
+                        drawer
+                            .frame(width: drawerWidth)
+                            .background(Theme.surface)
+                            .clipShape(UnevenRoundedRectangle(topLeadingRadius: 24, bottomLeadingRadius: 24))
+                            .shadow(color: .black.opacity(0.12), radius: 16, x: -4)
+                            .accessibilityAddTraits(.isModal)
+                    }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityAction(.escape, close)
+                    .accessibilityIdentifier("cover-sessions-drawer")
+                    // Both pages travel exactly the same distance, in one transaction.
+                    .transition(.offset(x: drawerWidth))
+                }
             }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+            .clipped()
         }
-        .accessibilityElement(children: .contain)
-        .accessibilityAction(.escape, close)
-        .accessibilityIdentifier("cover-sessions-drawer")
-        .transition(.move(edge: .trailing).combined(with: .opacity))
+        // Each sibling navigation stack reserves its own native control rail.
+        .ignoresSafeArea(.container)
+        .animation(Motion.collapse, value: available && shown)
     }
 }

@@ -69,8 +69,8 @@ struct SessionPagerHost: View {
     @Environment(AppModel.self) private var model
     @State private var current: String
     @State private var forward = true
-    @Environment(\.coverSessionsAvailable) private var coverSessionsAvailable
-    @State private var coverSessionsShown = false
+    @Environment(\.coverSessionsShown) private var coverSessionsShown
+    @Environment(\.coverSessionSelection) private var coverSessionSelection
 
     init(chatId: String) {
         _current = State(initialValue: chatId)
@@ -87,47 +87,17 @@ struct SessionPagerHost: View {
                     removal: .move(edge: forward ? .leading : .trailing)))
         }
         .clipped()
-        .overlay {
-            if coverSessionsAvailable && coverSessionsShown {
-                CoverSessionDrawerOverlay(close: closeCoverSessions) {
-                    CoverSessionsList(current: current, close: closeCoverSessions) { id in
-                        closeCoverSessions()
-                        go(to: id)
-                    }
-                }
-            }
+        .onAppear { coverSessionSelection?.wrappedValue = current }
+        .onChange(of: current) { _, id in coverSessionSelection?.wrappedValue = id }
+        .onChange(of: coverSessionSelection?.wrappedValue) { _, id in
+            if let id, id != current { go(to: id) }
         }
-        .environment(\.toggleCoverSessions, coverSessionsAvailable ? toggleCoverSessions : nil)
-        .environment(\.coverSessionsShown, coverSessionsShown)
-        .onChange(of: coverSessionsAvailable) { _, available in
-            if !available { coverSessionsShown = false }
-        }
-        #if DEBUG
-        .onAppear {
-            // Offline screenshot fixture: no navigation, typing or desktop input injection.
-            if model.demo != nil, coverSessionsAvailable,
-               ProcessInfo.processInfo.arguments.contains("-cover-sessions-open") {
-                coverSessionsShown = true
-            }
-        }
-        #endif
         // The clip stops at the safe area, so the session's own background cannot reach under the status bar,
         // the header or the home indicator, and the system's black showed there: a hard band, worst in dark
         // mode. The host paints the theme colour to the screen edges, outside the clip.
         .background(Theme.bg.ignoresSafeArea())
         .environment(\.pageSession, page)
         .environment(\.switchToSession, { go(to: $0) })
-    }
-
-    private func toggleCoverSessions() {
-        // The drawer has its own search field; don't leave the composer's keyboard under it.
-        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-        withAnimation(Motion.collapse) { coverSessionsShown.toggle() }
-    }
-
-    private func closeCoverSessions() {
-        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-        withAnimation(Motion.collapse) { coverSessionsShown = false }
     }
 
     private func page(_ direction: PageDirection) {

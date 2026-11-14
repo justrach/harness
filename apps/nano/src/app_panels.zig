@@ -173,7 +173,8 @@ pub fn chatChanged(a: *App) void {
     if (same) return;
     @import("app_git.zig").reset(a);
     @import("app_git_workflow.zig").reset(a);
-    @import("app_github_repository.zig").reset(a);
+    // GitHub is a child of its opener, not a mirror of split focus.
+    @import("app_github_repository.zig").reconcile(a);
     if (p.w_diffs) |id| a.engine.cancel(id);
     if (p.w_git) |id| a.engine.cancel(id);
     p.w_diffs = null;
@@ -207,7 +208,11 @@ pub fn chatChanged(a: *App) void {
             if (best) |ix| p.active = ix;
         }
     };
-    if (p.host_open and p.activeTab() != null) showTab(a, p.active);
+    if (p.host_open) if (p.activeTab()) |tab| {
+        // The opener owns GitHub's navigation and pending request. A focus
+        // change is not a request to reopen or refresh that child's page.
+        if (tab.kind != .github) showTab(a, p.active);
+    };
     if (p.files_open) openFiles(a);
 }
 
