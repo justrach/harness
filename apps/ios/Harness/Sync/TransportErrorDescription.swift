@@ -44,3 +44,12 @@ func describeUserFacingError(_ error: Error) -> String {
     if error is DecodingError { return "The device sent a reply this app can't read" }
     return describeTransportError(error)
 }
+
+/// Connectivity-aware variant: when the phone itself is offline, avoid
+/// blaming the host with "The device is offline" and report the local link state.
+func describeUserFacingError(_ error: Error, phoneOnline: Bool) -> String {
+    if !phoneOnline {
+        return "Phone is offline — waiting for connection"
+    }
+    return describeUserFacingError(error)
+}

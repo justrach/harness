@@ -9,6 +9,8 @@ struct SettingsView: View {
     @AppStorage(PhoneSplit.storageKey) private var phoneSplitRaw = PhoneSplit.off.rawValue
     @AppStorage(HomeUiMode.storageKey) private var uiModeRaw = HomeUiMode.zen.rawValue
     @AppStorage(HomeMovingPart.overridesStorageKey) private var uiPartOverridesRaw = ""
+    @AppStorage(ActivitySleepRules.archiveAfterKey) private var archiveAfterDays: Int = 0
+    @State private var selectedAppIcon = AppIconChoice.from(alternateIconName: UIApplication.shared.alternateIconName)
     /// Opens straight onto Crash reports (the `-sheet crashreports` rig).
     @State private var showCrashReports: Bool
     /// The first-run setup, opened again from Agents.
@@ -55,6 +57,53 @@ struct SettingsView: View {
                         LabeledContent("Theme", value: themeSummary)
                     }
                     .accessibilityIdentifier("settings-appearance")
+                }
+                .harnessListRow()
+
+                if UIApplication.shared.supportsAlternateIcons {
+                    Section("App Icon") {
+                        ForEach(AppIconChoice.allCases) { choice in
+                            Button {
+                                UISelectionFeedbackGenerator().selectionChanged()
+                                selectedAppIcon = choice
+                                choice.apply()
+                            } label: {
+                                HStack(spacing: 12) {
+                                    Image(choice.previewAssetName)
+                                        .resizable()
+                                        .scaledToFit()
+                                        .frame(width: 40, height: 40)
+                                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                                .strokeBorder(Theme.border, lineWidth: 1)
+                                        )
+                                    Text(choice.label)
+                                        .font(Theme.sans(15))
+                                        .foregroundStyle(Theme.text)
+                                    Spacer(minLength: 8)
+                                    if selectedAppIcon == choice {
+                                        Image(systemName: "checkmark")
+                                            .font(.system(size: 14, weight: .semibold))
+                                            .foregroundStyle(Theme.accent)
+                                    }
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("settings-app-icon-\(choice.rawValue)")
+                        }
+                    }
+                    .harnessListRow()
+                }
+
+                Section("Sessions") {
+                    Picker("Archive Idle Chats", selection: $archiveAfterDays) {
+                        ForEach(ActivitySleepRules.archiveAfterChoices, id: \.self) { days in
+                            Text(ActivitySleepRules.archiveAfterLabel(days)).tag(days)
+                        }
+                    }
+                    .accessibilityIdentifier("settings-archive-idle")
                 }
                 .harnessListRow()
 
@@ -200,6 +249,9 @@ struct SettingsView: View {
             }
             .harnessGroupedList()
             .navigationTitle("Settings")
+            .onAppear {
+                selectedAppIcon = AppIconChoice.from(alternateIconName: UIApplication.shared.alternateIconName)
+            }
             .navigationDestination(isPresented: $showCrashReports) { CrashReportsView() }
             .navigationDestination(isPresented: $showAutonomy) { AutonomyView() }
             .navigationDestination(isPresented: $showNotifications) { NotificationsView() }

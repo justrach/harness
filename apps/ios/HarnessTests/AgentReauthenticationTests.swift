@@ -549,4 +549,100 @@ final class AgentReauthenticationTests: XCTestCase {
         XCTAssertEqual(transport.cancelled, ["login-1"])
     }
 
+
+    func testSignedOutSessionResolvesProviderFromTrustedChatConfigNeverMessageText() {
+        XCTAssertEqual(
+            AgentReauthProvider.forSignedOutSession(harness: "claude-code", model: "sonnet"),
+            .claudeCode
+        )
+        XCTAssertEqual(
+            AgentReauthProvider.forSignedOutSession(harness: "codex", model: "gpt-5-codex"),
+            .codex
+        )
+        XCTAssertEqual(
+            AgentReauthProvider.forSignedOutSession(harness: "cursor", model: "auto"),
+            .cursor
+        )
+        XCTAssertEqual(
+            AgentReauthProvider.forSignedOutSession(harness: "graff", model: "gpt-5.4"),
+            .chatGPTNew
+        )
+        XCTAssertNil(
+            AgentReauthProvider.forSignedOutSession(harness: "graff", model: "gemini-4-hydrogen")
+        )
+        XCTAssertNil(AgentReauthProvider.forSignedOutSession(harness: nil, model: nil))
+    }
+
+    func testEarlierReauthRowsSuppressesInlineSignedOutActionAfterUserMovesOn() {
+        let rows: [TranscriptRow] = [
+            TranscriptRow(id: "e1", version: 1, turnStart: false, kind: .errorChip(message: "Not logged in · Please run /login", reauth: nil), entryId: "e1", timestamp: 1, partKey: "e1#e0", topGap: 8),
+            TranscriptRow(id: "u1", version: 1, turnStart: true, kind: .user(text: "Signed in, try again."), entryId: "u1", timestamp: 2, partKey: "u1", topGap: 8),
+            TranscriptRow(id: "e2", version: 1, turnStart: false, kind: .errorChip(message: "OAuth token has expired", reauth: nil), entryId: "e2", timestamp: 3, partKey: "e2#e0", topGap: 8),
+        ]
+        let earlier = TranscriptView.earlierReauthRows(rows, sessionReauth: .claudeCode)
+        XCTAssertTrue(earlier.contains("e1"))
+        XCTAssertFalse(earlier.contains("e2"))
+    }
+
+    func testClaudeCodePasteCodeFlowValidatesAuthorizeURLAndSubmitsCodeToHost() async throws {
+        let transport = LoginTransportStub()
+        transport.mode = .pasteCode
+        transport.url = "https://claude.ai/oauth/authorize?code=true&client_id=cid&response_type=code&code_challenge=abc123&code_challenge_method=S256&state=xyz789"
+        transport.deferPoll = true
+        let waiting = expectation(description: "paste-code waiting")
+        transport.onPoll = { waiting.fulfill() }
+        let recovery = AgentReauthentication(transport: transport, pollDelay: {})
+        let run = Task { await recovery.run(provider: .claudeCode) }
+        await fulfillment(of: [waiting], timeout: 10)
+        XCTAssertEqual(recovery.phase, .waiting)
+        XCTAssertEqual(recovery.pasteCodeSignIn?.url.host, "claude.ai")
+
+        let rejected = await recovery.submitAuthorizationCode("short")
+        XCTAssertFalse(rejected)
+        XCTAssertNotNil(recovery.redirectError)
+
+        let accepted = await recovery.submitAuthorizationCode("authcode_12345678#state_xyz789")
+        XCTAssertTrue(accepted)
+        XCTAssertEqual(transport.completed.first?.redirect, "authcode_12345678#state_xyz789")
+
+        try XCTUnwrap(transport.polls.removeValue(forKey: "login-1"))
+            .resume(returning: AgentLoginPoll(status: .done, message: nil, url: nil))
+        await run.value
+        XCTAssertEqual(recovery.phase, .done)
+        XCTAssertNil(recovery.pasteCodeSignIn)
+
+        for unsafeURL in [
+            "http://claude.ai/oauth/authorize?state=x&code_challenge=y",
+            "https://evil.invalid/oauth/authorize?state=x&code_challenge=y",
+            "https://claude.ai/oauth/authorize?state=x",
+            "https://claude.ai/oauth/authorize?state=x&code_challenge=y#frag",
+        ] {
+            let bad = LoginTransportStub()
+            bad.mode = .pasteCode
+            bad.url = unsafeURL
+            let badRecovery = AgentReauthentication(transport: bad, pollDelay: {})
+            await badRecovery.run(provider: .claudeCode)
+            guard case .failed = badRecovery.phase else {
+                return XCTFail("accepted unsafe paste-code URL: \(unsafeURL)")
+            }
+        }
+    }
+
+    func testCursorBrowserFlowValidatesCursorOriginAndPollsHostToCompletion() async {
+        let transport = LoginTransportStub()
+        transport.mode = .browser
+        transport.url = "https://cursor.com/loginDeepControl?challenge=abc&uuid=123"
+        let recovery = AgentReauthentication(transport: transport, pollDelay: {})
+        await recovery.run(provider: .cursor)
+        XCTAssertEqual(recovery.phase, .done)
+
+        let bad = LoginTransportStub()
+        bad.mode = .browser
+        bad.url = "https://evil.invalid/loginDeepControl"
+        let badRecovery = AgentReauthentication(transport: bad, pollDelay: {})
+        await badRecovery.run(provider: .cursor)
+        guard case .failed = badRecovery.phase else {
+            return XCTFail("accepted untrusted cursor browser URL")
+        }
+    }
 }
