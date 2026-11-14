@@ -20,6 +20,9 @@ import UniformTypeIdentifiers
 
 /// The body used for image-only sends.
 let attachmentOnlyText = "See the attached image(s)."
+/// The body used for non-image file-only sends.
+let fileAttachmentOnlyText = "See the attached file(s)."
+let attachedFilesHeader = "Attached files (local files — open them to view):"
 
 /// use-attachments.ts `withAttachments`: plain local paths appended to the
 /// text — the files are staged on the device that runs the agent.
@@ -28,6 +31,15 @@ func withAttachments(text: String, paths: [String]) -> String {
     let body = text.isEmpty ? attachmentOnlyText : text
     let refs = paths.map { "- \($0)" }.joined(separator: "\n")
     return "\(body)\n\nAttached images (local files — open them to view):\n\(refs)"
+}
+
+/// Append staged non-image file paths under a separate trailer so image parsing
+/// (`parseUserMessageImages`) remains 100% untouched.
+func withFileAttachments(text: String, paths: [String]) -> String {
+    guard !paths.isEmpty else { return text }
+    let body = text.isEmpty ? fileAttachmentOnlyText : text
+    let refs = paths.map { "- \($0)" }.joined(separator: "\n")
+    return "\(body)\n\n\(attachedFilesHeader)\n\(refs)"
 }
 
 /// An attachment ref parsed back out of a user message's text.
@@ -78,7 +90,10 @@ func parseUserMessageImages(_ rawContent: String) -> ParsedUserMessage {
     guard let markerIx else {
         return ParsedUserMessage(text: AppshotContext.visibleText(content), attachments: [])
     }
-    let attachments = lines[(markerIx + 1)...].compactMap { line -> String? in
+    let attachments = lines[(markerIx + 1)...].prefix { line in
+        let trimmed = line.trimmingCharacters(in: .whitespaces).lowercased()
+        return !(trimmed.hasPrefix("attached files (local files") && trimmed.hasSuffix("):"))
+    }.compactMap { line -> String? in
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         guard trimmed.hasPrefix("- ") else { return nil }
         let path = String(trimmed.dropFirst(2)).trimmingCharacters(in: .whitespaces)
@@ -94,6 +109,71 @@ func parseUserMessageImages(_ rawContent: String) -> ParsedUserMessage {
     let visible = AppshotContext.visibleText(body)
     return ParsedUserMessage(text: visible == attachmentOnlyText ? "" : visible,
                              attachments: attachments)
+}
+
+/// A non-image file attachment ref parsed back out of a user message's text.
+struct UserFileAttachment: Identifiable, Hashable, Sendable {
+    let id: String
+    let path: String
+    let name: String
+}
+
+struct ParsedUserFiles: Equatable, Sendable {
+    var text: String
+    var files: [UserFileAttachment]
+}
+
+/// Split out the `Attached files (local files — open them to view):` trailer
+/// without altering `parseUserMessageImages` behavior for image-only messages.
+func parseUserMessageFiles(_ rawContent: String) -> ParsedUserFiles {
+    let content = stripRoomDeliveryTag(rawContent)
+    let lines = content.components(separatedBy: "\n")
+    var markerIx: Int?
+    for (ix, raw) in lines.enumerated() where ix > 0 {
+        let line = raw.trimmingCharacters(in: .whitespaces)
+        if lines[ix - 1].trimmingCharacters(in: .whitespaces).isEmpty,
+           line.lowercased().hasPrefix("attached files (local files"),
+           line.hasSuffix("):") {
+            markerIx = ix
+            break
+        }
+    }
+    guard let markerIx else {
+        return ParsedUserFiles(text: content, files: [])
+    }
+
+    var filePaths: [String] = []
+    var sectionEnd = markerIx + 1
+    while sectionEnd < lines.count {
+        let trimmed = lines[sectionEnd].trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty {
+            break
+        }
+        guard trimmed.hasPrefix("- ") else { break }
+        let path = String(trimmed.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+        if !path.isEmpty { filePaths.append(path) }
+        sectionEnd += 1
+    }
+
+    guard !filePaths.isEmpty else {
+        return ParsedUserFiles(text: content, files: [])
+    }
+
+    let files = filePaths.enumerated().map { ix, path in
+        UserFileAttachment(id: "\(ix):\(path)", path: path, name: nameFromPath(path))
+    }
+    let before = lines[..<(markerIx - 1)].joined(separator: "\n")
+    let after = sectionEnd < lines.count
+        ? lines[sectionEnd...].joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        : ""
+    let combined: String
+    switch (before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, after.isEmpty) {
+    case (true, true): combined = ""
+    case (false, true): combined = before.trimmingCharacters(in: .whitespacesAndNewlines)
+    case (true, false): combined = after
+    case (false, false): combined = before.trimmingCharacters(in: .whitespacesAndNewlines) + "\n\n" + after
+    }
+    return ParsedUserFiles(text: combined == fileAttachmentOnlyText ? "" : combined, files: files)
 }
 
 // MARK: - Staging (use-attachments.ts intake)
@@ -114,6 +194,43 @@ let uploadConcurrency = 3
 /// hours (the 2026-08-19 image-send incident class).
 func attachmentDeadlineSeconds(chunkCount: Int) -> Int {
     min(120 + 15 * chunkCount, 900)
+}
+
+/// A non-image file staged in the composer before upload.
+struct StagedFileAttachment: Identifiable, Hashable, Sendable {
+    let id: String
+    let name: String
+    let data: Data
+    let byteCount: Int
+    let contentType: UTType?
+
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.id == rhs.id }
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
+
+    static func stage(name: String, data: Data, contentType: UTType? = nil) -> StagedFileAttachment? {
+        guard data.count <= maxAttachmentBytes else { return nil }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let safeName = trimmed.isEmpty ? "file" : trimmed
+        return StagedFileAttachment(
+            id: UUID().uuidString.lowercased(),
+            name: safeName,
+            data: data,
+            byteCount: data.count,
+            contentType: contentType
+        )
+    }
+
+    static func stage(url: URL) -> StagedFileAttachment? {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        let type = UTType(filenameExtension: url.pathExtension)
+        return stage(name: url.lastPathComponent, data: data, contentType: type)
+    }
+
+    var formattedSize: String {
+        ByteCountFormatter.string(fromByteCount: Int64(byteCount), countStyle: .file)
+    }
 }
 
 /// An image staged in the composer, before upload. Bytes are what uploads;
@@ -542,6 +659,62 @@ struct AttachmentStripView: View {
             }
         }
         .fullScreenCover(item: $preview) { AttachmentLightbox(preview: $0) }
+    }
+}
+
+/// Staged non-image file chips inside the composer pill.
+struct FileAttachmentStripView: View {
+    let files: [StagedFileAttachment]
+    let remove: (String) -> Void
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(files) { file in
+                    HStack(spacing: 6) {
+                        Image(systemName: iconName(for: file))
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(Theme.textMuted)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(file.name)
+                                .font(Theme.sans(12, weight: .medium))
+                                .foregroundStyle(Theme.text)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Text(file.formattedSize)
+                                .font(Theme.sans(10))
+                                .foregroundStyle(Theme.textFaint)
+                        }
+                        .frame(maxWidth: 140, alignment: .leading)
+                        Button {
+                            remove(file.id)
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(Theme.textMuted)
+                                .frame(width: 20, height: 20)
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Remove attached file \(file.name)")
+                        .accessibilityIdentifier("composer-remove-file-\(file.id)")
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(ink(0.05), in: RoundedRectangle(cornerRadius: 10))
+                    .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(hairline(0.11), lineWidth: 1))
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("composer-file-attachment-\(file.id)")
+                }
+            }
+        }
+    }
+
+    private func iconName(for file: StagedFileAttachment) -> String {
+        if file.contentType?.conforms(to: .pdf) == true { return "doc.richtext" }
+        if file.contentType?.conforms(to: .sourceCode) == true { return "chevron.left.forwardslash.chevron.right" }
+        if file.contentType?.conforms(to: .text) == true { return "doc.text" }
+        return "doc"
     }
 }
 
