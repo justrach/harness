@@ -15,7 +15,7 @@
 //! Text bodies are **LoroText** so streaming appends RLE-merge (1.03x oplog overhead vs
 //! 125x for whole-value rewrites).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use loro::{ExportMode, LoroDoc, LoroError, LoroList, LoroMap, LoroText, LoroValue, ToJson};
 use serde::{Deserialize, Serialize};
@@ -370,12 +370,18 @@ fn image_part(
 /// A session doc handle: typed access over a LoroDoc with the schema above.
 pub struct SessionDoc {
     doc: LoroDoc,
+    /// Serialize local queue lookup/length + mutation pairs. Loro protects
+    /// individual calls, not compound operations on its movable list.
+    pub(crate) queue_mutation: Mutex<()>,
 }
 
 impl SessionDoc {
     /// Wrap an existing doc (e.g. imported from a snapshot).
     pub fn from_doc(doc: LoroDoc) -> Self {
-        Self { doc }
+        Self {
+            doc,
+            queue_mutation: Mutex::new(()),
+        }
     }
 
     /// Create + initialize a fresh doc for `chat_id` (host-only).
@@ -385,7 +391,7 @@ impl SessionDoc {
         meta.insert("chatId", chat_id)?;
         meta.insert("schemaVersion", SESSION_SCHEMA_VERSION as i64)?;
         doc.commit();
-        Ok(Self { doc })
+        Ok(Self::from_doc(doc))
     }
 
     pub fn doc(&self) -> &LoroDoc {
