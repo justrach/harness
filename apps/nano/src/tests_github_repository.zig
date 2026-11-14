@@ -66,6 +66,150 @@ fn setup(h: *Harness, dark: bool, pages: []const flow.Page) !void {
     git.open(&h.a, .github);
     h.t.settle(0.1);
 }
+fn textRect(h: *Harness, text: []const u8) ?@import("nanoui").ui.Rect {
+    for (h.t.ctx.nodes.items) |node| switch (node.content) {
+        .text => |tx| if (std.mem.eql(u8, tx.str, text)) return node.rect,
+        else => {},
+    };
+    return null;
+}
+
+fn topTextRect(h: *Harness, text: []const u8) ?@import("nanoui").ui.Rect {
+    for (h.t.ctx.nodes.items) |node| switch (node.content) {
+        .text => |tx| if (std.mem.eql(u8, tx.str, text) and node.rect.y < 42 and node.rect.x >= h.a.view.sidebar_width) return node.rect,
+        else => {},
+    };
+    return null;
+}
+
+test "github child stays beside its originating split and retains repository on other chat focus" {
+    var h: Harness = undefined;
+    try setup(&h, true, &.{pulls});
+    defer h.deinit();
+    // Alpha is the first pane, Beta the second; GitHub belongs to Alpha.
+    h.a.splitPane(.horizontal);
+    h.a.openChat("b", null);
+    h.a.focusPane(0);
+    git.open(&h.a, .github);
+    h.t.settle(1);
+    try h.t.clickText("Repository");
+    h.t.settle(1);
+    try screenshot(&h, "child-placement");
+    const github = textRect(&h, "demo/fieldnotes") orelse return error.NoRepositoryTitle;
+    const beta = topTextRect(&h, "Remote work") orelse return error.NoNeighborTitle;
+    try testing.expect(github.x < beta.x);
+    try testing.expect(h.t.hasText("Split from Navigation polish"));
+    const calls = try githubCalls(&h);
+    h.a.focusPane(1);
+    h.t.settle(0.2);
+    try testing.expect(h.t.hasText("demo/fieldnotes"));
+    try testing.expectEqual(calls, try githubCalls(&h));
+    h.a.panels.host_open = false;
+    h.a.panels.host_open = true;
+    panels.showTab(&h.a, h.a.panels.active);
+    h.t.settle(0.2);
+    try testing.expect(h.t.hasText("Split from Navigation polish"));
+    try testing.expect(h.t.hasText("demo/fieldnotes"));
+}
+
+test "github child vertical layout bounds the child to its parent row and hides it in another workspace" {
+    for ([_]bool{ false, true }) |dark| {
+        var h: Harness = undefined;
+        try setup(&h, dark, &.{pulls});
+        defer h.deinit();
+        h.a.splitPane(.vertical);
+        h.a.openChat("b", null);
+        h.a.focusPane(0);
+        git.open(&h.a, .github);
+        h.t.settle(1);
+        try h.t.clickText("Repository");
+        h.t.settle(0.2);
+        const parent = topTextRect(&h, "Navigation polish") orelse return error.MissingParentTab;
+        const child = topTextRect(&h, "GitHub") orelse return error.MissingChildTab;
+        const sibling = topTextRect(&h, "Remote work") orelse return error.MissingSiblingTab;
+        try testing.expect(parent.x < child.x and child.x < sibling.x);
+        const title = textRect(&h, "demo/fieldnotes") orelse return error.NoRepositoryTitle;
+        try testing.expect(title.x > h.a.view.chrome.x + h.a.view.chrome.chat_width);
+        var bounded = false;
+        for (h.t.ctx.nodes.items) |node| {
+            if (node.style.radius == 10 and node.rect.x > h.a.view.chrome.x + h.a.view.chrome.chat_width and node.rect.y < 50) {
+                bounded = node.rect.h < h.a.view.chrome.height * 0.6;
+                if (bounded) break;
+            }
+        }
+        try testing.expect(bounded);
+        try screenshot(&h, if (dark) "child-vertical-dark" else "child-vertical-light");
+        const calls = try githubCalls(&h);
+        h.a.newTab();
+        h.t.settle(0.2);
+        try testing.expect(!@import("view_tab_strip.zig").hasHost(&h.a));
+        try testing.expect(!h.t.hasText("Split from Navigation polish"));
+        h.a.showTab(0);
+        h.t.settle(0.2);
+        try testing.expect(h.t.hasText("demo/fieldnotes"));
+        try testing.expectEqual(calls, try githubCalls(&h));
+        h.a.focusPane(0);
+        h.a.closePanel();
+        h.t.settle(0.2);
+        try testing.expect(!@import("view_tab_strip.zig").hasHost(&h.a));
+        h.a.openChatInTab("a");
+        h.t.settle(0.2);
+        try testing.expect(h.t.hasText("demo/fieldnotes"));
+        try testing.expectEqualStrings("a", h.a.panels.github_repository.owner.?);
+        try testing.expectEqual(calls, try githubCalls(&h));
+    }
+}
+
+test "github child description and activity images open a bounded preview without navigating away" {
+    var picture_detail = detail;
+    picture_detail.detail.?.body = "![Synthetic image](https://raw.githubusercontent.com/demo/repo/media/image.png)";
+    var picture_activity = activity;
+    picture_activity.events = &.{.{ .id = "image-event", .event = "commented", .author = "demo-reviewer", .createdAt = "2026-11-13", .body = picture_detail.detail.?.body }};
+    var h: Harness = undefined;
+    try setup(&h, true, &.{ pulls, picture_detail, picture_activity });
+    defer h.deinit();
+    try h.t.clickText("Repository");
+    try h.t.clickText("Polish repository navigation");
+    try h.a.panels.github_repository.images.seed("https://raw.githubusercontent.com/demo/repo/media/image.png", @embedFile("testdata/github-preview.png"));
+    for (0..2) |i| {
+        if (i == 1) try h.t.clickText("Activity");
+        h.t.settle(0.2);
+        try screenshot(&h, if (i == 0) "image-inline" else "image-activity");
+        const calls = h.a.engine.sent.items.len;
+        if (i == 0) {
+            const image = for (h.t.ctx.nodes.items) |node| {
+                if (node.content == .image and node.rect.w > 100 and node.rect.h > 100 and node.rect.x > h.a.view.chrome.x + h.a.view.chrome.chat_width) break node.rect;
+            } else return error.NoInlineImage;
+            h.t.click(image.x + image.w / 2, image.y + image.h / 2);
+        } else try h.t.clickText("Preview image");
+        h.t.settle(0.2);
+        try testing.expect(h.t.hasText("GitHub image preview"));
+        try h.t.clickText("Zoom in");
+        try testing.expect(h.a.panels.github_repository.images.zoom > 1);
+        h.a.view.strip.focused = .{ .chat = 0 };
+        try testing.expect(!@import("github_images.zig").keys(&h.t.ctx, &h.a));
+        h.a.view.strip.focused = .host;
+        const preview_title = textRect(&h, "GitHub image preview").?;
+        try testing.expect(preview_title.x > h.a.view.chrome.x + h.a.view.chrome.chat_width);
+        try screenshot(&h, "image-preview");
+        if (i == 0) try h.t.clickText("Close preview") else _ = h.t.shortcut(.{ .key = @import("nanoui").ui.Shortcut.escape });
+        h.t.settle(0.2);
+        try testing.expect(!h.t.hasText("GitHub image preview"));
+        try testing.expectEqual(calls, h.a.engine.sent.items.len);
+        try testing.expectEqual(if (i == 0) flow.Kind.pull else flow.Kind.activity, h.a.panels.github_repository.kind);
+    }
+}
+
+fn githubCalls(h: *Harness) !usize {
+    var count: usize = 0;
+    for (h.a.engine.sent.items) |frame| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, frame, .{});
+        defer parsed.deinit();
+        if (std.mem.eql(u8, parsed.value.object.get("method").?.string, "BrowseCheckoutGitHub")) count += 1;
+    }
+    return count;
+}
+
 fn request(h: *Harness) !std.json.Parsed(std.json.Value) {
     var i = h.a.engine.sent.items.len;
     while (i > 0) {
@@ -185,6 +329,9 @@ test "repository github browser resets context and ignores late host replies aft
     flow.show(&h.a);
     const old = h.a.panels.github_repository.pending.?;
     h.a.openChatInTab("b");
+    // Focus alone no longer reparents GitHub. An explicit open does.
+    try testing.expectEqual(old, h.a.panels.github_repository.pending.?);
+    git.open(&h.a, .github);
     flow.show(&h.a);
     const fresh = h.a.panels.github_repository.pending.?;
     try testing.expect(old != fresh);
@@ -267,7 +414,7 @@ test "repository github surface plus opens the surface picker instead of a chat 
     try setup(&h, false, &.{pulls});
     defer h.deinit();
     const tabs_before = h.a.tabs.items.items.len;
-    const title = h.t.findText("GitHub") orelse return error.MissingGitHubTab;
+    const title = topTextRect(&h, "GitHub") orelse return error.MissingGitHubTab;
     h.t.moveTo(title.x + title.w / 2, title.y + title.h / 2);
     h.t.settle(0.1);
     var plus: ?@import("nanoui").ui.Rect = null;

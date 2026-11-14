@@ -62,7 +62,9 @@ pub fn chatCount(a: *const App) usize {
     return if (a.tabs.layout()) |s| s.panes.items.len else 1;
 }
 pub fn hasHost(a: *const App) bool {
-    return a.panels.host_open;
+    if (!a.panels.host_open) return false;
+    const github = @import("app_github_repository.zig");
+    return !github.surface(a) or github.parentPane(a) != null;
 }
 pub fn hasFiles(a: *const App) bool {
     return a.panels.files_open;
@@ -499,7 +501,8 @@ pub fn glyph(a: *const App, panel: Panel) icons.Name {
 pub fn device(a: *const App, panel: Panel) ?[]const u8 {
     const id = switch (panel) {
         .chat => |ix| chatId(a, ix),
-        .host, .files => a.selected,
+        .host => if (@import("app_github_repository.zig").surface(a)) a.panels.github_repository.owner else a.selected,
+        .files => a.selected,
     };
     if (id) |chat| if (a.findChat(chat)) |ch| return ch.device_id;
     if (panel == .chat) if (a.tabs.layout()) |s| {
@@ -555,17 +558,20 @@ pub fn attention(a: *const App, panel: Panel, k: theme.Colors) ?ui.Color {
         .chat => |ix| ix,
         else => return null,
     };
-    var input = false;
+    var input = if (chatId(a, pane)) |id| @import("app_question.zig").needsInput(a, id) else false;
     if (chatId(a, pane)) |id| switch (workspace.statusOf(a.sessions.items, id)) {
         .errored => return k.danger,
         .awaiting_input => input = true,
         .idle, .working => {},
     };
     if (a.tabs.layout()) |s| {
-        if (pane < s.panes.items.len) for (s.groups[pane].items.items) |tab| if (tab.chat) |id| switch (workspace.statusOf(a.sessions.items, id)) {
-            .errored => return k.danger,
-            .awaiting_input => input = true,
-            .idle, .working => {},
+        if (pane < s.panes.items.len) for (s.groups[pane].items.items) |tab| if (tab.chat) |id| {
+            if (@import("app_question.zig").needsInput(a, id)) input = true;
+            switch (workspace.statusOf(a.sessions.items, id)) {
+                .errored => return k.danger,
+                .awaiting_input => input = true,
+                .idle, .working => {},
+            }
         };
     }
     return if (input) k.warning else null;

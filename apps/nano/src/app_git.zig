@@ -60,6 +60,7 @@ pub const State = struct {
 pub fn open(a: *App, kind: @import("app_panels.zig").TabKind) void {
     std.debug.assert(kind == .git or kind == .github);
     const p = &a.panels;
+    if (kind == .github) @import("app_github_repository.zig").bind(a);
     for (p.tabs.items, 0..) |tab, i| if (tab.kind == kind) {
         p.host_open = true;
         return @import("app_panels.zig").showTab(a, i);

@@ -22,6 +22,12 @@ pub fn host(c: *ui.Context, a: *App, k: theme.Colors) void {
     const col = ui.div(c).column().wFull().hFull().bg(k.background).clip();
     defer col.end();
     const t = a.panels.activeTab() orelse return picker(c, a, k);
+    if (t.kind == .github) {
+        githubIdentity(c, a, k);
+        defer @import("github_images.zig").preview(c, a, k, c.rects.get(c.node(col.index).id));
+        @import("view_git.zig").github(c, a, k);
+        return;
+    }
     switch (t.kind) {
         .diffs => @import("view_diffs.zig").diffs(c, a, k),
         .git => @import("view_git.zig").history(c, a, k),
@@ -33,6 +39,18 @@ pub fn host(c: *ui.Context, a: *App, k: theme.Colors) void {
             _ = @import("view_transcript.zig").entries(c, a, k, &s.transcript, @max(0, a.view.chrome.host_width - 2), !s.transcript.complete, 16);
         },
     }
+}
+
+fn githubIdentity(c: *ui.Context, a: *App, k: theme.Colors) void {
+    const header = ui.div(c).row().wFull().px(14).py(12).gap(10).itemsCenter().bg(k.accent.alpha(0.06));
+    defer header.end();
+    const badge = ui.div(c).size(32, 32).center().rounded(9).bg(k.accent.alpha(0.12));
+    icons.icon(c, .@"pull-request", 18, k.accent, 0);
+    badge.end();
+    const labels = ui.div(c).column().grow().w(0).gap(3).clip();
+    defer labels.end();
+    ui.text(c, "GitHub", .{ .size = 16, .weight = .semibold, .color = k.text });
+    kit.ellipsisText(c, c.print("Split from {s}", .{@import("app_github_repository.zig").ownerTitle(a)}), .{ .size = 11, .color = k.muted }, @max(40, a.view.chrome.host_width - 80));
 }
 
 fn band(c: *ui.Context, a: *App, k: theme.Colors) void {

@@ -144,7 +144,7 @@ pub fn view(a: *App, c: *ui.Context) void {
     }
     strip.settle(a);
     @import("view_attachment_drop.zig").prepare(a);
-    keys(c, a);
+    if (!@import("github_images.zig").keys(c, a)) keys(c, a);
     c.setZoom(a.settings.uiFontSize() / 16.0);
     if (!a.offscreen and c.time < a.view.resize_until) c.frameIn(1.0 / 120.0);
     a.syncPeers();
@@ -236,19 +236,17 @@ pub fn view(a: *App, c: *ui.Context) void {
             if (expanded == null or expanded.? == .chat) {
                 const only = expanded != null;
                 if (only) a.view.chrome.chat_width = a.view.chrome.width;
-                const chat = ui.div(c).column().w(a.view.chrome.chat_width).hFull();
+                const nested_github = githubChildInSplit(a);
+                const chat = ui.div(c).column().w(a.view.chrome.chat_width + (if (nested_github) a.view.chrome.host_width + chrome.gutter else 0)).hFull();
                 defer chat.end();
                 if (a.tabs.layout()) |s| {
                     if (!s.zoomed and !only and s.panes.items.len > 1) panes(c, a, k, s) else chatPanel(c, a, k);
                 } else chatPanel(c, a, k);
             }
-            if (strip.hasHost(a) and (expanded == null or expanded.? == .host)) {
+            if (strip.hasHost(a) and !githubChildInSplit(a) and (expanded == null or expanded.? == .host)) {
                 if (expanded == null) ui.div(c).w(chrome.gutter).hFull().end();
                 if (expanded != null) a.view.chrome.host_width = a.view.chrome.width;
-                const host = panel_chrome.body(c, k).w(a.view.chrome.host_width).hFull().clip();
-                defer host.end();
-                if (c.input.pressed and host.interaction().hovered) a.view.strip.focused = .host;
-                @import("view_host.zig").host(c, a, k);
+                hostPanel(c, a, k);
             }
             if (strip.hasFiles(a) and (expanded == null or expanded.? == .files)) {
                 if (expanded == null) ui.div(c).w(chrome.gutter).hFull().end();
@@ -378,6 +376,19 @@ fn focused(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
 }
 
+fn githubChildInSplit(a: *const App) bool {
+    const s = a.tabs.layout() orelse return false;
+    return s.panes.items.len > 1 and !s.zoomed and a.view.strip.expanded == null and strip.hasHost(a) and @import("app_github_repository.zig").surface(a);
+}
+
+fn hostPanel(c: *ui.Context, a: *App, k: theme.Colors) void {
+    ui.key(c, "workspace-host-body");
+    const host = panel_chrome.body(c, k).w(a.view.chrome.host_width).hFull().clip();
+    defer host.end();
+    if (c.input.pressed and host.interaction().hovered) a.view.strip.focused = .host;
+    @import("view_host.zig").host(c, a, k);
+}
+
 /// A split's panes along its axis, each its share of the column; the
 /// focused one is the tab's chat, the others its neighbors, read only
 /// (`render_chat_split`, shell/chat_split.rs).
@@ -418,30 +429,43 @@ fn panes(c: *ui.Context, a: *App, k: theme.Colors, s: *tabs.Split) void {
         }
     }
 
+    const child_parent = if (githubChildInSplit(a)) @import("app_github_repository.zig").parentPane(a) else null;
     for (s.panes.items, s.shares.items, 0..) |chat, share, ix| {
         ui.key(c, c.print("pane-{d}", .{ix}));
         if (ix > 0) divider(c, a, k, ix, across, total);
         const target = chrome.paneSpan(total, share, s.panes.items.len, across);
         const size = if (reveal) |r| revealSpan(total, across, r, ix, target, reveal_t) else target;
-        var pane = panel_chrome.body(c, k).clip();
-        pane = if (across) pane.w(size).hFull() else pane.h(size).wFull();
-        defer pane.end();
-        @import("view_attachment_drop.zig").target(c, a, pane.index, ix);
-        if (c.input.pressed and pane.interaction().hovered) a.view.strip.focused = .{ .chat = ix };
-        if (ix == s.focus) {
-            focused(c, a, k);
-            continue;
+        const owns_child = child_parent != null and child_parent.? == ix;
+        const extra = if (owns_child) a.view.chrome.host_width + chrome.gutter else 0;
+        var group = ui.div(c).row();
+        group = if (across) group.w(size + extra).hFull() else group.h(size).wFull();
+        defer group.end();
+        {
+            const saved_width = a.view.chrome.chat_width;
+            // In a vertical split only the parent's row shares its width.
+            if (!across and child_parent != null and !owns_child) a.view.chrome.chat_width += a.view.chrome.host_width + chrome.gutter;
+            defer a.view.chrome.chat_width = saved_width;
+            const pane = panel_chrome.body(c, k).clip().w(if (across) size else a.view.chrome.chat_width).hFull();
+            defer pane.end();
+            @import("view_attachment_drop.zig").target(c, a, pane.index, ix);
+            if (c.input.pressed and pane.interaction().hovered) a.view.strip.focused = .{ .chat = ix };
+            if (ix == s.focus) {
+                focused(c, a, k);
+            } else {
+                // Capture the whole subtree before focus moves the transcript.
+                const it = pane.interaction();
+                if (c.input.pressed and it.hovered and c.window_focused) a.view.pane_press = .{ .tab = @import("pane_gesture.zig").context(a, c), .pane = ix };
+                if (c.input.released and it.hovered and c.window_focused) if (press) |p| {
+                    if (p.tab == @import("pane_gesture.zig").context(a, c) and p.pane == ix) focus = ix;
+                };
+                const neighbor_w = @max(0, (if (across) size else a.view.chrome.chat_width) - a.view.seam_inset);
+                if (neighbor(c, a, k, ix, chat, neighbor_w)) return;
+            }
         }
-        // A message's hover/copy controls are the top hit, not the pane.
-        // Capture the whole subtree, then finish its action before focus
-        // moves the transcript into the active outlet (as GPUI does).
-        const it = pane.interaction();
-        if (c.input.pressed and it.hovered and c.window_focused) a.view.pane_press = .{ .tab = @import("pane_gesture.zig").context(a, c), .pane = ix };
-        if (c.input.released and it.hovered and c.window_focused) if (press) |p| {
-            if (p.tab == @import("pane_gesture.zig").context(a, c) and p.pane == ix) focus = ix;
-        };
-        const neighbor_w = @max(0, (if (across) size else a.view.chrome.chat_width) - a.view.seam_inset);
-        if (neighbor(c, a, k, ix, chat, neighbor_w)) return;
+        if (owns_child) {
+            ui.div(c).w(chrome.gutter).hFull().end();
+            hostPanel(c, a, k);
+        }
     }
     if (focus) |ix| {
         if (s.panes.items[ix]) |id| {
