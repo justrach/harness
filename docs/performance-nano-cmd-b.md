@@ -25,8 +25,17 @@ attention groups still come first.
 `Cmd+B grouped sidebar frame work stays near the viewport` drives the real
 shortcut and production shell in both directions at 120 Hz simulated time.
 It compares 8 synthetic projects with 1,024 projects, one chat per project.
-The regression failed before the fix and passes afterward. It bounds both
-UI-node growth and CPU growth rather than asserting a machine-specific FPS.
+The original regression failed before the fix and passes afterward. Its
+stable contract bounds UI-node growth; the 8-versus-1,024 CPU timings are
+reported diagnostically, since even linear indexing legitimately costs more
+for a larger input and runner scheduling can skew a narrow ratio.
+
+`Cmd+B group indexing avoids the former repeated full-list scans` separately
+compares the former nested scan with the production index on the **same**
+4,096-group workload. It verifies identical membership counts and requires at
+least a generous 2× speedup, using the best of three trials to avoid treating
+a scheduler pause as algorithmic work. Neither check asserts a machine-specific
+FPS.
 
 ReleaseSafe, native offscreen tester, 32 sampled frames per fixture:
 
