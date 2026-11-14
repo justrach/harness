@@ -125,7 +125,7 @@ test "question focus sidebar search owns digits and pending chat stays highlight
     try h.init(1000, 700, 3);
     defer h.deinit();
     const chats = try std.json.parseFromSlice(std.json.Value, testing.allocator,
-        \\[ {"id":"synthetic-owner","title":"Synthetic question owner","archived":false},
+        \\[ {"id":"synthetic-owner","title":"Question owner","archived":false},
         \\  {"id":"synthetic-neighbor","title":"Synthetic neighbor","archived":false} ]
     , .{});
     defer chats.deinit();
@@ -145,8 +145,10 @@ test "question focus sidebar search owns digits and pending chat stays highlight
     h.draw();
     try testing.expect(question.needsInput(&h.a, "synthetic-owner"));
     try testing.expectEqual(@as(usize, 0), textCount(&h.t, "Cancel question"));
+    // Keep this locator short enough for native Windows font metrics too:
+    // fadeText deliberately truncates overflowing titles before creating a node.
     // The inactive owner's row has an accent outline, not merely a status dot.
-    const label = textRect(&h.t, "Synthetic question owner") orelse return error.MissingOwnerRow;
+    const label = textRect(&h.t, "Question owner") orelse return error.MissingOwnerRow;
     var highlighted = false;
     for (h.t.ctx.nodes.items) |n| {
         if (n.rect.x <= label.x and n.rect.y <= label.y and n.rect.x + n.rect.w >= label.x + label.w and n.rect.y + n.rect.h >= label.y + label.h and n.style.border_width == 1) highlighted = true;
