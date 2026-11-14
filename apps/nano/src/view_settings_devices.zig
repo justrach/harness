@@ -187,9 +187,29 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
                 c,
                 k,
                 "Automatic update checks",
-                "Harness checks for new releases every hour, including across sleep. Installing an update and restarting are separate actions you choose; checks never restart the app or interrupt agents.",
+                "Harness checks for new releases every hour, including across sleep. Checks never restart the app or interrupt agents.",
                 0,
             );
+        }
+        {
+            ui.key(c, "automatically_install_updates");
+            const enabled = a.updates.app_can_install;
+            const r = set.row(c, k, false, !enabled);
+            defer r.end();
+            if (enabled) {
+                _ = r.control();
+                _ = kit.focusRing(c, r, k.accent, 2);
+            }
+            set.tile(c, k, .refresh);
+            set.words(c, k, "Install updates automatically", if (enabled)
+                "Download and install verified updates in the background. Restart when you're ready; your running chats won't be interrupted. Turning this off doesn't cancel an installation already underway."
+            else
+                "Automatic installation is available in the installed macOS app. This build still checks hourly; update it manually.", 40);
+            if (set.toggle(c, k, a.settings.get(.automatically_install_updates), enabled) or (enabled and r.clicked())) {
+                a.settings.toggle(.automatically_install_updates);
+                if (a.settings.get(.automatically_install_updates)) upd.checkForUpdates(a);
+                a.redraw();
+            }
         }
     } else {
         const r = set.row(c, k, true, false);
@@ -378,8 +398,23 @@ test "native updater settings describe hourly checks without an inert restart to
     defer t.deinit();
     t.settle(1);
     try std.testing.expect(t.hasText("Automatic update checks"));
+    try std.testing.expect(t.hasText("Install updates automatically"));
+    try std.testing.expect(a.settings.get(.automatically_install_updates));
     try std.testing.expect(!t.hasText("Restart automatically to install updates"));
     try std.testing.expect(a.settings.get(.restart_to_install_updates));
+    try t.clickText("Install updates automatically");
+    t.settle(0.1);
+    try std.testing.expect(a.settings.get(.automatically_install_updates)); // Unsupported builds cannot change the default.
+    a.updates.app_install_checked = true;
+    a.updates.app_can_install = true;
+    t.settle(0.1);
+    try t.clickText("Install updates automatically");
+    t.settle(0.1);
+    try std.testing.expect(!a.settings.get(.automatically_install_updates));
+    try t.clickText("Install updates automatically");
+    t.settle(0.1);
+    try std.testing.expect(a.settings.get(.automatically_install_updates));
+    try std.testing.expect(!a.updates.app_downloading);
 }
 
 test "presence, last seen, the subtitle and the id chip as the GPUI app's" {

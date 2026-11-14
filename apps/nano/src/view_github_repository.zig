@@ -127,7 +127,7 @@ fn summary(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page) void {
     ui.text(c, "Description", .{ .size = 12, .weight = .semibold, .color = k.muted });
     if (std.mem.trim(u8, detail.body, " \t\r\n").len == 0) {
         ui.text(c, "No description provided.", .{ .size = 12, .color = k.muted });
-    } else @import("view_markdown.zig").providerMarkdown(c, k, detail.body, a);
+    } else @import("view_markdown.zig").githubMarkdown(c, k, detail.body, a);
 }
 fn files(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page) void {
     const s = &a.panels.github_repository;
@@ -164,7 +164,7 @@ fn activity(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page) void {
         ui.text(c, c.print("{s} · {s}", .{ event.author, event.event }), .{ .size = 12, .weight = .medium, .wrap = true, .color = k.text });
         ui.text(c, date(event.createdAt), .{ .size = 10.5, .color = k.muted });
         if (event.commitSha) |sha| ui.text(c, sha[0..@min(12, sha.len)], .{ .size = 11, .mono = true, .color = k.muted });
-        if (event.body) |text| @import("view_markdown.zig").providerMarkdown(c, k, text, a);
+        if (event.body) |text| @import("view_markdown.zig").githubMarkdown(c, k, text, a);
     }
 }
 fn stateBadge(c: *ui.Context, k: theme.Colors, number: u64, state: []const u8, draft: bool) void {

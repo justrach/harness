@@ -400,8 +400,8 @@ pub fn updateSummary(buf: []u8, a: *const App, now_ms: i64) UpdateSummary {
 }
 
 /// Call from App.tick, not a render/scroll callback. The real-clock deadline
-/// survives sleep; minute wakeups also notice clock changes. Checks never
-/// download, apply or restart anything (including with HARNESS_AUTO_UPDATE=0).
+/// survives sleep; minute wakeups also notice clock changes. Successful checks
+/// install by default unless disabled; they never restart the app.
 /// Returns seconds until another tick is needed, or null for fixtures/tests.
 pub fn tick(a: *App) ?f32 {
     if (a.offscreen or builtin.is_test) return null;
@@ -431,9 +431,24 @@ pub fn onReleaseChecked(a: *App) void {
     } else {
         a.updates.setAppFailed("Release manifest unavailable. Try again when online.");
     }
-    // `harness update` applies immediately; it is not a background staging API.
-    // Automatic checks must never invoke it or consume restart preferences.
+    automaticallyInstall(a);
     a.redraw();
+}
+
+/// Only a fresh successful check may replace the verified running bundle.
+/// Installation defaults on; the legacy restart preference is unrelated.
+fn automaticallyInstall(a: *App) void {
+    if (!a.settings.get(.automatically_install_updates) or !a.release.succeeded or
+        a.release.schedule.in_flight or a.release.schedule.failures > 0 or
+        a.updates.app_ready or a.updates.app_downloading) return;
+    if (a.env) |env| {
+        if (env.get("HARNESS_AUTO_UPDATE")) |v| if (std.mem.eql(u8, v, "0")) return;
+    }
+    const ver = appUpdateVersion(a) orelse return;
+    if (std.mem.eql(u8, ver, "preview")) return;
+    initialize(a);
+    if (!a.updates.app_can_install) return;
+    startAppDownload(a);
 }
 
 pub fn triggerAppUpdate(a: *App, ver: []const u8) void {
@@ -1017,9 +1032,10 @@ test "native updater resolves only the running bundle never a global CLI" {
     try std.testing.expect(currentBundle("/tmp/Harness.app/Contents/MacOS/harness-nano", .windows) == null);
 }
 
-test "native updater release completion never installs or uses restart preference" {
+test "native updater release completion with installation disabled never installs or uses restart preference" {
     var a: App = .init(std.testing.allocator, std.testing.io, 1);
     defer a.deinit();
+    a.settings.set(.automatically_install_updates, false);
     a.settings.set(.restart_to_install_updates, true);
     a.updates.app_install_checked = true;
     a.updates.app_can_install = true;
@@ -1038,6 +1054,40 @@ test "native updater release completion never installs or uses restart preferenc
     try std.testing.expect(updateSummary(&buf, &a, a.nowMs()).action == .check);
     a.release.schedule.failures = 1;
     try std.testing.expect(std.mem.startsWith(u8, updateSummary(&buf, &a, a.nowMs()).line, "Couldn't check"));
+}
+
+test "native updater default automatic installation requires fresh success and install capability" {
+    var a: App = .init(std.testing.allocator, std.testing.io, 1);
+    defer a.deinit();
+    a.updates.app_install_checked = true;
+    a.updates.app_can_install = true;
+    const ver = "99.0.0";
+    @memcpy(a.release.latest[0..ver.len], ver);
+    a.release.latest_len = ver.len;
+    try std.testing.expect(a.settings.get(.automatically_install_updates));
+    a.settings.set(.restart_to_install_updates, false);
+    onReleaseChecked(&a); // Offline, even with a cached newer manifest.
+    try std.testing.expect(!a.updates.app_downloading);
+    a.release.succeeded = true;
+    a.release.schedule.failures = 1;
+    automaticallyInstall(&a);
+    try std.testing.expect(!a.updates.app_downloading);
+    a.release.schedule.failures = 0;
+    a.updates.app_can_install = false;
+    onReleaseChecked(&a);
+    try std.testing.expect(!a.updates.app_downloading);
+    a.updates.app_can_install = true;
+    onReleaseChecked(&a);
+    try std.testing.expect(a.updates.app_downloading);
+    try std.testing.expect(!a.updates.app_ready); // Installation is not a restart.
+    a.updates.app_downloading = false;
+    a.updates.app_ready = true;
+    onReleaseChecked(&a);
+    try std.testing.expect(!a.updates.app_downloading); // Never reinstall a staged update.
+    a.updates.app_ready = false;
+    a.settings.set(.automatically_install_updates, false);
+    onReleaseChecked(&a);
+    try std.testing.expect(!a.updates.app_downloading);
 }
 
 test "native updater rejects dev and standalone bundle identities" {

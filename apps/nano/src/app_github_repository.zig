@@ -66,6 +66,7 @@ fn validPart(part: []const u8) bool {
 const Target = struct { arena: std.heap.ArenaAllocator, chat: []const u8, cwd: []const u8, device: []const u8, branch: []const u8 };
 const Linked = struct { arena: std.heap.ArenaAllocator, repository: Repository };
 pub const State = struct {
+    images: @import("github_images.zig").Cache = .{},
     open: bool = false,
     target: ?Target = null,
     linked: ?Linked = null,
@@ -83,6 +84,7 @@ pub const State = struct {
     expanded_file: ?usize = null,
     error_text: ?[]u8 = null,
     pub fn deinit(s: *State, gpa: std.mem.Allocator) void {
+        s.images.deinit();
         if (s.target) |*t| t.arena.deinit();
         if (s.linked) |*link| link.arena.deinit();
         if (s.list) |*p| p.arena.deinit();
@@ -115,6 +117,7 @@ fn fail(a: *App, text: []const u8) void {
 }
 fn clearSnapshots(a: *App) void {
     const s = &a.panels.github_repository;
+    s.images.reset();
     if (s.list) |p| a.retireArena(p.arena);
     if (s.details) |p| a.retireArena(p.arena);
     if (s.content) |p| a.retireArena(p.arena);
@@ -132,7 +135,8 @@ pub fn reset(a: *App) void {
     clearError(a);
     if (s.target) |t| a.retireArena(t.arena);
     if (s.linked) |link| a.retireArena(link.arena);
-    s.* = .{};
+    const images = s.images;
+    s.* = .{ .images = images };
 }
 pub fn reconcile(a: *App) void {
     const s = &a.panels.github_repository;
@@ -228,6 +232,7 @@ pub fn openItem(a: *App, number: u64) void {
     if (s.pending != null or number == 0 or s.error_text != null) return;
     const page = if (s.list) |l| l.page else return;
     for (page.items) |item| if (item.number == number) {
+        s.images.reset();
         s.number = number;
         s.selected_kind = if (s.list_kind == .pulls) .pull else .issue;
         s.expanded_file = null;
