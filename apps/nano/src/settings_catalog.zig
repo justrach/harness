@@ -30,7 +30,7 @@ fn keywords(section: Section) []const u8 {
         .agents => "login authentication credentials account token subscription billing",
         .mcp => "integration tools protocol server",
         .github_ci => "continuous integration build test runner repository GitHub",
-        .devices => "update release version hourly install computer host remote desktop",
+        .devices => "update release version hourly install automatic background download restart computer host remote desktop",
         .appshots => "screenshot capture permission",
         .archived => "archive restore recover sessions chats history",
     };
@@ -57,6 +57,7 @@ test "settings discovery searches task words across section metadata" {
     try t.expect(matches(.browsing, "external PR"));
     try t.expect(matches(.notifications, "privacy telemetry"));
     try t.expect(matches(.devices, "hourly updates"));
+    try t.expect(matches(.devices, "automatic updates"));
     try t.expect(matches(.appearance, "font motion"));
     try t.expect(!matches(.files, "GitHub links"));
     try t.expect(!matches(.browsing, "GitHub nonsense"));
