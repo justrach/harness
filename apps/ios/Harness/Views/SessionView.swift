@@ -19,6 +19,8 @@ struct SessionView: View {
     @Environment(\.duoFlat) private var duoFlat
     /// Flat Duo: bring the session list in beside this session, or put it away (HomeView).
     @Environment(\.toggleFlatList) private var toggleFlatList
+    @Environment(\.toggleCoverSessions) private var toggleCoverSessions
+    @Environment(\.coverSessionsShown) private var coverSessionsShown
     /// Beside the list: the session's page is lifted (ContentPlane).
     @Environment(\.liftedPlane) private var liftedPlane
     /// Flat Duo: the chat column's width, for the rounded seam at the fold.
@@ -339,6 +341,16 @@ struct SessionView: View {
         .toolbarBackground(.hidden, for: .navigationBar)
         .toolbar(paneChrome ? .hidden : .automatic, for: .navigationBar)  // a Max draws its own header
         .toolbar {
+            if !paneChrome, let toggleCoverSessions {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(action: toggleCoverSessions) {
+                        Label(coverSessionsShown ? "Close sessions" : "Show sessions",
+                              systemImage: coverSessionsShown ? "xmark" : "sidebar.trailing")
+                    }
+                    .accessibilityIdentifier("duo-cover-toggle-sessions")
+                    .accessibilityValue(coverSessionsShown ? "Expanded" : "Collapsed")
+                }
+            }
             if !paneChrome, let toggleFlatList {
                 ToolbarItem(placement: .topBarLeading) {
                     Button(action: toggleFlatList) {
@@ -353,7 +365,15 @@ struct SessionView: View {
                 // Tap the session header to rename — model/effort changes
                 // moved into the composer's picker chips.
                 ToolbarItem(placement: .topBarTrailing) {
-                    headerTitle(chat)
+                    Group {
+                        if coverSessionsShown {
+                            Text("Sessions")
+                                .font(Theme.sans(16, weight: .semibold))
+                                .foregroundStyle(Theme.text)
+                        } else {
+                            headerTitle(chat)
+                        }
+                    }
                         // Claim the remaining bar width: the title expands before
                         // the fixed-size navigation and status marks. The title and
                         // pager carry their own swipe (headerControls).

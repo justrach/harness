@@ -454,7 +454,13 @@ struct HomeView: View {
             // Compact: a pager host, so the open session swipes to its
             // neighbours. The split layout keeps its own sidebar selection.
             case .chat(let id):
-                if splitLayout { SessionView(chatId: id) } else { SessionPagerHost(chatId: id) }
+                if splitLayout { SessionView(chatId: id) } else {
+                    SessionPagerHost(chatId: id)
+                        .environment(\.coverSessionsAvailable,
+                                     CoverSessionDrawer.isAvailable(duo: foldableDevice,
+                                                                     compactWidth: horizontalSizeClass == .compact,
+                                                                     fold: fold))
+                }
             case .newSession(let destination): NewSessionView(destination: destination, path: $path)
             }
         }
