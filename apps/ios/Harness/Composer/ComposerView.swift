@@ -65,6 +65,8 @@ struct ComposerShell<Chips: View>: View {
     var focusTick = 0
     /// Open the draft on the full-height Write page; nil hides the button.
     var onExpand: (() -> Void)? = nil
+    /// Open hands-free Voice Mode when nothing is typed; nil hides the button.
+    var onVoice: (() -> Void)? = nil
     @ViewBuilder var chips: Chips
 
     @Environment(\.verticalSizeClass) private var verticalSizeClass
@@ -184,6 +186,7 @@ struct ComposerShell<Chips: View>: View {
                     if expanded, let token {
                         token
                     }
+                    if showsVoiceButton { voiceButton }
                     actionButton
                 } else if expanded {
                     HStack(spacing: 8) {
@@ -208,11 +211,15 @@ struct ComposerShell<Chips: View>: View {
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        if showsVoiceButton { voiceButton }
                         actionButton
                     }
                     .padding(.top, compact ? 0 : 8)
                 } else {
-                    actionButton
+                    HStack(spacing: 6) {
+                        if showsVoiceButton { voiceButton }
+                        actionButton
+                    }
                 }
             }
         }
@@ -346,6 +353,27 @@ struct ComposerShell<Chips: View>: View {
         .motionAnimation(Motion.fadeQuick, value: showStop)
     }
 
+    private var showsVoiceButton: Bool {
+        onVoice != nil && !hasContent && !showStop && !busy
+    }
+
+    private var voiceButton: some View {
+        Button {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            onVoice?()
+        } label: {
+            Image(systemName: "waveform")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Theme.text)
+                .frame(width: singleLine ? 40 : 44, height: singleLine ? 40 : 44)
+                .glassEffect(.regular.interactive(), in: Circle())
+                .contentShape(Circle())
+        }
+        .buttonStyle(PressScaleButtonStyle(scale: 0.94))
+        .accessibilityLabel("Start Voice Mode")
+        .accessibilityIdentifier("composer-voice")
+    }
+
     private var buttonActive: Bool {
         if showStop, !hasContent { return true }
         return sendEnabled && hasContent && !busy
@@ -393,6 +421,9 @@ struct ComposerView: View {
     @State private var steerOverride: Bool? = nil
     /// The draft open on the full-height Write page.
     @State private var showWrite = false
+    /// Hands-free Voice Mode sheet (`-demo-voice` opens it directly for headless verification).
+    @State private var showVoiceMode = ProcessInfo.processInfo.arguments.contains("-demo")
+        && ProcessInfo.processInfo.arguments.contains("-demo-voice")
     /// The model picker opened from the Write page's dock (a sheet over it).
     @State private var showWriteModelPicker = false
     /// Live catalog for the chat's harness from its space's device.
@@ -605,7 +636,7 @@ struct ComposerView: View {
                 showStop: runLive && !duoChat,
                 busy: uploading || queueEditBusy || attachmentDraft.loading,
                 keepExpanded: showModelPicker || showTraitPicker || showOptionPicker != nil
-                    || showWrite || showCamera || showDocumentPicker,
+                    || showWrite || showCamera || showDocumentPicker || showVoiceMode,
                 onSend: send,
                 onStop: { store.sendInterrupt() },
                 onAdvanceQueue: advanceQueue,
@@ -629,7 +660,8 @@ struct ComposerView: View {
                 singleLine: duoChat,
                 token: duoChat ? AnyView(chipToken) : nil,
                 focusTick: DuoComposerFocus.shared.tick(chat.id),
-                onExpand: { showWrite = true }
+                onExpand: { showWrite = true },
+                onVoice: editingQueuedId == nil ? { showVoiceMode = true } : nil
             ) {
                 if showsGitChrome, let pullRequest = model.changeRequest(for: chat) {
                     PullRequestBadge(summary: pullRequest, surface: .composer)
@@ -685,6 +717,9 @@ struct ComposerView: View {
             }
         }
         .sheet(isPresented: $showModelPicker) { modelPicker }
+        .sheet(isPresented: $showVoiceMode) {
+            VoiceSessionSheet(store: store, chat: chat, runLive: runLive)
+        }
         .sheet(isPresented: $showWrite) {
             WriteSheet(
                 text: $text,

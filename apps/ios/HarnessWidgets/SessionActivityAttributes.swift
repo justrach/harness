@@ -11,6 +11,10 @@ struct SessionActivityAttributes: ActivityAttributes, Hashable {
             case working, waiting, done, failed
         }
 
+        enum VoiceState: String, Codable, Hashable, Sendable {
+            case listening, processing, speaking, muted
+        }
+
         var phase: Phase
         /// When the current run started; the working timer counts from here
         /// on its own, so it stays live while the app is suspended.
@@ -22,6 +26,8 @@ struct SessionActivityAttributes: ActivityAttributes, Hashable {
         var task: String?
         var tasksDone: Int?
         var tasksTotal: Int?
+        /// Non-nil while hands-free Voice Mode is active for this session.
+        var voiceState: VoiceState? = nil
 
         var hasTasks: Bool { (tasksTotal ?? 0) > 0 }
     }
