@@ -16,14 +16,24 @@ struct LiveActivitySnapshot: Hashable {
     var startedAt: Date
     var detail: String?
     var tasks: [TaskItem]?
+    var voiceState: SessionActivityAttributes.ContentState.VoiceState? = nil
+
+    var effectivePhase: SessionActivityAttributes.ContentState.Phase? {
+        if voiceState != nil {
+            if phase == .waiting { return .waiting }
+            return .working
+        }
+        return phase
+    }
 
     var state: SessionActivityAttributes.ContentState? {
-        guard let phase else { return nil }
+        guard let resolvedPhase = effectivePhase else { return nil }
         let list = tasks ?? []
-        return .init(phase: phase, startedAt: startedAt, detail: detail,
+        return .init(phase: resolvedPhase, startedAt: startedAt, detail: detail,
                      task: list.first { !$0.done }?.text,
                      tasksDone: list.isEmpty ? nil : list.filter(\.done).count,
-                     tasksTotal: list.isEmpty ? nil : list.count)
+                     tasksTotal: list.isEmpty ? nil : list.count,
+                     voiceState: voiceState)
     }
 }
 
@@ -99,7 +109,7 @@ enum LiveActivityPlan {
             return false
         }.count
         let candidates = sessions
-            .filter { showing[$0.attributes.chatId] == nil && ($0.phase == .working || $0.phase == .waiting) }
+            .filter { showing[$0.attributes.chatId] == nil && ($0.effectivePhase == .working || $0.effectivePhase == .waiting) }
             .sorted { ($0.startedAt, $0.attributes.chatId) > ($1.startedAt, $1.attributes.chatId) }
         for session in candidates where live < maxLive {
             steps.append(.start(chatId: session.attributes.chatId))
@@ -164,7 +174,7 @@ final class LiveActivities {
             case .update(let chatId):
                 guard let activity = activities[chatId], let state = byId[chatId]?.state else { continue }
                 let shown = activity.content.state
-                let onlyDetail = shown.phase == state.phase && shown.startedAt == state.startedAt
+                let onlyDetail = shown.phase == state.phase && shown.startedAt == state.startedAt && shown.voiceState == state.voiceState
                 if onlyDetail, let last = lastUpdate[chatId],
                    Date.now.timeIntervalSince(last) < Self.detailInterval {
                     continue
