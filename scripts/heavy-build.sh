@@ -6,6 +6,10 @@
 set -uo pipefail
 
 lock="${HARNESS_HEAVY_BUILD_LOCK:-${TMPDIR:-/tmp}/harness-heavy-build.lock}"
+held_owner="${HARNESS_HEAVY_BUILD_OWNER:-}"
+if [[ -n "$held_owner" ]] && [[ "$(cat "$lock/pid" 2>/dev/null || true)" == "$held_owner" ]] && kill -0 "$held_owner" 2>/dev/null; then
+  exec "$@"
+fi
 # The engine supplies a per-run directory; marker names are wrapper PIDs and
 # contents are Unix seconds of the first failed lock attempt, not the last poll.
 wait_marker=""
@@ -54,4 +58,5 @@ if [[ -n "$wait_marker" ]]; then
   wait_marker=""
 fi
 echo $$ >"$lock/pid"
+export HARNESS_HEAVY_BUILD_OWNER="$$"
 "$@"
