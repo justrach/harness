@@ -154,6 +154,43 @@ test "model search is scoped, stars do not select, and Return opens then uses th
     try testing.expectEqual(h.a.view.composer_id, h.t.ctx.focus);
 }
 
+test "model picker: text-field Return opens the filtered model and confirms it" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.t.typeText("synthetic-max");
+    h.t.settle(1);
+    h.t.key(.enter);
+    h.t.settle(1);
+    h.snap("picker-return");
+    try testing.expect(h.t.hasText("Use model"));
+    try testing.expectEqualStrings("openai/synthetic-max", h.a.view.model_picker.stage.?.model);
+    try testing.expect(h.a.new_model == null);
+    _ = h.t.shortcut(.{ .key = ui.Shortcut.enter });
+    h.t.settle(1);
+    try testing.expectEqualStrings("openai/synthetic-max", h.a.new_model.?);
+    try testing.expect(h.a.picker == .none);
+    try testing.expectEqual(h.a.view.composer_id, h.t.ctx.focus);
+    try testing.expectEqualStrings("", h.a.composer.text());
+}
+
+test "model picker: clicking Configure opens the highlighted model" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.t.typeText("synthetic-max");
+    h.t.settle(1);
+    try h.t.clickText("Configure");
+    h.t.settle(1);
+    try testing.expect(h.t.hasText("Use model"));
+    try testing.expectEqualStrings("openai/synthetic-max", h.a.view.model_picker.stage.?.model);
+    try testing.expect(h.a.new_model == null);
+    try h.t.clickText("Use model");
+    h.t.settle(1);
+    try testing.expectEqualStrings("openai/synthetic-max", h.a.new_model.?);
+    try testing.expect(h.a.picker == .none);
+}
+
 test "a row under the pointer shows a detail card of what the catalog says, and only that" {
     var h: Harness = undefined;
     try h.init(true);

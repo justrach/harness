@@ -271,6 +271,14 @@ fn firstModel(rows: []const models.Row) usize {
     return 0;
 }
 
+fn activateModel(c: *ui.Context, a: *App) void {
+    if (a.picker == .none) return;
+    const list = models.rows(a, c.alloc()) catch return;
+    if (list.len == 0) return;
+    const active = @min(a.view.model_picker.active, list.len - 1);
+    stage(c, a, list[active]);
+}
+
 /// AppKit's Home and End (NSHomeFunctionKey, NSEndFunctionKey).
 const home_key: u21 = 0xF729;
 const end_key: u21 = 0xF72B;
@@ -378,7 +386,7 @@ pub fn keys(c: *ui.Context, a: *App) void {
     }
     if (list.len == 0) return;
     p.active = @min(p.active, list.len - 1);
-    if (enter) return stage(c, a, list[p.active]);
+    if (enter) return activateModel(c, a);
     for (0..list.len) |_| {
         p.active = if (down) (p.active + 1) % list.len else (p.active + list.len - 1) % list.len;
         if (list[p.active].header == null) break;
@@ -466,7 +474,7 @@ pub fn popover(c: *ui.Context, a: *App, k: theme.Colors) void {
     _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.ink(0.06) }, .none, null);
     modelList(c, a, k, w - 2, h - 2 - 39 - 1 - 35 - 1 - 1 - 28, open, motion);
     _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.ink(0.08) }, .none, null);
-    pickerFooter(c, k);
+    pickerFooter(c, a, k, open);
 }
 
 fn keycap(c: *ui.Context, k: theme.Colors, text: []const u8) void {
@@ -475,7 +483,7 @@ fn keycap(c: *ui.Context, k: theme.Colors, text: []const u8) void {
     ui.text(c, text, .{ .size = 10, .line_height = 13, .mono = true, .weight = .medium, .color = k.muted });
 }
 
-fn pickerFooter(c: *ui.Context, k: theme.Colors) void {
+fn pickerFooter(c: *ui.Context, a: *App, k: theme.Colors, open: bool) void {
     const bar = ui.div(c).row().wFull().h(28).px(10).gap(10).itemsCenter().bg(k.ink(if (k.dark) 0.02 else 0.015));
     defer bar.end();
     {
@@ -485,8 +493,10 @@ fn pickerFooter(c: *ui.Context, k: theme.Colors) void {
         ui.text(c, "Navigate", .{ .size = 10.5, .line_height = 14, .color = k.muted });
     }
     {
-        const sel = ui.div(c).row().gap(4).itemsCenter();
+        ui.key(c, "model-picker-configure");
+        const sel = ui.div(c).row().gap(4).itemsCenter().rounded(4).hover(k.hover);
         defer sel.end();
+        if (sel.clicked() and open) activateModel(c, a);
         keycap(c, k, "↵");
         ui.text(c, "Configure", .{ .size = 10.5, .line_height = 14, .color = k.muted });
     }
@@ -1160,6 +1170,9 @@ fn search(c: *ui.Context, a: *App, k: theme.Colors) void {
         p.focus = false;
     }
     if (r.changed) reset(c, a);
+    // AppKit delivers plain Return to the focused field as submission,
+    // rather than the shortcut handled by keys(). Use the same row action.
+    if (r.submitted) activateModel(c, a);
 }
 
 fn space(c: *ui.Context, height: f32) void {
