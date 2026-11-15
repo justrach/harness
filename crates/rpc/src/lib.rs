@@ -46,6 +46,7 @@ pub mod methods {
     /// replies with the device's fresh `ListHarnesses` catalog.
     pub const GET_TITLE_SETTINGS: &str = "GetTitleSettings";
     pub const SET_TITLE_SETTINGS: &str = "SetTitleSettings";
+    pub const GENERATE_CUSTOM_THEME: &str = "GenerateCustomTheme";
     pub const GET_GRAFF_DRAFT_SUBAGENTS: &str = "GetGraffDraftSubagents";
     pub const SET_GRAFF_DRAFT_SUBAGENTS: &str = "SetGraffDraftSubagents";
     /// Where graff starts automatic compaction, as a percent of the context

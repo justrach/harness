@@ -8,7 +8,7 @@ const rules = @import("completion_rules.zig");
 const App = @import("app.zig").App;
 const Allocator = std.mem.Allocator;
 
-pub const Action = enum { model, new, resume_chat, settings, diff, files, terminal, rename, stop, help };
+pub const Action = enum { model, new, resume_chat, settings, diff, files, terminal, rename, stop, help, custom_theme, zen_mode };
 pub const SkillCommand = struct { name: []const u8, harness: []const u8 };
 pub const Entry = struct {
     name: []const u8,
@@ -260,6 +260,8 @@ const native = [_]Native{
     .{ .action = .resume_chat, .name = "resume", .description = "Resume a Harness session" },
     .{ .action = .settings, .name = "settings", .description = "Open Harness settings" },
     .{ .action = .help, .name = "help", .description = "Show keyboard shortcuts" },
+    .{ .action = .custom_theme, .name = "custom-theme", .description = "Create or pick a custom theme and animated backdrop" },
+    .{ .action = .zen_mode, .name = "zen", .description = "Toggle Zen / Developer workspace mode" },
     .{ .action = .diff, .name = "diff", .description = "Open changes", .chat = true },
     .{ .action = .files, .name = "files", .description = "Open files", .chat = true },
     .{ .action = .terminal, .name = "terminal", .description = "Open terminal", .chat = true },
@@ -414,6 +416,11 @@ fn activate(a: *App, action: Action) void {
         .files => @import("app_files.zig").open(a),
         .terminal => @import("app_panels.zig").toggleHost(a),
         .stop => a.interrupt(),
+        .custom_theme => @import("view_custom_theme_studio.zig").open(a),
+        .zen_mode => {
+            a.settings.toggleUiMode();
+            a.redraw();
+        },
         .rename => if (a.selected) |id| {
             var own: std.ArrayList(u8) = .empty;
             own.appendSlice(a.gpa, id) catch return;

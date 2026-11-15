@@ -395,3 +395,14 @@ pub fn dismissHarnessUpdate(harness: []const u8, version: ?[]const u8, host: ?[]
 pub fn setHarnessUpdatePolicy(harness: []const u8, auto_update: bool, host: ?[]const u8) Request(struct { harness: []const u8, autoUpdate: bool, targetDeviceId: ?[]const u8 }) {
     return .{ .method = "SetHarnessUpdatePolicy", .params = .{ .harness = harness, .autoUpdate = auto_update, .targetDeviceId = host } };
 }
+
+pub const GenerateCustomTheme = struct {
+    prompt: []const u8,
+    dark: ?bool = null,
+    harness: ?[]const u8 = null,
+};
+
+pub fn generateCustomTheme(prompt: []const u8, dark: ?bool, harness: ?[]const u8) Request(GenerateCustomTheme) {
+    return .{ .method = "GenerateCustomTheme", .params = .{ .prompt = prompt, .dark = dark, .harness = harness } };
+}
+

@@ -1193,6 +1193,29 @@ pub fn sidebarTitlebarLayout(sidebar_w_in: f32) SidebarTitlebarLayout {
     };
 }
 
+/// Zen sidebar titlebar cluster geometry (`Nano.FrameSchedule.zenSidebarTitlebarLayout`):
+/// no inline `+` button beside `[←][→]`, so `more_x` right-aligns cleanly at the card edge.
+pub fn zenSidebarTitlebarLayout(sidebar_w_in: f32) SidebarTitlebarLayout {
+    const sidebar_w = @max(0, sidebar_w_in);
+    const group_gap: f32 = if (sidebar_w >= 240) 8 else 4;
+    // Keep >= 13pt clearance from the Zen right card & topbar session pill at `sidebar_w + 3`.
+    const right_margin: f32 = 10;
+    const toggle_end: f32 = @import("window_chrome.zig").leading + 24;
+    const back_x = toggle_end + group_gap;
+    const forward_x = back_x + 24 + 2;
+    const natural_more = @max(0, sidebar_w - right_margin - 24);
+    const more_x = @max(forward_x + 24 + group_gap, natural_more);
+    return .{
+        .toggle_end = toggle_end,
+        .back_x = back_x,
+        .forward_x = forward_x,
+        .plus_x = forward_x + 24,
+        .cluster_end = forward_x + 24,
+        .more_x = more_x,
+        .more_end = more_x + 24,
+    };
+}
+
 /// Zeron sidebar disclosure body opacity (`Nano.FrameSchedule.disclosureOpacityPct`).
 pub fn disclosureOpacity(reveal_in: f32) f32 {
     const r = std.math.clamp(reveal_in, 0, 1);

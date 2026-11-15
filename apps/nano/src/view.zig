@@ -296,6 +296,7 @@ pub fn view(a: *App, c: *ui.Context) void {
     @import("view_updates.zig").updatesPopover(c, a, popup);
     // Over everything, as the GPUI app's deferred palette (priority 2).
     @import("view_palette.zig").overlay(c, a, popup);
+    @import("view_custom_theme_studio.zig").overlay(c, a, popup);
     @import("view_project_setup.zig").overlay(c, a, popup);
     @import("view_open_chooser.zig").overlay(c, a, popup);
     // First-run setup, over the whole window.
@@ -323,7 +324,7 @@ pub fn view(a: *App, c: *ui.Context) void {
 pub fn menuKeepsKeys(a: *const App) bool {
     const v = &a.view;
     return v.project_setup.open or v.open_chooser.open or v.strip.menu != null or v.more_menu or v.filter_menu or v.space_menu or v.checkout_menu or v.ref_menu or v.chat_menu.open or v.link_menu.open or
-        v.updates_popover or v.star_menu or v.account_usage.open or v.context.pinned or v.menus.ctx_at != null or v.palette.open or v.search.focus or a.picker != .none;
+        v.updates_popover or v.star_menu or v.account_usage.open or v.context.pinned or v.menus.ctx_at != null or v.palette.open or v.custom_theme_open or v.search.focus or a.picker != .none;
 }
 
 /// A press lands on the window's root unless something nearer takes focus,
@@ -385,6 +386,7 @@ fn focused(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (a.bots.page != .none) return @import("view_bots_page.zig").page(c, a, k, transcript_view.paneWidth(c, a));
     const parent = c.stack.items[c.stack.items.len - 1];
     defer @import("view_image_preview.zig").draw(c, a, k, c.rects.get(c.node(parent).id));
+    @import("view_backdrop.zig").draw(c, a, k);
     if (a.selected == null) {
         @import("view_newchat.zig").canvas(c, a, k);
     } else {
@@ -785,6 +787,7 @@ fn keys(c: *ui.Context, a: *App) void {
         a.picker = .none;
         a.view.filter_menu = false;
         a.view.more_menu = false;
+        if (a.view.custom_theme_open) @import("view_custom_theme_studio.zig").close(a);
         a.view.account_menu = false;
         a.view.account_usage.open = false;
         a.view.account_usage.card = null;

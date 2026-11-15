@@ -17,6 +17,8 @@ pub const Entry = union(enum) {
     new_project,
     settings,
     theme: Appearance,
+    custom_theme_studio,
+    custom_theme: []const u8,
     ui_mode: @import("motion_rules.zig").UiMode,
     toggle_part: @import("motion_rules.zig").MovingPart,
     /// An unfocused split pane (its index): picking it moves focus there.
@@ -39,6 +41,8 @@ pub const Entry = union(enum) {
                 .light => "Switch to light theme",
                 .dark => "Switch to dark theme",
             },
+            .custom_theme_studio => "Open Backdrop & Scene Studio",
+            .custom_theme => |id| if (@import("custom_themes.zig").findPreset(id)) |p| p.name else null,
             .ui_mode => |m| switch (m) {
                 .zen => "Switch to Zen mode (simple flat view)",
                 .developer => "Switch to Developer mode (full hierarchy)",
@@ -71,6 +75,7 @@ pub const Entry = union(enum) {
         if (std.meta.activeTag(x) != std.meta.activeTag(y)) return false;
         return switch (x) {
             .theme => |m| m == y.theme,
+            .custom_theme => |id| std.mem.eql(u8, id, y.custom_theme),
             .ui_mode => |m| m == y.ui_mode,
             .toggle_part => |part| part == y.toggle_part,
             .pane => |i| i == y.pane,
@@ -102,6 +107,7 @@ pub fn actionsFor(query: []const u8, is_dark: bool) Actions {
     };
     if (query.len > 0) {
         const extra = [_]Entry{
+            .custom_theme_studio,
             .{ .ui_mode = .zen },
             .{ .ui_mode = .developer },
             .{ .toggle_part = .open_workspaces_tree },
@@ -113,15 +119,32 @@ pub fn actionsFor(query: []const u8, is_dark: bool) Actions {
             .{ .toggle_part = .multi_axis_filters },
         };
         for (extra) |e| if (matchesQuery(query, e.label().?)) {
-            out.items[out.len] = e;
-            out.len += 1;
+            if (out.len < out.items.len) {
+                out.items[out.len] = e;
+                out.len += 1;
+            }
         };
+        const custom_themes = @import("custom_themes.zig");
+        for (custom_themes.userPresets()) |*p| {
+            if (out.len >= out.items.len) break;
+            if (matchesQuery(query, p.name) or matchesQuery(query, p.subtitle) or matchesQuery(query, @tagName(p.backdrop.motif))) {
+                out.items[out.len] = .{ .custom_theme = p.id };
+                out.len += 1;
+            }
+        }
+        for (custom_themes.curated()) |*p| {
+            if (out.len >= out.items.len) break;
+            if (matchesQuery(query, p.name) or matchesQuery(query, p.subtitle) or matchesQuery(query, @tagName(p.backdrop.motif))) {
+                out.items[out.len] = .{ .custom_theme = p.id };
+                out.len += 1;
+            }
+        }
     }
     return out;
 }
 
 pub const Actions = struct {
-    items: [16]Entry = undefined,
+    items: [64]Entry = undefined,
     len: usize = 0,
 
     pub fn slice(x: *const Actions) []const Entry {
