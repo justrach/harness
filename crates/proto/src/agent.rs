@@ -830,6 +830,14 @@ pub enum AgentEvent {
         input_tokens: u64,
         output_tokens: u64,
     },
+    /// Live provider plan-usage windows from `_codegraff/usage.planWindows`;
+    /// transient status only, never persisted to docs.
+    #[serde(rename_all = "camelCase")]
+    PlanUsage {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+        windows: Vec<crate::AgentUsageWindow>,
+    },
     /// The agent advertised (or changed) its slash-command set — ACP
     /// `available_commands_update`. The engine caches the latest list per
     /// harness for the composer's `/` popup; never persisted to docs.

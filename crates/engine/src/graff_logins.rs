@@ -23,6 +23,8 @@ use std::time::SystemTime;
 
 use harness_proto::{GRAFF_LOGIN_PROVIDERS, GraffLoginProvider};
 
+use crate::agent_accounts::{claude_plan, codex_plan, jwt_claims, read_json, str_field};
+
 /// The scope a ChatGPT sign-in needs before requests can run on the plan.
 pub const CHATGPT_PLAN_SCOPE: &str = "chatgpt.tokens.use.direct";
 
@@ -102,10 +104,137 @@ pub fn credential_path(home: &Path, provider: &str) -> Option<PathBuf> {
         })
 }
 
+/// The resolved on-disk credential file when signed in, falling back for
+/// Anthropic to `<home>/.anthropic/credentials/graff-oauth.json`.
+pub(crate) fn existing_credential_path(home: &Path, provider: &str) -> Option<PathBuf> {
+    if provider == "anthropic" {
+        return credential_path(home, provider)
+            .filter(|path| path.is_file())
+            .or_else(|| {
+                let fallback = home
+                    .join(".anthropic")
+                    .join("credentials")
+                    .join("graff-oauth.json");
+                fallback.is_file().then_some(fallback)
+            });
+    }
+    credential_path(home, provider).filter(|path| path.is_file())
+}
+
+#[derive(Default)]
+struct Meta {
+    account: Option<String>,
+    display_name: Option<String>,
+    organization: Option<String>,
+    plan_label: Option<String>,
+}
+
+fn empty_row(id: &str, name: &str) -> GraffLoginProvider {
+    GraffLoginProvider {
+        id: id.to_string(),
+        name: name.to_string(),
+        signed_in: false,
+        account: None,
+        plan_usage: None,
+        display_name: None,
+        organization: None,
+        plan_label: None,
+        usage_windows: Vec::new(),
+        prepaid_cents: None,
+        reset_credits: None,
+    }
+}
+
+fn chatgpt_meta(home: &Path) -> Meta {
+    let Some(path) = credential_path(home, "chatgpt-new") else {
+        return Meta::default();
+    };
+    let Some(json) = read_json(&path) else {
+        return Meta::default();
+    };
+    let id_claims = str_field(&json, "id_token").and_then(|t| jwt_claims(&t));
+    let ac_claims = str_field(&json, "access_token").and_then(|t| jwt_claims(&t));
+    let claim_str = |key: &str| {
+        id_claims
+            .as_ref()
+            .and_then(|c| str_field(c, key))
+            .or_else(|| ac_claims.as_ref().and_then(|c| str_field(c, key)))
+    };
+    let plan_for = |claims: Option<&serde_json::Value>| {
+        claims
+            .and_then(|c| c.get("https://api.openai.com/auth"))
+            .and_then(|oa| str_field(oa, "chatgpt_plan_type"))
+    };
+    Meta {
+        account: str_field(&json, "email").or_else(|| claim_str("email")),
+        display_name: str_field(&json, "display_name").or_else(|| claim_str("name")),
+        organization: None,
+        plan_label: codex_plan(
+            plan_for(id_claims.as_ref())
+                .or_else(|| plan_for(ac_claims.as_ref()))
+                .as_deref(),
+        ),
+    }
+}
+
+fn claude_agent_meta(marker_path: &Path, claude_config_file: Option<&Path>) -> Meta {
+    let marker = read_json(marker_path);
+    let mut meta = Meta {
+        account: marker.as_ref().and_then(|v| str_field(v, "email")),
+        display_name: None,
+        organization: marker.as_ref().and_then(|v| str_field(v, "organization")),
+        plan_label: marker.as_ref().and_then(|v| str_field(v, "plan")),
+    };
+    if let Some(cfg_path) = claude_config_file
+        && let Some(cfg) = read_json(cfg_path)
+        && let Some(oauth) = cfg.get("oauthAccount")
+    {
+        if meta.account.is_none() {
+            meta.account = str_field(oauth, "emailAddress");
+        }
+        if meta.display_name.is_none() {
+            meta.display_name = str_field(oauth, "displayName");
+        }
+        if meta.organization.is_none() {
+            meta.organization = str_field(oauth, "organizationName");
+        }
+        if meta.plan_label.is_none() {
+            meta.plan_label = claude_plan(
+                str_field(oauth, "organizationType").as_deref(),
+                str_field(oauth, "organizationRateLimitTier").as_deref(),
+            );
+        }
+    }
+    meta
+}
+
+fn token_oauth_meta(path: &Path) -> Meta {
+    let Some(json) = read_json(path) else {
+        return Meta::default();
+    };
+    let claims = str_field(&json, "access_token").and_then(|t| jwt_claims(&t));
+    Meta {
+        account: str_field(&json, "email")
+            .or_else(|| claims.as_ref().and_then(|c| str_field(c, "email"))),
+        display_name: str_field(&json, "display_name")
+            .or_else(|| claims.as_ref().and_then(|c| str_field(c, "name"))),
+        organization: str_field(&json, "organization"),
+        plan_label: str_field(&json, "plan"),
+    }
+}
+
 /// Every provider with whether it is signed in, in the order of
 /// [`GRAFF_LOGIN_PROVIDERS`]: a credential file for most, a plan-granted
 /// token in the record for ChatGPT.
+#[cfg(test)]
 pub fn list(home: &Path) -> Vec<GraffLoginProvider> {
+    list_with_claude_config(home, None)
+}
+
+pub(crate) fn list_with_claude_config(
+    home: &Path,
+    claude_config_file: Option<&Path>,
+) -> Vec<GraffLoginProvider> {
     GRAFF_LOGIN_PROVIDERS
         .iter()
         .map(|(id, name)| {
@@ -113,23 +242,38 @@ pub fn list(home: &Path) -> Vec<GraffLoginProvider> {
                 // Ready only with plan usage; a sign-in without it still
                 // names its account so the screen can say plan usage is off.
                 let record = chatgpt_record(home).filter(|record| record.signed_in);
+                let meta = if record.is_some() {
+                    chatgpt_meta(home)
+                } else {
+                    Meta::default()
+                };
                 return GraffLoginProvider {
-                    id: (*id).to_string(),
-                    name: (*name).to_string(),
                     signed_in: record.as_ref().is_some_and(|record| record.plan_usage),
-                    account: record.as_ref().and_then(|record| record.account.clone()),
+                    account: record
+                        .as_ref()
+                        .and_then(|record| record.account.clone())
+                        .or(meta.account),
                     plan_usage: record.map(|record| record.plan_usage),
+                    display_name: meta.display_name,
+                    organization: meta.organization,
+                    plan_label: meta.plan_label,
+                    ..empty_row(id, name)
                 };
             }
-            let path = credential_path(home, id).filter(|path| path.is_file());
+            let path = existing_credential_path(home, id);
+            let meta = match (&path, *id) {
+                (Some(p), "anthropic") => anthropic_meta(p),
+                (Some(p), "claude-agent") => claude_agent_meta(p, claude_config_file),
+                (Some(p), _) => token_oauth_meta(p),
+                (None, _) => Meta::default(),
+            };
             GraffLoginProvider {
-                id: (*id).to_string(),
-                name: (*name).to_string(),
                 signed_in: path.is_some(),
-                account: (*id == "anthropic")
-                    .then(|| path.as_deref().and_then(anthropic_account))
-                    .flatten(),
-                plan_usage: None,
+                account: meta.account,
+                display_name: meta.display_name,
+                organization: meta.organization,
+                plan_label: meta.plan_label,
+                ..empty_row(id, name)
             }
         })
         .collect()
@@ -169,14 +313,28 @@ fn anthropic_credentials_path(
     dir.join("credentials").join(format!("{profile}.json"))
 }
 
-/// The Console account a profile's credentials name, if any.
+/// The Console account metadata a profile's credentials name, if any.
+fn anthropic_meta(path: &Path) -> Meta {
+    let Some(value) = read_json(path) else {
+        return Meta::default();
+    };
+    Meta {
+        account: str_field(&value, "account_email")
+            .or_else(|| str_field(&value, "email"))
+            .or_else(|| {
+                value
+                    .get("account")
+                    .and_then(|a| str_field(a, "email").or_else(|| str_field(a, "email_address")))
+            }),
+        display_name: str_field(&value, "display_name"),
+        organization: str_field(&value, "organization"),
+        plan_label: str_field(&value, "plan"),
+    }
+}
+
+#[cfg(test)]
 fn anthropic_account(path: &Path) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
-    value
-        .get("account_email")
-        .and_then(|email| email.as_str())
-        .filter(|email| !email.is_empty())
-        .map(str::to_string)
+    anthropic_meta(path).account
 }
 
 /// The credential file's modified time: a sign-in landed when this differs
@@ -829,5 +987,119 @@ mod tests {
             let meta = std::fs::metadata(dir.join(name)).unwrap();
             assert_eq!(meta.permissions().mode() & 0o777, 0o755, "{name}");
         }
+    }
+
+    #[test]
+    fn list_extracts_account_org_and_plan_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+
+        // xAI: JWT identity claims inside access_token + stored plan
+        let jwt = format!(
+            "h.{}.s",
+            base64::Engine::encode(
+                &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+                r#"{"email":"xai@example.test","name":"Ada Lovelace"}"#
+            )
+        );
+        let xai_path = credential_path(home, "xai").unwrap();
+        std::fs::create_dir_all(xai_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &xai_path,
+            serde_json::json!({
+                "access_token": jwt,
+                "plan": "SuperGrok",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        // Anthropic: fallback `<home>/.anthropic/credentials/graff-oauth.json`
+        let anth_path = home
+            .join(".anthropic")
+            .join("credentials")
+            .join("graff-oauth.json");
+        std::fs::create_dir_all(anth_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &anth_path,
+            serde_json::json!({
+                "access_token": "ant-tok",
+                "email": "ops@acme.test",
+                "display_name": "Ops User",
+                "organization": "Acme Labs",
+                "plan": "Claude Max",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        // Claude Agent: empty marker falls back to read-only claude_config_file
+        let ca_path = credential_path(home, "claude-agent").unwrap();
+        std::fs::create_dir_all(ca_path.parent().unwrap()).unwrap();
+        std::fs::write(&ca_path, "{}").unwrap();
+        let claude_cfg = home.join("claude.json");
+        std::fs::write(
+            &claude_cfg,
+            serde_json::json!({
+                "oauthAccount": {
+                    "emailAddress": "dev@studio.test",
+                    "displayName": "Dev User",
+                    "organizationName": "Studio Team",
+                    "organizationType": "claude_max",
+                    "organizationRateLimitTier": "default_claude_max_20x",
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        // ChatGPT: plan claim in id_token JWT
+        let cg_jwt = format!(
+            "h.{}.s",
+            base64::Engine::encode(
+                &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+                r#"{"name":"Ada Lovelace","https://api.openai.com/auth":{"chatgpt_plan_type":"plus"}}"#
+            )
+        );
+        let cg_path = credential_path(home, "chatgpt-new").unwrap();
+        std::fs::create_dir_all(cg_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &cg_path,
+            serde_json::json!({
+                "email": "ada@example.test",
+                "access_token": "at",
+                "id_token": cg_jwt,
+                "scopes": [CHATGPT_PLAN_SCOPE],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let rows = list_with_claude_config(home, Some(&claude_cfg));
+        let find = |id: &str| rows.iter().find(|r| r.id == id).cloned().unwrap();
+
+        let xai = find("xai");
+        assert!(xai.signed_in);
+        assert_eq!(xai.account.as_deref(), Some("xai@example.test"));
+        assert_eq!(xai.display_name.as_deref(), Some("Ada Lovelace"));
+        assert_eq!(xai.plan_label.as_deref(), Some("SuperGrok"));
+
+        let anth = find("anthropic");
+        assert!(anth.signed_in);
+        assert_eq!(anth.account.as_deref(), Some("ops@acme.test"));
+        assert_eq!(anth.organization.as_deref(), Some("Acme Labs"));
+        assert_eq!(anth.plan_label.as_deref(), Some("Claude Max"));
+
+        let ca = find("claude-agent");
+        assert!(ca.signed_in);
+        assert_eq!(ca.account.as_deref(), Some("dev@studio.test"));
+        assert_eq!(ca.organization.as_deref(), Some("Studio Team"));
+        assert_eq!(ca.plan_label.as_deref(), Some("Max 20×"));
+
+        let cg = find("chatgpt-new");
+        assert!(cg.signed_in);
+        assert_eq!(cg.account.as_deref(), Some("ada@example.test"));
+        assert_eq!(cg.display_name.as_deref(), Some("Ada Lovelace"));
+        assert_eq!(cg.plan_label.as_deref(), Some("ChatGPT Plus"));
     }
 }

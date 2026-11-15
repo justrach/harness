@@ -168,7 +168,7 @@ pub fn load(a: *App, t: accounts.Trigger) void {
     p.snapshot.phase = .loading;
     loadUsage(a);
     loadJobs(a);
-    loadGraff(a);
+    loadGraffFor(a, accounts.forceUsage(t));
     cloud.refresh(a);
     p.snapshot.call = a.engine.call("ListAgentAccounts", .{ .forceUsage = accounts.forceUsage(t), .targetDeviceId = target(a) }, .of(App, a, handler("snapshot", accounts.parseSnapshot)));
 }
@@ -189,10 +189,14 @@ pub fn loadJobs(a: *App) void {
 
 /// graff's sign-ins: rows on screen stay through a reload.
 pub fn loadGraff(a: *App) void {
+    loadGraffFor(a, true);
+}
+
+fn loadGraffFor(a: *App, force: bool) void {
     const p = &a.view.accounts;
     if (!engineUp(a)) return p.graff.fail(a.gpa, "Engine not connected");
     if (p.graff.phase != .ready) p.graff.phase = .loading;
-    p.graff.call = a.engine.call("ListGraffLogins", .{ .targetDeviceId = target(a) }, .of(App, a, handler("graff", accounts.parseGraffLogins)));
+    p.graff.call = a.engine.call("ListGraffLogins", .{ .forceUsage = force, .targetDeviceId = target(a) }, .of(App, a, handler("graff", accounts.parseGraffLogins)));
 }
 
 /// The reply handler for slot `field`, read with `parse`.
@@ -466,8 +470,8 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
     };
     if (browse.shown(a)) browse.card(c, a, k);
     codegraff(c, a, k, now);
-    graff.chatgpt(c, a, k);
-    graff.providers(c, a, k);
+    graff.chatgpt(c, a, k, now);
+    graff.providers(c, a, k, now);
     providerSections(c, a, k, now);
     {
         set.space(c, 24);

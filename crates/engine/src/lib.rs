@@ -32,6 +32,7 @@ pub mod external_history;
 pub mod git_actions;
 pub mod github_repository;
 mod graff_logins;
+mod graff_usage;
 pub mod harness_updates;
 mod http_error;
 pub mod instance_lock;

@@ -403,7 +403,13 @@ pub fn reasoningRange(buf: []u8, levels: []const []const u8) ?[]const u8 {
 
 /// The catalog's billing tag, in words (`billing_label`).
 pub fn billingLabel(billing: []const u8) []const u8 {
-    const pairs = .{ .{ "plan", "Your plan" }, .{ "credits", "Credits" }, .{ "api", "API usage" }, .{ "local", "Runs locally" } };
+    const pairs = .{
+        .{ "plan", "Your plan" },
+        .{ "plan*", "Your plan \u{00b7} separate limit" },
+        .{ "credits", "Credits" },
+        .{ "api", "API usage" },
+        .{ "local", "Runs locally" },
+    };
     inline for (pairs) |p| if (std.mem.eql(u8, billing, p[0])) return p[1];
     return billing;
 }
@@ -412,7 +418,7 @@ pub fn billingLabel(billing: []const u8) []const u8 {
 /// non-subscription (`credits` / unreported / `api`) models.
 pub fn billingRank(billing: ?[]const u8) u8 {
     const b = billing orelse return 2;
-    if (std.mem.eql(u8, b, "plan")) return 0;
+    if (std.mem.eql(u8, b, "plan") or std.mem.eql(u8, b, "plan*")) return 0;
     if (std.mem.eql(u8, b, "local")) return 1;
     if (std.mem.eql(u8, b, "api")) return 3;
     return 2;
@@ -537,6 +543,7 @@ test "the detail card states only what the catalog says (the_detail_card_states_
     try testing.expectEqualStrings("High", reasoningRange(&b, &.{"high"}).?);
     try testing.expect(reasoningRange(&b, &.{}) == null);
     try testing.expectEqualStrings("Your plan", billingLabel("plan"));
+    try testing.expectEqualStrings("Your plan \u{00b7} separate limit", billingLabel("plan*"));
     try testing.expectEqualStrings("odd", billingLabel("odd"));
     try testing.expectEqualStrings("1M", contextLabel(&b, 1 << 20));
     try testing.expectEqualStrings("200k", contextLabel(&b, 200_000));
@@ -557,6 +564,7 @@ test "every slider has a colour and Grok and Z.ai differ (every_slider_has_a_col
 }
 
 test "subscription models and routes come before non-subscription credits and API models" {
+    try testing.expectEqual(billingRank("plan"), billingRank("plan*"));
     try testing.expect(billingRank("plan") < billingRank("local"));
     try testing.expect(billingRank("local") < billingRank("credits"));
     try testing.expect(billingRank("credits") < billingRank("api"));
