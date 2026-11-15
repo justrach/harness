@@ -274,6 +274,7 @@ fn resumeAfter(a: *App, chat: workspace.Chat, row: rr.Row) void {
         .harness = chat.harness,
         .model = chat.model,
         .reasoning = chat.reasoning,
+        .modelOptions = .{ .orchestrator = chat.orchestrator },
         .cwd = chat.cwd orelse ".",
     }).params, .of(App, a, onResume));
     for (a.reauth.resumes.items) |*x| if (x.call == in_call) {

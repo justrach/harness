@@ -449,6 +449,7 @@ pub const App = struct {
     /// A draft's execution target; never changes this machine's identity.
     new_device: ?[]u8 = null,
     new_reasoning: ?[]u8 = null,
+    new_orchestrator: ?[]u8 = null,
     /// The agent `models` lists models for (owned).
     models_for: []u8 = &.{},
     /// The model chip's picker is open.
@@ -635,6 +636,7 @@ pub const App = struct {
         if (a.device_id) |d| a.gpa.free(d);
         if (a.new_model) |m| a.gpa.free(m);
         if (a.new_reasoning) |m| a.gpa.free(m);
+        if (a.new_orchestrator) |o| a.gpa.free(o);
         if (a.new_device) |id| a.gpa.free(id);
         if (a.new_ref) |r| a.gpa.free(r);
         a.gpa.free(a.models_for);
@@ -661,6 +663,7 @@ pub const App = struct {
     pub const pickReasoning = agent.pickReasoning;
     pub const pickModelAndReasoning = agent.pickModelAndReasoning;
     pub const applyLiveModelAndReasoning = agent.applyLiveModelAndReasoning;
+    pub const applyLiveOrchestrator = agent.applyLiveOrchestrator;
     pub const ensureModels = agent.ensureModels;
     pub const newChatSpace = agent.newChatSpace;
     pub fn setArchived(a: *App, id: []const u8, archived: bool) void {
@@ -1992,6 +1995,7 @@ pub const App = struct {
         var harness: ?[]const u8 = null;
         var model: ?[]const u8 = null;
         var reasoning: ?[]const u8 = null;
+        var orchestrator: ?[]const u8 = null;
         var cwd: []const u8 = "~";
         var worktree: ?requests.WorktreeSpec = null;
         const chat_id = if (a.selected) |id| blk: {
@@ -1999,6 +2003,7 @@ pub const App = struct {
                 harness = c.harness;
                 model = c.model;
                 reasoning = c.reasoning;
+                orchestrator = c.orchestrator;
                 if (c.cwd) |d| cwd = d;
             }
             break :blk id;
@@ -2018,10 +2023,12 @@ pub const App = struct {
             harness = if (plain) t.harness else a.new_harness;
             model = if (plain) t.model else a.new_model;
             reasoning = a.new_reasoning;
+            orchestrator = if (plain) null else t.orchestrator;
             const config: requests.Config = .{
                 .harness = harness.?,
                 .model = model,
                 .reasoning = reasoning,
+                .modelOptions = .{ .orchestrator = orchestrator },
                 .chatMode = if (plain) true else null,
             };
             // A chat with no project names its device instead.
@@ -2041,6 +2048,7 @@ pub const App = struct {
             .harness = harness,
             .model = model,
             .reasoning = reasoning,
+            .modelOptions = .{ .orchestrator = orchestrator },
             .cwd = cwd,
             .worktree = worktree,
         }), .of(feedback.Pending, pending, feedback.Pending.onReply));

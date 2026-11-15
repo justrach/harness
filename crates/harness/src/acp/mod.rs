@@ -2723,7 +2723,7 @@ fn config_option_sets_with_modes(
             // (approvalPolicy "never" + danger-full-access sandbox), Devin
             // `bypass`. Cursor instead exposes agent/plan/ask — those arrive
             // as a Traits "Mode" option and win when the run selected one.
-            ("select", Some("mode")) => model_options
+            ("select", Some("mode")) if config_id == "mode" => model_options
                 .get("mode")
                 .and_then(Value::as_str)
                 .filter(|c| available.contains(c))
@@ -5992,6 +5992,41 @@ mod tests {
             config_option_sets(&json!({"sessionId": "s"}), Some("x"), &["high"], &no_opts),
             Vec::new()
         );
+    }
+
+    #[test]
+    fn config_option_sets_orchestrator_under_mode_category() {
+        let response = json!({
+            "sessionId": "s-1",
+            "configOptions": [
+                {
+                    "id": "orchestrator",
+                    "name": "Orchestrator",
+                    "category": "mode",
+                    "type": "select",
+                    "currentValue": "auto",
+                    "options": [
+                        { "value": "off", "name": "Off" },
+                        { "value": "auto", "name": "Auto" },
+                        { "value": "on", "name": "On" },
+                    ],
+                },
+            ],
+        });
+        let no_opts = serde_json::Map::new();
+        assert_eq!(
+            config_option_sets(&response, None, &[], &no_opts),
+            Vec::new()
+        );
+        let mut opts = serde_json::Map::new();
+        opts.insert("orchestrator".into(), json!("on"));
+        assert_eq!(
+            config_option_sets(&response, None, &[], &opts),
+            vec![("orchestrator".to_owned(), json!({ "value": "on" }))]
+        );
+        let mut same = serde_json::Map::new();
+        same.insert("orchestrator".into(), json!("auto"));
+        assert_eq!(config_option_sets(&response, None, &[], &same), Vec::new());
     }
 
     #[test]

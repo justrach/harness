@@ -29,6 +29,7 @@ pub const State = struct {
     card_id: u64 = 0,
     hovered_last_frame: bool = false,
     loading: bool = false,
+    graff_loading: bool = false,
     switching_prev_id: ?[]u8 = null,
     switching_harness: ?[]u8 = null,
     err: std.ArrayList(u8) = .empty,
@@ -38,6 +39,7 @@ pub const State = struct {
     probed_key_len: usize = 0,
     remote_target: ?[]u8 = null,
     remote_slot: view_accounts.Slot(accounts.Snapshot) = .{},
+    remote_graff: view_accounts.Slot([]const accounts.GraffLogin) = .{},
 
     pub fn deinit(s: *State, gpa: Allocator) void {
         if (s.switching_prev_id) |p| gpa.free(p);
@@ -45,6 +47,7 @@ pub const State = struct {
         if (s.remote_target) |rt| gpa.free(rt);
         s.err.deinit(gpa);
         s.remote_slot.deinit(gpa);
+        s.remote_graff.deinit(gpa);
     }
 };
 
@@ -79,8 +82,7 @@ fn constSnapshot(a: *const App) ?accounts.Snapshot {
     return null;
 }
 
-fn slotMut(a: *App) *view_accounts.Slot(accounts.Snapshot) {
-    if (usesSharedSettingsSlot(a)) return &a.view.accounts.snapshot;
+fn ensureRemoteSlot(a: *App) void {
     const s = &a.view.account_usage;
     const want = slotKey(chatTargetDevice(a));
     const same = if (s.remote_target) |rt| std.mem.eql(u8, rt, want) else false;
@@ -88,41 +90,79 @@ fn slotMut(a: *App) *view_accounts.Slot(accounts.Snapshot) {
         if (s.remote_target) |old| a.gpa.free(old);
         s.remote_target = a.gpa.dupe(u8, want) catch null;
         s.remote_slot.clear();
+        s.remote_graff.clear();
     }
-    return &s.remote_slot;
 }
 
-/// Only probe automatically when talking to a live engine WebSocket, a parity
-/// `scene_accounts` fixture, or a scene fixture that explicitly defines `ListAgentAccounts`
-/// so unrelated UI scene tests never see spurious RPC frames in `a.engine.sent`.
-fn canAutoProbe(a: *const App) bool {
-    if (view_accounts.scene_accounts != null and chatTargetDevice(a) == null) return true;
+fn slotMut(a: *App) *view_accounts.Slot(accounts.Snapshot) {
+    if (usesSharedSettingsSlot(a)) return &a.view.accounts.snapshot;
+    ensureRemoteSlot(a);
+    return &a.view.account_usage.remote_slot;
+}
+
+fn constGraffLogins(a: *const App) ?[]const accounts.GraffLogin {
+    if (usesSharedSettingsSlot(a)) return a.view.accounts.graff.get();
+    const s = &a.view.account_usage;
+    const want = slotKey(chatTargetDevice(a));
+    if (s.remote_target) |rt| {
+        if (std.mem.eql(u8, rt, want)) return s.remote_graff.get();
+    }
+    return null;
+}
+
+fn graffSlotMut(a: *App) *view_accounts.Slot([]const accounts.GraffLogin) {
+    if (usesSharedSettingsSlot(a)) return &a.view.accounts.graff;
+    ensureRemoteSlot(a);
+    return &a.view.account_usage.remote_graff;
+}
+
+fn sceneHas(a: *const App, method: []const u8) bool {
     if (a.engine.state != .connected) return false;
     if (a.engine.client != null) return true;
     if (a.engine.scene) |sc| {
-        if (sc.value == .object and sc.value.object.get("ListAgentAccounts") != null) return true;
+        if (sc.value == .object and sc.value.object.get(method) != null) return true;
     }
     return false;
+}
+
+/// Only probe automatically when talking to a live engine WebSocket, a parity
+/// `scene_accounts` fixture, or a scene fixture that explicitly defines the RPC
+/// so unrelated UI scene tests never see spurious RPC frames in `a.engine.sent`.
+fn canAutoProbe(a: *const App) bool {
+    if (view_accounts.scene_accounts != null and chatTargetDevice(a) == null) return true;
+    return sceneHas(a, "ListAgentAccounts");
+}
+
+fn canAutoProbeGraff(a: *const App) bool {
+    if (view_accounts.scene_accounts != null and chatTargetDevice(a) == null) return true;
+    return sceneHas(a, "ListGraffLogins");
+}
+
+fn canAutoProbeAny(a: *const App, harness_wire: []const u8) bool {
+    return canAutoProbe(a) or (std.mem.eql(u8, harness_wire, "graff") and canAutoProbeGraff(a));
 }
 
 fn maybeProbe(c: *ui.Context, a: *App) void {
     const s = &a.view.account_usage;
     if (a.selected == null) return;
     const t = agent.target(a);
-    if (!accounts.reportsUsage(t.harness)) return;
+    const is_graff = std.mem.eql(u8, t.harness, "graff");
+    if (!is_graff and !accounts.reportsUsage(t.harness)) return;
     const key = std.fmt.bufPrint(&s.probed_key, "{s}:{s}", .{ slotKey(chatTargetDevice(a)), t.harness }) catch "";
     if (!std.mem.eql(u8, s.probed_key[0..s.probed_key_len], key)) {
-        if (constSnapshot(a) == null and canAutoProbe(a)) {
+        const have_snap = constSnapshot(a) != null;
+        const have_graff = !is_graff or constGraffLogins(a) != null;
+        if ((!have_snap or !have_graff) and canAutoProbeAny(a, t.harness)) {
             s.probed_key_len = key.len;
             requestLoad(a, c.time, false);
-        } else if (constSnapshot(a) != null) {
+        } else if (have_snap and have_graff) {
             s.probed_key_len = key.len;
         }
         return;
     }
     if (a.selectedStatus() == .working) {
         if (s.last_loaded_at) |last| {
-            if (c.time - last >= refresh_interval_s and canAutoProbe(a)) {
+            if (c.time - last >= refresh_interval_s and canAutoProbeAny(a, t.harness)) {
                 requestLoad(a, c.time, false);
             }
         }
@@ -131,7 +171,7 @@ fn maybeProbe(c: *ui.Context, a: *App) void {
 
 fn requestForceRefresh(a: *App, now_s: f64) void {
     const s = &a.view.account_usage;
-    if (!canAutoProbe(a)) return;
+    if (!canAutoProbeAny(a, agent.target(a).harness)) return;
     if (s.last_forced_at) |last| {
         if (now_s - last < force_min_interval_s) return;
     }
@@ -141,31 +181,67 @@ fn requestForceRefresh(a: *App, now_s: f64) void {
 
 fn requestLoad(a: *App, now_s: f64, force_usage: bool) void {
     const s = &a.view.account_usage;
-    if (s.loading) return;
     const dev = chatTargetDevice(a);
     if (view_accounts.scene_accounts) |text| if (dev == null) {
         var parsed = json.parseFromSlice(json.Value, a.gpa, text, .{}) catch return;
         defer parsed.deinit();
         const o = if (parsed.value == .object) parsed.value.object else return;
-        const snap_val = o.get("snapshot") orelse return;
-        var ar: std.heap.ArenaAllocator = .init(a.gpa);
-        const snap = accounts.parseSnapshot(ar.allocator(), snap_val) catch {
-            ar.deinit();
-            return;
-        };
-        slotMut(a).take(ar, snap);
+        if (o.get("snapshot")) |snap_val| {
+            var ar: std.heap.ArenaAllocator = .init(a.gpa);
+            if (accounts.parseSnapshot(ar.allocator(), snap_val)) |snap| {
+                slotMut(a).take(ar, snap);
+            } else |_| ar.deinit();
+        }
+        if (o.get("graffLogins")) |graff_val| {
+            var ar: std.heap.ArenaAllocator = .init(a.gpa);
+            if (accounts.parseGraffLogins(ar.allocator(), graff_val)) |rows| {
+                graffSlotMut(a).take(ar, rows);
+            } else |_| ar.deinit();
+        }
         s.last_loaded_at = now_s;
         a.redraw();
         return;
     };
     if (!a.engine.up()) return;
-    s.loading = true;
-    s.last_loaded_at = now_s;
-    _ = a.engine.call(
-        "ListAgentAccounts",
-        .{ .targetDeviceId = dev, .forceUsage = force_usage },
-        .of(App, a, onLoaded),
-    );
+    const is_graff = std.mem.eql(u8, agent.target(a).harness, "graff");
+    var issued = false;
+    if (!s.loading and canAutoProbe(a)) {
+        s.loading = true;
+        _ = a.engine.call(
+            "ListAgentAccounts",
+            .{ .targetDeviceId = dev, .forceUsage = force_usage },
+            .of(App, a, onLoaded),
+        );
+        issued = true;
+    }
+    if (is_graff and !s.graff_loading and canAutoProbeGraff(a)) {
+        s.graff_loading = true;
+        _ = a.engine.call(
+            "ListGraffLogins",
+            .{ .targetDeviceId = dev, .forceUsage = true },
+            .of(App, a, onGraffLoginsLoaded),
+        );
+        issued = true;
+    }
+    if (issued) s.last_loaded_at = now_s;
+}
+
+fn onGraffLoginsLoaded(a: *App, _: u64, r: rpc.Reply) void {
+    const s = &a.view.account_usage;
+    s.graff_loading = false;
+    switch (r) {
+        .ok => |val| {
+            var ar: std.heap.ArenaAllocator = .init(a.gpa);
+            const rows = accounts.parseGraffLogins(ar.allocator(), val) catch {
+                ar.deinit();
+                return;
+            };
+            graffSlotMut(a).take(ar, rows);
+            a.redraw();
+        },
+        .err => {},
+        .item, .done => {},
+    }
 }
 
 fn onLoaded(a: *App, _: u64, r: rpc.Reply) void {
@@ -189,6 +265,12 @@ fn onLoaded(a: *App, _: u64, r: rpc.Reply) void {
 pub fn fraction(a: *const App) ?f32 {
     if (a.selected == null) return null;
     const t = agent.target(a);
+    if (std.mem.eql(u8, t.harness, "graff")) {
+        var buf: [256]u8 = undefined;
+        var fb = std.heap.FixedBufferAllocator.init(&buf);
+        const acc = accounts.graffActiveAccount(fb.allocator(), constSnapshot(a), constGraffLogins(a), t.model) orelse return null;
+        return accounts.ringFraction(acc, t.harness, t.model);
+    }
     const snap = constSnapshot(a) orelse return null;
     const acc = accounts.activeAccountForHarness(snap, t.harness) orelse return null;
     return accounts.ringFraction(acc, t.harness, t.model);
@@ -262,20 +344,29 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
         return;
     }
     const target_cfg = agent.target(a);
-    const provider = accounts.providerHarness(target_cfg.harness) orelse {
+    const is_graff = std.mem.eql(u8, target_cfg.harness, "graff");
+    const provider: accounts.Harness = if (is_graff) .graff else accounts.providerHarness(target_cfg.harness) orelse {
         s.open = false;
         s.card = null;
         return;
     };
-    const snap = constSnapshot(a) orelse {
+    const snap = constSnapshot(a);
+    const logins = if (is_graff) constGraffLogins(a) else null;
+    if (!is_graff and snap == null) {
         s.open = false;
         s.card = null;
         return;
-    };
+    }
     var matching: std.ArrayList(accounts.Account) = .empty;
-    for (snap.accounts) |acc| {
-        if (accounts.providerHarness(acc.harness) == provider) {
+    if (is_graff) {
+        for (accounts.graffMatchingAccounts(c.alloc(), snap, logins, target_cfg.model)) |acc| {
             matching.append(c.alloc(), acc) catch {};
+        }
+    } else if (snap) |sn| {
+        for (sn.accounts) |acc| {
+            if (accounts.providerHarness(acc.harness) == provider) {
+                matching.append(c.alloc(), acc) catch {};
+            }
         }
     }
     if (matching.items.len == 0) {
@@ -341,11 +432,11 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
         c.node(list.index).style.scroll_edge_fade = 16;
         defer list.end();
         for (matching.items, 0..) |acc, ix| {
-            drawAccountRow(c, a, k, target_cfg.harness, acc, ix, now_ms);
+            drawAccountRow(c, a, k, acc.harness, acc, ix, now_ms);
         }
     } else {
         for (matching.items, 0..) |acc, ix| {
-            drawAccountRow(c, a, k, target_cfg.harness, acc, ix, now_ms);
+            drawAccountRow(c, a, k, acc.harness, acc, ix, now_ms);
         }
     }
 
