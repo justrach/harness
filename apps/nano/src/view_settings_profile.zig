@@ -29,7 +29,9 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
         const seed_str = if (u.id.len > 0) u.id else if (u.email.len > 0) u.email else display_name;
         const shown_name = if (display_name.len > 0) display_name else "Member";
         const card_zoom: f32 = if (!wide or set.inner_w >= 680) 1.0 else 0.78;
-        const aside_w: f32 = member_card.base_w * card_zoom + 16;
+        const aside_w: f32 = member_card.base_w * card_zoom + 24;
+        const traits = member_card.resolveTraits(seed_str, u.member_number, u.card_scenes, u.card_traits);
+        const card_caption = c.print("{s} \u{00b7} {s}", .{ member_card.ensoLabel(traits.enso), traits.holo.label() });
 
         const layout = if (wide)
             ui.div(c).row().wFull().gap(28).itemsStart()
@@ -37,7 +39,7 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
             ui.div(c).column().wFull().gap(24);
         defer layout.end();
 
-        if (!wide) drawSignedInAside(c, a, k, seed_str, shown_name, u, card_zoom, false, aside_w);
+        if (!wide) drawSignedInAside(c, a, k, seed_str, shown_name, u, card_zoom, false, aside_w, card_caption);
 
         // Left column: profile settings group card + external Sign out / Provider accounts bar.
         {
@@ -108,7 +110,6 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
                     .development => "Development mode",
                 };
 
-                const traits = member_card.resolveTraits(seed_str, u.member_number, u.card_scenes, u.card_traits);
                 const sc_title = member_card.title(traits.scene);
                 const is_founder = if (u.member_number) |mn| (mn >= 1 and mn <= 1000) else false;
                 const edition_label = if (is_founder)
@@ -143,12 +144,13 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
             }
         }
 
-        if (wide) drawSignedInAside(c, a, k, seed_str, shown_name, u, card_zoom, true, aside_w);
+        if (wide) drawSignedInAside(c, a, k, seed_str, shown_name, u, card_zoom, true, aside_w, card_caption);
     } else {
         // Signed-out state (`profile.luau`): 3-row Settings group + outside Sign in on left,
         // floating interactive preview card ("You" / "000·000") outside on right (or above when narrow).
-        const preview_w = member_card.base_w * member_card.preview_zoom;
-        const aside_w = preview_w + 16;
+        const preview_card_zoom: f32 = if (!wide or set.inner_w >= 660) 0.78 else 0.66;
+        const preview_w = member_card.base_w * preview_card_zoom;
+        const aside_w = preview_w + 24;
         const left_w = if (wide) @max(220.0, set.inner_w - 28.0 - aside_w) else set.inner_w;
         const row_text_w = @max(120.0, left_w - 84.0);
 
@@ -158,7 +160,7 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
             ui.div(c).column().wFull().gap(24);
         defer layout.end();
 
-        if (!wide) drawSignedOutAside(c, a, k, false, aside_w);
+        if (!wide) drawSignedOutAside(c, a, k, false, aside_w, preview_card_zoom);
 
         {
             const left = if (wide) ui.div(c).column().grow().w(0).gap(12) else ui.div(c).column().wFull().gap(12);
@@ -200,7 +202,7 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
             }
         }
 
-        if (wide) drawSignedOutAside(c, a, k, true, aside_w);
+        if (wide) drawSignedOutAside(c, a, k, true, aside_w, preview_card_zoom);
     }
 }
 
@@ -214,6 +216,7 @@ fn drawSignedInAside(
     card_zoom: f32,
     wide: bool,
     aside_w: f32,
+    caption: []const u8,
 ) void {
     const right = if (wide)
         ui.div(c).column().w(aside_w).py(4).itemsCenter()
@@ -230,10 +233,18 @@ fn drawSignedInAside(
         .card_traits = u.card_traits,
         .preview = false,
         .zoom_override = card_zoom,
+        .caption = caption,
     });
 }
 
-fn drawSignedOutAside(c: *ui.Context, a: *App, k: theme.Colors, wide: bool, aside_w: f32) void {
+fn drawSignedOutAside(
+    c: *ui.Context,
+    a: *App,
+    k: theme.Colors,
+    wide: bool,
+    aside_w: f32,
+    card_zoom: f32,
+) void {
     const right = if (wide)
         ui.div(c).column().w(aside_w).py(4).itemsCenter()
     else
@@ -247,6 +258,7 @@ fn drawSignedOutAside(c: *ui.Context, a: *App, k: theme.Colors, wide: bool, asid
         .member_number = null,
         .started_at = if (now_secs > 0) @divFloor(now_secs, 1000) else 1794700800,
         .preview = true,
+        .zoom_override = card_zoom,
         .caption = "Yours when you sign in",
     });
 }

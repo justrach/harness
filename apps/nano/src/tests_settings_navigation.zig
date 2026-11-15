@@ -86,3 +86,30 @@ test "settings navigation keeps search and Back reachable on short windows and r
     h.t.settle(0.1);
     try testing.expect(!h.a.view.settings_open);
 }
+
+test "zen settings shows esc hints and closes on Escape or Close pill" {
+    const ui = @import("nanoui").ui;
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.zen);
+    view.open(&h.a);
+    h.t.settle(0.2);
+
+    try testing.expect(h.t.hasText("Back to chats"));
+    try testing.expect(h.t.hasText("Close"));
+    try testing.expect(h.t.hasText("esc"));
+
+    // Escape closes Settings even while Search settings has focus.
+    _ = h.t.shortcut(.{ .key = ui.Shortcut.escape });
+    h.t.settle(0.2);
+    try testing.expect(!h.a.view.settings_open);
+
+    // Reopen and verify clicking the page-header Close [esc] pill also exits Settings.
+    view.open(&h.a);
+    h.t.settle(0.2);
+    try testing.expect(h.a.view.settings_open);
+    try h.t.clickText("Close");
+    h.t.settle(0.2);
+    try testing.expect(!h.a.view.settings_open);
+}
