@@ -51,6 +51,7 @@ pub fn loadLibrary(io: std.Io, data_dir: []const u8) void {
     everything = b;
     library = .{};
     load_warning = null;
+    @import("custom_themes.zig").loadUserThemes(io, data_dir);
     library = theme_library.load(a, io, data_dir) catch {
         load_warning = a.dupe(u8, theme_library.last_error) catch null;
         return;
@@ -79,7 +80,7 @@ pub fn colorsOf(o: json.ObjectMap) ?theme.Colors {
 
 pub fn find(id: []const u8) ?*const Variant {
     for (all()) |*v| if (std.mem.eql(u8, v.id, id)) return v;
-    return null;
+    return @import("custom_themes.zig").findVariant(id);
 }
 
 fn parse(gpa: std.mem.Allocator, text: []const u8, curated: bool) ![]const Variant {

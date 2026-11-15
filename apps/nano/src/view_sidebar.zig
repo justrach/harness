@@ -47,12 +47,13 @@ pub fn sidebar(c: *ui.Context, a: *App, k: theme.Colors) void {
         filterRow(c, a, k);
         const search = @import("view_sidebar_search.zig");
         search.controls(c, a, k);
+        var archived_count = a.view.cached_archived_count;
         if (!search.results(c, a, k)) {
             openWorkspaces(c, a, k);
-            lists(c, a, k);
+            archived_count = lists(c, a, k);
         }
         @import("view_bots.zig").group(c, a, k);
-        zenFooter(c, a, k);
+        zenFooter(c, a, k, archived_count);
         return;
     }
     // The edge is drawn over its last column (view.zig), as the GPUI app's.
@@ -66,7 +67,7 @@ pub fn sidebar(c: *ui.Context, a: *App, k: theme.Colors) void {
     search.controls(c, a, k);
     if (!search.results(c, a, k)) {
         openWorkspaces(c, a, k);
-        lists(c, a, k);
+        _ = lists(c, a, k);
     }
     // Contacts, not chats in a folder: shown on every project filter.
     @import("view_bots.zig").group(c, a, k);
@@ -103,9 +104,9 @@ fn sidebarTitlebar(c: *ui.Context, a: *App, k: theme.Colors) void {
     const zen = a.settings.uiMode() == .zen;
     const menus = @import("view_sidebar_menus.zig");
     const side_w = widthOf(a);
-    const layout = @import("motion_rules.zig").sidebarTitlebarLayout(side_w);
+    const layout = if (zen) @import("motion_rules.zig").zenSidebarTitlebarLayout(side_w) else @import("motion_rules.zig").sidebarTitlebarLayout(side_w);
     const group_gap: f32 = if (side_w >= 240) 8 else 4;
-    const right_margin: f32 = if (side_w >= 240) 8 else 4;
+    const right_margin: f32 = if (zen) 10 else if (side_w >= 240) 8 else 4;
     const bar = ui.div(c).row().wFull().h(titlebar_h).pt(4).pl(layout.back_x).pr(right_margin).itemsCenter();
     defer bar.end();
     navHistoryControls(c, a, k);
@@ -114,11 +115,11 @@ fn sidebarTitlebar(c: *ui.Context, a: *App, k: theme.Colors) void {
         ui.key(c, "sidebar-titlebar-new-session");
         if (kit.iconButton(c, k, .plus, .{ .size = 24, .radius = 6, .icon = 16, .color = k.muted, .tip = .{ .text = "New session", .delay = tip.quick } }))
             a.newWorkspaceSession();
-        ui.spacer(c);
     }
+    ui.spacer(c);
     {
         ui.key(c, "sidebar-view-options");
-        const more = tip.on(ui.div(c).row(), k, .{ .text = "Sidebar view options", .delay = tip.quick });
+        const more = tip.on(ui.div(c).row(), k, .{ .text = if (a.view.more_menu) "" else "Sidebar view options", .delay = tip.quick });
         defer more.end();
         if (kit.iconButton(c, k, .@"more-horizontal", .{ .size = 24, .radius = 6, .icon = 16, .color = k.muted, .on = a.view.more_menu }))
             if (a.view.more_menu) menus.close(a) else menus.openView(a);
@@ -453,10 +454,71 @@ fn filterRow(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
 }
 
+const RowLookup = struct {
+    spaces: std.StringHashMapUnmanaged(workspace.Space) = .empty,
+    use_spaces: bool = false,
+    sessions: std.StringHashMapUnmanaged(workspace.Session) = .empty,
+    use_sessions: bool = false,
+    chats: std.StringHashMapUnmanaged(usize) = .empty,
+    use_chats: bool = false,
+
+    fn init(gpa: std.mem.Allocator, a: *const App) RowLookup {
+        var out: RowLookup = .{};
+        if (a.spaces.items.len > 4) {
+            out.use_spaces = true;
+            out.spaces.ensureTotalCapacity(gpa, @intCast(a.spaces.items.len)) catch {};
+            for (a.spaces.items) |sp| out.spaces.put(gpa, sp.id, sp) catch {};
+        }
+        if (a.sessions.items.len > 4) {
+            out.use_sessions = true;
+            out.sessions.ensureTotalCapacity(gpa, @intCast(a.sessions.items.len)) catch {};
+            for (a.sessions.items) |s| out.sessions.put(gpa, s.chat_id, s) catch {};
+        }
+        if (a.chats.items.len > 4 and a.settings.pins.items.len > 0) {
+            out.use_chats = true;
+            out.chats.ensureTotalCapacity(gpa, @intCast(a.chats.items.len)) catch {};
+            for (a.chats.items, 0..) |ch, i| out.chats.put(gpa, ch.id, i) catch {};
+        }
+        return out;
+    }
+
+    fn findSpace(l: *const RowLookup, a: *const App, id: ?[]const u8) ?workspace.Space {
+        const want = id orelse return null;
+        if (l.use_spaces) return l.spaces.get(want);
+        return a.findSpace(want);
+    }
+
+    fn sessionOf(l: *const RowLookup, a: *const App, id: []const u8) ?workspace.Session {
+        if (l.use_sessions) return l.sessions.get(id);
+        return workspace.sessionOf(a.sessions.items, id);
+    }
+
+    fn findChat(l: *const RowLookup, a: *const App, id: []const u8) ?workspace.Chat {
+        if (l.use_chats) {
+            const ix = l.chats.get(id) orelse return null;
+            return if (ix < a.chats.items.len) a.chats.items[ix] else null;
+        }
+        return a.findChat(id);
+    }
+
+    fn markOf(l: *const RowLookup, a: *const App, ch: workspace.Chat, now: i64) workspace.Mark {
+        if (@import("app_question.zig").needsInput(a, ch.id)) return .awaiting_input;
+        return workspace.markOf(ch, l.sessionOf(a, ch.id), now);
+    }
+};
+
+fn listedWith(a: *const App, chat: workspace.Chat, lk: *const RowLookup, filter_space: ?[]const u8) bool {
+    if (chat.parent_chat_id != null) return false;
+    if (a.bots.ofChat(chat.id) != null) return false;
+    if (chat.space_id) |sid| if (lk.findSpace(a, sid) == null) return false;
+    if (filter_space) |f| if (chat.space_id == null or !std.mem.eql(u8, chat.space_id.?, f)) return false;
+    return true;
+}
+
 /// The rows the lists show: top-level chats in a project that still
 /// exists (or none), narrowed by the project filter. (The session search
 /// shows its own results in their place: view_sidebar_search.zig.)
-fn listed(a: *const App, chat: workspace.Chat) bool {
+pub fn listed(a: *const App, chat: workspace.Chat) bool {
     if (chat.parent_chat_id != null) return false;
     // A bot's standing chat is its row in the Bots group, not a second one here.
     if (a.bots.ofChat(chat.id) != null) return false;
@@ -468,10 +530,17 @@ fn listed(a: *const App, chat: workspace.Chat) bool {
 
 /// The pins this list shows, in pin order: listed and not archived.
 pub fn visiblePins(a: *const App, gpa: std.mem.Allocator) []const []const u8 {
+    const lk = RowLookup.init(gpa, a);
+    return visiblePinsWith(a, gpa, &lk);
+}
+
+fn visiblePinsWith(a: *const App, gpa: std.mem.Allocator, lk: *const RowLookup) []const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
+    if (a.settings.pins.items.len == 0) return out.items;
+    const filter_space: ?[]const u8 = if (a.view.filter) |f| (if (lk.findSpace(a, f) != null) f else null) else null;
     const last_activity = a.settings.lastActivity();
     const now = a.nowMs();
-    for (a.settings.pins.items) |id| if (a.findChat(id)) |ch| if (!ch.archived and listed(a, ch) and last_activity.matches(ch.timeMs(), now)) out.append(gpa, id) catch {};
+    for (a.settings.pins.items) |id| if (lk.findChat(a, id)) |ch| if (!ch.archived and listedWith(a, ch, lk, filter_space) and last_activity.matches(ch.timeMs(), now)) out.append(gpa, id) catch {};
     return out.items;
 }
 
@@ -522,24 +591,24 @@ const ChatItem = struct {
     group_key: []const u8 = "",
 };
 
-fn prepareItems(c: *ui.Context, a: *App, pins: []const []const u8, grouped: bool, by: Grouping) []const ChatItem {
-    const gpa = c.alloc();
+fn prepareItems(
+    gpa: std.mem.Allocator,
+    a: *const App,
+    pins: []const []const u8,
+    grouped: bool,
+    by: Grouping,
+    lk: *const RowLookup,
+) []const ChatItem {
     const out = gpa.alloc(ChatItem, a.chats.items.len) catch return &.{};
-    const filter_space: ?[]const u8 = if (a.view.filter) |f| (if (a.findSpace(f) != null) f else null) else null;
+    const filter_space: ?[]const u8 = if (a.view.filter) |f| (if (lk.findSpace(a, f) != null) f else null) else null;
     const last_activity = a.settings.lastActivity();
     const l = Look.of(a);
     const show_updated = a.settings.get(.sidebar_show_updated);
-    // Project existence is shared by every session in a project. Avoid a
-    // full project-list scan per chat on every Cmd+B display frame.
-    var spaces: std.StringHashMapUnmanaged(void) = .empty;
-    if (a.spaces.items.len > 8) {
-        spaces.ensureTotalCapacity(gpa, @intCast(a.spaces.items.len)) catch {};
-        for (a.spaces.items) |space| spaces.put(gpa, space.id, {}) catch {};
-    }
-    var session_map: std.StringHashMapUnmanaged(workspace.Session) = .empty;
-    if ((grouped or last_activity != .all) and a.sessions.items.len > 8) {
-        session_map.ensureTotalCapacity(gpa, @intCast(a.sessions.items.len)) catch {};
-        for (a.sessions.items) |s| session_map.put(gpa, s.chat_id, s) catch {};
+    const zen = a.settings.uiMode() == .zen;
+    var pin_set: std.StringHashMapUnmanaged(void) = .empty;
+    if (pins.len > 4) {
+        pin_set.ensureTotalCapacity(gpa, @intCast(pins.len)) catch {};
+        for (pins) |pid| pin_set.put(gpa, pid, {}) catch {};
     }
     for (a.chats.items, 0..) |ch, idx| {
         // A subagent's chat, or a bot's standing chat (its row is in the
@@ -548,7 +617,7 @@ fn prepareItems(c: *ui.Context, a: *App, pins: []const []const u8, grouped: bool
             out[idx] = .{};
             continue;
         }
-        if (ch.space_id) |sid| if (if (a.spaces.items.len > 8) !spaces.contains(sid) else a.findSpace(sid) == null) {
+        if (ch.space_id) |sid| if (lk.findSpace(a, sid) == null) {
             out[idx] = .{};
             continue;
         };
@@ -556,10 +625,10 @@ fn prepareItems(c: *ui.Context, a: *App, pins: []const []const u8, grouped: bool
             out[idx] = .{};
             continue;
         };
-        const row_h = if (a.settings.uiMode() == .zen) @as(f32, 30) else contextHeight(l.label, l.branch and ch.branch != null, show_updated, l.harness or l.icon);
-        const is_pinned = !ch.archived and pinned(pins, ch.id) != null;
+        const row_h = if (zen) @as(f32, 30) else contextHeight(l.label, l.branch and ch.branch != null, show_updated, l.harness or l.icon);
+        const is_pinned = !ch.archived and (if (pins.len > 4) pin_set.contains(ch.id) else pinned(pins, ch.id) != null);
         if (!ch.archived and !is_pinned and last_activity != .all) {
-            const sess = if (a.sessions.items.len > 8) session_map.get(ch.id) else workspace.sessionOf(a.sessions.items, ch.id);
+            const sess = lk.sessionOf(a, ch.id);
             const mark = workspace.markOf(ch, sess, by.now);
             if (mark != .working and mark != .awaiting_input and !last_activity.matches(ch.timeMs(), by.now)) {
                 out[idx] = .{};
@@ -568,13 +637,13 @@ fn prepareItems(c: *ui.Context, a: *App, pins: []const []const u8, grouped: bool
         }
         var gkey: []const u8 = "";
         if (grouped and !ch.archived and !is_pinned) {
-            const sess = if (a.sessions.items.len > 8) session_map.get(ch.id) else workspace.sessionOf(a.sessions.items, ch.id);
+            const sess = lk.sessionOf(a, ch.id);
             const mark = workspace.markOf(ch, sess, by.now);
             gkey = if (mark == .awaiting_input or mark == .errored)
                 "needs"
             else switch (by.org) {
                 .by_status => workspace.statusGroup(mark, ch.timeMs(), by.now, by.offset).key(),
-                .by_project => ch.space_id orelse c.print("home:{s}", .{ch.device_id orelse ""}),
+                .by_project => ch.space_id orelse (std.fmt.allocPrint(gpa, "home:{s}", .{ch.device_id orelse ""}) catch ""),
                 else => ch.device_id orelse "",
             };
         }
@@ -583,16 +652,31 @@ fn prepareItems(c: *ui.Context, a: *App, pins: []const []const u8, grouped: bool
     return out;
 }
 
-// The input offset may overshoot the end before layout clamps it. Bound
-// the build window against the complete content, not the previous frame's
-// rows; otherwise an immediate jump to the bottom can produce a blank frame.
-fn contentHeight(c: *ui.Context, a: *App, pins: []const []const u8, items: []const ChatItem, grouped: bool, by: Grouping) f32 {
+const ListStats = struct {
+    total_height: f32,
+    active: usize,
+    archived: usize,
+    regular_full_h: f32,
+    archived_full_h: f32,
+};
+
+// Single-pass accumulation for viewport bounds, disclosure reveal heights,
+// and Zen footer archived count without rescanning `a.chats.items`.
+fn measureList(
+    c: *ui.Context,
+    a: *const App,
+    pins: []const []const u8,
+    items: []const ChatItem,
+    grouped: bool,
+    by: Grouping,
+    lk: *const RowLookup,
+) ListStats {
     var height: f32 = 4;
     if (pins.len > 0) {
         height += 30;
         if (a.view.pinned_open) {
             height += 6;
-            for (pins) |id| if (a.findChat(id)) |ch| {
+            for (pins) |id| if (lk.findChat(a, id)) |ch| {
                 height += rowHeight(a, ch) + 2;
             };
         }
@@ -600,14 +684,16 @@ fn contentHeight(c: *ui.Context, a: *App, pins: []const []const u8, items: []con
     }
     var active: usize = 0;
     var archived: usize = 0;
-    var archive_height: f32 = 0;
+    var regular_full_h: f32 = 0;
+    var archived_full_h: f32 = 0;
     var keys: std.StringHashMapUnmanaged(bool) = .empty;
     for (a.chats.items, items) |ch, it| if (it.listed) {
         if (ch.archived) {
-            if (archived < a.view.archived_limit) archive_height += it.row_h + 2;
+            if (archived < a.view.archived_limit) archived_full_h += it.row_h + 2;
             archived += 1;
         } else if (!it.pinned) {
             active += 1;
+            regular_full_h += it.row_h + 2;
             if (grouped) {
                 const key = it.group_key;
                 const entry = keys.getOrPut(c.alloc(), key) catch continue;
@@ -620,6 +706,11 @@ fn contentHeight(c: *ui.Context, a: *App, pins: []const []const u8, items: []con
             } else if (a.view.sessions_open) height += it.row_h + 2;
         }
     };
+    const show_more_h: f32 = if (archived > a.view.archived_limit) (if (a.settings.get(.sidebar_compact)) @as(f32, 29) else 36) + 2 else 0;
+    if (regular_full_h >= 2) regular_full_h -= 2;
+    var archive_panel_h = archived_full_h;
+    if (archive_panel_h >= 2) archive_panel_h -= 2;
+    archive_panel_h += show_more_h;
     if (active == 0 and pins.len == 0) {
         height += 8 + c.text.lineHeight(.{ .size = 12 });
     } else if (!grouped and active > 0) height += 30 + (if (a.view.sessions_open) @as(f32, 2) else 0);
@@ -629,14 +720,39 @@ fn contentHeight(c: *ui.Context, a: *App, pins: []const []const u8, items: []con
     if (inline_archived and archived > 0 and a.settings.get(.sidebar_show_archived)) {
         height += 6 + 30;
         if (arch_open) {
-            height += 2 + archive_height;
-            if (archived > a.view.archived_limit) height += (if (a.settings.get(.sidebar_compact)) @as(f32, 29) else 36) + 2;
+            height += 2 + archived_full_h + show_more_h;
         }
     }
-    return height + 6; // Bottom padding, less the trailing parent gap.
+    return .{
+        .total_height = height + 6,
+        .active = active,
+        .archived = archived,
+        .regular_full_h = regular_full_h,
+        .archived_full_h = archive_panel_h,
+    };
 }
 
-fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
+/// Equal-work indexed Zen preparation pass for sidebar performance benchmarks.
+pub fn zenIndexPass(a: *const App, gpa: std.mem.Allocator) struct { listed: usize, archived: usize, active_marks: usize } {
+    const lk = RowLookup.init(gpa, a);
+    const pins = visiblePinsWith(a, gpa, &lk);
+    const items = prepareItems(gpa, a, pins, false, .{ .org = .in_one_list, .now = a.nowMs() }, &lk);
+    var listed_n: usize = 0;
+    var archived_n: usize = 0;
+    var marks_n: usize = 0;
+    const now = a.nowMs();
+    for (a.chats.items, items) |ch, it| if (it.listed) {
+        listed_n += 1;
+        if (ch.archived) {
+            archived_n += 1;
+        } else if (marks_n < 32) {
+            if (lk.markOf(a, ch, now) != .idle) marks_n += 1;
+        }
+    };
+    return .{ .listed = listed_n, .archived = archived_n, .active_marks = marks_n };
+}
+
+fn lists(c: *ui.Context, a: *App, k: theme.Colors) usize {
     ui.scroll(c, .{ .grow = 1, .width = .fill, .padding = .{ .left = 8, .right = 8, .top = 4, .bottom = 8 }, .gap = 2 });
     defer ui.end(c);
     const scroll = c.stack.items[c.stack.items.len - 1];
@@ -650,34 +766,24 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
     const moving = drag.moving(a);
     window.eager = moving != null;
     const target = drag.sidebarTarget(a);
-    const pins = visiblePins(a, c.alloc());
+    const gpa = c.alloc();
+    const lk = RowLookup.init(gpa, a);
+    const pins = visiblePinsWith(a, gpa, &lk);
     const by = Grouping.of(a);
     const grouped = by.org != .in_one_list;
-    const items = prepareItems(c, a, pins, grouped, by);
+    const items = prepareItems(gpa, a, pins, grouped, by, &lk);
+    const stats = measureList(c, a, pins, items, grouped, by, &lk);
+    a.view.cached_archived_count = stats.archived;
     if (!window.eager) {
-        const bounded = @min(offset, @max(0, contentHeight(c, a, pins, items, grouped, by) - c.size.h));
+        const bounded = @min(offset, @max(0, stats.total_height - c.size.h));
         window.top = @max(0, bounded - overscan);
         window.bottom = bounded + c.size.h + overscan;
     }
     const source_pin = if (moving) |id| pinned(pins, id) else null;
-    var active: usize = 0;
-    var archived: usize = 0;
-    var regular_full_h: f32 = 0;
-    var archived_full_h: f32 = 0;
-    var archived_counted: usize = 0;
-    for (a.chats.items, items) |ch, it| if (it.listed) {
-        if (ch.archived) {
-            if (archived_counted < a.view.archived_limit) archived_full_h += it.row_h + 2;
-            archived_counted += 1;
-            archived += 1;
-        } else if (!it.pinned) {
-            active += 1;
-            regular_full_h += it.row_h + 2;
-        }
-    };
-    if (regular_full_h >= 2) regular_full_h -= 2;
-    if (archived_full_h >= 2) archived_full_h -= 2;
-    if (archived > a.view.archived_limit) archived_full_h += (if (a.settings.get(.sidebar_compact)) @as(f32, 29) else 36) + 2;
+    const active = stats.active;
+    const archived = stats.archived;
+    const regular_full_h = stats.regular_full_h;
+    const archived_full_h = stats.archived_full_h;
     // Pinned, while there are pins or a session is being dragged.
     if (pins.len > 0 or moving != null) {
         a.view.pin_header = rectOf(c, sectionAt(c, k, "Pinned", pins.len, &a.view.pinned_open));
@@ -686,7 +792,7 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
         if (pin_disc.visible(a.view.pinned_open)) {
             window.y += 2;
             var pin_full_h: f32 = 6;
-            for (pins) |pid| if (a.findChat(pid)) |pch| {
+            for (pins) |pid| if (lk.findChat(a, pid)) |pch| {
                 pin_full_h += rowHeight(a, pch) + 2;
             };
             if (pins.len > 0 and pin_full_h >= 2) pin_full_h -= 2;
@@ -706,7 +812,7 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
                 .regular => null,
             } else null;
             for (pins, 0..) |id, ix| {
-                const ch = a.findChat(id) orelse continue;
+                const ch = lk.findChat(a, id) orelse continue;
                 // Rows give way: toward the held row's place among them, or
                 // apart for one coming from Sessions.
                 var dy: f32 = 0;
@@ -719,7 +825,7 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
                     if (ix >= g) dy = row_slot;
                 }
                 const held = source_pin != null and source_pin.? == ix;
-                if (rows.include(c, &window, rowHeight(a, ch))) slotRow(c, a, k, ch, dy, held);
+                if (rows.include(c, &window, rowHeight(a, ch))) slotRow(c, a, k, ch, dy, held, &lk);
             }
             rows.flush(c);
             window.y += 4;
@@ -745,7 +851,7 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
             defer empty.end();
             ui.text(c, "No sessions yet", .{ .size = 12, .line_height = empty_line, .color = k.faint });
             window.y += 8 + empty_line;
-        } else groups(c, a, k, items, by, moving, &window);
+        } else groups(c, a, k, items, by, moving, &window, &lk);
     } else regular: {
         // GPUI has no Sessions disclosure when the regular list is empty.
         // A drag still needs that section as its drop target.
@@ -787,7 +893,7 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
             const held = moving != null and std.mem.eql(u8, moving.?, ch.id);
             // Dragged to the pins, a session's row leaves the list.
             if (held and target != null and target.? == .pinned) continue;
-            if (rows.include(c, &window, it.row_h)) slotRow(c, a, k, ch, 0, held);
+            if (rows.include(c, &window, it.row_h)) slotRow(c, a, k, ch, 0, held, &lk);
         };
         rows.flush(c);
         // An empty body still has its outer gap.
@@ -807,7 +913,7 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
     // Show › Archived off, or Zen keeps Archived pinned to the bottom until opened.
     const zen = a.settings.uiMode() == .zen;
     const arch_flag = if (zen) &a.view.zen_archived_open else &a.view.archived_open;
-    if (archived == 0 or !a.settings.get(.sidebar_show_archived) or (zen and !arch_flag.*)) return;
+    if (archived == 0 or !a.settings.get(.sidebar_show_archived) or (zen and !arch_flag.*)) return archived;
     // 6 under the list above: its 4, and the gap.
     _ = c.leaf(.{ .height = .{ .px = 4 } }, .none, null);
     window.y += 6 + 30;
@@ -832,7 +938,7 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
         var shown: usize = 0;
         for (a.chats.items, items) |ch, it| if (it.listed and ch.archived) {
             if (shown == a.view.archived_limit) break;
-            if (rows.include(c, &window, it.row_h)) sessionRow(c, a, k, ch);
+            if (rows.include(c, &window, it.row_h)) sessionRowWith(c, a, k, ch, &lk);
             shown += 1;
         };
         rows.flush(c);
@@ -847,12 +953,13 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
             ui.text(c, c.print("Show {d} more", .{@min(archived - shown, 25)}), .{ .size = 13, .line_height = 13 * 1.618, .color = color });
         }
     }
+    return archived;
 }
 
 /// By status, by project or by device (`sidebar_organization`): a
 /// disclosure for each, in the order their newest sessions come; this
 /// device's first, and "Needs you" above "Today" above "Earlier".
-fn groups(c: *ui.Context, a: *App, k: theme.Colors, items: []const ChatItem, by: Grouping, moving: ?[]const u8, window: *Window) void {
+fn groups(c: *ui.Context, a: *App, k: theme.Colors, items: []const ChatItem, by: Grouping, moving: ?[]const u8, window: *Window, lk: *const RowLookup) void {
     const by_project = by.org == .by_project;
     const gpa = c.alloc();
     var index = @import("sidebar_groups.zig").Index.build(gpa, a.chats.items, items) catch return;
@@ -878,7 +985,7 @@ fn groups(c: *ui.Context, a: *App, k: theme.Colors, items: []const ChatItem, by:
         else if (by.org == .by_status)
             workspace.StatusGroup.fromKey(key).?.label()
         else if (by_project)
-            (if (std.mem.startsWith(u8, key, "home:")) "~" else if (a.findSpace(key)) |sp| sp.name else "?")
+            (if (std.mem.startsWith(u8, key, "home:")) "~" else if (lk.findSpace(a, key)) |sp| sp.name else "?")
         else
             a.deviceName(key);
         {
@@ -924,7 +1031,7 @@ fn groups(c: *ui.Context, a: *App, k: theme.Colors, items: []const ChatItem, by:
         while (member) |i| : (member = index.next[i]) {
             const ch = a.chats.items[i];
             const held = moving != null and std.mem.eql(u8, moving.?, ch.id);
-            if (rows.include(c, &inside, items[i].row_h)) slotRow(c, a, k, ch, 0, held);
+            if (rows.include(c, &inside, items[i].row_h)) slotRow(c, a, k, ch, 0, held, lk);
         }
         rows.flush(c);
     }
@@ -937,13 +1044,14 @@ fn groups(c: *ui.Context, a: *App, k: theme.Colors, items: []const ChatItem, by:
 pub fn visibleSessionIds(c: *ui.Context, a: *App) []const []const u8 {
     const gpa = c.alloc();
     var out: std.ArrayList([]const u8) = .empty;
-    const pins = visiblePins(a, gpa);
+    const lk = RowLookup.init(gpa, a);
+    const pins = visiblePinsWith(a, gpa, &lk);
     const by = Grouping.of(a);
     const grouped = by.org != .in_one_list;
-    const items = prepareItems(c, a, pins, grouped, by);
+    const items = prepareItems(gpa, a, pins, grouped, by, &lk);
     if (pins.len > 0 and a.view.pinned_open) {
         for (pins) |id| {
-            if (a.findChat(id) != null) out.append(gpa, id) catch {};
+            if (lk.findChat(a, id) != null) out.append(gpa, id) catch {};
         }
     }
     if (grouped) {
@@ -1003,12 +1111,12 @@ fn groupKey(c: *ui.Context, a: *App, ch: workspace.Chat, by: Grouping) []const u
 
 /// A row, moved `dy` while rows give way; the held one keeps its place
 /// empty, drawn instead under the pointer.
-fn slotRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, dy: f32, held: bool) void {
+fn slotRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, dy: f32, held: bool, lk: ?*const RowLookup) void {
     ui.key(c, c.print("slot-{s}", .{ch.id}));
     var w = ui.div(c).column().wFull().offset(0, dy);
     if (held) w = w.opacity(0);
     defer w.end();
-    sessionRow(c, a, k, ch);
+    sessionRowWith(c, a, k, ch, lk);
 }
 
 fn rectOf(c: *ui.Context, d: ui.Div) ?ui.Rect {
@@ -1138,6 +1246,10 @@ pub fn rowPreview(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat) 
 
 /// The harness's mark and the project's monogram, as Show has them.
 fn marks(c: *ui.Context, a: *const App, k: theme.Colors, ch: workspace.Chat, l: Look, lit: bool) void {
+    marksWith(c, a, k, ch, l, lit, a.findSpace(ch.space_id));
+}
+
+fn marksWith(c: *ui.Context, a: *const App, k: theme.Colors, ch: workspace.Chat, l: Look, lit: bool, space: ?workspace.Space) void {
     const muted = ch.archived and !lit;
     if (l.harness) {
         const mark = icons.harnessMark(ch.harness orelse "graff");
@@ -1145,10 +1257,9 @@ fn marks(c: *ui.Context, a: *const App, k: theme.Colors, ch: workspace.Chat, l: 
     }
     if (l.icon) {
         // `project_icon_frame`: the project and its device on hover.
-        const space = a.findSpace(ch.space_id);
         const b = tip.project(c, ui.div(c).row().opacity(if (muted) 0.4 else 1), k, if (space) |sp| sp.name else "Home", a.deviceName(ch.device_id));
         defer b.end();
-        badge(c, a, k, ch.space_id, lit);
+        badgeWith(c, k, space, lit);
     }
 }
 
@@ -1161,8 +1272,8 @@ fn remote(a: *const App, ch: workspace.Chat) bool {
 
 /// "project @ device" (`sidebar_chat_data`): "~" for no project, and no
 /// device when it isn't known.
-fn folderLabel(c: *ui.Context, a: *const App, ch: workspace.Chat) []const u8 {
-    const project = if (a.findSpace(ch.space_id)) |s| s.name else if (ch.space_id == null) "~" else "?";
+fn folderLabelWith(c: *ui.Context, a: *const App, ch: workspace.Chat, space: ?workspace.Space) []const u8 {
+    const project = if (space) |s| s.name else if (ch.space_id == null) "~" else "?";
     const dev = ch.device_id orelse return project;
     if (a.device_id) |local| if (std.mem.eql(u8, local, dev)) return project;
     for (a.devices.items) |d| if (std.mem.eql(u8, d.id, dev)) return c.print("{s} @ {s}", .{ project, d.name });
@@ -1172,33 +1283,37 @@ fn folderLabel(c: *ui.Context, a: *const App, ch: workspace.Chat) []const u8 {
 /// The expanded row's lines: "project @ device" with the status or time,
 /// the marks and title, then the branch.
 fn expandedLines(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, l: Look, lit: bool, hovered: bool) void {
+    expandedLinesWith(c, a, k, ch, l, lit, hovered, rowMark(a, ch), a.findSpace(ch.space_id));
+}
+
+fn expandedLinesWith(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, l: Look, lit: bool, hovered: bool, mark_state: workspace.Mark, space: ?workspace.Space) void {
     const inner = widthOf(a) - 16 - 16;
     const subline = k.subline;
     var archive = false;
     if (l.label) {
         const line = ui.div(c).row().wFull().gap(8).itemsCenter();
         defer line.end();
-        const corner_w = cornerWidth(c, a, ch, hovered);
+        const corner_w = cornerWidthWith(c, a, ch, hovered, mark_state);
         {
             const t = ui.div(c).row().grow().w(0).clip();
             defer t.end();
-            kit.fadeText(c, folderLabel(c, a, ch), .{ .size = 11, .line_height = 14, .color = subline }, inner - 8 - corner_w);
+            kit.fadeText(c, folderLabelWith(c, a, ch, space), .{ .size = 11, .line_height = 14, .color = subline }, inner - 8 - corner_w);
         }
-        archive = corner(c, a, k, ch, hovered);
+        archive = cornerWith(c, a, k, ch, hovered, k.subline, mark_state);
     }
     {
         const line = ui.div(c).row().wFull().gap(8).itemsCenter();
         defer line.end();
-        marks(c, a, k, ch, l, lit);
+        marksWith(c, a, k, ch, l, lit, space);
         const marks_w = (if (l.harness) @as(f32, 21) else 0) + (if (l.icon) @as(f32, 21) else 0);
-        const corner_w = if (l.label) 0 else cornerWidth(c, a, ch, hovered) + 8;
+        const corner_w = if (l.label) 0 else cornerWidthWith(c, a, ch, hovered, mark_state) + 8;
         const tc = if (lit) k.text else if (ch.archived) k.text.alpha(0.55) else k.text.alpha(0.8);
         {
             const t = ui.div(c).row().grow().w(0).clip();
             defer t.end();
             kit.fadeText(c, chatLabel(ch), kit.style(c, 13, 17, .{ .color = tc }), inner - marks_w - corner_w);
         }
-        if (!l.label) archive = corner(c, a, k, ch, hovered);
+        if (!l.label) archive = cornerWith(c, a, k, ch, hovered, k.subline, mark_state);
     }
     if (l.branch) if (ch.branch) |b| {
         const line = ui.div(c).row().wFull().gap(4).itemsCenter();
@@ -1210,9 +1325,13 @@ fn expandedLines(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, l
 }
 
 fn cornerWidth(c: *ui.Context, a: *const App, ch: workspace.Chat, hovered: bool) f32 {
+    return cornerWidthWith(c, a, ch, hovered, rowMark(a, ch));
+}
+
+fn cornerWidthWith(c: *ui.Context, a: *const App, ch: workspace.Chat, hovered: bool, mark_state: workspace.Mark) f32 {
     const st: ui.TextStyle = .{ .size = 10, .weight = theme.ui_medium_weight };
     if (hovered) return 4 + 11 + 4 + c.text.width(if (ch.archived) "Unarchive" else "Archive", st);
-    const word = statusWord(rowMark(a, ch));
+    const word = statusWord(mark_state);
     if (word) |w| return 6 + 4 + c.text.width(w, st);
     return c.text.width(rules.relativeTime(c.alloc().alloc(u8, 16) catch &.{}, a.nowMs(), ch.timeMs()), st);
 }
@@ -1243,6 +1362,10 @@ fn corner(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, hovered:
 /// `corner` with the time in `subline`: a search result's is the muted
 /// text itself, the sidebar's half of it.
 fn cornerIn(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, hovered: bool, subline: ui.Color) bool {
+    return cornerWith(c, a, k, ch, hovered, subline, rowMark(a, ch));
+}
+
+fn cornerWith(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, hovered: bool, subline: ui.Color, mark: workspace.Mark) bool {
     const box = ui.div(c).row().h(14).itemsCenter();
     defer box.end();
     if (hovered) {
@@ -1252,7 +1375,6 @@ fn cornerIn(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, hovere
         ui.text(c, if (ch.archived) "Unarchive" else "Archive", .{ .size = 10, .color = k.muted });
         return b.clicked();
     }
-    const mark = rowMark(a, ch);
     if (statusWord(mark)) |word| {
         const color = switch (mark) {
             .completed => k.success.alpha(0.9),
@@ -1423,7 +1545,7 @@ fn notice(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
 }
 
-fn sessionRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat) void {
+fn sessionRowWith(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, lk: ?*const RowLookup) void {
     ui.key(c, c.print("row-{s}", .{ch.id}));
     const zen = a.settings.uiMode() == .zen;
     const selected = a.selected != null and std.mem.eql(u8, a.selected.?, ch.id);
@@ -1432,7 +1554,10 @@ fn sessionRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat) void
     var r = ui.div(c).column().wFull().h(rowHeight(a, ch)).px(8).py(if (zen) @as(f32, 5) else 6).gap(2).rounded(if (zen) @as(f32, 7) else 8).clip();
     // Hovered as GPUI's row is (its `hover_listener`): by the pointer's
     // moves, so its menu opening under a still pointer leaves it hovered.
-    const waiting = rowMark(a, ch) == .awaiting_input;
+    const now = a.nowMs();
+    const mark_state = if (lk) |lkp| lkp.markOf(a, ch, now) else rowMark(a, ch);
+    const sp = if (lk) |lkp| lkp.findSpace(a, ch.space_id) else a.findSpace(ch.space_id);
+    const waiting = mark_state == .awaiting_input;
     if (waiting) r = r.border(k.accent.alpha(0.5)).borderW(1).bg(k.accent.alpha(0.08));
     const lh = kit.listenerHover(&a.view.hovers, if (selected) r.bg(k.selected) else r, if (selected) k.selected else if (waiting) k.accent.alpha(0.13) else k.hover);
     r = lh.div;
@@ -1441,11 +1566,9 @@ fn sessionRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat) void
     const hovered = lh.hovered and !@import("view_drag.zig").dragging(a);
     var archive = false;
     var menu = false;
-    const now = a.nowMs();
     if (zen) {
         const line = ui.div(c).row().wFull().h(20).gap(6).itemsCenter();
         defer line.end();
-        const mark_state = rowMark(a, ch);
         {
             const lead = ui.div(c).row().size(14, 14).center();
             defer lead.end();
@@ -1459,7 +1582,7 @@ fn sessionRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat) void
                 },
             }
         }
-        zenMonogram(c, a, k, ch, 16);
+        zenMonogramWith(c, k, ch, sp, 16);
         const time = rules.relativeTime(c.alloc().alloc(u8, 16) catch &.{}, now, ch.timeMs());
         const time_w = if (hovered) @as(f32, 40) else c.text.width(time, .{ .size = 11 }) + 4;
         const far = remote(a, ch);
@@ -1490,12 +1613,12 @@ fn sessionRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat) void
             ui.text(c, time, .{ .size = 11, .color = k.subline });
         }
     } else if (!l.compact) {
-        expandedLines(c, a, k, ch, l, selected or hovered, hovered);
+        expandedLinesWith(c, a, k, ch, l, selected or hovered, hovered, mark_state, sp);
     } else {
         const line = ui.div(c).row().wFull().h(18).gap(4).itemsCenter();
         defer line.end();
-        statusSlot(c, k, rowMark(a, ch));
-        marks(c, a, k, ch, l, selected or hovered);
+        statusSlot(c, k, mark_state);
+        marksWith(c, a, k, ch, l, selected or hovered, sp);
         // In the frame's memory: the text is drawn after this returns.
         const time = rules.relativeTime(c.alloc().alloc(u8, 16) catch &.{}, now, ch.timeMs());
         const time_w = if (hovered) 18 else c.text.width(time, .{ .size = 11 });
@@ -1560,7 +1683,10 @@ fn statusSlot(c: *ui.Context, k: theme.Colors, mark: workspace.Mark) void {
 }
 
 pub fn zenMonogram(c: *ui.Context, a: *const App, k: theme.Colors, ch: workspace.Chat, size: f32) void {
-    const space = a.findSpace(ch.space_id);
+    zenMonogramWith(c, k, ch, a.findSpace(ch.space_id), size);
+}
+
+fn zenMonogramWith(c: *ui.Context, k: theme.Colors, ch: workspace.Chat, space: ?workspace.Space, size: f32) void {
     const seed = if (space) |s| s.name else chatLabel(ch);
     const path = if (space) |s| s.path else ch.cwd;
     const m = rules.monogram(seed, path, true);
@@ -1578,7 +1704,10 @@ pub fn zenMonogram(c: *ui.Context, a: *const App, k: theme.Colors, ch: workspace
 
 /// The project's monogram tile (`project_icon.rs`).
 pub fn badge(c: *ui.Context, a: *const App, k: theme.Colors, space_id: ?[]const u8, lit: bool) void {
-    const space = a.findSpace(space_id);
+    badgeWith(c, k, a.findSpace(space_id), lit);
+}
+
+fn badgeWith(c: *ui.Context, k: theme.Colors, space: ?workspace.Space, lit: bool) void {
     const m = rules.monogram(if (space) |s| s.name else "Home", if (space) |s| s.path else null, k.dark);
     // The project's own tone (`project_icon::monogram`), its letter's
     // lightness raised (lowered, in light) when the row is lit.
@@ -1599,34 +1728,28 @@ fn firstLine(s: []const u8) []const u8 {
     return s[0 .. std.mem.indexOfScalar(u8, s, '\n') orelse s.len];
 }
 
-fn zenFooter(c: *ui.Context, a: *App, k: theme.Colors) void {
+fn zenFooter(c: *ui.Context, a: *App, k: theme.Colors, archived_count: usize) void {
     notice(c, a, k);
     if (a.offscreen or a.window != null)
         @import("view_sandbox_strip.zig").computers(c, a, k)
     else
         @import("view_sandbox_strip.zig").strip(c, a, k, 0);
 
-    if (a.settings.get(.sidebar_show_archived) and !a.view.zen_archived_open) {
-        var archived_count: usize = 0;
-        for (a.chats.items) |ch| if (ch.archived and listed(a, ch)) {
-            archived_count += 1;
-        };
-        if (archived_count > 0) {
-            const wrap = ui.div(c).column().wFull().px(8).pt(2).pb(2);
-            defer wrap.end();
-            ui.key(c, "zen-archived-footer");
-            const ar = ui.div(c).row().wFull().h(28).px(8).itemsCenter().rounded(7).hover(k.hover).control();
-            const clicked = ar.clicked();
-            {
-                defer ar.end();
-                ui.text(c, "Archived", .{ .size = 12, .line_height = 16, .color = k.muted });
-                ui.spacer(c);
-                ui.text(c, c.print("{d}", .{archived_count}), .{ .size = 11.5, .line_height = 16, .mono = true, .color = k.faint });
-            }
-            if (clicked) {
-                a.view.zen_archived_open = true;
-                a.redraw();
-            }
+    if (a.settings.get(.sidebar_show_archived) and !a.view.zen_archived_open and archived_count > 0) {
+        const wrap = ui.div(c).column().wFull().px(8).pt(2).pb(2);
+        defer wrap.end();
+        ui.key(c, "zen-archived-footer");
+        const ar = ui.div(c).row().wFull().h(28).px(8).itemsCenter().rounded(7).hover(k.hover).control();
+        const clicked = ar.clicked();
+        {
+            defer ar.end();
+            ui.text(c, "Archived", .{ .size = 12, .line_height = 16, .color = k.muted });
+            ui.spacer(c);
+            ui.text(c, c.print("{d}", .{archived_count}), .{ .size = 11.5, .line_height = 16, .mono = true, .color = k.faint });
+        }
+        if (clicked) {
+            a.view.zen_archived_open = true;
+            a.redraw();
         }
     }
 
@@ -1724,7 +1847,7 @@ fn zenFooter(c: *ui.Context, a: *App, k: theme.Colors) void {
             else
                 false;
             if (!drew_avatar) renderFallbackAvatar(c, k, label, has_identity);
-            const label_room = @max(40, cardInnerW(a) - 8 - 16 - 30 - 4 - 20 - 8 - 10);
+            const label_room = @max(36, cardInnerW(a) - 8 - 16 - 56 - 30 - 4 - 20 - 8 - 10);
             kit.ellipsisText(c, label, .{
                 .size = 12.5,
                 .line_height = 17,
@@ -1738,6 +1861,32 @@ fn zenFooter(c: *ui.Context, a: *App, k: theme.Colors) void {
         } else if (rclick) {
             a.view.account_menu = !a.view.account_menu;
             if (a.view.account_menu) account.refresh(a);
+            a.redraw();
+        }
+    }
+    {
+        const dev = a.settings.uiMode() == .developer;
+        ui.key(c, "sidebar-ui-mode-pill");
+        var pill = tip.on(
+            ui.div(c).row().h(26).px(7).gap(4).itemsCenter().rounded(6)
+                .bg(if (dev) k.ink(0.08) else .transparent)
+                .border(if (dev) k.muted.alpha(0.35) else k.muted.alpha(0.22)).borderW(1)
+                .hover(k.hover),
+            k,
+            .{ .text = "Click to switch Zen / Developer mode (⇧⌘M) · Right-click to customize", .delay = tip.quick },
+        );
+        const pill_clicked = pill.clicked();
+        const pill_rclick = kit.secondaryClicked(pill);
+        {
+            defer pill.end();
+            icons.icon(c, if (dev) .terminal else .@"magic-stick-3", 12, if (dev) k.text else k.muted, 0);
+            ui.text(c, if (dev) "Dev" else "Zen", .{ .size = 11, .line_height = 14, .weight = if (dev) .semibold else theme.ui_medium_weight, .color = if (dev) k.text else k.muted });
+        }
+        if (pill_clicked) {
+            a.settings.toggleUiMode();
+            a.redraw();
+        } else if (pill_rclick) {
+            @import("view_sidebar_menus.zig").openView(a);
             a.redraw();
         }
     }

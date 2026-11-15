@@ -736,10 +736,8 @@ pub fn toggle(c: *ui.Context, k: theme.Colors, on: bool, usable: bool) bool {
     var box = ui.div(c).row();
     if (!usable) box = box.opacity(0.35);
     defer box.end();
-    const track = ui.div(c).row().w(32).h(18).roundedFull().bg(if (on) k.text else k.ink(0.15)).pl(if (on) 16 else 2).itemsCenter();
-    defer track.end();
-    _ = c.leaf(.{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .radius = 7, .background = if (on) k.on_solid else k.ink(0.7) }, .none, null);
-    return usable and track.clicked();
+    const hit = kit.toggleSwitch(c, k, on);
+    return usable and hit;
 }
 
 /// `row_title`, cut with an ellipsis at `w`.

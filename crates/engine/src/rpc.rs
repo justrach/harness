@@ -2224,6 +2224,13 @@ impl RpcService for EngineRpc {
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&self.registry.title_settings())
             }
+            methods::GENERATE_CUSTOM_THEME => {
+                let p: crate::custom_theme_gen::GenerateCustomThemeParams = parse_params(params)?;
+                let generated =
+                    crate::custom_theme_gen::generate(&self.registry, self.repos.data_dir(), p)
+                        .await;
+                RpcReply::value(&generated)
+            }
             methods::SET_HARNESS_ENABLED => {
                 let p: SetHarnessEnabledParams = parse_params(params)?;
                 update_harness_enabled(&self.registry, p.harness, p.enabled).await?;

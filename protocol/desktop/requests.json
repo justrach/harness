@@ -84,6 +84,7 @@
     {"name": "apply an agent CLI update", "method": "ApplyHarnessUpdate", "stream": false, "params": {"harness":"claude-code","targetDeviceId":"host-parity"}},
     {"name": "cancel an agent CLI update", "method": "CancelHarnessUpdate", "stream": false, "params": {"harness":"claude-code","targetDeviceId":"host-parity"}},
     {"name": "dismiss an agent CLI update", "method": "DismissHarnessUpdate", "stream": false, "params": {"harness":"claude-code","version":"2.1.322","targetDeviceId":"host-parity"}},
-    {"name": "set agent CLI auto-update policy", "method": "SetHarnessUpdatePolicy", "stream": false, "params": {"harness":"claude-code","autoUpdate":true,"targetDeviceId":"host-parity"}}
+    {"name": "set agent CLI auto-update policy", "method": "SetHarnessUpdatePolicy", "stream": false, "params": {"harness":"claude-code","autoUpdate":true,"targetDeviceId":"host-parity"}},
+    {"name": "generate custom theme and animated backdrop", "method": "GenerateCustomTheme", "stream": false, "params": {"prompt":"kyoto rain at midnight","dark":true}}
   ]
 }

@@ -355,9 +355,7 @@ pub fn words(c: *ui.Context, k: theme.Colors, title: []const u8, meta: []const u
 pub fn toggle(c: *ui.Context, k: theme.Colors, on: bool, enabled: bool) bool {
     const target = ui.div(c).row().size(40, 40).center();
     defer target.end();
-    const track = ui.div(c).row().w(32).h(18).roundedFull().bg(if (on) k.text else k.ink(0.15)).pl(if (on) 16 else 2).itemsCenter();
-    defer track.end();
-    _ = c.leaf(.{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .radius = 7, .background = if (on) k.on_solid else k.ink(0.7) }, .none, null);
+    _ = kit.toggleSwitch(c, k, on);
     return enabled and target.clicked();
 }
 

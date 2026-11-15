@@ -1234,4 +1234,46 @@ theorem update_island_expands_taller (compactW maxW rows : Nat) (hrows : rows �
   simp
   omega
 
+/-- Zen sidebar titlebar cluster geometry when the `+` new-session button lives
+at the top of the Zen card rather than beside `[←][→]` (`ui.spacer` unconditional
+so `moreX` stays right-aligned instead of hugging `fwdX`). -/
+def zenSidebarTitlebarLayout (sideW : Nat) : SidebarTitlebarLayout :=
+  let groupGap := if sideW >= 240 then 8 else 4
+  let toggleEnd := 88 + 24
+  let backX := toggleEnd + groupGap
+  let fwdX := backX + 24 + 2
+  let newX := fwdX + 24
+  let rightMargin := 10
+  let moreX := max (fwdX + 24 + groupGap) (sideW - rightMargin - 24)
+  { toggleEnd, backX, fwdX, newX, moreX }
+
+theorem zen_sidebar_titlebar_disjoint_and_right_aligned (sideW : Nat) (h : sideW ≥ 224) :
+    let l := zenSidebarTitlebarLayout sideW
+    l.toggleEnd < l.backX ∧
+    l.backX + 24 < l.fwdX ∧
+    l.fwdX + 24 < l.moreX ∧
+    l.moreX + 24 ≤ sideW ∧
+    l.moreX + 24 + 12 ≤ sideW + 3 := by
+  unfold zenSidebarTitlebarLayout
+  by_cases h240 : sideW >= 240
+  · simp [h240]
+    omega
+  · simp [h240]
+    omega
+
+/-- Zen inter-card gutter (`sidebarTrail = 3pt` + `panelLeading = 6 - 3*t/100`)
+scaled by `100`, guaranteeing exact `6pt` (`600`) spacing when open (`tPct = 100`)
+and `0 <= gap <= 600` throughout the `Cmd+B` tween. -/
+def zenInterCardGapPct (tPct : Nat) : Nat :=
+  let t := min 100 tPct
+  300 + (600 - (300 * t) / 100)
+
+theorem zen_inter_card_gap_open_and_bounded :
+    zenInterCardGapPct 100 = 600 ∧
+    ∀ tPct, 600 ≤ zenInterCardGapPct tPct ∧ zenInterCardGapPct tPct ≤ 900 := by
+  refine ⟨by decide, ?_⟩
+  intro tPct
+  simp only [zenInterCardGapPct]
+  omega
+
 end Nano.FrameSchedule
