@@ -48,6 +48,8 @@ pub const Page = struct {
 pub const Snapshot = struct {
     arena: std.heap.ArenaAllocator,
     page: Page,
+    /// Parse provider fragments once per snapshot, not on every paint/scroll.
+    patches: []const ?@import("diff.zig").File = &.{},
     pub fn parse(gpa: std.mem.Allocator, value: std.json.Value) !Snapshot {
         var arena: std.heap.ArenaAllocator = .init(gpa);
         errdefer arena.deinit();
@@ -55,7 +57,18 @@ pub const Snapshot = struct {
         if (page.page == 0 or page.items.len > 30 or page.files.len > 30 or page.events.len > 30 or
             !std.mem.eql(u8, page.repository.host, "github.com") or page.repository.key.len == 0 or
             !validPart(page.repository.owner) or !validPart(page.repository.name)) return error.InvalidGitHubPage;
-        return .{ .arena = arena, .page = page };
+        const patches = try arena.allocator().alloc(?@import("diff.zig").File, page.files.len);
+        for (page.files, patches) |file, *parsed| {
+            parsed.* = null;
+            const patch = file.patch orelse continue;
+            // The filename stays data, never part of a synthetic patch header.
+            const source = try std.fmt.allocPrint(arena.allocator(), "diff --git a/github b/github\n{s}", .{patch});
+            const files = try @import("diff.zig").parse(arena.allocator(), source);
+            if (files.len != 1 or files[0].hunks.len == 0) continue;
+            parsed.* = files[0];
+            parsed.*.?.path = file.filename;
+        }
+        return .{ .arena = arena, .page = page, .patches = patches };
     }
 };
 fn validPart(part: []const u8) bool {

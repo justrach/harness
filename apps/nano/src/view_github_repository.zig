@@ -131,25 +131,46 @@ fn summary(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page) void {
 }
 fn files(c: *ui.Context, a: *App, k: theme.Colors, page: flow.Page) void {
     const s = &a.panels.github_repository;
-    ui.text(c, "GitHub may omit binary or large patches. Only one patch is expanded at a time.", .{ .size = 11, .color = k.muted, .wrap = true });
+    ui.text(c, "Expand a file to review its changes.", .{ .size = 11, .color = k.muted });
     if (page.files.len == 0) ui.text(c, "No files on this page.", .{ .size = 12, .color = k.muted });
     for (page.files, 0..) |file, i| {
         ui.key(c, file.filename);
-        const card = ui.div(c).column().wFull().border(k.border).borderW(1).rounded(8).clip();
+        const expanded = s.expanded_file == i;
+        const card = ui.div(c).column().wFull().border(if (expanded) k.accent.alpha(0.3) else k.border).borderW(1).rounded(9).clip();
         defer card.end();
         {
-            const row = ui.div(c).column().wFull().p(10).gap(5).hover(k.hover).control();
+            const row = ui.div(c).row().wFull().p(10).gap(8).itemsCenter().bg(k.ink(0.015)).hover(k.hover).control();
             defer row.end();
-            ui.text(c, file.filename, .{ .size = 12, .mono = true, .wrap = true, .color = k.text });
-            ui.text(c, c.print("{s} · +{d} / −{d} · {s}", .{ file.status, file.additions, file.deletions, if (s.expanded_file == i) "Collapse patch" else "Expand patch" }), .{ .size = 11, .color = k.muted });
-            if (row.clicked()) s.expanded_file = if (s.expanded_file == i) null else i;
+            _ = kit.focusRing(c, row, k.accent, 2);
+            icons.icon(c, if (expanded) .@"alt-arrow-down" else .@"alt-arrow-right", 12, k.muted, 0);
+            @import("file_icons.zig").icon(c, file.filename, false, k.dark, 15);
+            {
+                const name = ui.div(c).column().grow().w(0).gap(4).clip();
+                defer name.end();
+                kit.ellipsisText(c, file.filename, .{ .size = 11.5, .mono = true, .weight = .medium, .color = k.text }, @max(40, a.view.chrome.host_width - 184));
+                ui.text(c, file.status, .{ .size = 10.5, .color = k.muted });
+            }
+            ui.text(c, c.print("+{d}", .{file.additions}), .{ .size = 11, .mono = true, .color = k.diff_add });
+            ui.text(c, c.print("−{d}", .{file.deletions}), .{ .size = 11, .mono = true, .color = k.diff_del });
+            if (row.clicked()) s.expanded_file = if (expanded) null else i;
         }
-        if (s.expanded_file == i) {
-            const patch = ui.div(c).column().wFull().p(10).bg(k.ink(0.03));
-            defer patch.end();
-            if (file.previousFilename) |old| ui.text(c, c.print("Previously: {s}", .{old}), .{ .size = 11, .wrap = true, .color = k.muted });
-            if (file.patchTruncated) ui.text(c, "Patch incomplete; open on GitHub for the full diff.", .{ .size = 11, .wrap = true, .color = k.warning });
-            ui.text(c, file.patch orelse "Patch not supplied by GitHub (binary, large or omitted).", .{ .size = 11, .mono = true, .wrap = true, .color = k.text });
+        if (expanded) {
+            rule(c, k);
+            if (file.previousFilename != null or file.patchTruncated) {
+                const notices = ui.div(c).column().wFull().px(12).py(8).gap(5).bg(k.ink(0.015));
+                defer notices.end();
+                if (file.previousFilename) |old| ui.text(c, c.print("Previously: {s}", .{old}), .{ .size = 11, .wrap = true, .color = k.muted });
+                if (file.patchTruncated) ui.text(c, "Patch incomplete; open on GitHub for the full diff.", .{ .size = 11, .wrap = true, .color = k.warning });
+            }
+            const parsed = if (s.content) |snapshot| (if (i < snapshot.patches.len) snapshot.patches[i] else null) else null;
+            if (parsed) |patch| {
+                const available = if (c.rects.get(c.node(card.index).id)) |r| r.w - 2 else a.view.chrome.host_width - 30;
+                @import("view_github_diff.zig").draw(c, k, &patch, @max(1, available));
+            } else {
+                const fallback = ui.div(c).column().wFull().p(12).bg(k.ink(0.015));
+                defer fallback.end();
+                ui.text(c, file.patch orelse "Patch not supplied by GitHub (binary, large or omitted).", .{ .size = 11, .mono = file.patch != null, .wrap = true, .color = k.muted });
+            }
         }
     }
 }
