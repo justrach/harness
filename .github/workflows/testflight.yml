@@ -77,6 +77,8 @@ jobs:
         run: |
           ../../scripts/heavy-build.sh xcodebuild -project Harness.xcodeproj -scheme Harness \
             -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -IDEPackageSupportDisableManifestSandbox=YES \
             CODE_SIGNING_ALLOWED=NO build-for-testing
 
       - name: Verify mobile contracts and privacy consent
@@ -87,6 +89,8 @@ jobs:
           simulator_id="$(xcrun simctl list devices available --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(v["udid"] for runtime,group in d["devices"].items() if "iOS" in runtime for v in group if v["name"].startswith("iPhone")))')"
           ../../scripts/heavy-build.sh xcodebuild -project Harness.xcodeproj -scheme Harness \
             -destination "platform=iOS Simulator,id=$simulator_id" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -IDEPackageSupportDisableManifestSandbox=YES \
             -only-testing:HarnessTests/ParityTests \
             -only-testing:HarnessTests/PerfMonitorTests \
             -only-testing:HarnessTests/PerfResourcesTests \

@@ -75,6 +75,8 @@ jobs:
           ../../scripts/heavy-build.sh xcodebuild -project Harness.xcodeproj -scheme Harness \
             -configuration Release \
             -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_ID" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -IDEPackageSupportDisableManifestSandbox=YES \
             -resultBundlePath "$RUNNER_TEMP/reauth-tests.xcresult" \
             -only-testing:HarnessTests/AgentReauthenticationTests \
             -only-testing:HarnessTests/GeneratedImageTests \
@@ -95,6 +97,8 @@ jobs:
           ../../scripts/heavy-build.sh xcodebuild -project Harness.xcodeproj -scheme Harness \
             -configuration Debug \
             -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_ID" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -IDEPackageSupportDisableManifestSandbox=YES \
             -resultBundlePath "$RUNNER_TEMP/scroll-matrix-tests.xcresult" \
             -only-testing:HarnessTests/TranscriptScrollMatrixTests \
             -only-testing:HarnessTests/TextSelectionTests \

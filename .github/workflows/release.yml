@@ -199,10 +199,11 @@ jobs:
           while IFS= read -r kc; do
             [ -n "$kc" ] && [ "$kc" != "$keychain" ] && existing+=("$kc")
           done < <(security list-keychains -d user | sed 's/^[[:space:]]*"//; s/"[[:space:]]*$//')
-          if [ "${#existing[@]}" -eq 0 ]; then
-            existing=(login.keychain-db)
+          if [ "${#existing[@]}" -gt 0 ]; then
+            security list-keychains -d user -s "$keychain" "${existing[@]}"
+          else
+            security list-keychains -d user -s "$keychain"
           fi
-          security list-keychains -d user -s "$keychain" "${existing[@]}"
           identity="$(security find-identity -v -p codesigning "$keychain" \
             | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)"
           [ -n "$identity" ] || { echo "p12 contains no Developer ID Application identity"; exit 1; }
@@ -247,6 +248,8 @@ jobs:
             done < <(security list-keychains -d user | sed 's/^[[:space:]]*"//; s/"[[:space:]]*$//')
             if [ "${#kept[@]}" -gt 0 ]; then
               security list-keychains -d user -s "${kept[@]}"
+            else
+              security list-keychains -d user -s
             fi
             security delete-keychain "$CODESIGN_KEYCHAIN" 2>/dev/null || rm -f "$CODESIGN_KEYCHAIN"
           fi

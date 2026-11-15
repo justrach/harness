@@ -73,6 +73,8 @@ jobs:
         run: |
           ../../scripts/heavy-build.sh xcodebuild -project Harness.xcodeproj -scheme Harness \
             -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_ID" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -IDEPackageSupportDisableManifestSandbox=YES \
             -resultBundlePath "$RUNNER_TEMP/parity.xcresult" \
             -only-testing:HarnessTests/ParityTests \
             -only-testing:HarnessTests/Chat2VectorTests CODE_SIGNING_ALLOWED=NO test
