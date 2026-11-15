@@ -35,6 +35,9 @@ struct MDListItem: Hashable {
 }
 
 indirect enum MDBlock: Hashable {
+    /// Presentation-only container: consecutive response blocks share one
+    /// native text storage so selection can cross Markdown boundaries.
+    case response([MDBlock])
     case paragraph([InlineRun])
     case heading(level: Int, [InlineRun])
     case codeBlock(language: String?, code: String)

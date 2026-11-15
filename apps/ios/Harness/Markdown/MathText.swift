@@ -156,6 +156,8 @@ enum MathText {
 
     private static func restore(_ block: MDBlock, _ formulas: [Formula]) -> MDBlock {
         switch block {
+        case let .response(children):
+            return .response(children.map { restore($0, formulas) })
         case let .paragraph(runs):
             return .paragraph(expand(runs, formulas))
         case let .heading(level, runs):
