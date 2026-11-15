@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   macos:
-    runs-on: macos-latest
+    runs-on: harness-macos-arm64
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -77,7 +77,7 @@ jobs:
           GRAFF_BINARY: ${{ steps.graff.outputs.binary }}
         run: |
           rustup show active-toolchain || rustup toolchain install
-          scripts/package-macos.sh
+          ./scripts/heavy-build.sh scripts/package-macos.sh
           test -f target/package/*-macos-arm64-app.tar.gz
       - name: Record included revisions
         if: steps.selected.outputs.tag != '' && steps.cache.outputs.cache-hit != 'true'

@@ -105,7 +105,7 @@ jobs:
 
   macos-frame-recovery:
     name: macos-frame-recovery
-    runs-on: macos-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'harness-macos-arm64' || 'macos-latest' }}
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
@@ -119,10 +119,10 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
       - name: Check macOS application
-        run: cargo check --release --locked -p harness
+        run: ./scripts/heavy-build.sh cargo check --release --locked -p harness
       - name: Nano UI macOS tests
         working-directory: apps/nano
-        run: zig build test --summary all
+        run: ../../scripts/heavy-build.sh zig build test --summary all
 
   ios-tests:
     # Skipped for now: the iOS app isn't shipping yet and this job fails.

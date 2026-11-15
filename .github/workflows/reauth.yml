@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   ios-recovery:
-    runs-on: macos-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'harness-macos-arm64' || 'macos-latest' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -51,7 +51,7 @@ jobs:
       - name: Build app and run recovery regressions
         working-directory: apps/ios
         run: |
-          xcodebuild -project Harness.xcodeproj -scheme Harness \
+          ../../scripts/heavy-build.sh xcodebuild -project Harness.xcodeproj -scheme Harness \
             -configuration Release \
             -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_ID" \
             -resultBundlePath "$RUNNER_TEMP/reauth-tests.xcresult" \
@@ -71,7 +71,7 @@ jobs:
       - name: Run transcript scroll matrix
         working-directory: apps/ios
         run: |
-          xcodebuild -project Harness.xcodeproj -scheme Harness \
+          ../../scripts/heavy-build.sh xcodebuild -project Harness.xcodeproj -scheme Harness \
             -configuration Debug \
             -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_ID" \
             -resultBundlePath "$RUNNER_TEMP/scroll-matrix-tests.xcresult" \

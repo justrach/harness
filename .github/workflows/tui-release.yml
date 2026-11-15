@@ -48,7 +48,7 @@ jobs:
           - runner: macos-latest # Apple silicon
           - runner: ubuntu-24.04 # x86_64
           - runner: ubuntu-24.04-arm # aarch64
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner == 'macos-latest' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'harness-macos-arm64' || matrix.runner }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -72,7 +72,7 @@ jobs:
           endpoint: ${{ secrets.KACHE_S3_ENDPOINT }}
           manifest-key: ${{ github.job }}-${{ strategy.job-index }}
       - name: package
-        run: tui/package.sh
+        run: ./scripts/heavy-build.sh tui/package.sh
       - name: smoke test the tarball
         run: |
           (cd tui/dist && { sha256sum -c ./*.sha256 2>/dev/null || shasum -a 256 -c ./*.sha256; })

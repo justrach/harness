@@ -29,7 +29,7 @@ concurrency:
 
 jobs:
   ios-parity:
-    runs-on: macos-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'harness-macos-arm64' || 'macos-latest' }}
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
@@ -50,7 +50,7 @@ jobs:
       - name: Parity tests
         working-directory: apps/ios
         run: |
-          xcodebuild -project Harness.xcodeproj -scheme Harness \
+          ../../scripts/heavy-build.sh xcodebuild -project Harness.xcodeproj -scheme Harness \
             -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_ID" \
             -resultBundlePath "$RUNNER_TEMP/parity.xcresult" \
             -only-testing:HarnessTests/ParityTests \
