@@ -1,5 +1,5 @@
 //! The queue tray over the composer (crates/ui/src/queue.rs): a surface
-//! with rounded top corners tucked behind the pill, one 36-point row per
+//! above (never behind) the input, one 36-point row per
 //! message: its text on one line, then Remove, Edit and "Send now"; the row
 //! being edited reads "Editing in composer" with "Save to queue" and
 //! "Cancel".
@@ -13,14 +13,20 @@ const tip = @import("view_tooltip.zig");
 const queue = @import("queue.zig");
 const App = @import("app.zig").App;
 
-/// How far the pill covers the tray's foot.
-pub const tuck: f32 = 26;
+/// Visible separation between the queue surface and the composer.
+pub const gap: f32 = 8;
+const row_height: f32 = 36;
 
 pub fn tray(c: *ui.Context, a: *App, k: theme.Colors, w: f32) bool {
     if (a.queue.items.len == 0) return false;
-    const box = ui.div(c).column().w(w - 32).bg(k.composer).border(k.border).borderW(1).rounded(16).pb(8 + tuck).pt(4).px(4)
-        .maxH(c.size.h * 0.3).scrollY();
+    const box = ui.div(c).column().w(@max(0, w - 32)).bg(k.composer).border(k.border).borderW(1).rounded(16).pb(8).pt(4).px(4);
     defer box.end();
+    // Reuse PR #844's row-only scroll-region approach: surface decoration
+    // cannot consume scroll range or hide the last row underneath the input.
+    const pane_h = @import("view_transcript.zig").paneHeight(c, a) orelse c.size.h;
+    const rows = ui.div(c).column().wFull().maxH(@max(row_height, pane_h * 0.3 - 14))
+        .scrollY().scrollbar(.{ .overlay = k.muted.alpha(0.5) });
+    defer rows.end();
     const compact = w < 520;
     for (a.queue.items, 0..) |r, i| {
         ui.key(c, c.print("q-{s}", .{r.id}));

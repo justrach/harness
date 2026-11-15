@@ -51,7 +51,7 @@ pub fn contentWidth(c: *ui.Context, a: *const App) f32 {
 /// split across it.
 pub fn paneWidth(c: *ui.Context, a: *const App) f32 {
     const w = contentWidth(c, a);
-    if (a.view.strip.expanded != null) return w;
+    if (@import("view_tab_strip.zig").layoutExpanded(a) != null) return w;
     const s = a.tabs.layout() orelse return w;
     if (s.zoomed or s.axis != .horizontal or s.panes.items.len <= 1) return w;
     const total = a.view.chrome.chat_width;
@@ -71,7 +71,7 @@ pub fn paneWidth(c: *ui.Context, a: *const App) f32 {
 /// window; null when it has the column's full height.
 pub fn paneHeight(c: *ui.Context, a: *const App) ?f32 {
     const s = a.tabs.layout() orelse return null;
-    if (s.zoomed or s.axis != .vertical) return null;
+    if (s.zoomed or s.axis != .vertical or @import("view_tab_strip.zig").layoutExpanded(a) != null) return null;
     _ = c;
     return @max(0, @import("panel_chrome.zig").paneSpan(a.view.chrome.height, s.shares.items[s.focus], s.panes.items.len, false) - a.view.seam_inset);
 }
@@ -501,8 +501,11 @@ fn sentAttachment(c: *ui.Context, a: *App, k: theme.Colors, chat_id: ?[]const u8
         if (image) |loaded| if (loaded.status == .ready) {
             const leaf = c.nodes.items.len - 1;
             if (c.nodes.items[leaf].content == .image) {
-                const picture = c.interact(@intCast(leaf), .{ .focusable = true });
-                if (picture.clicked or thumb.clicked()) @import("view_image_preview.zig").open(a, chat_id, loaded);
+                const picture = @import("preview_focus.zig").action(c, @intCast(leaf), k, c.print("Open image preview: {s}", .{name}));
+                if (picture or thumb.clicked()) {
+                    c.focus = c.node(@intCast(leaf)).id;
+                    @import("view_image_preview.zig").open(a, chat_id, loaded);
+                }
             }
         };
     }

@@ -82,6 +82,74 @@ fn topTextRect(h: *Harness, text: []const u8) ?@import("nanoui").ui.Rect {
     return null;
 }
 
+test "github Cmd R reopens beside the invoking chat instead of the previous rightmost owner" {
+    var h: Harness = undefined;
+    try setup(&h, true, &.{pulls});
+    defer h.deinit();
+    h.a.splitPane(.horizontal);
+    h.a.openChat("b", null);
+    git.open(&h.a, .github);
+    h.t.settle(1);
+    try testing.expectEqualStrings("b", h.a.panels.github_repository.owner.?);
+    h.a.focusPane(0);
+    h.t.settle(0.2);
+    _ = h.t.shortcut(.{ .key = 'r', .cmd = true });
+    h.t.settle(0.2);
+    try testing.expect(h.a.panels.host_open);
+    try testing.expectEqualStrings("a", h.a.panels.github_repository.owner.?);
+    _ = h.t.shortcut(.{ .key = 'r', .cmd = true });
+    h.t.settle(0.2);
+    try testing.expect(!h.a.panels.host_open);
+    _ = h.t.shortcut(.{ .key = 'r', .cmd = true });
+    h.t.settle(0.2);
+    try testing.expectEqualStrings("a", h.a.panels.github_repository.owner.?);
+    const child = topTextRect(&h, "GitHub") orelse return error.MissingChildTab;
+    const parent = topTextRect(&h, "Navigation polish") orelse return error.MissingParentTab;
+    const sibling = topTextRect(&h, "Remote work") orelse return error.MissingSiblingTab;
+    try testing.expect(parent.x < child.x and child.x < sibling.x);
+}
+
+test "github pane keeps a useful width and its tab joins the body with curved shoulders" {
+    for ([_]bool{ false, true }) |dark| {
+        var h: Harness = undefined;
+        try setup(&h, dark, &.{pulls});
+        defer h.deinit();
+        try h.t.clickText("Repository");
+        h.a.splitPane(.horizontal);
+        h.a.openChat("b", null);
+        h.a.focusPane(0);
+        git.open(&h.a, .github);
+        h.t.settle(1);
+        h.t.resize(1050, 700);
+        h.t.settle(0.2);
+        try testing.expect(h.a.view.chrome.host_width >= 420);
+        const cap = h.a.view.strip.host_tab_rect orelse return error.MissingAttachedCap;
+        try testing.expect(cap.w < h.a.view.chrome.host_width - 16);
+        var joined = false;
+        for (h.t.ctx.nodes.items) |node| {
+            if (node.style.shadows.len == 2 and node.rect.y < 42 and node.rect.y > 0 and node.rect.w > 100) {
+                try testing.expectApproxEqAbs(cap.x, node.rect.x, 1);
+                try testing.expectApproxEqAbs(cap.w, node.rect.w, 1);
+                joined = true;
+            }
+        }
+        try testing.expect(joined);
+        try screenshot(&h, if (dark) "attached-dark" else "attached-light");
+        h.t.resize(760, 620);
+        h.t.settle(0.2);
+        const previous = textRect(&h, "Previous") orelse return error.MissingPagination;
+        const next = textRect(&h, "Next") orelse return error.MissingPagination;
+        try testing.expect(previous.x >= 0 and next.x + next.w <= h.t.size.w);
+        try testing.expect(h.a.view.chrome.host_width >= 420);
+        try screenshot(&h, if (dark) "attached-narrow-dark" else "attached-narrow-light");
+        h.t.resize(1600, 900);
+        h.t.settle(0.2);
+        try testing.expect(h.a.view.strip.expanded == null);
+        try testing.expect(topTextRect(&h, "Navigation polish") != null);
+        try testing.expect(topTextRect(&h, "Remote work") != null);
+    }
+}
+
 test "github child stays beside its originating split and retains repository on other chat focus" {
     var h: Harness = undefined;
     try setup(&h, true, &.{pulls});
@@ -184,6 +252,34 @@ test "github child description and activity images open a bounded preview withou
         } else try h.t.clickText("Preview image");
         h.t.settle(0.2);
         try testing.expect(h.t.hasText("GitHub image preview"));
+        const origin = h.a.panels.github_repository.images.focus_scope.origin;
+        const focus_order = [_][]const u8{ "Close preview", "Zoom out", "Zoom in", "Fit", "Close preview" };
+        for (focus_order, 0..) |label, step| {
+            if (step > 0) h.t.key(.tab);
+            const focused_label = for (h.t.ctx.a11y_items.items) |item| {
+                if (item.id == h.t.ctx.focus and item.role == .button) break item.label;
+            } else return error.NoFocusedPreviewButton;
+            try testing.expectEqualStrings(label, focused_label);
+        }
+        var preview_picture: @import("nanoui").ui.Rect = undefined;
+        for (h.t.ctx.nodes.items) |node| {
+            if (node.content == .image and node.rect.w > 100 and node.rect.h > 100) preview_picture = node.rect;
+        }
+        const px = preview_picture.x + preview_picture.w * 0.6;
+        const py = preview_picture.y + preview_picture.h * 0.5;
+        h.t.moveTo(px, py);
+        h.t.scroll(px, py, 80);
+        const cache = &h.a.panels.github_repository.images;
+        try testing.expect(cache.zoom > 1);
+        try testing.expect(cache.inspection.inverse > 1 / cache.zoom and cache.inspection.inverse < 1);
+        try testing.expectApproxEqAbs(@as(f32, 0.6), cache.inspection.center.x + 0.1 * cache.inspection.inverse, 0.001);
+        h.t.settle(3);
+        h.t.pinch(px, py, 1.25, 0, 0);
+        h.t.settle(3);
+        try testing.expect(cache.zoom > 1.7);
+        try h.t.clickText("Fit");
+        h.t.settle(3);
+        try testing.expectEqual(@as(f32, 1), cache.inspection.inverse);
         try h.t.clickText("Zoom in");
         try testing.expect(h.a.panels.github_repository.images.zoom > 1);
         h.a.view.strip.focused = .{ .chat = 0 };
@@ -195,9 +291,73 @@ test "github child description and activity images open a bounded preview withou
         if (i == 0) try h.t.clickText("Close preview") else _ = h.t.shortcut(.{ .key = @import("nanoui").ui.Shortcut.escape });
         h.t.settle(0.2);
         try testing.expect(!h.t.hasText("GitHub image preview"));
-        try testing.expectEqual(calls, h.a.engine.sent.items.len);
+        try testing.expectEqual(origin, h.t.ctx.focus);
+        // Settling the zoom crosses the unrelated live-progress retry timer.
+        // No browsing or image fetching is allowed during inspection.
+        for (h.a.engine.sent.items[calls..]) |frame| {
+            const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, frame, .{});
+            defer parsed.deinit();
+            try testing.expectEqualStrings("WatchToolProgress", parsed.value.object.get("method").?.string);
+        }
         try testing.expectEqual(if (i == 0) flow.Kind.pull else flow.Kind.activity, h.a.panels.github_repository.kind);
     }
+}
+
+fn labeledControl(h: *Harness, label: []const u8) !u64 {
+    for (h.t.ctx.a11y_items.items) |item| {
+        if (std.mem.eql(u8, item.label, label)) return item.id;
+    }
+    return error.MissingAccessibleControl;
+}
+
+test "github keyboard cards buttons and disclosures activate exactly once" {
+    var h: Harness = undefined;
+    try setup(&h, true, &.{ pulls, detail, files });
+    defer h.deinit();
+    try h.t.clickText("Repository");
+    h.t.settle(0.1);
+    // Focus the actual card, just as Tab does, without invoking its pointer path.
+    const card_id = for (h.t.ctx.nodes.items) |node| {
+        if (node.content == .text and std.mem.eql(u8, node.content.text.str, "Polish repository navigation")) break h.t.ctx.node(node.parent).id;
+    } else return error.NoPullCard;
+    h.t.ctx.focus = card_id;
+    const before = try githubCalls(&h);
+    h.t.key(.enter);
+    h.t.settle(0.1);
+    try testing.expectEqual(flow.Kind.pull, h.a.panels.github_repository.kind);
+    try testing.expectEqual(before + 1, try githubCalls(&h));
+    h.t.ctx.focus = try labeledControl(&h, "Code");
+    _ = h.t.shortcut(.{ .key = ' ' });
+    h.t.settle(0.1);
+    try testing.expectEqual(flow.Kind.files, h.a.panels.github_repository.kind);
+    h.a.panels.github_repository.expanded_file = null;
+    h.t.settle(0.1);
+    h.t.ctx.focus = try labeledControl(&h, "src/navigation.zig");
+    h.t.key(.enter);
+    h.t.settle(0.1);
+    try testing.expectEqual(@as(?usize, 0), h.a.panels.github_repository.expanded_file);
+    _ = h.t.shortcut(.{ .key = ' ' });
+    h.t.settle(0.1);
+    try testing.expect(h.a.panels.github_repository.expanded_file == null);
+}
+
+test "github keyboard choice arrows move focus without fetching until committed" {
+    var h: Harness = undefined;
+    try setup(&h, true, &.{ pulls, issues });
+    defer h.deinit();
+    try h.t.clickText("Repository");
+    h.t.settle(0.1);
+    h.t.ctx.focus = try labeledControl(&h, "Pull requests");
+    const before = try githubCalls(&h);
+    h.t.key(.right);
+    try testing.expectEqual(try labeledControl(&h, "Issues"), h.t.ctx.focus);
+    try testing.expectEqual(flow.Kind.pulls, h.a.panels.github_repository.kind);
+    try testing.expectEqual(before, try githubCalls(&h));
+    h.t.key(.enter);
+    h.t.settle(0.1);
+    try testing.expectEqual(flow.Kind.issues, h.a.panels.github_repository.kind);
+    try testing.expectEqual(before + 1, try githubCalls(&h));
+    try testing.expectEqual(try labeledControl(&h, "Issues"), h.t.ctx.focus);
 }
 
 fn githubCalls(h: *Harness) !usize {

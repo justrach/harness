@@ -165,6 +165,12 @@ pub const Browser = struct {
 
 pub const LinkOwner = Source;
 
+/// Shared conversation/pane ownership for non-web artifact actions. It grants
+/// no path access; local bytes must still pass the owning host's read jail.
+pub fn sourceOwner(a: *const App, parent: []const u8) ?LinkOwner {
+    return source(a, parent);
+}
+
 pub fn linkOwner(a: *const App, parent: []const u8, url: []const u8) ?LinkOwner {
     if (!web.allowedNavigation(url)) return null;
     return source(a, parent);

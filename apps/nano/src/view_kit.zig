@@ -27,22 +27,47 @@ pub const IconButton = struct {
     /// Drawn behind it while its menu or panel is open.
     on: bool = false,
     disabled: bool = false,
+    /// Explicit accessible name; otherwise use the tooltip or icon name.
+    label: ?[]const u8 = null,
     /// Its tooltip, where the GPUI app has one.
     tip: ?@import("view_tooltip.zig").Tip = null,
 };
 
-/// A square button holding one icon; true when clicked.
+/// A square icon control; true on pointer, keyboard, or accessibility activation.
 pub fn iconButton(c: *ui.Context, k: theme.Colors, name: icons.Name, o: IconButton) bool {
     var b = ui.div(c).row().size(o.size, o.size).center().rounded(o.radius);
     if (o.radius * 2 >= o.size) b = b.circular();
     if (o.on) b = b.bg(k.hover) else if (!o.disabled) b = b.hover(k.hover);
     if (o.tip) |t| b = @import("view_tooltip.zig").on(b, k, t);
     if (!o.disabled) b = pressFeedback(b.control());
+    const label = o.label orelse if (o.tip) |t| (if (t.text.len > 0) t.text else iconButtonLabel(c, name)) else iconButtonLabel(c, name);
+    // Keep the focusable interaction last: pointer-only feedback must not
+    // overwrite the focus assigned by the shared activation helper.
+    const clicked = @import("control_behavior.zig").activate(c, b, k, label, !o.disabled, o.on);
     defer b.end();
-    const clicked = b.clicked() and !o.disabled;
     const color = o.color orelse k.muted;
     icons.icon(c, name, o.icon, if (o.disabled) color.alpha(0.35) else color, 0);
     return clicked;
+}
+
+/// Human-readable fallback for existing icon-only call sites without a tooltip.
+fn iconButtonLabel(c: *ui.Context, name: icons.Name) []const u8 {
+    return switch (name) {
+        .plus => "Add",
+        .magnifer => "Search",
+        .@"more-horizontal" => "More actions",
+        .@"settings-minimalistic" => "Settings",
+        .@"sidebar-minimalistic", .@"sidebar-minimalistic-left" => "Toggle sidebar",
+        .@"trash-bin-minimalistic" => "Delete",
+        else => blk: {
+            const label = c.alloc().dupe(u8, @tagName(name)) catch break :blk @tagName(name);
+            for (label) |*ch| {
+                if (ch.* == '-') ch.* = ' ';
+            }
+            label[0] = std.ascii.toUpper(label[0]);
+            break :blk label;
+        },
+    };
 }
 
 /// A short, reversible press without changing layout or the hit target.

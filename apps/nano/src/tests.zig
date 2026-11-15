@@ -20,6 +20,11 @@ test {
     _ = @import("tests_git.zig");
     _ = @import("tests_git_workflow.zig");
     _ = @import("tests_github_repository.zig");
+    _ = @import("tests_github_responsive.zig");
+    _ = @import("tests_control_behavior.zig");
+    _ = @import("tests_control_navigation.zig");
+    _ = @import("tests_composer_dock_layout.zig");
+    _ = @import("tests_agent_login_lifecycle.zig");
     _ = @import("tests_github_links.zig");
     _ = @import("tests_remote_markdown.zig");
     _ = @import("github_image_url.zig");
@@ -30,6 +35,8 @@ test {
     _ = @import("tests_sidebar_performance.zig");
     _ = @import("sidebar_groups.zig");
     _ = @import("tests_link_actions.zig");
+    _ = @import("tests_artifact_markdown.zig");
+    _ = @import("tests_artifact_links.zig");
     _ = @import("tests_titlebar_clearance.zig");
     _ = @import("wizard.zig");
     _ = @import("termlog.zig");

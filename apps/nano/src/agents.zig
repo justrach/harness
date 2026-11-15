@@ -256,14 +256,14 @@ pub const SignInPhase = enum {
 
     pub fn pendingLabel(p: SignInPhase) []const u8 {
         return switch (p) {
-            .starting => "Preparing Antigravity…",
+            .starting => "Starting Antigravity sign-in…",
             .authenticating => "Finish signing in in your browser.",
         };
     }
 
     pub fn failureLabel(p: SignInPhase) []const u8 {
         return switch (p) {
-            .starting => "Setup failed",
+            .starting => "Sign-in startup failed",
             .authenticating => "Sign-in failed",
         };
     }
@@ -293,9 +293,9 @@ test "explicit sign-in requires installed Antigravity" {
     try testing.expect(!offersSignIn(.codex, true));
 }
 
-test "Antigravity setup copy matches each phase" {
-    try testing.expectEqualStrings("Preparing Antigravity…", SignInPhase.starting.pendingLabel());
-    try testing.expectEqualStrings("Setup failed", SignInPhase.starting.failureLabel());
+test "Antigravity sign-in copy distinguishes authentication from installation" {
+    try testing.expectEqualStrings("Starting Antigravity sign-in…", SignInPhase.starting.pendingLabel());
+    try testing.expectEqualStrings("Sign-in startup failed", SignInPhase.starting.failureLabel());
     try testing.expectEqualStrings("Finish signing in in your browser.", SignInPhase.authenticating.pendingLabel());
     try testing.expectEqualStrings("Sign-in failed", SignInPhase.authenticating.failureLabel());
 }

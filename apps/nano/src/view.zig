@@ -214,7 +214,10 @@ pub fn view(a: *App, c: *ui.Context) void {
         }
         a.view.seam_inset = 2;
         const layout = a.tabs.layout();
-        a.view.chrome = chrome.frameWithSide(c.size.w, c.size.h, a.view.sidebar_width, side_width, strip.chatCount(a), if (layout) |s| s.axis == .horizontal and !s.zoomed else true, strip.hasHost(a), strip.hasFiles(a), a.settings.rightPaneWidth());
+        const github_host = strip.hasHost(a) and @import("app_github_repository.zig").surface(a);
+        const preferred_host = if (github_host) @max(chrome.right_pane_default, a.settings.rightPaneWidth()) else a.settings.rightPaneWidth();
+        a.view.chrome = chrome.frameWithSide(c.size.w, c.size.h, a.view.sidebar_width, side_width, strip.chatCount(a), if (layout) |s| s.axis == .horizontal and !s.zoomed else true, strip.hasHost(a), strip.hasFiles(a), preferred_host);
+        a.view.chrome.compact_host = github_host and a.view.chrome.host_width < chrome.github_min_width;
         ui.key(c, "main-column");
         const main = ui.div(c).column().grow().w(0).hFull();
         defer main.end();
@@ -232,7 +235,7 @@ pub fn view(a: *App, c: *ui.Context) void {
         } else {
             const workspace = ui.div(c).row().pt(chrome.header_height).pl(a.view.chrome.leading).pr(chrome.gutter).pb(chrome.gutter).hFull().wFull();
             defer workspace.end();
-            const expanded = a.view.strip.expanded;
+            const expanded = strip.layoutExpanded(a);
             if (expanded == null or expanded.? == .chat) {
                 const only = expanded != null;
                 if (only) a.view.chrome.chat_width = a.view.chrome.width;
@@ -380,14 +383,23 @@ fn focused(c: *ui.Context, a: *App, k: theme.Colors) void {
 
 fn githubChildInSplit(a: *const App) bool {
     const s = a.tabs.layout() orelse return false;
-    return s.panes.items.len > 1 and !s.zoomed and a.view.strip.expanded == null and strip.hasHost(a) and @import("app_github_repository.zig").surface(a);
+    return s.panes.items.len > 1 and !s.zoomed and strip.layoutExpanded(a) == null and strip.hasHost(a) and @import("app_github_repository.zig").surface(a);
 }
 
 fn hostPanel(c: *ui.Context, a: *App, k: theme.Colors) void {
     ui.key(c, "workspace-host-body");
-    const host = panel_chrome.body(c, k).w(a.view.chrome.host_width).hFull().clip();
+    const host = panel_chrome.body(c, k).w(a.view.chrome.host_width).hFull();
     defer host.end();
     if (c.input.pressed and host.interaction().hovered) a.view.strip.focused = .host;
+    if (@import("app_github_repository.zig").surface(a)) {
+        if (a.view.strip.host_tab_rect) |tab| if (c.rects.get(c.node(host.index).id)) |body| {
+            panel_chrome.join(c, k, a.view.chrome.host_width, @max(0, tab.x - body.x), @min(a.view.chrome.host_width, tab.x + tab.w - body.x));
+        };
+    }
+    // Clip content, not the cap/shoulders extending above the body.
+    ui.key(c, "workspace-host-content");
+    const content = ui.div(c).column().wFull().hFull().rounded(9).clip();
+    defer content.end();
     @import("view_host.zig").host(c, a, k);
 }
 

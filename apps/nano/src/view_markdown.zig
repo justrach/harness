@@ -223,7 +223,8 @@ fn rich(c: *ui.Context, in: md.Inline, style: ui.TextStyle) void {
     const lines = c.text.wrapAttributed(in.text, st, in.spans, rect.w);
     const line_h = c.text.lineHeight(st);
     for (in.links, 0..) |link, li| {
-        if (!@import("browser_url.zig").allowedNavigation(link.url)) continue;
+        const local_artifact = link_owner != null and @import("artifact_links.zig").isLocal(link.url);
+        if (!local_artifact and !@import("browser_url.zig").allowedNavigation(link.url)) continue;
         for (lines, 0..) |line, row| {
             const start = @max(@as(usize, link.start), line.start);
             const end = @min(@as(usize, link.end), line.end);
@@ -234,11 +235,15 @@ fn rich(c: *ui.Context, in: md.Inline, style: ui.TextStyle) void {
             const hit = @import("view_tooltip.zig").on(ui.div(c).absolute().offset(rect.x - origin.x + x, rect.y - origin.y + @as(f32, @floatFromInt(row)) * line_h).size(@max(right - x, 1), line_h), k, .{ .text = link.url });
             defer hit.end();
             const action = c.interact(hit.index, .{ .focusable = true });
+            @import("control_behavior.zig").indicate(c, hit, k, action.focused);
+            c.addA11y(hit.index, .link, in.text[link.start..link.end], link.url, false, true);
             if (link_owner) |owner| @import("view_link_menu.zig").track(c, owner.app, owner.parent, link.url, hit.index, action.right_clicked or action.secondary_clicked);
             const activate = action.clicked or (action.focused and (c.shortcut(.{ .key = ui.Shortcut.enter }) or c.shortcut(.{ .key = ' ' })));
             if (activate) {
                 if (link_owner) |owner| {
-                    @import("app_browser.zig").openLink(owner.app, owner.parent, link.url);
+                    if (local_artifact) {
+                        @import("artifact_links.zig").open(owner.app, owner.parent, link.url);
+                    } else @import("app_browser.zig").openLink(owner.app, owner.parent, link.url);
                 } else {
                     _ = nanoui.shell.openUrl(link.url);
                 }

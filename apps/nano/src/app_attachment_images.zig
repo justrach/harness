@@ -14,6 +14,8 @@ pub const Cache = struct {
     zoom: f32 = 1,
     center: @import("nanoui").ui.Point = .{ .x = 0.5, .y = 0.5 },
     drag: ?@import("nanoui").ui.Point = null,
+    inspection: @import("image_inspection.zig").State = .{},
+    focus_scope: @import("preview_focus.zig").State = .{},
 
     pub fn deinit(cache: *Cache, gpa: std.mem.Allocator) void {
         if (cache.preview_chat) |chat| gpa.free(chat);

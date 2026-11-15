@@ -10,10 +10,10 @@
 //! Attachments live only on the host device — every read proxies through the
 //! owning device via `ReadAttachmentChunk`; nothing is mirrored to the edge.
 //!
-//! `read_chunk` serves transcript images back in 45KB base64 chunks. Path jail:
-//! only files under the uploads dir or a workspace-known chat cwd are readable
-//! (the RPC layer supplies the cwd roots) — and only supported image types, as
-//! in harness.
+//! `read_chunk` serves transcript images and explicitly opened media artifacts
+//! in 45KB base64 chunks. Only files under the uploads dir or a workspace-known
+//! chat cwd are readable (the RPC layer supplies roots). The allowlist excludes
+//! executable and HTML content; opening never bypasses the canonical path jail.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -190,7 +190,10 @@ impl Uploads {
             let Ok(real) = std::fs::canonicalize(&path) else {
                 continue;
             };
-            if real.is_file() && roots.iter().any(|root| real.starts_with(root)) && !seen.contains(&real) {
+            if real.is_file()
+                && roots.iter().any(|root| real.starts_with(root))
+                && !seen.contains(&real)
+            {
                 seen.push(real);
                 out.push(path);
             }
@@ -410,8 +413,9 @@ impl Uploads {
         if meta.len() > MAX_BYTES {
             return Err(EngineError::Other("Attachment is too large".into()));
         }
-        let mime_type = mime_by_ext(&resolved)
-            .ok_or_else(|| EngineError::Other("Attachment is not a supported image".into()))?;
+        let mime_type = mime_by_ext(&resolved).ok_or_else(|| {
+            EngineError::Other("Attachment is not a supported image, video or PDF".into())
+        })?;
         Ok(InspectedFile {
             name: resolved
                 .file_name()
@@ -500,6 +504,11 @@ fn mime_by_ext(path: &Path) -> Option<&'static str> {
         "tif" | "tiff" => Some("image/tiff"),
         "avif" => Some("image/avif"),
         "heic" => Some("image/heic"),
+        "ico" => Some("image/x-icon"),
+        "mp4" | "m4v" => Some("video/mp4"),
+        "mov" => Some("video/quicktime"),
+        "webm" => Some("video/webm"),
+        "pdf" => Some("application/pdf"),
         _ => None,
     }
 }
@@ -526,7 +535,11 @@ mod tests {
         );
         let owned = uploads.owned_attachments(&prompt);
         assert_eq!(owned, [inside.to_string_lossy().into_owned()]);
-        assert!(uploads.owned_attachments("no trailer - /etc/passwd").is_empty());
+        assert!(
+            uploads
+                .owned_attachments("no trailer - /etc/passwd")
+                .is_empty()
+        );
     }
     use super::*;
 
@@ -535,6 +548,65 @@ mod tests {
         assert_eq!(sanitize("../../etc/passwd"), "passwd");
         assert_eq!(sanitize("my photo (1).png"), "my_photo__1_.png");
         assert_eq!(sanitize(""), "upload");
+    }
+
+    #[test]
+    fn artifact_reads_serve_media_inside_known_cwd_and_keep_the_path_jail() {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = home.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let uploads = Uploads::from_root(&home.path().join("uploads"));
+        let cases: &[(&str, &str, &[u8])] = &[
+            ("mp4", "video/mp4", b"\0\0\0\x18ftypisom"),
+            ("mov", "video/quicktime", b"\0\0\0\x18ftypqt  "),
+            ("m4v", "video/mp4", b"\0\0\0\x18ftypM4V "),
+            ("webm", "video/webm", b"\x1a\x45\xdf\xa3synthetic"),
+            ("gif", "image/gif", b"GIF89a"),
+            ("pdf", "application/pdf", b"%PDF-1.7"),
+        ];
+        for &(extension, mime, bytes) in cases {
+            let path = workspace.join(format!("synthetic.{extension}"));
+            std::fs::write(&path, bytes).unwrap();
+            let chunk = uploads
+                .read_chunk(path.to_str().unwrap(), 0, std::slice::from_ref(&workspace))
+                .unwrap();
+            assert_eq!(chunk.mime_type, mime);
+            assert_eq!(BASE64.decode(&chunk.data).unwrap(), bytes);
+            assert_eq!(chunk.next_offset, bytes.len() as u64);
+            assert!(chunk.done);
+        }
+        let outside = home.path().join("outside.mp4");
+        std::fs::write(&outside, b"\0\0\0\x18ftypisom").unwrap();
+        assert!(
+            uploads
+                .read_chunk(
+                    outside.to_str().unwrap(),
+                    0,
+                    std::slice::from_ref(&workspace)
+                )
+                .is_err()
+        );
+        let executable = workspace.join("not-media.html");
+        std::fs::write(&executable, b"<script>untrusted</script>").unwrap();
+        assert!(
+            uploads
+                .read_chunk(
+                    executable.to_str().unwrap(),
+                    0,
+                    std::slice::from_ref(&workspace)
+                )
+                .is_err()
+        );
+        #[cfg(unix)]
+        {
+            let escape = workspace.join("symlink.mp4");
+            std::os::unix::fs::symlink(&outside, &escape).unwrap();
+            assert!(
+                uploads
+                    .read_chunk(escape.to_str().unwrap(), 0, &[workspace])
+                    .is_err()
+            );
+        }
     }
 
     #[test]

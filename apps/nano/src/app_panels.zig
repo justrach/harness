@@ -236,8 +236,22 @@ pub fn chatsArrived(a: *App) void {
 // ── the surface pane ─────────────────────────────────────────────────
 
 pub fn toggleHost(a: *App) void {
-    a.panels.host_open = !a.panels.host_open;
-    if (a.panels.host_open) showTab(a, a.panels.active);
+    const github = @import("app_github_repository.zig");
+    const is_github = github.surface(a);
+    const owner = a.panels.github_repository.owner;
+    const reparent = is_github and a.selected != null and (owner == null or !std.mem.eql(u8, owner.?, a.selected.?));
+    if (reparent) {
+        // Cmd+R is an explicit open from this chat, unlike ordinary split
+        // focus changes or restoring the host's existing tab.
+        const repository_open = a.panels.github_repository.open;
+        github.bind(a);
+        a.panels.host_open = true;
+        if (repository_open) github.show(a);
+    } else a.panels.host_open = !a.panels.host_open;
+    if (a.panels.host_open) {
+        if (is_github) a.view.strip.focused = .host;
+        showTab(a, a.panels.active);
+    } else if (is_github) a.view.strip.focused = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
     a.redraw();
 }
 
