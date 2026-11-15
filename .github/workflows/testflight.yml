@@ -79,7 +79,8 @@ jobs:
             -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath "$RUNNER_TEMP/DerivedData" \
             -IDEPackageSupportDisableManifestSandbox=YES \
-            CODE_SIGNING_ALLOWED=NO build-for-testing
+            -IDEPackageSupportDisablePluginExecutionSandbox=YES \
+            SWIFTC_DISABLE_SANDBOX=YES CODE_SIGNING_ALLOWED=NO build-for-testing
 
       - name: Verify mobile contracts and privacy consent
         working-directory: apps/ios
@@ -91,6 +92,7 @@ jobs:
             -destination "platform=iOS Simulator,id=$simulator_id" \
             -derivedDataPath "$RUNNER_TEMP/DerivedData" \
             -IDEPackageSupportDisableManifestSandbox=YES \
+            -IDEPackageSupportDisablePluginExecutionSandbox=YES \
             -only-testing:HarnessTests/ParityTests \
             -only-testing:HarnessTests/PerfMonitorTests \
             -only-testing:HarnessTests/PerfResourcesTests \
@@ -99,7 +101,7 @@ jobs:
             -only-testing:HarnessTests/LivePerfTests \
             -only-testing:HarnessTests/TranscriptScrollMatrixTests \
             -only-testing:HarnessTests/BrandMarkTests \
-            CODE_SIGNING_ALLOWED=NO test
+            SWIFTC_DISABLE_SANDBOX=YES CODE_SIGNING_ALLOWED=NO test
 
   upload:
     needs: verify
