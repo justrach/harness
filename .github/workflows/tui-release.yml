@@ -33,6 +33,26 @@ permissions:
   contents: write
 
 jobs:
+  macos-runner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      label: ${{ steps.pick.outputs.label }}
+    steps:
+      - id: pick
+        env:
+          HEARTBEAT: ${{ vars.HARNESS_MAC_HEARTBEAT }}
+          SAME_REPO: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+        run: |
+          now=$(date +%s)
+          if [ "$SAME_REPO" = "true" ] && [[ "$HEARTBEAT" =~ ^[0-9]+$ ]] && [ $((now - HEARTBEAT)) -lt 150 ]; then
+            echo "label=harness-macos-arm64" >> "$GITHUB_OUTPUT"
+            echo "Routing macOS job to local M3 worker (heartbeat $((now - HEARTBEAT))s old)"
+          else
+            echo "label=macos-latest" >> "$GITHUB_OUTPUT"
+            echo "Routing macOS job to GitHub cloud macos-latest (same_repo=$SAME_REPO, heartbeat=${HEARTBEAT:-unset})"
+          fi
+
   # The wrapper's self-update, against a fake release over file:// (no build, a few seconds).
   wrapper:
     runs-on: ubuntu-latest
@@ -41,6 +61,7 @@ jobs:
       - run: tui/tests/self-update.sh
 
   build:
+    needs: macos-runner
     strategy:
       fail-fast: false
       matrix:
@@ -48,7 +69,7 @@ jobs:
           - runner: macos-latest # Apple silicon
           - runner: ubuntu-24.04 # x86_64
           - runner: ubuntu-24.04-arm # aarch64
-    runs-on: ${{ matrix.runner == 'macos-latest' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'harness-macos-arm64' || matrix.runner }}
+    runs-on: ${{ matrix.runner == 'macos-latest' && (needs.macos-runner.outputs.label || 'macos-latest') || matrix.runner }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
