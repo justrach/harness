@@ -68,9 +68,9 @@ const CLAUDE_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const CLAUDE_REDIRECT: &str = "https://console.anthropic.com/oauth/code/callback";
 const CLAUDE_SCOPES: &str = "org:create_api_key user:profile user:inference";
 const CLAUDE_TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
-const CLAUDE_PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
-const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
-const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
+pub(crate) const CLAUDE_PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
+pub(crate) const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+pub(crate) const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 /// The Cursor dashboard's current-period usage RPC (Connect-style POST).
 const CURSOR_CURRENT_PERIOD_USAGE: &str = "aiserver.v1.DashboardService/GetCurrentPeriodUsage";
 const CURSOR_DEFAULT_BACKEND: &str = "https://api2.cursor.sh";
@@ -86,7 +86,7 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-fn claude_endpoint(url: &'static str) -> String {
+pub(crate) fn claude_endpoint(url: &'static str) -> String {
     #[cfg(test)]
     if let Some(base) = CLAUDE_ENDPOINT_OVERRIDE.with(|base| base.borrow().clone()) {
         let path = url.splitn(4, '/').nth(3).unwrap_or_default();
@@ -106,7 +106,7 @@ const CLAUDE_SHARED_CREDENTIAL_KEYS: &[&str] = &[
     "pluginSecrets",
 ];
 
-const USAGE_TTL: Duration = Duration::from_secs(60);
+pub(crate) const USAGE_TTL: Duration = Duration::from_secs(60);
 /// An abandoned login flow (dialog dismissed without Cancel) is reaped past this.
 const FLOW_TTL: Duration = Duration::from_secs(15 * 60);
 /// How long a relayed sign-in may take to finish once its redirect reaches
@@ -310,16 +310,21 @@ impl LoginFlow {
 // ── service ─────────────────────────────────────────────────────────────────
 
 /// Cached usage probe result: the windows (or a remembered miss) + fetch time.
-type CachedUsage = (Option<UsageSnapshot>, Instant);
+pub(crate) type CachedUsage = (Option<UsageSnapshot>, Instant);
 
 /// One live usage probe: rate-limit windows plus the plan label the provider
 /// reported alongside them (Codex's usage endpoint carries a live `plan_type`,
 /// which supersedes the login-time JWT claim — plan changes show up here
 /// without a re-login). Claude's usage endpoint has no plan field.
 #[derive(Clone, Default)]
-struct UsageSnapshot {
-    windows: Vec<AgentUsageWindow>,
-    plan_label: Option<String>,
+pub(crate) struct UsageSnapshot {
+    pub(crate) windows: Vec<AgentUsageWindow>,
+    pub(crate) plan_label: Option<String>,
+    pub(crate) prepaid_cents: Option<i64>,
+    pub(crate) reset_credits: Option<f64>,
+    pub(crate) account: Option<String>,
+    pub(crate) display_name: Option<String>,
+    pub(crate) organization: Option<String>,
 }
 
 struct Inner {
@@ -342,7 +347,7 @@ struct Inner {
     inflight_refreshes: Mutex<std::collections::HashSet<String>>,
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -1083,7 +1088,54 @@ impl AgentAccounts {
 
     /// graff's sign-in providers on this device, and whether each has a login.
     pub fn list_graff_logins(&self) -> Vec<GraffLoginProvider> {
-        graff_logins::list(&self.inner.config.graff_home)
+        graff_logins::list_with_claude_config(
+            &self.inner.config.graff_home,
+            Some(&self.inner.config.claude_config_file),
+        )
+    }
+
+    /// graff's sign-in providers with account identity and cached/live usage windows.
+    pub async fn list_graff_logins_with_usage(
+        &self,
+        force_usage: bool,
+    ) -> Vec<GraffLoginProvider> {
+        crate::graff_usage::list_with_usage(self, force_usage).await
+    }
+
+    pub(crate) fn http(&self) -> &reqwest::Client {
+        &self.inner.http
+    }
+
+    pub(crate) fn config(&self) -> &AgentAccountsConfig {
+        &self.inner.config
+    }
+
+    pub(crate) fn usage_cache(&self) -> &Mutex<HashMap<String, CachedUsage>> {
+        &self.inner.usage_cache
+    }
+
+    /// Read-only lookup of a cached Claude Code usage snapshot for `claude-agent`,
+    /// never touching Claude Code's single-use refresh token.
+    pub(crate) fn cached_claude_usage(&self, account_hint: Option<&str>) -> Option<UsageSnapshot> {
+        let cfg = read_json(&self.inner.config.claude_config_file);
+        let oauth = cfg.as_ref().and_then(|c| c.get("oauthAccount"));
+        let live_email = oauth.and_then(|o| str_field(o, "emailAddress"));
+        let key_part = oauth
+            .and_then(|o| str_field(o, "accountUuid"))
+            .or_else(|| live_email.clone());
+        let cache = lock(&self.inner.usage_cache);
+        if let Some(part) = key_part
+            && account_hint.is_none_or(|hint| {
+                live_email
+                    .as_deref()
+                    .is_some_and(|e| e.eq_ignore_ascii_case(hint))
+            })
+            && let Some((usage, at)) = cache.get(&format!("claude-code:{part}"))
+            && at.elapsed() < USAGE_TTL
+        {
+            return usage.clone();
+        }
+        None
     }
 
     /// Sign out of one graff provider by removing its credential file. A
@@ -1099,6 +1151,7 @@ impl AgentAccounts {
         provider: &str,
     ) -> Result<Vec<GraffLoginProvider>, EngineError> {
         self.reap_graff_flows(provider);
+        lock(&self.inner.usage_cache).retain(|k, _| !k.starts_with(&format!("graff:{provider}:")));
         if provider == "chatgpt-new" {
             self.graff_logout(provider).await?;
             return Ok(self.list_graff_logins());
@@ -2292,6 +2345,7 @@ impl AgentAccounts {
         Some(UsageSnapshot {
             windows,
             plan_label,
+            ..Default::default()
         })
     }
 
@@ -2337,6 +2391,7 @@ impl AgentAccounts {
         cursor_usage_window(&body).map(|window| UsageSnapshot {
             windows: vec![window],
             plan_label: None,
+            ..Default::default()
         })
     }
 
@@ -2540,14 +2595,14 @@ fn harness_slug(harness: HarnessId) -> &'static str {
     }
 }
 
-fn read_json(file: &Path) -> Option<serde_json::Value> {
+pub(crate) fn read_json(file: &Path) -> Option<serde_json::Value> {
     let raw = std::fs::read_to_string(file).ok()?;
     serde_json::from_str(&raw)
         .ok()
         .filter(serde_json::Value::is_object)
 }
 
-fn str_field(value: &serde_json::Value, key: &str) -> Option<String> {
+pub(crate) fn str_field(value: &serde_json::Value, key: &str) -> Option<String> {
     value
         .get(key)
         .and_then(|v| v.as_str())
@@ -2557,7 +2612,7 @@ fn str_field(value: &serde_json::Value, key: &str) -> Option<String> {
 
 /// Decode a JWT payload without verifying — we only mine identity claims from a
 /// token the user's own CLI already trusts.
-fn jwt_claims(jwt: &str) -> Option<serde_json::Value> {
+pub(crate) fn jwt_claims(jwt: &str) -> Option<serde_json::Value> {
     let payload = jwt.split('.').nth(1)?;
     let bytes = BASE64_URL
         .decode(payload)
@@ -2572,7 +2627,7 @@ fn slot_id_for(harness: HarnessId, account_key: &str) -> String {
 }
 
 /// Pretty plan label from Claude's org type + rate-limit tier ("Max 20×").
-fn claude_plan(org_type: Option<&str>, tier: Option<&str>) -> Option<String> {
+pub(crate) fn claude_plan(org_type: Option<&str>, tier: Option<&str>) -> Option<String> {
     let base = match org_type {
         Some("claude_max") => "Max",
         Some("claude_pro") => "Pro",
@@ -2601,7 +2656,7 @@ fn claude_plan(org_type: Option<&str>, tier: Option<&str>) -> Option<String> {
     })
 }
 
-fn codex_plan(plan: Option<&str>) -> Option<String> {
+pub(crate) fn codex_plan(plan: Option<&str>) -> Option<String> {
     let plan = plan?;
     let mut chars = plan.chars();
     let first = chars.next()?;
@@ -2617,7 +2672,7 @@ fn codex_plan(plan: Option<&str>) -> Option<String> {
 /// primary (~18_000s) with a weekly secondary (604_800s). A bare "> 1 day =
 /// week" rule mislabeled the monthly window "Week"; thresholds in seconds
 /// leave the middle gaps to the nearest label rather than guessing a plan.
-fn codex_window_label(span_seconds: i64) -> &'static str {
+pub(crate) fn codex_window_label(span_seconds: i64) -> &'static str {
     const DAY: i64 = 86_400;
     if span_seconds >= 28 * DAY {
         "Month"
@@ -2792,7 +2847,7 @@ fn cursor_key_usable(auth: &serde_json::Value) -> bool {
             .is_none_or(|ms| ms > now_ms())
 }
 
-fn parse_when(value: Option<&serde_json::Value>) -> Option<DateTime<Utc>> {
+pub(crate) fn parse_when(value: Option<&serde_json::Value>) -> Option<DateTime<Utc>> {
     match value? {
         serde_json::Value::Number(n) => DateTime::<Utc>::from_timestamp(n.as_i64()?, 0),
         serde_json::Value::String(s) => DateTime::parse_from_rfc3339(s)
@@ -2837,9 +2892,20 @@ fn may_refresh_claude_slot(slot: &Slot, live: Option<&Detected>) -> bool {
     }
 }
 
-fn claude_usage_windows(body: &serde_json::Value) -> Option<UsageSnapshot> {
+pub(crate) fn claude_usage_windows(body: &serde_json::Value) -> Option<UsageSnapshot> {
     let mut windows = Vec::new();
-    for (key, label) in [("five_hour", "Session"), ("seven_day", "Week")] {
+    for (key, label) in [
+        ("five_hour", "Session"),
+        ("seven_day", "Week"),
+        ("seven_day_opus", "Opus"),
+        ("seven_day_sonnet", "Sonnet"),
+        ("seven_day_haiku", "Haiku"),
+        ("fable", "Fable"),
+        ("seven_day_fable", "Fable"),
+    ] {
+        if label == "Fable" && windows.iter().any(|w: &AgentUsageWindow| w.label == "Fable") {
+            continue;
+        }
         if let Some(w) = body.get(key)
             && let Some(utilization) = w.get("utilization").and_then(|v| v.as_f64())
         {
@@ -2853,6 +2919,7 @@ fn claude_usage_windows(body: &serde_json::Value) -> Option<UsageSnapshot> {
     (!windows.is_empty()).then_some(UsageSnapshot {
         windows,
         plan_label: None,
+        ..Default::default()
     })
 }
 
@@ -3503,6 +3570,36 @@ mod tests {
         // the UI then says "Usage unavailable" instead of showing nothing.
         assert!(claude_usage_windows(&serde_json::json!({ "extra_usage": {} })).is_none());
         assert!(claude_usage_windows(&serde_json::json!({ "five_hour": {} })).is_none());
+    }
+
+    #[test]
+    fn claude_usage_windows_include_model_and_deduplicated_fable() {
+        let body = serde_json::json!({
+            "five_hour": { "utilization": 10.0 },
+            "seven_day": { "utilization": 20.0 },
+            "seven_day_opus": { "utilization": 30.0 },
+            "seven_day_sonnet": { "utilization": 40.0 },
+            "seven_day_haiku": { "utilization": 50.0 },
+            "fable": { "utilization": 85.0, "resets_at": "2026-04-14T16:59:59Z" },
+            "seven_day_fable": { "utilization": 12.0 },
+        });
+        let snapshot = claude_usage_windows(&body).expect("windows");
+        let pairs: Vec<_> = snapshot
+            .windows
+            .iter()
+            .map(|w| (w.label.as_str(), (w.used_fraction * 100.0).round() as i32))
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                ("Session", 10),
+                ("Week", 20),
+                ("Opus", 30),
+                ("Sonnet", 40),
+                ("Haiku", 50),
+                ("Fable", 85),
+            ]
+        );
     }
 
     #[test]

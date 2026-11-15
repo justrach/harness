@@ -711,6 +711,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
         // folding a rolling log into the chip is the rejected live tail above.
         AgentEvent::AssistantMessageCompleted { .. }
         | AgentEvent::Usage { .. }
+        | AgentEvent::PlanUsage { .. }
         | AgentEvent::ContextUsage { .. }
         | AgentEvent::ContextSavings { .. }
         | AgentEvent::AvailableCommands { .. }

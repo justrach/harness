@@ -1059,14 +1059,14 @@ pub const CHATGPT_PLAN_CONFIRMATION: &str = "You're using your ChatGPT plan";
 pub const CHATGPT_PLAN_OFF: &str = "Signed in to ChatGPT, but plan usage is off. Continue with ChatGPT again and allow plan usage, or use an API key.";
 
 /// One graff sign-in provider on a device (`ListGraffLogins` row).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GraffLoginProvider {
     pub id: String,
     pub name: String,
     /// Ready to use. For ChatGPT that means signed in with plan usage granted.
     pub signed_in: bool,
-    /// ChatGPT: the signed-in account, when graff's record names one.
+    /// Signed-in account identifier (typically email), when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
     /// ChatGPT: whether the stored sign-in was granted plan usage. `None` when
@@ -1074,6 +1074,24 @@ pub struct GraffLoginProvider {
     /// plan usage off, which can't run requests on the plan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_usage: Option<bool>,
+    /// Optional human display name extracted from local credentials/profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Organization or workspace name for the signed-in account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization: Option<String>,
+    /// Subscription/plan tier label (e.g., `Plus`, `SuperGrok Heavy`, `Max`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_label: Option<String>,
+    /// Remaining/used plan quota windows for this provider, if known.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub usage_windows: Vec<AgentUsageWindow>,
+    /// Prepaid credit balance in cents (e.g., xAI billing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepaid_cents: Option<i64>,
+    /// Monthly reset credit allocation, when reported separately from percentage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_credits: Option<f64>,
 }
 
 /// CLI plan rate-limit window (accounts settings meters) — NOT app token accounting.
@@ -1084,6 +1102,30 @@ pub struct AgentUsageWindow {
     /// 0.0..=1.0
     pub used_fraction: f32,
     pub resets_at: Option<DateTime<Utc>>,
+}
+
+impl AgentUsageWindow {
+    /// Construct a usage window from a 0..=100 percent and optional Unix reset
+    /// timestamp (or relative `reset_after_seconds` from now).
+    pub fn from_percent_and_unix(
+        label: impl Into<String>,
+        used_percent: f64,
+        resets_at_unix: Option<i64>,
+        reset_after_seconds: Option<i64>,
+    ) -> Self {
+        let resets_at = resets_at_unix
+            .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0))
+            .or_else(|| {
+                reset_after_seconds
+                    .filter(|secs| *secs >= 0)
+                    .map(|secs| Utc::now() + chrono::Duration::seconds(secs))
+            });
+        Self {
+            label: label.into(),
+            used_fraction: (used_percent.clamp(0.0, 100.0) / 100.0) as f32,
+            resets_at,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

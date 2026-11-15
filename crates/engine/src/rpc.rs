@@ -4014,7 +4014,19 @@ impl RpcService for EngineRpc {
                 .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&start)
             }
-            methods::LIST_GRAFF_LOGINS => RpcReply::value(&self.agent_accounts.list_graff_logins()),
+            methods::LIST_GRAFF_LOGINS => {
+                let p: ListAgentAccountsParams = if params.is_null() {
+                    ListAgentAccountsParams { force_usage: None }
+                } else {
+                    parse_params(params)?
+                };
+                RpcReply::value(
+                    &self
+                        .agent_accounts
+                        .list_graff_logins_with_usage(p.force_usage.unwrap_or(false))
+                        .await,
+                )
+            }
             methods::LIST_MCP_SERVERS => {
                 let p: ListMcpServersParams = parse_params(params)?;
                 let home = self.agent_accounts.graff_home();

@@ -3792,6 +3792,9 @@ async fn drive_run(
             }
             continue;
         }
+        if matches!(&event, AgentEvent::PlanUsage { .. }) {
+            continue;
+        }
         if let AgentEvent::ReasoningChanged { reasoning } = &event {
             let current_run = lock(&inner.runs)
                 .get(&chat_id)

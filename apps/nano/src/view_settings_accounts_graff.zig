@@ -31,23 +31,52 @@ fn graffProviderIcon(provider: ?[]const u8) ?icons.Name {
     return null;
 }
 
-/// One graff sign-in (`render_graff_row`): avatar, name and line, Signed
-/// in, then sign-out and the sign-in button for a provider of graff's own.
-fn graffRow(c: *ui.Context, a: *App, k: theme.Colors, first: bool, provider: ?[]const u8, name: []const u8, status: []const u8, signed_in: bool) GraffAction {
+/// One graff sign-in (`render_graff_row`): avatar, name, subtitle and optional
+/// usage meters, plan/Signed-in badges, then sign-out and sign-in button.
+fn graffRow(
+    c: *ui.Context,
+    a: *App,
+    k: theme.Colors,
+    first: bool,
+    provider: ?[]const u8,
+    name: []const u8,
+    status: []const u8,
+    signed_in: bool,
+    plan_label: ?[]const u8,
+    windows: []const accounts.Window,
+    now_ms: i64,
+) GraffAction {
     const p = &a.view.accounts;
     var out: GraffAction = .none;
     const busy = if (provider) |id| page.eqOpt(p.busy_graff, id) else false;
     const label: []const u8 = if (provider != null and std.mem.eql(u8, provider.?, "chatgpt-new")) "Continue with ChatGPT" else if (signed_in) "Sign in again" else "Sign in";
+    const has_meters = signed_in and windows.len > 0;
     if (!first) rows.line(c, k);
-    const r = ui.div(c).row().wFull().px(20).py(14).gap(12).itemsCenter();
+    var r = ui.div(c).row().wFull().px(20).py(14).gap(12);
+    r = if (has_meters) r.itemsStretch() else r.itemsCenter();
     defer r.end();
-    if (graffProviderIcon(provider)) |mark| {
-        const b = ui.div(c).row().size(32, 32).center().roundedFull().border(k.border).borderW(1).bg(k.ink(0.03));
-        defer b.end();
-        icons.icon(c, mark, 18, k.muted, 0);
-    } else rows.avatar(c, k, name);
-    var right_w: f32 = if (signed_in) rows.badgeActiveW(c, "Signed in") else 0;
-    if (provider != null) right_w += (if (signed_in) @as(f32, 8 + rows.trash_w + 4) else 0) + rows.primaryW(c, label);
+    {
+        const av = ui.div(c).column().justifyCenter();
+        defer av.end();
+        if (graffProviderIcon(provider)) |mark| {
+            const b = ui.div(c).row().size(32, 32).center().roundedFull().border(k.border).borderW(1).bg(k.ink(0.03));
+            defer b.end();
+            icons.icon(c, mark, 18, k.muted, 0);
+        } else rows.avatar(c, k, name);
+    }
+    var badges_w: f32 = 0;
+    if (signed_in) {
+        if (plan_label) |pl| badges_w += rows.badgeW(c, pl) + 6;
+        badges_w += rows.badgeActiveW(c, "Signed in");
+    }
+    const actions_w: f32 = if (provider != null)
+        (if (signed_in) @as(f32, rows.trash_w + 4) else 0) + rows.primaryW(c, label)
+    else
+        0;
+    const right_w: f32 = if (has_meters)
+        @max(badges_w, actions_w)
+    else
+        badges_w + (if (badges_w > 0 and actions_w > 0) @as(f32, 8) else 0) + actions_w;
     const w = rows.rowInner() - 32 - 12 - 12 - right_w;
     {
         const col = ui.div(c).column().grow().w(0);
@@ -55,26 +84,59 @@ fn graffRow(c: *ui.Context, a: *App, k: theme.Colors, first: bool, provider: ?[]
         rows.title(c, k, name, w);
         set.space(c, 4);
         kit.ellipsisText(c, status, st(c, 11.5, .{ .color = k.muted.alpha(0.6) }), w);
+        if (has_meters) {
+            set.space(c, 8);
+            const ms = ui.div(c).column().gap(7);
+            defer ms.end();
+            for (windows, 0..) |win, i| {
+                ui.key(c, c.print("graff-meter-{d}", .{i}));
+                rows.meter(c, k, win, w, now_ms);
+            }
+        }
     }
-    const right = ui.div(c).row().gap(8).itemsCenter();
-    defer right.end();
-    if (signed_in) rows.badgeActive(c, k, "Signed in");
-    if (provider != null) {
-        const acts = ui.div(c).row().gap(4).itemsCenter();
-        defer acts.end();
-        if (signed_in) if (rows.trash(c, k, busy)) {
-            out = .sign_out;
-        };
-        if (rows.primary(c, k, label, busy)) out = .sign_in;
+    if (has_meters) {
+        const right = ui.div(c).column().itemsEnd().justifyBetween().gap(8);
+        defer right.end();
+        {
+            const b = ui.div(c).row().gap(6).itemsCenter();
+            defer b.end();
+            if (plan_label) |pl| rows.badge(c, k, pl);
+            rows.badgeActive(c, k, "Signed in");
+        }
+        if (provider != null) {
+            const acts = ui.div(c).row().gap(4).itemsCenter();
+            defer acts.end();
+            if (rows.trash(c, k, busy)) out = .sign_out;
+            if (rows.primary(c, k, label, busy)) out = .sign_in;
+        }
+    } else {
+        const right = ui.div(c).row().gap(8).itemsCenter();
+        defer right.end();
+        if (signed_in) {
+            const b = ui.div(c).row().gap(6).itemsCenter();
+            defer b.end();
+            if (plan_label) |pl| rows.badge(c, k, pl);
+            rows.badgeActive(c, k, "Signed in");
+        }
+        if (provider != null) {
+            const acts = ui.div(c).row().gap(4).itemsCenter();
+            defer acts.end();
+            if (signed_in) if (rows.trash(c, k, busy)) {
+                out = .sign_out;
+            };
+            if (rows.primary(c, k, label, busy)) out = .sign_in;
+        }
     }
     return out;
 }
 
 /// graff's ChatGPT (plan) sign-in, separate from the legacy Codex one
 /// (`render_chatgpt_section`).
-pub fn chatgpt(c: *ui.Context, a: *App, k: theme.Colors) void {
+pub fn chatgpt(c: *ui.Context, a: *App, k: theme.Colors, now_ms: i64) void {
     const p = &a.view.accounts;
-    const row = accounts.Chatgpt.fromListing(p.graff.get());
+    const listing = p.graff.get();
+    const row = accounts.Chatgpt.fromListing(listing);
+    const cg_login = accounts.Chatgpt.rowFromListing(listing);
     set.space(c, 24);
     {
         const h = ui.div(c).row().gap(8).itemsCenter();
@@ -88,16 +150,18 @@ pub fn chatgpt(c: *ui.Context, a: *App, k: theme.Colors) void {
     {
         const cd = rows.card(c, k, 0);
         defer cd.end();
-        chatgptCard(c, a, k, row);
+        chatgptCard(c, a, k, row, cg_login, now_ms);
     }
     // graffRow already paints this row's top border inside the card.
     // Painting an extra rail over it applies the translucent color twice.
 }
 
-fn chatgptCard(c: *ui.Context, a: *App, k: theme.Colors, row: accounts.Chatgpt) void {
+fn chatgptCard(c: *ui.Context, a: *App, k: theme.Colors, row: accounts.Chatgpt, login_row: ?accounts.GraffLogin, now_ms: i64) void {
     const p = &a.view.accounts;
     var buf: [512]u8 = undefined;
-    switch (graffRow(c, a, k, true, "chatgpt-new", "ChatGPT", c.print("{s}", .{row.status(&buf)}), row == .ready)) {
+    const plan = if (login_row) |lr| lr.plan_label else null;
+    const wins = if (login_row) |lr| lr.usage_windows else &.{};
+    switch (graffRow(c, a, k, true, "chatgpt-new", "ChatGPT", c.print("{s}", .{row.status(&buf)}), row == .ready, plan, wins, now_ms)) {
         .sign_in => login.begin(a, .graff, "chatgpt-new"),
         .sign_out => page.signOutGraff(a, "chatgpt-new"),
         .none => {},
@@ -138,7 +202,7 @@ fn chatgptCard(c: *ui.Context, a: *App, k: theme.Colors, row: accounts.Chatgpt) 
 
 /// graff's other sign-ins, with the legacy shared Codex login second
 /// (`render_graff_logins_section`).
-pub fn providers(c: *ui.Context, a: *App, k: theme.Colors) void {
+pub fn providers(c: *ui.Context, a: *App, k: theme.Colors, now_ms: i64) void {
     const p = &a.view.accounts;
     set.space(c, 24);
     {
@@ -158,10 +222,10 @@ pub fn providers(c: *ui.Context, a: *App, k: theme.Colors) void {
             list.insert(c.alloc(), @min(list.items.len, 1), null) catch {};
             const snap = p.snapshot.get();
             for (list.items, 0..) |entry, ix| {
-                var buf: [256]u8 = undefined;
+                var buf: [512]u8 = undefined;
                 if (entry) |g| {
                     ui.key(c, c.print("graff-login-{s}", .{g.id}));
-                    switch (graffRow(c, a, k, ix == 0, g.id, g.name, c.print("{s}", .{accounts.graffStatus(&buf, g)}), g.signed_in)) {
+                    switch (graffRow(c, a, k, ix == 0, g.id, g.name, c.print("{s}", .{accounts.graffStatus(&buf, g)}), g.signed_in, g.plan_label, g.usage_windows, now_ms)) {
                         .sign_in => login.begin(a, .graff, g.id),
                         .sign_out => page.signOutGraff(a, g.id),
                         .none => {},
@@ -169,7 +233,7 @@ pub fn providers(c: *ui.Context, a: *App, k: theme.Colors) void {
                 } else {
                     ui.key(c, "graff-login-codex");
                     const signed = if (snap) |s| accounts.openaiLogin(s).signed_in else false;
-                    _ = graffRow(c, a, k, ix == 0, null, "ChatGPT (old Codex)", c.print("{s}", .{accounts.openaiStatus(&buf, snap)}), signed);
+                    _ = graffRow(c, a, k, ix == 0, null, "ChatGPT (old Codex)", c.print("{s}", .{accounts.openaiStatus(&buf, snap)}), signed, null, &.{}, now_ms);
                 }
             }
         },
