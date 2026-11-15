@@ -32,6 +32,7 @@ pub const Draft = struct {
     harness: []u8,
     model: ?[]u8 = null,
     reasoning: ?[]u8 = null,
+    orchestrator: ?[]u8 = null,
     /// The project it starts in.
     space: ?[]u8 = null,
     no_project: bool = false,
@@ -46,7 +47,7 @@ pub const Draft = struct {
     pub fn deinit(d: *Draft, gpa: Allocator) void {
         gpa.free(d.text);
         gpa.free(d.harness);
-        inline for (.{ "model", "reasoning", "space", "device", "ref", "completion" }) |f| if (@field(d, f)) |x| gpa.free(x);
+        inline for (.{ "model", "reasoning", "orchestrator", "space", "device", "ref", "completion" }) |f| if (@field(d, f)) |x| gpa.free(x);
     }
 
     /// An independent owned copy, including the exact unsent prompt.
@@ -71,7 +72,7 @@ pub const Draft = struct {
         out.no_project = d.no_project;
         // Fresh siblings default to isolation and host-selected base. Git
         // picks are canvas-owned, not inherited from the old shared checkout.
-        inline for (.{ "model", "reasoning", "space", "device" }) |f| if (@field(d, f)) |x| {
+        inline for (.{ "model", "reasoning", "orchestrator", "space", "device" }) |f| if (@field(d, f)) |x| {
             @field(out, f) = try gpa.dupe(u8, x);
         };
         return out;

@@ -24,6 +24,7 @@ pub const Stage = struct {
     model: []u8,
     /// Index into the model's levels; null for the model's default.
     level: ?usize = null,
+    orchestrator: ?[]u8 = null,
     error_text: ?[]const u8 = null,
     compact: bool = false,
     fast: bool = false,
@@ -154,6 +155,7 @@ pub const State = struct {
         if (s.stage) |st| {
             s.retired_strings.append(gpa, st.harness) catch gpa.free(st.harness);
             s.retired_strings.append(gpa, st.model) catch gpa.free(st.model);
+            if (st.orchestrator) |orch| s.retired_strings.append(gpa, orch) catch gpa.free(orch);
         }
         s.stage = null;
         s.dragging = false;
@@ -237,6 +239,8 @@ pub fn copyModels(to: *workspace.Models, models: []const workspace.Model) !void 
         n.maker = if (m.maker) |v| try gpa.dupe(u8, v) else null;
         n.billing = if (m.billing) |v| try gpa.dupe(u8, v) else null;
         n.reasoning_default = if (m.reasoning_default) |v| try gpa.dupe(u8, v) else null;
+        n.orchestrator_supported = m.orchestrator_supported;
+        n.orchestrator_default = if (m.orchestrator_default) |v| try gpa.dupe(u8, v) else null;
         const levels = try gpa.alloc([]const u8, m.levels.len);
         for (m.levels, levels) |v, *l| l.* = try gpa.dupe(u8, v);
         n.levels = levels;
