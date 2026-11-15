@@ -31,8 +31,75 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  macos-runner:
+    if: github.ref == 'refs/heads/main' && inputs.ci_certificates != 'list'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      label: ${{ steps.pick.outputs.label }}
+    steps:
+      - id: pick
+        env:
+          HEARTBEAT: ${{ vars.HARNESS_MAC_HEARTBEAT }}
+        run: |
+          now=$(date +%s)
+          if [[ "$HEARTBEAT" =~ ^[0-9]+$ ]] && [ $((now - HEARTBEAT)) -lt 150 ]; then
+            echo "label=harness-macos-arm64" >> "$GITHUB_OUTPUT"
+            echo "Routing unsigned iOS verification to local M3 worker (heartbeat $((now - HEARTBEAT))s old)"
+          else
+            echo "label=xcode-27" >> "$GITHUB_OUTPUT"
+            echo "Routing unsigned iOS verification to GitHub cloud xcode-27 (heartbeat=${HEARTBEAT:-unset})"
+          fi
+
+  verify:
+    needs: macos-runner
+    if: github.ref == 'refs/heads/main' && inputs.ci_certificates != 'list'
+    runs-on: ${{ needs.macos-runner.outputs.label || 'xcode-27' }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Xcode version
+        run: |
+          if [ -d /Applications/Xcode_27.1.app ]; then
+            sudo xcode-select -s /Applications/Xcode_27.1.app
+          fi
+          xcodebuild -version
+          sdk=$(xcrun --sdk iphoneos --show-sdk-version)
+          echo "iOS SDK $sdk"
+          case "$sdk" in
+            2[7-9].[1-9]*|2[8-9].*|[3-9][0-9].*) ;;
+            *) echo "::error::iOS SDK $sdk predates iPhone Duo (27.1)"; exit 1 ;;
+          esac
+
+      - name: Compile iOS app and tests
+        working-directory: apps/ios
+        run: |
+          ../../scripts/heavy-build.sh xcodebuild -project Harness.xcodeproj -scheme Harness \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO build-for-testing
+
+      - name: Verify mobile contracts and privacy consent
+        working-directory: apps/ios
+        shell: bash
+        run: |
+          set -euo pipefail
+          simulator_id="$(xcrun simctl list devices available --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(v["udid"] for runtime,group in d["devices"].items() if "iOS" in runtime for v in group if v["name"].startswith("iPhone")))')"
+          ../../scripts/heavy-build.sh xcodebuild -project Harness.xcodeproj -scheme Harness \
+            -destination "platform=iOS Simulator,id=$simulator_id" \
+            -only-testing:HarnessTests/ParityTests \
+            -only-testing:HarnessTests/PerfMonitorTests \
+            -only-testing:HarnessTests/PerfResourcesTests \
+            -only-testing:HarnessTests/PerfOTLPTests \
+            -only-testing:HarnessTests/PerfFramesTests \
+            -only-testing:HarnessTests/LivePerfTests \
+            -only-testing:HarnessTests/TranscriptScrollMatrixTests \
+            -only-testing:HarnessTests/BrandMarkTests \
+            CODE_SIGNING_ALLOWED=NO test
+
   upload:
-    if: github.ref == 'refs/heads/main'
+    needs: verify
+    if: always() && github.ref == 'refs/heads/main' && (needs.verify.result == 'success' || needs.verify.result == 'skipped')
     # Xcode 27.1 (the xcode-27 image, a GitHub public preview): an app built
     # with an older SDK runs in compatibility mode on iPhone Duo's inner
     # display, and the project only compiles its hinge code (HINGE_API) with
@@ -196,33 +263,6 @@ jobs:
             2[7-9].[1-9]*|2[8-9].*|[3-9][0-9].*) ;;
             *) echo "::error::iOS SDK $sdk predates iPhone Duo (27.1)"; exit 1 ;;
           esac
-
-      - name: Compile iOS app and tests
-        if: inputs.ci_certificates != 'list'
-        working-directory: apps/ios
-        run: |
-          xcodebuild -project Harness.xcodeproj -scheme Harness \
-            -destination 'generic/platform=iOS Simulator' \
-            CODE_SIGNING_ALLOWED=NO build-for-testing
-
-      - name: Verify mobile contracts and privacy consent
-        if: inputs.ci_certificates != 'list'
-        working-directory: apps/ios
-        shell: bash
-        run: |
-          set -euo pipefail
-          simulator_id="$(xcrun simctl list devices available --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(v["udid"] for runtime,group in d["devices"].items() if "iOS" in runtime for v in group if v["name"].startswith("iPhone")))')"
-          xcodebuild -project Harness.xcodeproj -scheme Harness \
-            -destination "platform=iOS Simulator,id=$simulator_id" \
-            -only-testing:HarnessTests/ParityTests \
-            -only-testing:HarnessTests/PerfMonitorTests \
-            -only-testing:HarnessTests/PerfResourcesTests \
-            -only-testing:HarnessTests/PerfOTLPTests \
-            -only-testing:HarnessTests/PerfFramesTests \
-            -only-testing:HarnessTests/LivePerfTests \
-            -only-testing:HarnessTests/TranscriptScrollMatrixTests \
-            -only-testing:HarnessTests/BrandMarkTests \
-            CODE_SIGNING_ALLOWED=NO test
 
       - name: Archive build
         if: inputs.ci_certificates != 'list'

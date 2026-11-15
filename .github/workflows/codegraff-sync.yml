@@ -17,8 +17,29 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  macos-runner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      label: ${{ steps.pick.outputs.label }}
+    steps:
+      - id: pick
+        env:
+          HEARTBEAT: ${{ vars.HARNESS_MAC_HEARTBEAT }}
+          SAME_REPO: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+        run: |
+          now=$(date +%s)
+          if [ "$SAME_REPO" = "true" ] && [[ "$HEARTBEAT" =~ ^[0-9]+$ ]] && [ $((now - HEARTBEAT)) -lt 150 ]; then
+            echo "label=harness-macos-arm64" >> "$GITHUB_OUTPUT"
+            echo "Routing macOS job to local M3 worker (heartbeat $((now - HEARTBEAT))s old)"
+          else
+            echo "label=macos-latest" >> "$GITHUB_OUTPUT"
+            echo "Routing macOS job to GitHub cloud macos-latest (same_repo=$SAME_REPO, heartbeat=${HEARTBEAT:-unset})"
+          fi
+
   macos:
-    runs-on: macos-latest
+    needs: macos-runner
+    runs-on: ${{ needs.macos-runner.outputs.label || 'macos-latest' }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -77,7 +98,7 @@ jobs:
           GRAFF_BINARY: ${{ steps.graff.outputs.binary }}
         run: |
           rustup show active-toolchain || rustup toolchain install
-          scripts/package-macos.sh
+          ./scripts/heavy-build.sh scripts/package-macos.sh
           test -f target/package/*-macos-arm64-app.tar.gz
       - name: Record included revisions
         if: steps.selected.outputs.tag != '' && steps.cache.outputs.cache-hit != 'true'

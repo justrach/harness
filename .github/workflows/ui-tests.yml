@@ -42,6 +42,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  macos-runner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      label: ${{ steps.pick.outputs.label }}
+    steps:
+      - id: pick
+        env:
+          HEARTBEAT: ${{ vars.HARNESS_MAC_HEARTBEAT }}
+          SAME_REPO: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+        run: |
+          now=$(date +%s)
+          if [ "$SAME_REPO" = "true" ] && [[ "$HEARTBEAT" =~ ^[0-9]+$ ]] && [ $((now - HEARTBEAT)) -lt 150 ]; then
+            echo "label=harness-macos-arm64" >> "$GITHUB_OUTPUT"
+            echo "Routing macOS job to local M3 worker (heartbeat $((now - HEARTBEAT))s old)"
+          else
+            echo "label=macos-latest" >> "$GITHUB_OUTPUT"
+            echo "Routing macOS job to GitHub cloud macos-latest (same_repo=$SAME_REPO, heartbeat=${HEARTBEAT:-unset})"
+          fi
+
   session-sync-regressions:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -105,7 +125,8 @@ jobs:
 
   macos-frame-recovery:
     name: macos-frame-recovery
-    runs-on: macos-latest
+    needs: macos-runner
+    runs-on: ${{ needs.macos-runner.outputs.label || 'macos-latest' }}
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
@@ -119,10 +140,10 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
       - name: Check macOS application
-        run: cargo check --release --locked -p harness
+        run: ./scripts/heavy-build.sh cargo check --release --locked -p harness
       - name: Nano UI macOS tests
         working-directory: apps/nano
-        run: zig build test --summary all
+        run: ../../scripts/heavy-build.sh zig build test --summary all
 
   ios-tests:
     # Skipped for now: the iOS app isn't shipping yet and this job fails.
