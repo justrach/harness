@@ -4,6 +4,7 @@ const Section = @import("settings.zig").Section;
 
 pub fn description(section: Section) []const u8 {
     return switch (section) {
+        .account => "Harness profile, member card and sync",
         .appearance => "Themes, text size, sidebar and motion",
         .notifications => "Sounds, alerts and anonymous performance sharing",
         .shortcuts => "Keyboard shortcuts, sending and completion",
@@ -21,7 +22,8 @@ pub fn description(section: Section) []const u8 {
 
 fn keywords(section: Section) []const u8 {
     return switch (section) {
-        .appearance => "font colors dark light compact animation reduce motion",
+        .account => "profile member card join date sign in out cloud sync avatar",
+        .appearance => "font colors dark light compact animation reduce motion before after design preview comparison visual diff",
         .notifications => "privacy telemetry metrics responsiveness scroll statistics consent sound volume banner",
         .shortcuts => "keys hotkey enter return slash commands suggestions stop escape",
         .files => "hidden ignored directory starting folder editor save wrap",
@@ -59,6 +61,7 @@ test "settings discovery searches task words across section metadata" {
     try t.expect(matches(.devices, "hourly updates"));
     try t.expect(matches(.devices, "automatic updates"));
     try t.expect(matches(.appearance, "font motion"));
+    try t.expect(matches(.appearance, "before after design"));
     try t.expect(!matches(.files, "GitHub links"));
     try t.expect(!matches(.browsing, "GitHub nonsense"));
     try t.expect(matches(.browsing, " \t "));

@@ -144,6 +144,9 @@ pub const State = struct {
     card_height: ?ScalarTransition = null,
     /// True when the full model list was opened from the compact thinking tier panel.
     can_return_compact: bool = false,
+    /// Account switcher submenu state inside the compact model popover.
+    account_submenu: bool = false,
+    account_anchor: ?ui.Rect = null,
     /// Retired stage strings freed at the start of the next frame (`reap`).
     retired_strings: std.ArrayList([]u8) = .empty,
 
@@ -160,6 +163,8 @@ pub const State = struct {
         s.press_anim = null;
         s.energy_anim = null;
         s.shimmer_last = null;
+        s.account_submenu = false;
+        s.account_anchor = null;
     }
 
     pub fn reap(s: *State, gpa: Allocator) void {

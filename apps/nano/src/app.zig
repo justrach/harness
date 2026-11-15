@@ -91,6 +91,7 @@ pub const View = struct {
     sessions_header: ?nanoui.ui.Rect = null,
     session_rows: ?nanoui.ui.Rect = null,
     archived_open: bool = true,
+    zen_archived_open: bool = false,
     /// Archived rows shown: 10, then 25 more at a time.
     archived_limit: usize = 10,
     space_menu: bool = false,
@@ -141,6 +142,8 @@ pub const View = struct {
     model_picker: @import("model_picker.zig").State = .{},
     /// The context ring's hover card (view_context.zig).
     context: @import("view_context.zig").State = .{},
+    /// The composer footer's account-usage ring and switcher popover (view_account_usage.zig).
+    account_usage: @import("view_account_usage.zig").State = .{},
     composer_anchor: ?nanoui.ui.Rect = null,
     /// A press in a peer, including its message/control descendants.
     pane_press: ?struct { tab: usize, pane: usize } = null,
@@ -186,6 +189,16 @@ pub const View = struct {
     agents: @import("view_settings_agents.zig").Page = .{},
     /// Settings › Accounts, kept between visits.
     accounts: @import("view_settings_accounts.zig").Page = .{},
+    /// Interactive member card state for Settings › Account (`member_card.zig`).
+    profile_card: @import("member_card.zig").State = .{},
+    /// Top-right unified updates popover state & anchor (`view_updates.zig`).
+    before_after: @import("view_before_after.zig").State = .{},
+    updates_popover: bool = false,
+    updates_anchor: ?nanoui.ui.Rect = null,
+    /// Sidebar `#star-banner` context menu state & last opened external URL.
+    star_menu: bool = false,
+    star_menu_pos: nanoui.ui.Point = .{},
+    last_opened_url: ?[]u8 = null,
     /// Settings › Archived sessions' Unarchive and Delete all.
     archived: @import("view_settings_archived.zig").Page = .{},
     /// Settings › Devices' Rename, Remove and copied id.
@@ -238,6 +251,9 @@ pub const View = struct {
         v.model_picker.deinit(gpa);
         v.agents.deinit(gpa);
         v.accounts.deinit(gpa);
+        v.account_usage.deinit(gpa);
+        v.profile_card.deinit(gpa);
+        if (v.last_opened_url) |u| gpa.free(u);
         v.archived.deinit(gpa);
         v.devices.deinit(gpa);
         v.hovers.deinit(gpa);
@@ -1686,6 +1702,14 @@ pub const App = struct {
 
     pub fn noticeText(a: *const App) ?[]const u8 {
         return if (a.notice_len == 0) null else a.notice[0..a.notice_len];
+    }
+
+    pub fn openExternalUrl(a: *App, url: []const u8) void {
+        if (a.view.last_opened_url) |old| a.gpa.free(old);
+        a.view.last_opened_url = a.gpa.dupe(u8, url) catch null;
+        if (!a.offscreen and !@import("builtin").is_test) {
+            _ = nanoui.shell.openUrl(url);
+        }
     }
 
     fn watchDoc(a: *App, opening: bool) void {

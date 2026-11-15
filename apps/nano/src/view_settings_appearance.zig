@@ -10,6 +10,7 @@ const ui = nanoui.ui;
 const theme = @import("theme.zig");
 const themes = @import("themes.zig");
 const icons = @import("icons.zig");
+const kit = @import("view_kit.zig");
 const set = @import("view_settings.zig");
 const import_view = @import("view_settings_theme_import.zig");
 const App = @import("app.zig").App;
@@ -82,6 +83,18 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
             set.tile(c, k, .@"eye-closed");
             words(c, k, "Compact mode", "Fold a turn's thinking, tool calls, and narration into one collapsed row — only the reply shows.", 32);
             if (switch_(c, k, a.settings.get(.transcript_compact_mode), 0)) a.settings.toggle(.transcript_compact_mode);
+        }
+        {
+            const r = set.row(c, k, false, false).control();
+            defer r.end();
+            _ = kit.focusRing(c, r, k.accent, 2);
+            set.tile(c, k, .@"file-image");
+            words(c, k, "Design before & after", "Show interactive before and after visual comparisons inline in chat when an agent changes UI or styling.", 32);
+            const switched = switch_(c, k, a.settings.get(.design_before_after_enabled), 0);
+            if (switched or r.clicked()) {
+                a.settings.toggle(.design_before_after_enabled);
+                a.redraw();
+            }
         }
         {
             const r = set.row(c, k, true, false);
@@ -289,7 +302,6 @@ pub fn preview(c: *ui.Context, k: theme.Colors, t: theme.Colors) void {
 pub fn themeMenu(c: *ui.Context, a: *App, k: theme.Colors) void {
     const dark = a.view.theme_menu orelse return;
     const at = a.view.theme_anchor orelse return;
-    const kit = @import("view_kit.zig");
     if (kit.pressedOutside(c, at)) {
         a.view.theme_menu = null;
         return;

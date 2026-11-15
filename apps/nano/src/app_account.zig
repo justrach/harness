@@ -6,6 +6,7 @@
 //! (`AuthStatus`, a stream) and the Codegraff sign-in
 //! (`CodegraffAuthStatus`, asked when the menu opens).
 const std = @import("std");
+const builtin = @import("builtin");
 const nanoui = @import("nanoui");
 const json = std.json;
 const rpc = @import("rpc.zig");
@@ -16,14 +17,31 @@ const Allocator = std.mem.Allocator;
 /// Where this engine's work lives (`WorkspaceScope`).
 pub const Scope = enum { local, synced, development };
 
-/// A signed-in person's name and email (owned).
+/// Server-assigned / canonical Harness member card traits (value type; no heap fields).
+pub const WireCardTraits = struct {
+    scene: u32,
+    sky: u32,
+    enso: u32,
+    holo: u32,
+    seal: u32,
+};
+
+/// A signed-in person's identity & Harness member card fields (owned).
 pub const User = struct {
+    id: []u8 = &.{},
     name: ?[]u8 = null,
     email: []u8 = &.{},
+    avatar_url: ?[]u8 = null,
+    member_number: ?u64 = null,
+    started_at: ?i64 = null,
+    card_scenes: ?u32 = null,
+    card_traits: ?WireCardTraits = null,
 
-    fn deinit(u: *User, gpa: Allocator) void {
+    pub fn deinit(u: *User, gpa: Allocator) void {
+        if (u.id.len > 0) gpa.free(u.id);
         if (u.name) |n| gpa.free(n);
-        gpa.free(u.email);
+        if (u.email.len > 0) gpa.free(u.email);
+        if (u.avatar_url) |url| gpa.free(url);
     }
 };
 
@@ -48,10 +66,20 @@ pub const Account = struct {
     /// stop asking (`POLL_EVERY`, `POLL_FOR`).
     poll_at: ?f64 = null,
     poll_until: f64 = 0,
+    avatar_lock: std.atomic.Value(bool) = .init(false),
+    avatar_bytes: ?[]u8 = null,
+    avatar_url_loaded: ?[]u8 = null,
+    avatar_pending_bytes: ?[]u8 = null,
+    avatar_pending_url: ?[]u8 = null,
+    avatar_fetching: bool = false,
 
     pub fn deinit(acc: *Account, gpa: Allocator) void {
         if (acc.user) |*u| u.deinit(gpa);
         if (acc.codegraff.who) |w| gpa.free(w);
+        if (acc.avatar_bytes) |b| gpa.free(b);
+        if (acc.avatar_url_loaded) |u| gpa.free(u);
+        if (acc.avatar_pending_bytes) |b| gpa.free(b);
+        if (acc.avatar_pending_url) |u| gpa.free(u);
     }
 };
 
@@ -146,6 +174,15 @@ pub fn readCodegraff(gpa: Allocator, v: json.Value) !Codegraff {
     };
 }
 
+fn intVal(o: json.ObjectMap, key: []const u8) ?i64 {
+    const v = o.get(key) orelse return null;
+    return switch (v) {
+        .integer => |i| i,
+        .float => |f| if (std.math.isFinite(f)) @intFromFloat(f) else null,
+        else => null,
+    };
+}
+
 /// An `AuthStatus` item: the user when signed in (or choosing an
 /// organization), else none.
 pub fn readUser(gpa: Allocator, v: json.Value) !?User {
@@ -154,9 +191,40 @@ pub fn readUser(gpa: Allocator, v: json.Value) !?User {
     if (std.mem.eql(u8, state, "signedOut")) return null;
     const u = v.object.get("user") orelse return null;
     if (u != .object) return null;
-    var out: User = .{ .email = try gpa.dupe(u8, str(u.object, "email") orelse "") };
+    var out: User = .{
+        .id = if (str(u.object, "id")) |id_s| try gpa.dupe(u8, id_s) else &.{},
+        .email = if (str(u.object, "email")) |em| try gpa.dupe(u8, em) else &.{},
+    };
     errdefer out.deinit(gpa);
-    if (str(u.object, "name")) |n| out.name = try gpa.dupe(u8, n);
+    if (str(u.object, "name")) |n| if (n.len > 0) {
+        out.name = try gpa.dupe(u8, n);
+    };
+    if (str(u.object, "avatarUrl")) |url| if (url.len > 0) {
+        out.avatar_url = try gpa.dupe(u8, url);
+    };
+    if (intVal(u.object, "memberNumber")) |n| if (n > 0) {
+        out.member_number = @intCast(n);
+    };
+    if (intVal(u.object, "startedAt")) |s| if (s > 0) {
+        out.started_at = s;
+    };
+    if (intVal(u.object, "cardScenes")) |cs| if (cs > 0) {
+        out.card_scenes = @intCast(@min(cs, 256));
+    };
+    if (u.object.get("cardTraits")) |ct_val| if (ct_val == .object) {
+        const ct = ct_val.object;
+        if (intVal(ct, "scene")) |sc| if (intVal(ct, "sky")) |sk| if (intVal(ct, "enso")) |en| if (intVal(ct, "holo")) |ho| if (intVal(ct, "seal")) |se| {
+            if (sc >= 0 and sk >= 0 and en >= 0 and ho >= 0 and se >= 0) {
+                out.card_traits = .{
+                    .scene = @intCast(@min(sc, 255)),
+                    .sky = @intCast(@min(sk, 255)),
+                    .enso = @intCast(@min(en, 255)),
+                    .holo = @intCast(@min(ho, 255)),
+                    .seal = @intCast(@min(se, 255)),
+                };
+            }
+        };
+    };
     return out;
 }
 
@@ -184,6 +252,7 @@ fn onAuth(a: *App, _: u64, r: rpc.Reply) void {
             const recovered = a.account.lost_session and user != null;
             if (a.account.user) |*u| u.deinit(a.gpa);
             a.account.user = user;
+            if (user == null) clearAvatar(&a.account, a.gpa) else maybeFetchAvatar(a);
             if (recovered) a.account.scope = .synced;
             a.account.auth_signed_out = v == .object and std.mem.eql(u8, str(v.object, "state") orelse "", "signedOut");
             refreshLostSession(a);
@@ -274,6 +343,7 @@ fn onSignOut(a: *App, _: u64, r: rpc.Reply) void {
         .ok => {
             if (a.account.user) |*u| u.deinit(a.gpa);
             a.account.user = null;
+            clearAvatar(&a.account, a.gpa);
             a.account.scope = .local;
             a.account.lost_session = false;
             a.account.lost_check_at = null;
@@ -524,4 +594,153 @@ test "the engine's replies: scope, Codegraff status, the Harness account" {
     , .{});
     defer out.deinit();
     try testing.expect((try readUser(testing.allocator, out.value)) == null);
+
+    const rich = try json.parseFromSlice(json.Value, testing.allocator,
+        \\{"state":"signedIn","user":{"id":"42","email":"ada@example.com","name":"Ada Lovelace","avatarUrl":"https://cdn.example.com/a.png","memberNumber":42,"startedAt":1700000000,"cardScenes":12},"orgId":"org_42"}
+    , .{});
+    defer rich.deinit();
+    var ru = (try readUser(testing.allocator, rich.value)).?;
+    defer ru.deinit(testing.allocator);
+    try testing.expectEqualStrings("42", ru.id);
+    try testing.expectEqualStrings("Ada Lovelace", ru.name.?);
+    try testing.expectEqualStrings("https://cdn.example.com/a.png", ru.avatar_url.?);
+    try testing.expectEqual(@as(?u64, 42), ru.member_number);
+    try testing.expectEqual(@as(?i64, 1700000000), ru.started_at);
+    try testing.expectEqual(@as(?u32, 12), ru.card_scenes);
+    try testing.expectEqual(@as(?WireCardTraits, null), ru.card_traits);
+}
+
+test "readUser decodes optional cardTraits object" {
+    const raw =
+        \\{"state":"signedIn","user":{"id":"u1","email":"alex@example.com","memberNumber":42,"cardScenes":20,"cardTraits":{"scene":13,"sky":9,"enso":1,"holo":3,"seal":2}},"orgId":null}
+    ;
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, raw, .{});
+    defer parsed.deinit();
+    var ru = (try readUser(testing.allocator, parsed.value)).?;
+    defer ru.deinit(testing.allocator);
+    try testing.expectEqual(@as(?u64, 42), ru.member_number);
+    try testing.expectEqual(@as(?u32, 20), ru.card_scenes);
+    try testing.expect(ru.card_traits != null);
+    const ct = ru.card_traits.?;
+    try testing.expectEqual(@as(u32, 13), ct.scene);
+    try testing.expectEqual(@as(u32, 9), ct.sky);
+    try testing.expectEqual(@as(u32, 1), ct.enso);
+    try testing.expectEqual(@as(u32, 3), ct.holo);
+    try testing.expectEqual(@as(u32, 2), ct.seal);
+}
+
+fn lockAvatar(acc: *Account) void {
+    while (acc.avatar_lock.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {
+        std.atomic.spinLoopHint();
+    }
+}
+
+fn unlockAvatar(acc: *Account) void {
+    acc.avatar_lock.store(false, .release);
+}
+
+fn clearAvatar(acc: *Account, gpa: Allocator) void {
+    if (acc.avatar_bytes) |b| gpa.free(b);
+    acc.avatar_bytes = null;
+    if (acc.avatar_url_loaded) |u| gpa.free(u);
+    acc.avatar_url_loaded = null;
+    lockAvatar(acc);
+    if (acc.avatar_pending_bytes) |b| gpa.free(b);
+    acc.avatar_pending_bytes = null;
+    if (acc.avatar_pending_url) |u| gpa.free(u);
+    acc.avatar_pending_url = null;
+    acc.avatar_fetching = false;
+    unlockAvatar(acc);
+}
+
+fn maybeFetchAvatar(a: *App) void {
+    const user = a.account.user orelse return clearAvatar(&a.account, a.gpa);
+    const url = user.avatar_url orelse return clearAvatar(&a.account, a.gpa);
+    if (!std.mem.startsWith(u8, url, "https://")) return;
+    if (a.account.avatar_url_loaded) |loaded| {
+        if (std.mem.eql(u8, loaded, url)) return;
+    }
+    clearAvatar(&a.account, a.gpa);
+    if (a.offscreen or builtin.is_test) return;
+    lockAvatar(&a.account);
+    if (a.account.avatar_fetching) {
+        unlockAvatar(&a.account);
+        return;
+    }
+    a.account.avatar_fetching = true;
+    unlockAvatar(&a.account);
+    const dup = a.gpa.dupe(u8, url) catch {
+        lockAvatar(&a.account);
+        a.account.avatar_fetching = false;
+        unlockAvatar(&a.account);
+        return;
+    };
+    const t = std.Thread.spawn(.{}, avatarWorker, .{ a, dup }) catch {
+        a.gpa.free(dup);
+        lockAvatar(&a.account);
+        a.account.avatar_fetching = false;
+        unlockAvatar(&a.account);
+        return;
+    };
+    t.detach();
+}
+
+fn avatarWorker(a: *App, url: []u8) void {
+    defer a.gpa.free(url);
+    const res = std.process.run(a.gpa, a.io, .{
+        .argv = &.{ "/usr/bin/curl", "-fsSL", "--max-time", "5", "--max-filesize", "2097152", "--", url },
+        .stdout_limit = .limited(2 << 20),
+        .stderr_limit = .limited(4096),
+    }) catch {
+        lockAvatar(&a.account);
+        a.account.avatar_fetching = false;
+        unlockAvatar(&a.account);
+        return;
+    };
+    defer a.gpa.free(res.stderr);
+    const ok = switch (res.term) {
+        .exited => |code| code == 0 and res.stdout.len > 0,
+        else => false,
+    };
+    if (!ok) {
+        a.gpa.free(res.stdout);
+        lockAvatar(&a.account);
+        a.account.avatar_fetching = false;
+        unlockAvatar(&a.account);
+        return;
+    }
+    const done_url = a.gpa.dupe(u8, url) catch {
+        a.gpa.free(res.stdout);
+        lockAvatar(&a.account);
+        a.account.avatar_fetching = false;
+        unlockAvatar(&a.account);
+        return;
+    };
+    lockAvatar(&a.account);
+    if (a.account.avatar_pending_bytes) |old| a.gpa.free(old);
+    if (a.account.avatar_pending_url) |old| a.gpa.free(old);
+    a.account.avatar_pending_bytes = res.stdout;
+    a.account.avatar_pending_url = done_url;
+    a.account.avatar_fetching = false;
+    unlockAvatar(&a.account);
+    _ = nanoui.App.onMain(a, avatarDelivered);
+}
+
+fn avatarDelivered(ctx: ?*anyopaque) callconv(.c) void {
+    const a: *App = @ptrCast(@alignCast(ctx orelse return));
+    lockAvatar(&a.account);
+    const bytes = a.account.avatar_pending_bytes;
+    const url = a.account.avatar_pending_url;
+    a.account.avatar_pending_bytes = null;
+    a.account.avatar_pending_url = null;
+    unlockAvatar(&a.account);
+    if (bytes) |b| {
+        if (a.account.avatar_bytes) |old| a.gpa.free(old);
+        a.account.avatar_bytes = b;
+    }
+    if (url) |u| {
+        if (a.account.avatar_url_loaded) |old| a.gpa.free(old);
+        a.account.avatar_url_loaded = u;
+    }
+    a.redraw();
 }

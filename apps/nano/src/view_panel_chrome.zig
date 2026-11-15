@@ -18,9 +18,46 @@ pub fn edge(k: theme.Colors) ui.Color {
     return k.border.alpha(k.border.a * (if (k.dark) @as(f32, 0.72) else 0.55));
 }
 
+pub fn zenSidebarBg(k: theme.Colors) ui.Color {
+    if (k.frosted) {
+        return if (k.dark) k.text.alpha(0.032) else ui.Color.white.alpha(0.52);
+    }
+    const themes = @import("themes.zig");
+    const base_shell = k.shell.alpha(1);
+    return if (k.dark)
+        themes.over(base_shell, k.text.alpha(0.028))
+    else
+        themes.over(base_shell, ui.Color.white.alpha(0.55));
+}
+
+pub fn zenPageBg(k: theme.Colors) ui.Color {
+    const themes = @import("themes.zig");
+    const base_shell = k.shell.alpha(1);
+    return if (k.dark)
+        themes.over(base_shell, k.text.alpha(0.042))
+    else
+        themes.over(base_shell, ui.Color.white.alpha(0.86));
+}
+
+pub fn zenEdge(k: theme.Colors) ui.Color {
+    return k.ink(if (k.dark) 0.085 else 0.095);
+}
+
+pub fn zenSidebar(c: *ui.Context, k: theme.Colors) ui.Div {
+    return ui.div(c).column().bg(zenSidebarBg(k)).border(zenEdge(k)).borderW(1).rounded(chrome.zen_radius);
+}
+
+pub fn zenBody(c: *ui.Context, k: theme.Colors) ui.Div {
+    return ui.div(c).column().bg(zenPageBg(k)).border(zenEdge(k)).borderW(1).p(1).rounded(chrome.zen_radius);
+}
+
 pub fn body(c: *ui.Context, k: theme.Colors) ui.Div {
     return ui.div(c).column().bg(k.background).border(edge(k)).borderW(1).p(1).rounded(chrome.body_radius)
         .shadows(if (k.dark) &dark_shadow else &light_shadow);
+}
+
+pub fn bodyFor(c: *ui.Context, k: theme.Colors, zen: bool) ui.Div {
+    return if (zen) zenBody(c, k) else body(c, k);
 }
 
 /// Join before panel content, outside its rounded clip: the selected cap and

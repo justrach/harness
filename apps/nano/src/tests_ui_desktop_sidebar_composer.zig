@@ -250,7 +250,7 @@ test "sidebar avatar keeps signed-in identity in its tooltip and menu" {
     h.t.settle(1);
     try testing.expect(!h.t.hasText("Synthetic User"));
     // Footer whitespace is not a second click target.
-    h.t.click(100, 758);
+    h.t.click(76, 758);
     try testing.expect(!h.a.view.account_menu);
     const avatar = h.a.view.account_anchor orelse return error.NoAvatar;
     h.t.moveTo(avatar.x + avatar.w / 2, avatar.y + avatar.h / 2);
@@ -271,7 +271,7 @@ test "desktop parity sidebar starts with project filter and exposes only current
     try testing.expect(filter.y < 80);
     try testing.expect(!h.t.hasText("Tabs · 1"));
     // Footer whitespace must not open the avatar's account menu.
-    h.t.click(100, 758);
+    h.t.click(76, 758);
     try testing.expect(!h.a.view.account_menu);
     menus.openView(&h.a);
     h.t.settle(0.3);
@@ -708,7 +708,8 @@ test "zen mode flattens sidebar and footer hierarchy while developer mode restor
     h.t.click(pill_rect.x + pill_rect.w / 2, pill_rect.y + pill_rect.h / 2);
     h.t.settle(0.3);
     try testing.expectEqual(@import("motion_rules.zig").UiMode.zen, h.a.settings.uiMode());
-    try testing.expect(h.t.hasText("Zen"));
+    try testing.expect(h.t.hasText("Sign in"));
+    try testing.expect(h.t.hasText("New chat"));
     try testing.expect(!h.t.hasText("New worktree"));
 
     // Cmd+Shift+M toggles back to Developer mode in one shortcut, and again back to Zen.
@@ -763,14 +764,20 @@ test "zeron sidebar layout, titlebar back/forward navigation, and smooth disclos
     h.a.chats.items[2].last_message_ms = now - 23 * 60 * 60 * 1000;
     h.t.settle(1);
 
-    // Titlebar hosts [⋯] at y < 38, and filterRow is a full-width rounded pill ("All projects").
+    // Titlebar hosts [⋯] at y < 38, and filterRow is a compact pill ("All projects").
     const more = h.a.view.more_anchor orelse return error.MissingMoreButton;
     try testing.expect(more.y < 38);
     const filter = h.a.view.filter_anchor orelse return error.MissingFilterPill;
-    try testing.expect(filter.w >= 200);
+    try testing.expect(filter.w >= 90 and filter.w <= 200);
     try testing.expect(h.t.hasText("All projects"));
-    try testing.expect(h.t.hasText("Sessions"));
+    try testing.expect(h.t.hasText("New chat"));
+    try testing.expect(h.t.hasText("Search"));
+    try testing.expect(h.t.hasText("Pull requests"));
+    try testing.expect(h.t.hasText("Activity"));
     try testing.expect(h.t.hasText("Archived"));
+    try testing.expect(h.t.hasText("Star on GitHub"));
+    try testing.expect(h.t.hasText("Sign in"));
+    try testing.expect(!h.t.hasText("Local"));
 
     // Navigate Home -> c-init -> c-casual, then verify [←] and [→] history navigation.
     try testing.expect(!h.a.canGoBack());
@@ -780,6 +787,30 @@ test "zeron sidebar layout, titlebar back/forward navigation, and smooth disclos
     try testing.expect(!h.a.canGoForward());
     h.snap("desktop-zeron-sidebar");
 
+    // Zen mode omits Developer mode's protruding folder-tab cap and frames
+    // both the sidebar and right workspace panel as symmetric rounded-12 inset cards.
+    try testing.expect(@import("view_tab_strip.zig").rendering.selectedBounds(&h.a) == null);
+    var zen_left_card = false;
+    var zen_right_card = false;
+    for (h.t.ctx.nodes.items) |n| {
+        if (n.style.radius == 12 and @abs(n.rect.y - 42) < 0.5) {
+            if (n.rect.x < 256 and n.rect.w > 200 and n.rect.h > 400) zen_left_card = true;
+            if (n.rect.x >= 256 and n.rect.w > 400 and n.rect.h > 400) zen_right_card = true;
+        }
+    }
+    try testing.expect(zen_left_card and zen_right_card);
+
+    // Selected chat appears in the topbar session pill as well as the sidebar.
+    var topbar_pill = false;
+    for (h.t.ctx.nodes.items) |n| switch (n.content) {
+        .text => |tx| if (n.rect.y < 42 and std.mem.eql(u8, tx.str, "Initial Greeting Session")) {
+            topbar_pill = true;
+            break;
+        },
+        else => {},
+    };
+    try testing.expect(topbar_pill);
+
     h.a.goBack();
     h.t.settle(0.4);
     try testing.expect(h.a.selected == null);
@@ -788,7 +819,7 @@ test "zeron sidebar layout, titlebar back/forward navigation, and smooth disclos
     h.t.settle(0.4);
     try testing.expectEqualStrings("c-init", h.a.selected.?);
 
-    // Smooth 0.18s disclosure collapse & expand on "Sessions".
+    // Smooth 0.18s disclosure collapse & expand on "Activity".
     const hasCasualInSidebar = struct {
         fn check(t: *ui.Tester) bool {
             for (t.ctx.nodes.items) |n| switch (n.content) {
@@ -799,7 +830,7 @@ test "zeron sidebar layout, titlebar back/forward navigation, and smooth disclos
         }
     }.check;
     try testing.expect(hasCasualInSidebar(&h.t));
-    try h.t.clickText("Sessions");
+    try h.t.clickText("Activity");
     h.t.advance(0.06);
     try testing.expect(!h.a.view.sessions_open);
     // Mid-collapse: disclosure tween is active and still revealing partial rows.
@@ -807,16 +838,56 @@ test "zeron sidebar layout, titlebar back/forward navigation, and smooth disclos
     try testing.expect(sess_tw.animating(h.t.ctx.time, false));
     h.t.settle(1);
     try testing.expect(!hasCasualInSidebar(&h.t));
-    try testing.expect(h.t.hasText("Sessions (2)"));
-    try h.t.clickText("Sessions (2)");
+    try testing.expect(h.t.hasText("Activity (2)"));
+    try h.t.clickText("Activity (2)");
     h.t.settle(1);
     try testing.expect(hasCasualInSidebar(&h.t));
+
+    // Opening Settings in Zen mode frames both Settings nav and page as symmetric rounded-12 cards
+    // at y == 42 while keeping the active session pill clickable in the 42pt top bar.
+    @import("view_settings.zig").open(&h.a);
+    h.t.settle(0.4);
+    var settings_top_tab = false;
+    var settings_chat_left_card = false;
+    var settings_chat_right_card = false;
+    for (h.t.ctx.nodes.items) |n| {
+        if (n.style.radius == 12 and @abs(n.rect.y - 42) < 0.5 and n.rect.h > 400) {
+            if (n.rect.x < 256 and n.rect.w > 200) settings_chat_left_card = true;
+            if (n.rect.x >= 256 and n.rect.w > 400) settings_chat_right_card = true;
+        }
+        switch (n.content) {
+            .text => |tx| if (n.rect.y < 42 and n.rect.x >= 256 and std.mem.eql(u8, tx.str, "Initial Greeting Session")) {
+                settings_top_tab = true;
+            },
+            else => {},
+        }
+    }
+    try testing.expect(settings_top_tab);
+    try testing.expect(settings_chat_left_card and settings_chat_right_card);
+
+    // Pure luminance invariant: Zen cards stay strictly lighter than the shell across dark×frosted combinations.
+    const panel_chrome = @import("view_panel_chrome.zig");
+    const surfaces = @import("surface_palette.zig");
+    for ([_]bool{ false, true }) |is_dark| {
+        const base = theme.builtin(is_dark);
+        for ([_]bool{ false, true }) |is_frosted| {
+            const k = surfaces.apply(base, is_frosted);
+            const page = panel_chrome.zenPageBg(k);
+            const sh = k.shell.alpha(1);
+            try testing.expect(theme.contrast(page, .{}) > theme.contrast(sh, .{}));
+            if (!is_frosted) {
+                const side_bg = panel_chrome.zenSidebarBg(k);
+                try testing.expect(theme.contrast(side_bg, .{}) > theme.contrast(sh, .{}));
+            }
+        }
+    }
 }
 
-test "zeron Home agent-update island morphs between pill and expandable card and dispatches ApplyHarnessUpdate" {
+test "top-right unified updates pill opens the 340pt popover and dispatches Update & Update all" {
     var h: Harness = undefined;
     try h.init(false);
     defer h.deinit();
+    h.a.settings.applyUiMode(.zen);
     const devs = try std.json.parseFromSlice(std.json.Value, testing.allocator,
         \\[{"id":"synthetic-device","name":"Synthetic Mac Studio","online":true}]
     , .{});
@@ -834,42 +905,63 @@ test "zeron Home agent-update island morphs between pill and expandable card and
     h.t.settle(1);
     h.t.frame();
 
-    // Collapsed pill state: [w, 38], bottom-anchored on Home.
-    try testing.expect(h.t.hasText("3 agent updates \u{00b7} Synthetic Mac Studio"));
-    const pill_rect = h.a.agent_updates.card_rect orelse return error.MissingUpdatePill;
-    try testing.expectApproxEqAbs(@as(f32, 38), pill_rect.h, 1);
-    h.snap("desktop-agent-updates-pill");
+    // No Home bottom island anymore; unified updates pill sits in top-right titlebar.
+    try testing.expect(!h.t.hasText("3 agent updates \u{00b7} Synthetic Mac Studio"));
+    const btn_rect = h.a.view.updates_anchor orelse return error.MissingTopbarUpdatesButton;
+    try testing.expect(btn_rect.y < 38);
+    try testing.expect(btn_rect.x > 700);
+    h.snap("desktop-updates-button");
 
-    // Click pill to expand upward into the 360px card; verify mid-flight C0 morph!
-    h.t.click(pill_rect.x + pill_rect.w / 2, pill_rect.y + pill_rect.h / 2);
-    h.t.advance(0.08);
-    const mid_rect = h.a.agent_updates.card_rect orelse return error.MissingMidUpdateCard;
-    try testing.expect(mid_rect.h > 42 and mid_rect.h < 228);
-    // Bottom edge stays anchored while expanding upward.
-    try testing.expectApproxEqAbs(pill_rect.y + pill_rect.h, mid_rect.y + mid_rect.h, 2);
-
+    // Click top-right pill to open the 340pt anchored popover.
+    h.t.click(btn_rect.x + btn_rect.w / 2, btn_rect.y + btn_rect.h / 2);
     h.t.settle(1);
-    const card_rect = h.a.agent_updates.card_rect orelse return error.MissingExpandedUpdateCard;
-    try testing.expectApproxEqAbs(@as(f32, 360), card_rect.w, 1);
-    try testing.expectApproxEqAbs(@as(f32, 230), card_rect.h, 1);
+    try testing.expect(h.a.view.updates_popover);
+    try testing.expect(h.t.hasText("Update all"));
     try testing.expect(h.t.hasText("Claude Code"));
     try testing.expect(h.t.hasText("2.1.319 \u{2192} 2.1.322"));
     try testing.expect(h.t.hasText("Pi"));
     try testing.expect(h.t.hasText("OpenCode"));
-    h.snap("desktop-agent-updates-expanded");
+    h.snap("desktop-updates-popover");
 
-    // Click first [Update] button and verify ApplyHarnessUpdate is dispatched.
+    // Clicking a single [Update] button dispatches ApplyHarnessUpdate for Claude Code.
     try h.t.clickText("Update");
     h.t.settle(0.3);
-    const last = h.a.agent_updates.last_action orelse return error.MissingDispatchedUpdateAction;
-    try testing.expectEqualStrings("ApplyHarnessUpdate", last.method);
-    try testing.expectEqualStrings("claude-code", last.harness);
+    const single = h.a.agent_updates.last_action orelse return error.MissingDispatchedUpdateAction;
+    try testing.expectEqualStrings("ApplyHarnessUpdate", single.method);
+    try testing.expectEqualStrings("claude-code", single.harness);
+
+    // Clicking [Update all] dispatches updates across all updatable rows (reaching opencode).
+    try h.t.clickText("Update all");
+    h.t.settle(0.3);
+    const batch = h.a.agent_updates.last_action orelse return error.MissingDispatchedBatchAction;
+    try testing.expectEqualStrings("ApplyHarnessUpdate", batch.method);
+    try testing.expectEqualStrings("opencode", batch.harness);
+
+    // 4+ updates inside the popover wrap in a scroll container with overlay scrollbar and 18pt bottom fade.
+    try updates.setTestStatuses(&h.a, "synthetic-device", true,
+        \\[{"harness":"claude-code","installedVersion":"2.1.319","latestVersion":"2.1.322","phase":"available","canApply":true},
+        \\ {"harness":"codex","installedVersion":"0.168.0","latestVersion":"0.169.0","phase":"available","canApply":true},
+        \\ {"harness":"pi","installedVersion":"1.5.0","latestVersion":"1.5.2","phase":"available","canApply":true},
+        \\ {"harness":"opencode","installedVersion":"1.0.2","latestVersion":"1.4.15","phase":"available","canApply":true}]
+    );
+    h.t.settle(0.4);
+    h.t.frame();
+    try testing.expect(h.a.view.updates_popover);
+    var has_scroll_fade_list = false;
+    for (h.t.ctx.nodes.items) |n| {
+        if (n.style.scroll and n.style.scroll_edge_fade == 18 and n.style.scrollbar == .overlay) {
+            has_scroll_fade_list = true;
+            break;
+        }
+    }
+    try testing.expect(has_scroll_fade_list);
 }
 
-test "Home agent-update island dismisses with its close button and returns only when the updates change" {
+test "unified updates Skip persists per version token and reappears only when a newer version arrives" {
     var h: Harness = undefined;
     try h.init(false);
     defer h.deinit();
+    h.a.settings.applyUiMode(.zen);
     const devs = try std.json.parseFromSlice(std.json.Value, testing.allocator,
         \\[{"id":"synthetic-device","name":"Synthetic Mac Studio","online":true}]
     , .{});
@@ -879,41 +971,200 @@ test "Home agent-update island dismisses with its close button and returns only 
     h.a.device_id = try h.a.gpa.dupe(u8, "synthetic-device");
 
     const updates = @import("agent_updates.zig");
-    const updated =
-        \\[{"harness":"claude-code","installedVersion":"2.1.322","latestVersion":"2.1.322","phase":"updated"},
-        \\ {"harness":"pi","installedVersion":"1.5.2","latestVersion":"1.5.2","phase":"updated"},
-        \\ {"harness":"opencode","installedVersion":"1.4.15","latestVersion":"1.4.15","phase":"updated"}]
+    const avail =
+        \\[{"harness":"claude-code","installedVersion":"2.1.319","latestVersion":"2.1.322","phase":"available","canApply":true}]
     ;
-    try updates.setTestStatuses(&h.a, "synthetic-device", true, updated);
+    try updates.setTestStatuses(&h.a, "synthetic-device", true, avail);
     h.t.settle(1);
     h.t.frame();
-    try testing.expect(h.t.hasText("3 agents updated \u{00b7} Synthetic Mac Studio"));
-    const pill = h.a.agent_updates.card_rect orelse return error.MissingUpdatePill;
-    h.snap("desktop-agent-updates-dismiss-before");
-
-    // The close button sits at the pill's right edge (1px border, 8px trailing, 24px button).
-    h.t.click(pill.x + pill.w - 1 - 8 - 12, pill.y + pill.h / 2);
+    const btn_rect = h.a.view.updates_anchor orelse return error.MissingTopbarUpdatesButton;
+    h.t.click(btn_rect.x + btn_rect.w / 2, btn_rect.y + btn_rect.h / 2);
     h.t.settle(1);
-    h.t.frame();
-    try testing.expect(!h.t.hasText("3 agents updated \u{00b7} Synthetic Mac Studio"));
-    try testing.expect(!h.a.agent_updates.expanded);
-    try testing.expect(!updates.hasVisible(&h.a));
-    h.snap("desktop-agent-updates-dismiss-after");
+    try testing.expect(h.t.hasText("Skip"));
 
-    // The same statuses arriving again (the engine re-sends its snapshot) stay dismissed.
-    try updates.setTestStatuses(&h.a, "synthetic-device", true, updated);
+    try h.t.clickText("Skip");
     h.t.settle(1);
-    h.t.frame();
-    try testing.expect(!updates.hasVisible(&h.a));
+    try testing.expect(h.a.settings.isUpdateSkipped("agent:synthetic-device:claude-code", "2.1.322"));
+    try testing.expect(h.a.view.updates_anchor == null);
+    try testing.expect(!h.a.view.updates_popover);
 
-    // A new update changes what is visible, so the island comes back.
+    // Re-receiving the same version keeps it hidden.
+    try updates.setTestStatuses(&h.a, "synthetic-device", true, avail);
+    h.t.settle(1);
+    try testing.expect(h.a.view.updates_anchor == null);
+
+    // Receiving a newer version brings the topbar updates pill back.
     try updates.setTestStatuses(&h.a, "synthetic-device", true,
         \\[{"harness":"claude-code","installedVersion":"2.1.322","latestVersion":"2.1.330","phase":"available","canApply":true}]
     );
     h.t.settle(1);
     h.t.frame();
-    try testing.expect(updates.hasVisible(&h.a));
-    try testing.expect(h.t.hasText("Claude Code 2.1.330 available \u{00b7} Synthetic Mac Studio"));
+    try testing.expect(h.a.view.updates_anchor != null);
+}
+
+test "sidebar star banner, right-click menu, bottom account row, and compact model account popover" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.zen);
+    h.t.settle(1);
+
+    // Right-click on the Star on GitHub banner opens its context menu and copies codegraff URL.
+    const star_txt = h.t.findText("Star on GitHub") orelse return error.MissingStarBanner;
+    h.t.secondaryClick(star_txt.x + 12, star_txt.y + star_txt.h / 2);
+    h.t.settle(0.4);
+    try testing.expect(h.a.view.star_menu);
+    try testing.expect(h.t.hasText("Open in browser"));
+    try testing.expect(h.t.hasText("Copy link"));
+    try h.t.clickText("Copy link");
+    h.t.settle(0.4);
+    try testing.expectEqualStrings(sidebar.star_github_url, h.t.clipboard.items);
+    try testing.expect(!h.a.view.star_menu);
+
+    // Left-clicking Star on GitHub records the codegraff URL and persists dismissal.
+    try h.t.clickText("Star on GitHub");
+    h.t.settle(0.4);
+    try testing.expectEqualStrings("https://github.com/justrach/codegraff", h.a.view.last_opened_url.?);
+    try testing.expect(h.a.settings.get(.star_banner_dismissed));
+    try testing.expect(!h.t.hasText("Star on GitHub"));
+
+    // Reset star banner and verify close button dismisses without opening URL.
+    h.a.settings.set(.star_banner_dismissed, false);
+    h.a.gpa.free(h.a.view.last_opened_url.?);
+    h.a.view.last_opened_url = null;
+    h.t.settle(0.4);
+    const sr = h.t.findText("Star on GitHub") orelse return error.MissingStarBanner;
+    var close_rect: ?ui.Rect = null;
+    for (h.t.ctx.nodes.items) |n| switch (n.content) {
+        .image => if (@abs((n.rect.y + n.rect.h / 2) - (sr.y + sr.h / 2)) < 8 and n.rect.x < 256) {
+            if (close_rect == null or n.rect.x > close_rect.?.x) close_rect = n.rect;
+        },
+        else => {},
+    };
+    const cr = close_rect orelse return error.MissingStarClose;
+    h.t.click(cr.x + cr.w / 2, cr.y + cr.h / 2);
+    h.t.settle(0.4);
+    try testing.expect(h.a.settings.get(.star_banner_dismissed));
+    try testing.expect(h.a.view.last_opened_url == null);
+    try testing.expect(!h.t.hasText("Star on GitHub"));
+
+    // Clicking Sign in in bottom sidebar account row opens Settings directly on the Account section
+    // with symmetric rounded-12 Settings cards at y == 42, single Back to chats (no esc badge, no orphaned toggle).
+    try h.t.clickText("Sign in");
+    h.t.settle(0.4);
+    try testing.expect(h.a.view.settings_open);
+    try testing.expectEqual(settings.Section.account, h.a.settings.section);
+    try testing.expect(h.t.hasText("Harness Account"));
+    try testing.expect(h.t.hasText("Yours when you sign in"));
+    try testing.expect(h.t.hasText("Back to chats"));
+    const side_w = h.a.settings.sidebarWidth();
+    var settings_left_card = false;
+    var settings_right_card = false;
+    var duplicate_back_row = false;
+    var topbar_nav_control = false;
+    var stacked_esc_badge = false;
+    for (h.t.ctx.nodes.items) |n| {
+        if (n.style.radius == 12 and @abs(n.rect.y - 42) < 0.5 and n.rect.h > 400) {
+            if (n.rect.x < side_w and n.rect.w > side_w - 20) settings_left_card = true;
+            if (n.rect.x >= side_w and n.rect.w > 400) settings_right_card = true;
+        }
+        switch (n.content) {
+            .text => |tx| {
+                if (std.mem.eql(u8, tx.str, "Back")) duplicate_back_row = true;
+                if (std.mem.eql(u8, tx.str, "esc")) stacked_esc_badge = true;
+            },
+            else => {},
+        }
+        if (n.rect.y < 38 and n.rect.x < side_w and n.rect.w == 24 and n.rect.h == 24 and n.style.control) {
+            topbar_nav_control = true;
+        }
+    }
+    try testing.expect(settings_left_card and settings_right_card);
+    try testing.expect(!duplicate_back_row);
+    try testing.expect(!topbar_nav_control);
+    try testing.expect(!stacked_esc_badge);
+
+    // Click the single "Back to chats" row to close Settings while remaining in the draft workspace.
+    try h.t.clickText("Back to chats");
+    h.t.settle(0.4);
+    try testing.expect(!h.a.view.settings_open);
+
+    // Test compact composer model+account+slider popover with per-model brand accent color.
+    h.a.setHarness("codex");
+    const mfor = try h.a.gpa.dupe(u8, "codex");
+    h.a.retireSlice(h.a.models_for);
+    h.a.models_for = mfor;
+    const mjson = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"openai/gpt-6.1-sol","label":"GPT-6.1-Sol","context":1048576,"maker":"openai","billing":"plan","reasoningLevels":["low","medium","high","xhigh"],"defaultReasoningLevel":"high"}]
+    , .{});
+    defer mjson.deinit();
+    try h.a.models.replace(mjson.value);
+    h.a.setModel("openai/gpt-6.1-sol");
+    const accts = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"accounts":[{"id":"acct-1","harness":"codex","email":"alex@example.com","active":true,"switchable":true},{"id":"acct-2","harness":"codex","email":"team@example.com","active":false,"switchable":true}]}
+    , .{});
+    defer accts.deinit();
+    @import("view_settings_accounts.zig").setSnapshot(&h.a, accts.value);
+    h.t.settle(0.4);
+    h.a.togglePickerCompact();
+    h.t.settle(0.4);
+    try testing.expect(h.a.view.model_picker.track != null);
+    const tr = h.a.view.model_picker.track.?;
+    var has_blue_rail = false;
+    var has_capsule_thumb = false;
+    var slider_textures: usize = 0;
+    for (h.t.ctx.nodes.items) |n| {
+        if (n.content == .texture and n.rect.y >= tr.y - 2 and n.rect.y <= tr.y + tr.h + 2) {
+            slider_textures += 1;
+        }
+        if (n.rect.h == 28 and n.rect.w > 40) {
+            if (n.style.background) |bg| {
+                if (bg.b > bg.r + 0.2) has_blue_rail = true;
+            }
+        }
+        if (n.rect.w == 44 and n.rect.h == 32) {
+            has_capsule_thumb = true;
+        }
+    }
+    try testing.expectEqual(@as(usize, 0), slider_textures);
+    try testing.expect(has_blue_rail);
+    try testing.expect(has_capsule_thumb);
+    try testing.expect(h.t.hasText("Account"));
+    try testing.expect(h.t.hasText("alex@example.com"));
+    try testing.expect(h.t.hasText("REASONING"));
+    try h.t.clickText("Account");
+    h.t.settle(0.4);
+    try testing.expect(h.a.view.model_picker.account_submenu);
+    try testing.expect(h.t.hasText("Add account"));
+
+    // Close picker and open a chat panel: unscrolled Zen chat panel must not paint topFade strips.
+    h.a.togglePickerCompact();
+    h.a.openChatInTab("synthetic-chat");
+    h.t.settle(0.4);
+    var top_fade_strips: usize = 0;
+    for (h.t.ctx.nodes.items) |n| {
+        if (n.rect.x >= side_w and n.rect.y >= 42 and n.rect.y < 70 and n.rect.h == 1 and n.rect.w > 200) {
+            if (n.style.background != null) top_fade_strips += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 0), top_fade_strips);
+}
+
+test "modelEffortColor uses Harness per-model brand colors across dark and light modes" {
+    const picker = @import("view_picker.zig");
+    const dark_k = theme.colors(true);
+    const light_k = theme.colors(false);
+
+    const gpt: @import("workspace.zig").Model = .{ .id = "openai/gpt-6.1-sol", .label = "GPT-6.1-Sol", .maker = "openai" };
+    try testing.expectEqual(@as(u24, 0x66b5ff), picker.colorToHex(picker.modelEffortColor(gpt, "codex", dark_k)));
+    try testing.expectEqual(@as(u24, 0x2563eb), picker.colorToHex(picker.modelEffortColor(gpt, "codex", light_k)));
+
+    const claude: @import("workspace.zig").Model = .{ .id = "anthropic/claude-opus-5.5", .label = "Claude Opus 5.5", .maker = "anthropic" };
+    try testing.expectEqual(@as(u24, 0xd97757), picker.colorToHex(picker.modelEffortColor(claude, "claude-code", dark_k)));
+    try testing.expectEqual(@as(u24, 0xd97757), picker.colorToHex(picker.modelEffortColor(claude, "claude-code", light_k)));
+
+    const unknown: @import("workspace.zig").Model = .{ .id = "custom/model", .label = "Custom Model" };
+    try testing.expectEqual(picker.colorToHex(dark_k.accent), picker.colorToHex(picker.modelEffortColor(unknown, "custom", dark_k)));
 }
 
 test "desktop 3-pane horizontal split contains tool rows, question chips, and session footer within each pane" {
@@ -971,4 +1222,165 @@ test "desktop 3-pane horizontal split contains tool rows, question chips, and se
         },
         else => {},
     };
+}
+
+test "session footer renders account usage ring alongside context ring, opens account switcher popover, and optimistically switches accounts" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+
+    const chats = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"c-usage","deviceId":"synthetic-device","title":"Account usage footer session","spaceId":"synthetic-project","archived":false,"config":{"harness":"claude-code","model":"anthropic/claude-opus-5.5"}}]
+    , .{});
+    defer chats.deinit();
+    try h.a.chats.replace(chats.value);
+
+    h.a.openChatInTab("c-usage");
+    const doc = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"u1","role":"user","status":"complete","parts":[{"id":"p1","kind":"text","text":"Check footer rings"}]}],
+        \\ "contextUsage":{"tokens":46000,"window":200000}}
+    , .{});
+    defer doc.deinit();
+    try h.a.transcript.apply(doc.value);
+    h.t.settle(1);
+
+    // Without usageWindows, only #context-usage renders.
+    try testing.expect(h.t.hasText("23%"));
+    try testing.expect(h.a.view.account_usage.anchor == null);
+
+    const accts = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"accounts":[
+        \\  {"id":"acct-primary","harness":"claude-code","email":"alex@example.com","planLabel":"Max 20x","active":true,"switchable":true,
+        \\   "usageWindows":[{"label":"5h","usedFraction":0.38,"resetsAt":"2026-11-15T14:00:00Z"},{"label":"7d","usedFraction":0.21,"resetsAt":"2026-11-20T00:00:00Z"}]},
+        \\  {"id":"acct-backup","harness":"claude-code","email":"studio@example.com","planLabel":"Pro","active":false,"switchable":true,
+        \\   "usageWindows":[{"label":"5h","usedFraction":0.86,"resetsAt":"2026-11-15T16:00:00Z"}]}
+        \\]}
+    , .{});
+    defer accts.deinit();
+    @import("view_settings_accounts.zig").setSnapshot(&h.a, accts.value);
+    h.t.settle(1);
+    h.t.frame();
+
+    // Both rings sit side by side (#account-usage to the left of #context-usage) with zero idle wake timer.
+    try testing.expect(h.t.hasText("38%"));
+    try testing.expect(h.t.hasText("23%"));
+    try testing.expect(h.a.tick(h.t.ctx.time) == null);
+    h.t.ctx.input.window_active = false;
+    h.t.frame();
+    try testing.expect(h.t.ctx.frame_in == null);
+    h.t.ctx.input.window_active = true;
+    h.t.frame();
+    const acct_anchor = h.a.view.account_usage.anchor orelse return error.NoAccountUsageAnchor;
+    const ctx_anchor = h.a.view.context.anchor orelse return error.NoContextUsageAnchor;
+    try testing.expect(acct_anchor.x + acct_anchor.w <= ctx_anchor.x + 0.01);
+
+    // Provide a mock scene reply for ActivateAgentAccount before clicking.
+    h.a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"ActivateAgentAccount":{"ok":true}}
+    , .{});
+    h.a.engine.state = .connected;
+
+    // Click #account-usage -> opens #account-usage-menu upward above the footer ring.
+    h.t.click(acct_anchor.x + acct_anchor.w / 2, acct_anchor.y + acct_anchor.h / 2);
+    h.t.settle(1);
+    try testing.expect(h.a.view.account_usage.open);
+    for ([_][]const u8{ "Claude Code accounts", "alex@example.com", "Max 20x", "In use", "5h", "7d", "studio@example.com", "Pro", "86%" }) |needle| {
+        try testing.expect(h.t.hasText(needle));
+    }
+    const card = h.a.view.account_usage.card orelse return error.NoAccountUsageCard;
+    try testing.expect(card.y + card.h <= acct_anchor.y + 0.01);
+
+    // Clicking the inactive switchable account optimistically switches and sends ActivateAgentAccount.
+    try h.t.clickText("studio@example.com");
+    h.t.settle(1);
+    try testing.expect(h.t.hasText("86%"));
+    var sent_activate = false;
+    for (h.a.engine.sent.items) |frame| {
+        if (std.mem.indexOf(u8, frame, "ActivateAgentAccount") != null and std.mem.indexOf(u8, frame, "acct-backup") != null) {
+            sent_activate = true;
+            break;
+        }
+    }
+    try testing.expect(sent_activate);
+
+    // Pressing Escape dismisses the popover cleanly.
+    _ = h.t.shortcut(.{ .key = ui.Shortcut.escape });
+    h.t.settle(1);
+    try testing.expect(!h.a.view.account_usage.open);
+
+    // Clicking #context-usage pins the context card immediately without waiting for hover delay.
+    h.t.click(ctx_anchor.x + ctx_anchor.w / 2, ctx_anchor.y + ctx_anchor.h / 2);
+    h.t.settle(1);
+    try testing.expect(h.a.view.context.open);
+    try testing.expect(h.a.view.context.pinned);
+    try testing.expect(h.t.hasText("Context"));
+}
+
+test "zen topbar session pill left edge aligns flush with the right rounded-12 card in both chat and settings" {
+    const Find = struct {
+        fn rightCard(ctx: *ui.Context, side_w: f32) ?ui.Rect {
+            for (ctx.nodes.items) |n| {
+                if (n.style.radius == 12 and @abs(n.rect.y - 42) < 0.5 and n.rect.x >= side_w and n.rect.w > 400 and n.rect.h > 400) {
+                    return n.rect;
+                }
+            }
+            return null;
+        }
+        fn activePill(ctx: *ui.Context) ?ui.Rect {
+            for (ctx.nodes.items) |n| {
+                if (n.rect.y < 38 and @abs(n.rect.h - 28) < 0.5 and n.style.radius == 7 and n.style.control) {
+                    return n.rect;
+                }
+            }
+            return null;
+        }
+    };
+
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.a.settings.applyUiMode(.zen);
+    h.a.openChatInTab("synthetic-chat");
+    h.t.settle(1);
+
+    // Default sidebarWidth (224): pill left edge is flush with right card (sidebar_width + 3 = 227) and clears [⋯].
+    {
+        const card = Find.rightCard(&h.t.ctx, h.a.view.sidebar_width) orelse return error.MissingRightCard;
+        const pill = Find.activePill(&h.t.ctx) orelse return error.MissingActivePill;
+        const more = h.a.view.more_anchor orelse return error.MissingMoreAnchor;
+        try testing.expectApproxEqAbs(card.x, pill.x, 0.5);
+        try testing.expect(more.x + more.w + 12 <= pill.x);
+    }
+
+    // Wider sidebar (300): pill follows right card edge (303) instead of pinning near left sidebar controls.
+    h.a.settings.setNumber("sidebarWidth", 300);
+    h.t.settle(0.5);
+    {
+        const card = Find.rightCard(&h.t.ctx, h.a.view.sidebar_width) orelse return error.MissingRightCard;
+        const pill = Find.activePill(&h.t.ctx) orelse return error.MissingActivePill;
+        try testing.expectApproxEqAbs(@as(f32, 303), card.x, 0.5);
+        try testing.expectApproxEqAbs(card.x, pill.x, 0.5);
+    }
+
+    // Settings open: pill stays flush with the Zen Settings right rounded-12 card.
+    try h.t.clickText("Sign in");
+    h.t.settle(0.4);
+    try testing.expect(h.a.view.settings_open);
+    {
+        const card = Find.rightCard(&h.t.ctx, h.a.view.sidebar_width) orelse return error.MissingRightCard;
+        const pill = Find.activePill(&h.t.ctx) orelse return error.MissingActivePill;
+        try testing.expectApproxEqAbs(card.x, pill.x, 0.5);
+    }
+
+    // Return to chats and collapse sidebar: pill clears traffic lights, toggle, history, and mode controls.
+    try h.t.clickText("Back to chats");
+    h.t.settle(0.4);
+    _ = h.t.shortcut(.{ .key = 'b', .cmd = true });
+    h.t.settle(0.5);
+    try testing.expect(h.a.view.sidebar_width < 0.5);
+    {
+        const pill = Find.activePill(&h.t.ctx) orelse return error.MissingActivePill;
+        const min_x = @import("window_chrome.zig").leading + 24 + 56 + 14;
+        try testing.expect(pill.x >= min_x - 0.5);
+    }
 }

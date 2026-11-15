@@ -189,6 +189,11 @@ mod gate_tests {
             id: "user-1".into(),
             email: "user@example.com".into(),
             name: None,
+            avatar_url: None,
+            member_number: None,
+            started_at: None,
+            card_scenes: None,
+            card_traits: None,
         }
     }
 
@@ -263,6 +268,19 @@ pub fn parse_auth_state(value: &serde_json::Value) -> Option<AuthState> {
             id: u.get("id")?.as_str()?.to_string(),
             email: u.get("email")?.as_str()?.to_string(),
             name: u.get("name").and_then(|n| n.as_str()).map(str::to_string),
+            avatar_url: u
+                .get("avatarUrl")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            member_number: u.get("memberNumber").and_then(|v| v.as_u64()),
+            started_at: u.get("startedAt").and_then(|v| v.as_i64()),
+            card_scenes: u
+                .get("cardScenes")
+                .and_then(|v| v.as_u64())
+                .and_then(|n| u32::try_from(n).ok()),
+            card_traits: u
+                .get("cardTraits")
+                .and_then(|v| serde_json::from_value(v.clone()).ok()),
         })
     };
     match tag {

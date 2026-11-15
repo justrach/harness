@@ -12,17 +12,20 @@ const kit = @import("view_kit.zig");
 const rules = @import("rules.zig");
 const models = @import("model_picker.zig");
 const workspace = @import("workspace.zig");
+const accounts_view = @import("view_settings_accounts.zig");
 const App = @import("app.zig").App;
 
 /// `PICKER_WIDTH` and `DETAIL_WIDTH`.
 pub const menu_width: f32 = 356;
+pub const compact_width: f32 = 268;
+const compact_account_menu_w: f32 = 216;
 const detail_width: f32 = 276;
 /// The list's height; the model's page fits its content (`h_auto`,
 /// 4c9766def), measured as drawn, from this first guess.
 const list_height: f32 = 480;
 const stage_height: f32 = 293;
-pub const compact_height: f32 = 104;
-pub const compact_single_height: f32 = 52;
+pub const compact_height: f32 = 134;
+pub const compact_single_height: f32 = 46;
 
 /// GPUI's menu_geometry and measure_trigger: new-chat menus prefer down
 /// when 180 points fit; established chats prefer up, flipping near the top.
@@ -80,6 +83,7 @@ pub fn opened(a: *App) void {
 /// header expands upwards into the full searchable model list.
 pub fn openedCompact(a: *App) void {
     opened(a);
+    if (!a.view.accounts.started and a.engine.up()) accounts_view.load(a, .mount);
     stageCurrentCompact(a);
     a.view.model_picker.card_height = null;
 }
@@ -113,7 +117,17 @@ pub fn stageCurrentCompact(a: *App) void {
     p.focus = false;
     p.detail = null;
     p.hover_target = null;
-    p.height = if (levels.len > 1) compact_height else compact_single_height;
+    var tmp_arena: std.heap.ArenaAllocator = .init(a.gpa);
+    defer tmp_arena.deinit();
+    const acct_count = accounts_view.accountsForHarness(a, t.harness, tmp_arena.allocator()).len;
+    p.height = compactCardHeight(acct_count > 0, levels.len > 1);
+}
+
+fn compactCardHeight(has_accounts: bool, has_levels: bool) f32 {
+    var h: f32 = compact_single_height; // border(2) + body_pad(8) + model_row(34) + 2
+    if (has_accounts) h += 37; // divider(5) + account_row(32)
+    if (has_levels) h += 88; // divider(5) + header(40) + slider_row(42) + 1
+    return h;
 }
 
 fn applyLiveStage(a: *App) void {
@@ -219,10 +233,12 @@ fn stage(c: *ui.Context, a: *App, r: models.Row) void {
     p.shimmer_last = null;
     p.detail = null;
     p.hover_target = null;
-    p.height = if (return_compact)
-        (if (levels.len > 1) compact_height else compact_single_height)
-    else
-        (if (levels.len > 1) stage_height else 245);
+    p.height = if (return_compact) blk: {
+        var tmp_arena: std.heap.ArenaAllocator = .init(a.gpa);
+        defer tmp_arena.deinit();
+        const acct_count = accounts_view.accountsForHarness(a, harness, tmp_arena.allocator()).len;
+        break :blk compactCardHeight(acct_count > 0, levels.len > 1);
+    } else (if (levels.len > 1) stage_height else 245);
     if (return_compact) {
         p.focus = false;
         applyLiveStage(a);
@@ -413,7 +429,7 @@ pub fn popover(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
     const anchor = p.anchor orelse return;
     const is_compact = p.stage != null and p.stage.?.compact;
-    const card_w: f32 = if (is_compact) 256 else menu_width;
+    const card_w: f32 = if (is_compact) compact_width else menu_width;
     const w = @min(card_w, c.size.w - 16);
     const animate_height = is_compact or p.can_return_compact;
     const wanted_h = if (animate_height) blk: {
@@ -454,19 +470,27 @@ pub fn popover(c: *ui.Context, a: *App, k: theme.Colors) void {
     } else {
         p.opened_at = null;
     }
-    ui.key(c, "model-picker-card");
-    const panel = @import("view_sidebar_menus.zig").held(kit.shadowLg(ui.div(c).fixed().offset(x, y).motion(motion).w(w).h(h).layer(5).column().p(1)
-        .bg(k.composer).border(k.border).borderW(1).rounded(if (is_compact) 14 else 12).clip()));
-    defer panel.end();
-    if (p.stage != null) return page(c, a, k, w - 2, open);
-    tabs(c, a, k, w - 2);
-    // The full-bleed hairline over the search (`crate::theme::hairline(0.08)`).
-    _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.ink(0.08) }, .none, null);
-    search(c, a, k);
-    _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.ink(0.06) }, .none, null);
-    modelList(c, a, k, w - 2, h - 2 - 39 - 1 - 35 - 1 - 1 - 28, open, motion);
-    _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.ink(0.08) }, .none, null);
-    pickerFooter(c, k);
+    {
+        ui.key(c, "model-picker-card");
+        const panel = @import("view_sidebar_menus.zig").held(kit.shadowLg(ui.div(c).fixed().offset(x, y).motion(motion).w(w).h(h).layer(5).column().p(1)
+            .bg(k.composer).border(k.border).borderW(1).rounded(if (is_compact) 14 else 12).clip()));
+        defer panel.end();
+        if (p.stage != null) {
+            page(c, a, k, w - 2, open);
+        } else {
+            tabs(c, a, k, w - 2);
+            // The full-bleed hairline over the search (`crate::theme::hairline(0.08)`).
+            _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.ink(0.08) }, .none, null);
+            search(c, a, k);
+            _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.ink(0.06) }, .none, null);
+            modelList(c, a, k, w - 2, h - 2 - 39 - 1 - 35 - 1 - 1 - 28, open, motion);
+            _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.ink(0.08) }, .none, null);
+            pickerFooter(c, k);
+        }
+    }
+    if (is_compact and p.account_submenu and open) {
+        compactAccountMenu(c, a, k, .{ .x = x, .y = y, .w = w, .h = h }, motion);
+    }
 }
 
 fn keycap(c: *ui.Context, k: theme.Colors, text: []const u8) void {
@@ -515,8 +539,7 @@ fn modelList(c: *ui.Context, a: *App, k: theme.Colors, w: f32, list_h: f32, open
     var hovered: ?usize = null;
     var detail_row: ?ui.Rect = null;
     {
-        var style: ui.Style = .{ .width = .fill, .height = .{ .px = @max(30, list_h) }, .padding = .{ .left = 6, .right = 6, .top = 1, .bottom = 6 } };
-        if (@hasField(ui.Style, "scrollbar")) style.scrollbar = .{ .overlay = k.faint.alpha(0.5) };
+        const style: ui.Style = .{ .width = .fill, .height = .{ .px = @max(30, list_h) }, .padding = .{ .left = 6, .right = 6, .top = 1, .bottom = 6 }, .scrollbar = .{ .overlay = k.faint.alpha(0.5) } };
         ui.key(c, "model-picker-list");
         const at = c.nodes.items.len;
         ui.scroll(c, style);
@@ -725,6 +748,25 @@ fn detail(c: *ui.Context, a: *App, k: theme.Colors, r: models.Row, row: ui.Rect,
 }
 
 /// The model's page (`preview_reasoning`): back to the models, the model
+/// Brand/maker accent colour for a model's reasoning control, using Harness's
+/// `models.brandHex` mapping with contrast clamping on light surfaces.
+pub fn modelEffortColor(m: workspace.Model, harness_id: []const u8, k: theme.Colors) ui.Color {
+    const raw: ui.Color = if (models.brandHex(m, harness_id, k.dark)) |hx| ui.Color.hex(hx) else k.accent;
+    // Ensure high contrast on warm light surfaces when the brand hex is a
+    // light sky blue (`0x66b5ff`).
+    return if (!k.dark and raw.b > 0.85 and raw.r > 0.3)
+        ui.Color.hex(0x2563eb)
+    else
+        raw;
+}
+
+pub fn colorToHex(col: ui.Color) u24 {
+    const r: u24 = @intFromFloat(std.math.clamp(@round(col.r * 255.0), 0.0, 255.0));
+    const g: u24 = @intFromFloat(std.math.clamp(@round(col.g * 255.0), 0.0, 255.0));
+    const b: u24 = @intFromFloat(std.math.clamp(@round(col.b * 255.0), 0.0, 255.0));
+    return (r << 16) | (g << 8) | b;
+}
+
 /// and its route, its reasoning on a slider in the maker's colour, and
 /// "Use model". When `st.compact` is true, renders the Zeron-style compact
 /// thinking tier card (`crates/ui/src/pickers/compact.rs`).
@@ -753,13 +795,7 @@ fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) void {
     const m: workspace.Model = staged(a) orelse .{ .id = model_id, .label = model_id };
     const levels = levelsOf(a, harness_id, m);
     const is_binary = models.binary(levels);
-    const raw_accent: ui.Color = if (models.brandHex(m, harness_id, k.dark)) |hx| ui.Color.hex(hx) else k.accent;
-    // Ensure high contrast on warm light surfaces when the brand hex is a
-    // light sky blue (`0x66b5ff`).
-    const accent: ui.Color = if (!k.dark and raw_accent.b > 0.85 and raw_accent.r > 0.3)
-        ui.Color.hex(0x2563eb)
-    else
-        raw_accent;
+    const accent = modelEffortColor(m, harness_id, k);
     {
         const body = ui.div(c).column().wFull().grow().h(0).clip();
         defer body.end();
@@ -832,10 +868,10 @@ fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) void {
     ui.text(c, "Use model", .{ .size = 13, .line_height = 13 * 1.618, .weight = .medium, .color = k.on_solid });
 }
 
-/// Zeron-style compact thinking tier panel (`crates/ui/src/pickers/compact.rs`):
-/// effort title (`High`) on top, clickable model subtitle (`GPT-6.1-Sol ›`)
-/// beneath that expands upwards into the searchable model list, fast-tier
-/// bolt toggle on the right, and a live 120fps capsule effort slider below.
+/// Folded compact model + optional Account switcher + smooth capsule reasoning slider
+/// popover: top model trigger expands upwards into the full searchable catalog; optional
+/// Account row opens `#compact-account-menu`; REASONING header pairs a rolling level label
+/// + ⚡ toggle above the 28pt capsule `slider` in each model's brand accent colour.
 fn compactPage(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) void {
     const p = &a.view.model_picker;
     const st = p.stage orelse return;
@@ -845,69 +881,164 @@ fn compactPage(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) voi
     const m: workspace.Model = staged(a) orelse .{ .id = model_id, .label = a.modelLabel(model_id) };
     const levels = levelsOf(a, harness_id, m);
     const is_binary = models.binary(levels);
-    const wanted_h: f32 = if (levels.len > 1) compact_height else compact_single_height;
+    const accts = accounts_view.accountsForHarness(a, harness_id, c.alloc());
+    const wanted_h = compactCardHeight(accts.len > 0, levels.len > 1);
     if (@abs(p.height - wanted_h) > 0.5) {
         p.height = wanted_h;
         c.changed = true;
     }
-    const raw_accent: ui.Color = if (models.brandHex(m, harness_id, k.dark)) |hx| ui.Color.hex(hx) else k.accent;
-    const accent: ui.Color = if (!k.dark and raw_accent.b > 0.85 and raw_accent.r > 0.3)
-        ui.Color.hex(0x2563eb)
-    else
-        raw_accent;
+
+    const look_color = modelEffortColor(m, harness_id, k);
+
     ui.key(c, "model-compact-page");
-    const body = ui.div(c).column().wFull().grow().h(0).p(3).justifyBetween();
+    const body = ui.div(c).column().wFull().grow().h(0).p(4);
     defer body.end();
-    const header_h: f32 = if (levels.len > 1) 48 else 44;
+
+    // 1. Folded model trigger (`Model label ⌄`).
     {
-        const header = ui.div(c).row().wFull().h(header_h).gap(4).itemsCenter();
-        defer header.end();
         ui.key(c, "compact-select-model");
-        const select_btn = ui.div(c).column().grow().w(0).hFull().px(8).justifyCenter().rounded(8).hover(k.hover);
+        const select_btn = ui.div(c).row().wFull().h(34).px(8).gap(8).itemsCenter().rounded(8).hover(k.hover);
         const hot = select_btn.hovered();
         const clicked_model = select_btn.clicked();
         {
             defer select_btn.end();
-            if (levels.len > 0) {
-                const cur_level = if (p.stage) |s| s.level else st.level;
-                const label = if (cur_level) |i| (if (i < levels.len) models.levelLabel(levels[i], is_binary) else "Default") else "Default";
-                const top_line = ui.div(c).row().wFull().itemsCenter().clip();
-                defer top_line.end();
-                kit.rollText(c, "model-picker-effort-badge", label, .{ .size = 14, .line_height = 18, .weight = .semibold, .color = k.text });
-            }
-            const bottom_line = ui.div(c).row().wFull().gap(3).itemsCenter();
-            defer bottom_line.end();
-            const model_color = if (levels.len == 0 or hot) k.text else k.muted;
-            const model_size: f32 = if (levels.len == 0) 13 else 12;
-            const model_lh: f32 = if (levels.len == 0) 17 else 15;
-            const model_weight: ui.Weight = if (levels.len == 0) .semibold else .medium;
-            kit.ellipsisText(c, m.label, .{ .size = model_size, .line_height = model_lh, .weight = model_weight, .color = model_color }, @max(40, w - 76));
-            icons.icon(c, .@"alt-arrow-right", 10, if (hot) k.text else k.muted.alpha(0.7), 10);
+            const mark = icons.harnessMark(harness_id);
+            const ic = if (m.maker != null) models.modelIcon(m) else mark.name;
+            icons.icon(c, ic, 15, if (hot) k.text else k.text.alpha(0.9), 15);
+            kit.ellipsisText(c, m.label, .{ .size = 13, .line_height = 17, .weight = .medium, .color = k.text }, @max(40, w - 68));
+            ui.spacer(c);
+            icons.icon(c, .@"alt-arrow-down", 12, if (hot) k.text else k.muted, 0);
         }
         if (clicked_model and open) {
             p.can_return_compact = true;
             back(c, a);
+            return;
         }
-        ui.key(c, "compact-fast");
-        var fast_btn = ui.div(c).row().size(32, header_h).center().rounded(8).hover(k.hover);
-        if (st.fast) fast_btn = fast_btn.bg(accent.alpha(if (k.dark) 0.16 else 0.10));
-        const fast_hot = fast_btn.hovered();
-        const fast_clicked = fast_btn.clicked();
+    }
+
+    if (accts.len > 0 or levels.len > 1) {
+        const sep = ui.div(c).row().wFull().px(4).py(2);
+        defer sep.end();
+        _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border.alpha(0.6) }, .none, null);
+    }
+
+    // 2. Optional Account row when the harness has stored CLI accounts.
+    if (accts.len > 0) {
+        const active = for (accts) |acc| {
+            if (acc.active) break acc;
+        } else accts[0];
+        ui.key(c, "compact-account-row");
+        var acct_row = ui.div(c).row().wFull().h(32).px(8).gap(8).itemsCenter().rounded(8).hover(k.hover);
+        if (p.account_submenu) acct_row = acct_row.bg(k.hover);
+        const acct_hot = acct_row.hovered();
+        const acct_clicked = acct_row.clicked();
+        const row_id = c.node(acct_row.index).id;
         {
-            defer fast_btn.end();
-            const bolt_color = if (st.fast) accent else if (fast_hot) k.text else k.muted;
-            icons.icon(c, .@"fast-tier", 15, bolt_color, 15);
+            defer acct_row.end();
+            ui.text(c, "Account", .{ .size = 13, .line_height = 17, .color = k.text });
+            ui.spacer(c);
+            kit.ellipsisText(c, active.title(), .{ .size = 12, .line_height = 16, .color = if (acct_hot) k.text else k.muted }, @max(40, w - 116));
+            icons.icon(c, .@"alt-arrow-right", 11, if (acct_hot) k.text else k.muted, 0);
         }
-        if (fast_clicked and open) {
-            if (p.stage) |*s| s.fast = !s.fast;
+        if (c.rects.get(row_id)) |r| p.account_anchor = r;
+        if (acct_clicked and open) {
+            p.account_submenu = !p.account_submenu;
             c.changed = true;
         }
+        if (levels.len > 1) {
+            const sep2 = ui.div(c).row().wFull().px(4).py(2);
+            defer sep2.end();
+            _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border.alpha(0.6) }, .none, null);
+        }
+    } else {
+        p.account_submenu = false;
     }
+
+    // 3. Reasoning header + Fast-tier toggle + capsule EffortSlider.
     if (levels.len > 1) {
-        const slider_row = ui.div(c).row().wFull().px(6).pt(2).pb(4);
-        defer slider_row.end();
-        slider(c, a, k, accent, levels.len, @max(40, w - 6 - 12 - 44), open, fallback_level);
+        {
+            const hdr = ui.div(c).row().wFull().px(8).pt(6).pb(2).gap(8).itemsCenter();
+            defer hdr.end();
+            {
+                const col = ui.div(c).column().grow().w(0).gap(2);
+                defer col.end();
+                ui.text(c, "REASONING", .{ .size = 10, .line_height = 13, .mono = true, .weight = .medium, .color = k.faint });
+                const cur_level = if (p.stage) |s| s.level else st.level;
+                const label = if (cur_level) |i| (if (i < levels.len) models.levelLabel(levels[i], is_binary) else "Default") else "Default";
+                kit.rollText(c, "model-picker-effort-badge", label, .{ .size = 13, .line_height = 17, .weight = .semibold, .color = k.text });
+            }
+            ui.key(c, "compact-fast");
+            var fast_btn = ui.div(c).row().size(28, 28).center().rounded(7).hover(k.hover);
+            if (st.fast) fast_btn = fast_btn.bg(look_color.alpha(if (k.dark) 0.16 else 0.12));
+            const fast_hot = fast_btn.hovered();
+            const fast_clicked = fast_btn.clicked();
+            {
+                defer fast_btn.end();
+                const bolt_color = if (st.fast) look_color else if (fast_hot) k.text else k.muted;
+                icons.icon(c, .@"fast-tier", 15, bolt_color, 15);
+            }
+            if (fast_clicked and open) {
+                if (p.stage) |*s| s.fast = !s.fast;
+                c.changed = true;
+            }
+        }
+        {
+            const slider_row = ui.div(c).row().wFull().px(6).pt(2).pb(4);
+            defer slider_row.end();
+            slider(c, a, k, look_color, levels.len, @max(40, w - 8 - 12 - 44), open, fallback_level);
+        }
     }
+}
+
+fn compactAccountMenu(c: *ui.Context, a: *App, k: theme.Colors, card: ui.Rect, motion: ui.motion.Frame) void {
+    const p = &a.view.model_picker;
+    const st = p.stage orelse return;
+    const accts = accounts_view.accountsForHarness(a, st.harness, c.alloc());
+    if (accts.len == 0) return;
+
+    const menu_w = compact_account_menu_w;
+    const rows_h: f32 = @as(f32, @floatFromInt(accts.len)) * 30 + 36 + 10;
+    const anchor_y = if (p.account_anchor) |r| r.y - 4 else card.y + 40;
+    const place_right = card.x + card.w + 6 + menu_w <= c.size.w - 8;
+    const mx = if (place_right) card.x + card.w + 6 else @max(8, card.x - menu_w - 6);
+    const my = std.math.clamp(anchor_y, 8, @max(8, c.size.h - rows_h - 8));
+
+    ui.key(c, "compact-account-menu");
+    const menu = @import("view_sidebar_menus.zig").held(kit.shadowLg(ui.div(c).fixed().offset(mx, my).motion(motion).w(menu_w).layer(6).column().p(4).gap(2)
+        .bg(k.composer).border(k.border).borderW(1).rounded(10)));
+    defer menu.end();
+
+    for (accts, 0..) |acc, idx| {
+        ui.key(c, c.print("compact-account-item-{d}", .{idx}));
+        const row = ui.div(c).row().wFull().h(30).px(8).gap(6).itemsCenter().rounded(7).hover(k.hover).control();
+        const clicked = row.clicked();
+        const hot = row.hovered();
+        {
+            defer row.end();
+            icons.icon(c, .check, 12, if (acc.active) k.text else k.text.alpha(0), 0);
+            kit.ellipsisText(c, acc.title(), .{ .size = 12, .line_height = 16, .color = if (acc.active or hot) k.text else k.muted }, menu_w - 44);
+        }
+        if (clicked) {
+            accounts_view.activateAccount(a, acc);
+            p.account_submenu = false;
+            a.redraw();
+        }
+    }
+
+    const sep = ui.div(c).row().wFull().px(4).py(2);
+    sep.end();
+    _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border.alpha(0.6) }, .none, null);
+
+    ui.key(c, "compact-account-add");
+    const add_row = ui.div(c).row().wFull().h(30).px(8).gap(6).itemsCenter().rounded(7).hover(k.hover).control();
+    const add_clicked = add_row.clicked();
+    const add_hot = add_row.hovered();
+    {
+        defer add_row.end();
+        icons.icon(c, .plus, 12, if (add_hot) k.text else k.muted, 0);
+        ui.text(c, "Add account", .{ .size = 12, .line_height = 16, .color = if (add_hot) k.text else k.muted });
+    }
+    if (add_clicked) accounts_view.openAddAccount(a, st.harness);
 }
 
 /// The reasoning slider (`crates/ui/src/pickers/compact.rs`): a circular

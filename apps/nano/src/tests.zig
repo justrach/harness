@@ -38,6 +38,7 @@ test {
     _ = @import("tests_artifact_markdown.zig");
     _ = @import("tests_artifact_links.zig");
     _ = @import("tests_titlebar_clearance.zig");
+    _ = @import("view_before_after.zig");
     _ = @import("wizard.zig");
     _ = @import("termlog.zig");
     _ = @import("parity.zig");
@@ -153,6 +154,7 @@ test {
     _ = @import("tool_diff.zig");
     _ = @import("context_window.zig");
     _ = @import("view_context.zig");
+    _ = @import("view_account_usage.zig");
     _ = @import("tests_ui_desktop_sidebar_composer.zig");
     _ = @import("tests_ui_tool_tree.zig");
     _ = @import("tests_ui_actions_toolbar.zig");
@@ -175,4 +177,7 @@ test {
     _ = @import("view_updates.zig");
     _ = @import("sound.zig");
     _ = @import("visual_luau.zig");
+    _ = @import("ascii_field.zig");
+    _ = @import("member_card.zig");
+    _ = @import("view_settings_profile.zig");
 }

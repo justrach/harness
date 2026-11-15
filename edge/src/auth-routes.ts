@@ -16,6 +16,7 @@ import { bearerFromRequest, personalOrgId, verifyRefreshCredential, verifyToken 
 import type { Env } from "./env";
 import { CodegraffAuthFailed, exchange, refresh, sandboxExchange } from "./codegraff";
 import { deleteAccount } from "./account-delete";
+import { ensureHarnessMemberProfile } from "./member-profile";
 
 const json = (value: unknown, status = 200): Response =>
   new Response(JSON.stringify(value), {
@@ -125,6 +126,14 @@ export const handleAuthRoute = async (
   if (parts[1] === "account" && parts[2] === "delete" && parts.length === 3 && request.method === "POST") {
     if (!configured) return notConfigured();
     return deleteAccount(request, env);
+  }
+
+  if (parts[1] === "me" && parts.length === 2 && request.method === "GET") {
+    if (!configured && env.AUTH_MODE !== "dev") return notConfigured();
+    const token = bearerFromRequest(request);
+    const caller = token ? await verifyToken(env, token) : undefined;
+    if (!caller) return json({ error: "invalid or missing bearer token" }, 401);
+    return json({ user: await ensureHarnessMemberProfile(env, caller.userId) });
   }
 
   if (parts[1] === "orgs" && parts.length === 2) {

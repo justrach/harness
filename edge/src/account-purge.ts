@@ -26,6 +26,7 @@
 import { personalOrgId } from "./auth";
 import { deleteCrashReports } from "./crash-reports";
 import { AUTH_USER_HEADER, ROOM_KIND_HEADER, type Env } from "./env";
+import { deleteHarnessMember } from "./member-profile";
 import { PURGE_PATH } from "./purge";
 import { AUTH_ORG_HEADER, roomActorStub, roomStore, userRoomIds } from "./room-actor";
 
@@ -238,7 +239,10 @@ export class AccountPurge implements DurableObject {
         return true;
       }
       case "crashes":
-        if (this.env.HYPERDRIVE) await deleteCrashReports(this.env, job.userId);
+        if (this.env.HYPERDRIVE) {
+          await deleteCrashReports(this.env, job.userId);
+          await deleteHarnessMember(this.env, job.userId);
+        }
         return true;
       case "object": {
         const res = await this.purgeObject(this.env[target.ns], target.name, job.userId, target.workspace);

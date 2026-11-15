@@ -12,6 +12,10 @@ const rules = @import("rules.zig");
 const workspace = @import("workspace.zig");
 const App = @import("app.zig").App;
 
+const builtin = @import("builtin");
+
+pub const star_github_url = "https://github.com/justrach/codegraff";
+
 /// "No sessions yet": GPUI's default line (φ), up to a device pixel.
 const empty_line = kit.measured(12 * 1.618);
 
@@ -20,9 +24,37 @@ pub const width: f32 = @import("settings.zig").sidebar_default;
 pub fn widthOf(a: *const App) f32 {
     return a.settings.sidebarWidth();
 }
+fn cardInnerW(a: *const App) f32 {
+    return if (a.settings.uiMode() == .zen) widthOf(a) - @import("panel_chrome.zig").zen_gutter * 1.5 else widthOf(a);
+}
 pub const titlebar_h: f32 = 38;
 
 pub fn sidebar(c: *ui.Context, a: *App, k: theme.Colors) void {
+    const zen = a.settings.uiMode() == .zen;
+    if (zen) {
+        const chrome = @import("panel_chrome.zig");
+        const panel_chrome = @import("view_panel_chrome.zig");
+        const side = ui.div(c).column().w(widthOf(a)).hFull();
+        defer side.end();
+        sidebarTitlebar(c, a, k);
+        ui.div(c).h(chrome.top_pad).end();
+        const wrap = ui.div(c).column().wFull().grow().h(0).pl(chrome.zen_gutter).pr(chrome.zen_gutter / 2.0).pb(chrome.zen_gutter);
+        defer wrap.end();
+        ui.key(c, "zen-sidebar-card");
+        const card = panel_chrome.zenSidebar(c, k).wFull().grow().h(0).pt(6).clip();
+        defer card.end();
+        zenNavRows(c, a, k);
+        filterRow(c, a, k);
+        const search = @import("view_sidebar_search.zig");
+        search.controls(c, a, k);
+        if (!search.results(c, a, k)) {
+            openWorkspaces(c, a, k);
+            lists(c, a, k);
+        }
+        @import("view_bots.zig").group(c, a, k);
+        zenFooter(c, a, k);
+        return;
+    }
     // The edge is drawn over its last column (view.zig), as the GPUI app's.
     const side = ui.div(c).column().w(widthOf(a)).hFull().bg(k.sidebar);
     defer side.end();
@@ -41,14 +73,7 @@ pub fn sidebar(c: *ui.Context, a: *App, k: theme.Colors) void {
     footer(c, a, k);
 }
 
-fn sidebarTitlebar(c: *ui.Context, a: *App, k: theme.Colors) void {
-    const menus = @import("view_sidebar_menus.zig");
-    const side_w = widthOf(a);
-    const layout = @import("motion_rules.zig").sidebarTitlebarLayout(side_w);
-    const group_gap: f32 = if (side_w >= 240) 8 else 4;
-    const right_margin: f32 = if (side_w >= 240) 8 else 4;
-    const bar = ui.div(c).row().wFull().h(titlebar_h).pt(4).pl(layout.back_x).pr(right_margin).itemsCenter();
-    defer bar.end();
+pub fn navHistoryControls(c: *ui.Context, a: *App, k: theme.Colors) void {
     {
         ui.key(c, "sidebar-nav-back");
         if (a.canGoBack()) {
@@ -72,11 +97,25 @@ fn sidebarTitlebar(c: *ui.Context, a: *App, k: theme.Colors) void {
             disabled.end();
         }
     }
+}
+
+fn sidebarTitlebar(c: *ui.Context, a: *App, k: theme.Colors) void {
+    const zen = a.settings.uiMode() == .zen;
+    const menus = @import("view_sidebar_menus.zig");
+    const side_w = widthOf(a);
+    const layout = @import("motion_rules.zig").sidebarTitlebarLayout(side_w);
+    const group_gap: f32 = if (side_w >= 240) 8 else 4;
+    const right_margin: f32 = if (side_w >= 240) 8 else 4;
+    const bar = ui.div(c).row().wFull().h(titlebar_h).pt(4).pl(layout.back_x).pr(right_margin).itemsCenter();
+    defer bar.end();
+    navHistoryControls(c, a, k);
     ui.div(c).w(group_gap).end();
-    ui.key(c, "sidebar-titlebar-new-session");
-    if (kit.iconButton(c, k, .plus, .{ .size = 24, .radius = 6, .icon = 16, .color = k.muted, .tip = .{ .text = "New session", .delay = tip.quick } }))
-        a.newWorkspaceSession();
-    ui.spacer(c);
+    if (!zen) {
+        ui.key(c, "sidebar-titlebar-new-session");
+        if (kit.iconButton(c, k, .plus, .{ .size = 24, .radius = 6, .icon = 16, .color = k.muted, .tip = .{ .text = "New session", .delay = tip.quick } }))
+            a.newWorkspaceSession();
+        ui.spacer(c);
+    }
     {
         ui.key(c, "sidebar-view-options");
         const more = tip.on(ui.div(c).row(), k, .{ .text = "Sidebar view options", .delay = tip.quick });
@@ -295,8 +334,93 @@ fn openChatMark(c: *ui.Context, a: *const App, k: theme.Colors, chat_id: ?[]cons
     icons.icon(c, mark.name, size, mark.brand orelse if (active) k.text else k.muted, 0);
 }
 
+fn zenNavRows(c: *ui.Context, a: *App, k: theme.Colors) void {
+    const mac = builtin.os.tag == .macos;
+    const box = ui.div(c).column().wFull().px(8).pt(8).pb(4).gap(2);
+    defer box.end();
+
+    {
+        ui.key(c, "zen-nav-new-chat");
+        const row = ui.div(c).row().wFull().h(28).px(8).gap(8).itemsCenter().rounded(7).hover(k.hover).control();
+        const clicked = row.clicked();
+        const hot = row.hovered();
+        {
+            defer row.end();
+            icons.icon(c, .plus, 15, if (hot) k.text else k.muted, 0);
+            ui.text(c, "New chat", .{ .size = 13, .line_height = 17, .weight = theme.ui_medium_weight, .color = k.text.alpha(if (hot) 0.98 else 0.88) });
+            ui.spacer(c);
+            ui.text(c, if (mac) "⌘N" else "Ctrl+N", .{ .size = 11, .line_height = 14, .color = k.faint });
+        }
+        if (clicked) a.newWorkspaceSession();
+    }
+
+    {
+        const searching = a.view.search.open;
+        ui.key(c, "zen-nav-search");
+        var row = ui.div(c).row().wFull().h(28).px(8).gap(8).itemsCenter().rounded(7).hover(k.hover).control();
+        if (searching) row = row.bg(k.selected);
+        const clicked = row.clicked();
+        const hot = row.hovered();
+        if (c.rects.get(c.node(row.index).id)) |r| a.view.search_anchor = r;
+        {
+            defer row.end();
+            icons.icon(c, .magnifer, 15, if (searching or hot) k.text else k.muted, 0);
+            ui.text(c, "Search", .{ .size = 13, .line_height = 17, .weight = theme.ui_medium_weight, .color = k.text.alpha(if (searching or hot) 0.98 else 0.88) });
+            ui.spacer(c);
+            ui.text(c, if (mac) "⌘K" else "Ctrl+K", .{ .size = 11, .line_height = 14, .color = k.faint });
+        }
+        if (clicked) @import("view_sidebar_search.zig").toggle(a);
+    }
+
+    {
+        ui.key(c, "zen-nav-pull-requests");
+        const row = ui.div(c).row().wFull().h(28).px(8).gap(8).itemsCenter().rounded(7).hover(k.hover).control();
+        const clicked = row.clicked();
+        const hot = row.hovered();
+        {
+            defer row.end();
+            icons.icon(c, .@"pull-request", 15, if (hot) k.text else k.muted, 0);
+            ui.text(c, "Pull requests", .{ .size = 13, .line_height = 17, .weight = theme.ui_medium_weight, .color = k.text.alpha(if (hot) 0.98 else 0.88) });
+        }
+        if (clicked) {
+            const gh = @import("app_github_repository.zig");
+            gh.bind(a);
+            @import("app_git.zig").open(a, .github);
+            gh.show(a);
+        }
+    }
+}
+
 fn filterRow(c: *ui.Context, a: *App, k: theme.Colors) void {
     const menus = @import("view_sidebar_menus.zig");
+    if (a.settings.uiMode() == .zen) {
+        const row = ui.div(c).row().wFull().px(10).pt(4).pb(6).itemsCenter();
+        defer row.end();
+        const rest_bg = k.ink(if (k.dark) 0.065 else 0.045);
+        const base = ui.div(c).row().h(26).px(8).gap(6).itemsCenter().rounded(7)
+            .border(k.border.alpha(0.55)).borderW(1).clip().control();
+        const lh = kit.listenerHover(&a.view.hovers, base.bg(if (a.view.filter_menu) k.hover else rest_bg), k.hover);
+        const t = lh.div;
+        const clicked = t.clicked();
+        if (c.rects.get(c.node(t.index).id)) |r| a.view.filter_anchor = r;
+        {
+            defer t.end();
+            const color = if (lh.hovered or a.view.filter_menu) k.text else k.text.alpha(0.86);
+            const max_room = @max(60, widthOf(a) - 86);
+            if (a.findSpace(a.view.filter)) |s| {
+                const icon_slot = ui.div(c).row().size(15, 15).center();
+                badge(c, a, k, s.id, lh.hovered or a.view.filter_menu);
+                icon_slot.end();
+                kit.ellipsisText(c, s.name, .{ .size = 12.5, .line_height = 16, .weight = theme.ui_medium_weight, .color = color }, max_room);
+            } else {
+                icons.icon(c, .folder, 14, if (lh.hovered or a.view.filter_menu) k.text.alpha(0.88) else k.muted.alpha(0.85), 14);
+                ui.text(c, "All projects", .{ .size = 12.5, .line_height = 16, .weight = theme.ui_medium_weight, .color = color });
+            }
+            icons.icon(c, .@"alt-arrow-down", 10, k.muted, 0);
+        }
+        if (clicked) if (a.view.filter_menu) menus.close(a) else menus.openProjects(a);
+        return;
+    }
     const row = ui.div(c).row().wFull().px(8).pt(6).pb(4).itemsCenter();
     defer row.end();
     const rest_bg = k.ink(if (k.dark) 0.055 else 0.042);
@@ -432,7 +556,7 @@ fn prepareItems(c: *ui.Context, a: *App, pins: []const []const u8, grouped: bool
             out[idx] = .{};
             continue;
         };
-        const row_h = contextHeight(l.label, l.branch and ch.branch != null, show_updated, l.harness or l.icon);
+        const row_h = if (a.settings.uiMode() == .zen) @as(f32, 30) else contextHeight(l.label, l.branch and ch.branch != null, show_updated, l.harness or l.icon);
         const is_pinned = !ch.archived and pinned(pins, ch.id) != null;
         if (!ch.archived and !is_pinned and last_activity != .all) {
             const sess = if (a.sessions.items.len > 8) session_map.get(ch.id) else workspace.sessionOf(a.sessions.items, ch.id);
@@ -499,9 +623,12 @@ fn contentHeight(c: *ui.Context, a: *App, pins: []const []const u8, items: []con
     if (active == 0 and pins.len == 0) {
         height += 8 + c.text.lineHeight(.{ .size = 12 });
     } else if (!grouped and active > 0) height += 30 + (if (a.view.sessions_open) @as(f32, 2) else 0);
-    if (archived > 0 and a.settings.get(.sidebar_show_archived)) {
+    const zen = a.settings.uiMode() == .zen;
+    const arch_open = if (zen) a.view.zen_archived_open else a.view.archived_open;
+    const inline_archived = !zen or arch_open;
+    if (inline_archived and archived > 0 and a.settings.get(.sidebar_show_archived)) {
         height += 6 + 30;
-        if (a.view.archived_open) {
+        if (arch_open) {
             height += 2 + archive_height;
             if (archived > a.view.archived_limit) height += (if (a.settings.get(.sidebar_compact)) @as(f32, 29) else 36) + 2;
         }
@@ -633,7 +760,8 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
             }
             break :regular;
         }
-        a.view.sessions_header = rectOf(c, sectionAt(c, k, "Sessions", active, &a.view.sessions_open));
+        const sess_title = if (a.settings.uiMode() == .zen) "Activity" else "Sessions";
+        a.view.sessions_header = rectOf(c, sectionAt(c, k, sess_title, active, &a.view.sessions_open));
         const sess_disc = trackDisclosure(c, a, "sessions", a.view.sessions_open);
         window.y += 30;
         if (!sess_disc.visible(a.view.sessions_open)) {
@@ -676,14 +804,16 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
             ui.text(c, "No sessions yet", .{ .size = 12, .line_height = empty_line, .color = k.faint });
         }
     }
-    // Show › Archived off: no shelf.
-    if (archived == 0 or !a.settings.get(.sidebar_show_archived)) return;
+    // Show › Archived off, or Zen keeps Archived pinned to the bottom until opened.
+    const zen = a.settings.uiMode() == .zen;
+    const arch_flag = if (zen) &a.view.zen_archived_open else &a.view.archived_open;
+    if (archived == 0 or !a.settings.get(.sidebar_show_archived) or (zen and !arch_flag.*)) return;
     // 6 under the list above: its 4, and the gap.
     _ = c.leaf(.{ .height = .{ .px = 4 } }, .none, null);
     window.y += 6 + 30;
-    _ = section(c, k, "Archived", archived, &a.view.archived_open);
-    const arch_disc = trackDisclosure(c, a, "archived", a.view.archived_open);
-    if (arch_disc.visible(a.view.archived_open)) {
+    _ = section(c, k, "Archived", archived, arch_flag);
+    const arch_disc = trackDisclosure(c, a, "archived", arch_flag.*);
+    if (arch_disc.visible(arch_flag.*)) {
         // SIDEBAR_DISCLOSURE_BODY_INSET: 4 under the header, the list's 2 twice.
         _ = c.leaf(.{ .height = .{ .px = 0 } }, .none, null);
         const animating = arch_disc.animating and moving == null;
@@ -973,6 +1103,7 @@ const Look = struct {
 /// Desktop reserves a38px slot when context is enabled, even though its
 /// compact renderer keeps the marks, title and timestamp on one line.
 pub fn rowHeight(a: *const App, ch: workspace.Chat) f32 {
+    if (a.settings.uiMode() == .zen) return 30;
     const l = Look.of(a);
     return contextHeight(l.label, l.branch and ch.branch != null, a.settings.get(.sidebar_show_updated), l.harness or l.icon);
 }
@@ -1294,13 +1425,11 @@ fn notice(c: *ui.Context, a: *App, k: theme.Colors) void {
 
 fn sessionRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat) void {
     ui.key(c, c.print("row-{s}", .{ch.id}));
+    const zen = a.settings.uiMode() == .zen;
     const selected = a.selected != null and std.mem.eql(u8, a.selected.?, ch.id);
     const l = Look.of(a);
     // 6 above an 18-point line, as `render_chat_row`'s `py(6)` column.
-    var r = if (l.compact)
-        ui.div(c).column().wFull().h(rowHeight(a, ch)).px(8).py(6).gap(2).rounded(8).clip()
-    else
-        ui.div(c).column().wFull().h(rowHeight(a, ch)).px(8).py(6).gap(2).rounded(8).clip();
+    var r = ui.div(c).column().wFull().h(rowHeight(a, ch)).px(8).py(if (zen) @as(f32, 5) else 6).gap(2).rounded(if (zen) @as(f32, 7) else 8).clip();
     // Hovered as GPUI's row is (its `hover_listener`): by the pointer's
     // moves, so its menu opening under a still pointer leaves it hovered.
     const waiting = rowMark(a, ch) == .awaiting_input;
@@ -1313,7 +1442,54 @@ fn sessionRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat) void
     var archive = false;
     var menu = false;
     const now = a.nowMs();
-    if (!l.compact) {
+    if (zen) {
+        const line = ui.div(c).row().wFull().h(20).gap(6).itemsCenter();
+        defer line.end();
+        const mark_state = rowMark(a, ch);
+        {
+            const lead = ui.div(c).row().size(14, 14).center();
+            defer lead.end();
+            switch (mark_state) {
+                .working => kit.snake(c, k),
+                .awaiting_input => kit.dot(c, 7, k.accent),
+                .errored => kit.dot(c, 7, k.danger),
+                else => {
+                    const hm = icons.harnessMark(ch.harness orelse "graff");
+                    icons.icon(c, hm.name, 13, (hm.brand orelse k.muted).alpha(if (ch.archived and !selected and !hovered) 0.45 else 0.88), 0);
+                },
+            }
+        }
+        zenMonogram(c, a, k, ch, 16);
+        const time = rules.relativeTime(c.alloc().alloc(u8, 16) catch &.{}, now, ch.timeMs());
+        const time_w = if (hovered) @as(f32, 40) else c.text.width(time, .{ .size = 11 }) + 4;
+        const far = remote(a, ch);
+        const title_w = @max(24, cardInnerW(a) - 8 - 16 - 16 - 14 - 16 - 12 - time_w - (if (!hovered and far) @as(f32, 18) else 0));
+        const tc = if (selected or hovered) k.text else if (ch.archived) k.text.alpha(0.55) else k.text.alpha(0.84);
+        {
+            const t = ui.div(c).row().grow().w(0).clip();
+            defer t.end();
+            kit.fadeText(c, chatLabel(ch), kit.style(c, 13, 17, .{ .color = tc }), title_w);
+        }
+        if (hovered) {
+            const b = ui.div(c).row().size(18, 18).center().rounded(4).hover(k.wash(0.10));
+            defer b.end();
+            if (b.clicked()) archive = true;
+            icons.icon(c, if (ch.archived) .@"archive-up-minimalistic" else .@"archive-minimalistic", 13, k.muted, 0);
+            const m = ui.div(c).row().size(18, 18).center().rounded(4).hover(k.wash(0.10));
+            defer m.end();
+            if (m.clicked()) menu = true;
+            icons.icon(c, .@"more-horizontal", 13, k.muted, 0);
+        } else {
+            if (far) {
+                const b = ui.div(c).row().size(14, 14).center();
+                defer b.end();
+                icons.icon(c, .@"remote-server", 12, k.muted.alpha(0.5), 0);
+            }
+            const tm = ui.div(c).row().pl(4);
+            defer tm.end();
+            ui.text(c, time, .{ .size = 11, .color = k.subline });
+        }
+    } else if (!l.compact) {
         expandedLines(c, a, k, ch, l, selected or hovered, hovered);
     } else {
         const line = ui.div(c).row().wFull().h(18).gap(4).itemsCenter();
@@ -1383,6 +1559,23 @@ fn statusSlot(c: *ui.Context, k: theme.Colors, mark: workspace.Mark) void {
     }
 }
 
+pub fn zenMonogram(c: *ui.Context, a: *const App, k: theme.Colors, ch: workspace.Chat, size: f32) void {
+    const space = a.findSpace(ch.space_id);
+    const seed = if (space) |s| s.name else chatLabel(ch);
+    const path = if (space) |s| s.path else ch.cwd;
+    const m = rules.monogram(seed, path, true);
+    const bg = m.color.alpha(if (k.dark) 0.88 else 0.92);
+    const tile = ui.div(c).row().size(size, size).center().rounded(4).bg(bg);
+    defer tile.end();
+    ui.text(c, c.print("{c}", .{m.letter}), .{
+        .size = @max(8.5, size * 0.58),
+        .line_height = size,
+        .weight = .bold,
+        .mono = true,
+        .color = ui.Color.white,
+    });
+}
+
 /// The project's monogram tile (`project_icon.rs`).
 pub fn badge(c: *ui.Context, a: *const App, k: theme.Colors, space_id: ?[]const u8, lit: bool) void {
     const space = a.findSpace(space_id);
@@ -1404,6 +1597,191 @@ pub fn chatLabel(ch: workspace.Chat) []const u8 {
 
 fn firstLine(s: []const u8) []const u8 {
     return s[0 .. std.mem.indexOfScalar(u8, s, '\n') orelse s.len];
+}
+
+fn zenFooter(c: *ui.Context, a: *App, k: theme.Colors) void {
+    notice(c, a, k);
+    if (a.offscreen or a.window != null)
+        @import("view_sandbox_strip.zig").computers(c, a, k)
+    else
+        @import("view_sandbox_strip.zig").strip(c, a, k, 0);
+
+    if (a.settings.get(.sidebar_show_archived) and !a.view.zen_archived_open) {
+        var archived_count: usize = 0;
+        for (a.chats.items) |ch| if (ch.archived and listed(a, ch)) {
+            archived_count += 1;
+        };
+        if (archived_count > 0) {
+            const wrap = ui.div(c).column().wFull().px(8).pt(2).pb(2);
+            defer wrap.end();
+            ui.key(c, "zen-archived-footer");
+            const ar = ui.div(c).row().wFull().h(28).px(8).itemsCenter().rounded(7).hover(k.hover).control();
+            const clicked = ar.clicked();
+            {
+                defer ar.end();
+                ui.text(c, "Archived", .{ .size = 12, .line_height = 16, .color = k.muted });
+                ui.spacer(c);
+                ui.text(c, c.print("{d}", .{archived_count}), .{ .size = 11.5, .line_height = 16, .mono = true, .color = k.faint });
+            }
+            if (clicked) {
+                a.view.zen_archived_open = true;
+                a.redraw();
+            }
+        }
+    }
+
+    @import("view_account_notice.zig").strip(c, a, k);
+
+    if (!a.settings.get(.star_banner_dismissed)) {
+        const wrap = ui.div(c).column().wFull().px(8).pt(4).pb(2);
+        defer wrap.end();
+        const cg = theme.builtin(k.dark);
+        const star_bg = cg.accent.alpha(if (k.dark) 0.13 else 0.10);
+        const star_hover = cg.accent.alpha(if (k.dark) 0.20 else 0.16);
+        const star_border = cg.accent.alpha(if (k.dark) 0.24 else 0.20);
+        const star_fg = if (k.dark) cg.glyph[0] else cg.glyph[2];
+        ui.key(c, "star-banner");
+        const banner = ui.div(c).row().wFull().h(30).pl(10).pr(4).gap(6).itemsCenter().rounded(8)
+            .bg(star_bg).hover(star_hover).border(star_border).borderW(1);
+        const rclick = kit.secondaryClicked(banner);
+        var open_clicked = false;
+        var dismiss_clicked = false;
+        {
+            defer banner.end();
+            {
+                ui.key(c, "star-banner-open");
+                const open_btn = tip.on(ui.div(c).row().grow().w(0).hFull().gap(7).itemsCenter().control(), k, .{
+                    .text = "Star justrach/codegraff on GitHub",
+                    .delay = tip.quick,
+                });
+                open_clicked = open_btn.clicked();
+                defer open_btn.end();
+                icons.icon(c, .@"star-bold", 13, star_fg, 0);
+                ui.text(c, "Star on GitHub", .{ .size = 12, .line_height = 16, .weight = theme.ui_medium_weight, .color = star_fg });
+            }
+            {
+                ui.key(c, "star-banner-dismiss");
+                const close_btn = tip.on(ui.div(c).row().size(20, 20).center().rounded(5).hover(k.ink(0.10)).control(), k, .{
+                    .text = "Dismiss",
+                    .delay = tip.quick,
+                });
+                dismiss_clicked = close_btn.clicked();
+                defer close_btn.end();
+                icons.icon(c, .close, 10, star_fg.alpha(0.75), 0);
+            }
+        }
+        if (rclick) {
+            a.view.star_menu = true;
+            a.view.star_menu_pos = c.input.mouse;
+            a.redraw();
+        } else if (dismiss_clicked) {
+            a.settings.set(.star_banner_dismissed, true);
+            a.view.star_menu = false;
+            a.redraw();
+        } else if (open_clicked) {
+            a.openExternalUrl(star_github_url);
+            a.settings.set(.star_banner_dismissed, true);
+            a.view.star_menu = false;
+            a.redraw();
+        }
+    }
+
+    const row = ui.div(c).row().wFull().h(38).px(8).pt(2).pb(4).gap(4).itemsCenter();
+    defer row.end();
+    {
+        const account = @import("app_account.zig");
+        const m = account.menu(a.account.scope, a.account.user, a.account.codegraff);
+        const signed_in = a.account.user != null;
+        const has_identity = signed_in or a.account.codegraff.signed_in;
+        const label = if (m.name) |n|
+            n
+        else if (signed_in)
+            m.line
+        else if (a.account.codegraff.signed_in)
+            (a.account.codegraff.who orelse "Codegraff")
+        else if (a.account.scope == .development)
+            "Development"
+        else
+            "Sign in";
+        ui.key(c, "sidebar-account-row");
+        const btn = tip.on(
+            ui.div(c).row().grow().w(0).h(30).px(5).gap(8).itemsCenter().rounded(7).hover(k.hover).control(),
+            k,
+            .{ .text = c.print("Account: {s} (click for card, right-click for menu)", .{label}), .delay = tip.quick },
+        );
+        const clicked = btn.clicked();
+        const rclick = kit.secondaryClicked(btn);
+        if (c.rects.get(c.node(btn.index).id)) |r| a.view.account_anchor = r;
+        {
+            defer btn.end();
+            const drew_avatar = if (a.account.avatar_bytes) |bytes|
+                bytes.len > 0 and ui.image(c, .{
+                    .key = "sidebar-account-avatar",
+                    .source = .{ .encoded = bytes },
+                    .box = .{ .w = 20, .h = 20 },
+                    .radius = 10,
+                })
+            else
+                false;
+            if (!drew_avatar) renderFallbackAvatar(c, k, label, has_identity);
+            const label_room = @max(40, cardInnerW(a) - 8 - 16 - 30 - 4 - 20 - 8 - 10);
+            kit.ellipsisText(c, label, .{
+                .size = 12.5,
+                .line_height = 17,
+                .weight = theme.ui_medium_weight,
+                .color = k.text.alpha(0.92),
+            }, label_room);
+        }
+        if (clicked) {
+            a.settings.setSection(.account);
+            @import("view_settings.zig").open(a);
+        } else if (rclick) {
+            a.view.account_menu = !a.view.account_menu;
+            if (a.view.account_menu) account.refresh(a);
+            a.redraw();
+        }
+    }
+    {
+        ui.key(c, "sidebar-settings-button");
+        const gear = tip.on(
+            ui.div(c).row().size(30, 30).center().rounded(7).hover(k.hover).control(),
+            k,
+            .{ .text = "Settings (⌘,)", .delay = tip.quick },
+        );
+        const clicked = gear.clicked();
+        const rclick = kit.secondaryClicked(gear);
+        const hot = gear.hovered();
+        if (c.rects.get(c.node(gear.index).id)) |r| a.view.more_anchor = a.view.more_anchor orelse r;
+        {
+            defer gear.end();
+            icons.icon(c, .@"settings-minimalistic", 16, if (hot) k.text else k.muted, 0);
+        }
+        if (clicked) {
+            @import("view_settings.zig").open(a);
+        } else if (rclick) {
+            @import("view_sidebar_menus.zig").openView(a);
+            a.redraw();
+        }
+    }
+}
+
+fn renderFallbackAvatar(c: *ui.Context, k: theme.Colors, label: []const u8, has_identity: bool) void {
+    const account = @import("app_account.zig");
+    if (has_identity) {
+        const av = ui.div(c).row().size(20, 20).center().roundedFull().bg(k.accent);
+        defer av.end();
+        ui.text(c, c.print("{c}", .{account.initial(label)}), .{
+            .size = 10.5,
+            .line_height = 14,
+            .weight = .semibold,
+            .mono = true,
+            .color = k.onAccent(),
+        });
+    } else {
+        const badge_box = ui.div(c).row().size(20, 20).center().roundedFull().bg(k.accent_wash).border(k.accent.alpha(0.35)).borderW(1);
+        defer badge_box.end();
+        icons.icon(c, .@"user-rounded", 12, k.accent, 0);
+    }
 }
 
 fn footer(c: *ui.Context, a: *App, k: theme.Colors) void {

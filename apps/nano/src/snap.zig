@@ -72,7 +72,14 @@ pub fn main(init: std.process.Init) !void {
     a.account.scope = acct.readScope(scene);
     if (scene.get("auth")) |v| a.account.user = try acct.readUser(gpa, v);
     if (scene.get("codegraff")) |v| a.account.codegraff = try acct.readCodegraff(gpa, v);
+    try applySceneExtras(&a, init.arena.allocator(), scene);
     if (str(scene, "open")) |id| a.openChat(id, null);
+    if (str(scene, "openSettings")) |sec_key| {
+        if (@import("settings.zig").Section.fromKey(sec_key)) |sec| a.settings.setSection(sec);
+        @import("view_settings.zig").open(&a);
+    } else if (flag(scene, "openSettings")) {
+        @import("view_settings.zig").open(&a);
+    }
     // Bots: a `BotsState` reply as "bots", the clock its times are read
     // against as "botsNow" (ms), and the page shown: "inbox", "new" or a
     // bot's name. "botsDetail" is what `BotDetail` would answer for its
@@ -110,7 +117,8 @@ pub fn main(init: std.process.Init) !void {
     });
     defer t.deinit();
     const transcripts = if (scene.get("transcripts")) |v| (if (v == .object) v.object else null) else null;
-    settle(&t, &a, transcripts, init.arena.allocator());
+    const context_usage = scene.get("contextUsage");
+    settle(&t, &a, transcripts, context_usage, init.arena.allocator());
 
     var snaps: usize = 0;
     const steps = if (scene.get("steps")) |v| (if (v == .array) v.array.items else &.{}) else &.{};
@@ -146,7 +154,7 @@ pub fn main(init: std.process.Init) !void {
             try save(&t, out, snaps, name);
             continue;
         }
-        settle(&t, &a, transcripts, init.arena.allocator());
+        settle(&t, &a, transcripts, context_usage, init.arena.allocator());
     }
     if (snaps == 0) try save(&t, out, 0, "final");
 }
@@ -158,7 +166,7 @@ fn parity(init: std.process.Init, scene: json.ObjectMap, name: []const u8, out: 
     var a: App = .init(gpa, init.io, 1);
     defer a.deinit();
     a.updates.desktop_update = false;
-    a.new_harness = try gpa.dupe(u8, "graff");
+    a.new_harness = try gpa.dupe(u8, str(scene, "harness") orelse "graff");
     // A data folder of its own, empty, as the renderer's temporary one: what
     // a scene saves (a theme it imports) goes there, never in ~/.harness.
     const data = try std.fs.path.join(arena, &.{ out, try std.fmt.allocPrint(arena, "data-{s}", .{name}) });
@@ -218,6 +226,7 @@ fn parity(init: std.process.Init, scene: json.ObjectMap, name: []const u8, out: 
         accounts_page.scene_accounts = null;
     };
     if (str(scene, "selectedSpace") orelse first(scene, "spaces", "id")) |sp| a.space = try gpa.dupe(u8, sp);
+    try applySceneExtras(&a, arena, scene);
     if (str(scene, "selectedChat")) |id| {
         a.openChat(id, null);
         if (scene.get("transcript")) |v| {
@@ -226,6 +235,12 @@ fn parity(init: std.process.Init, scene: json.ObjectMap, name: []const u8, out: 
             if (scene.get("contextUsage")) |u| try frame.object.put(arena, "contextUsage", u);
             a.transcript.apply(frame) catch {};
         }
+    }
+    if (str(scene, "openSettings")) |sec_key| {
+        if (@import("settings.zig").Section.fromKey(sec_key)) |sec| a.settings.setSection(sec);
+        @import("view_settings.zig").open(&a);
+    } else if (flag(scene, "openSettings")) {
+        @import("view_settings.zig").open(&a);
     }
 
     var t: ui.Tester = undefined;
@@ -352,20 +367,99 @@ fn first(o: json.ObjectMap, list: []const u8, key: []const u8) ?[]const u8 {
     return str(v.array.items[0].object, key);
 }
 
+fn copyFixed(dst: []u8, len_slot: *usize, src: []const u8) void {
+    const n = @min(src.len, dst.len);
+    @memcpy(dst[0..n], src[0..n]);
+    len_slot.* = n;
+}
+
+fn applySceneExtras(a: *App, arena: std.mem.Allocator, scene: json.ObjectMap) !void {
+    if (str(scene, "uiMode")) |m| {
+        if (std.mem.eql(u8, m, "zen")) a.settings.applyUiMode(.zen) else if (std.mem.eql(u8, m, "developer")) a.settings.applyUiMode(.developer);
+    }
+    if (scene.get("harnesses")) |v| try a.harnesses.replace(v);
+    if (scene.get("models")) |v| {
+        a.gpa.free(a.models_for);
+        a.models_for = try a.gpa.dupe(u8, a.new_harness);
+        try a.models.replace(v);
+    }
+    if (str(scene, "model")) |m| a.setModel(m);
+    if (scene.get("agentAccounts")) |v| @import("view_settings_accounts.zig").setSnapshot(a, v);
+    if (scene.get("agentUpdates")) |v| {
+        if (a.device_id == null) {
+            const dev_id = first(scene, "spaces", "deviceId") orelse first(scene, "devices", "id") orelse "local";
+            a.device_id = try a.gpa.dupe(u8, dev_id);
+        }
+        const json_text = try json.Stringify.valueAlloc(arena, v, .{});
+        try @import("agent_updates.zig").setTestStatuses(a, a.device_id orelse "local", true, json_text);
+    }
+    if (scene.get("updates")) |v| if (v == .object) {
+        const u = v.object;
+        if (u.get("desktopUpdate")) |b| if (b == .bool) {
+            a.updates.desktop_update = b.bool;
+        };
+        if (u.get("appReady")) |b| if (b == .bool) {
+            a.updates.app_ready = b.bool;
+        };
+        if (u.get("appCanInstall")) |b| if (b == .bool) {
+            a.updates.app_can_install = b.bool;
+        };
+        if (u.get("appDownloading")) |b| if (b == .bool) {
+            a.updates.app_downloading = b.bool;
+        };
+        if (str(u, "appLatest")) |ver| {
+            copyFixed(&a.release.latest, &a.release.latest_len, ver);
+            a.release.succeeded = true;
+        }
+        if (str(u, "graffKind")) |gk| {
+            if (std.mem.eql(u8, gk, "none")) a.updates.graff_kind = .none else if (std.mem.eql(u8, gk, "updating")) a.updates.graff_kind = .updating else if (std.mem.eql(u8, gk, "updated")) a.updates.graff_kind = .updated else if (std.mem.eql(u8, gk, "available")) a.updates.graff_kind = .available;
+        }
+        if (str(u, "graffFrom")) |from| copyFixed(&a.updates.graff_from, &a.updates.graff_from_len, from);
+        if (str(u, "graffTo")) |to| copyFixed(&a.updates.graff_to, &a.updates.graff_to_len, to);
+    };
+    if (flag(scene, "openUpdatesPopover")) a.view.updates_popover = true;
+    if (flag(scene, "openCompactPicker")) a.togglePickerCompact();
+    if (flag(scene, "openAccountUsagePopover")) a.view.account_usage.open = true;
+    if (scene.get("setupStep")) |v| if (v == .integer and v.integer >= 0) {
+        @import("view_setup.zig").open(a, @intCast(v.integer));
+    };
+    if (scene.get("setupExtrasOn")) |v| if (v == .array) if (a.view.setup) |*s| {
+        for (0..@min(2, v.array.items.len)) |idx| if (v.array.items[idx] == .bool) {
+            s.extras_on[idx] = v.array.items[idx].bool;
+            s.extras_was[idx] = s.extras_on[idx];
+        };
+    };
+    if (str(scene, "setupInstalling")) |id| if (a.view.setup) |*s| {
+        if (std.mem.eql(u8, id, "claude-code")) s.installing = 0 else if (std.mem.eql(u8, id, "codex")) s.installing = 1;
+    };
+    if (scene.get("setupCopied")) |v| if (v == .integer and v.integer >= 0) if (a.view.setup) |*s| {
+        s.copied = @intCast(v.integer);
+        s.copied_until = 9999.0;
+    };
+}
+
 /// Runs frames until the view is still, giving every chat on screen (the
 /// open one, its split's other panes) its transcript from the scene.
-fn settle(t: *ui.Tester, a: *App, transcripts: ?json.ObjectMap, arena: std.mem.Allocator) void {
+fn settle(t: *ui.Tester, a: *App, transcripts: ?json.ObjectMap, context_usage: ?json.Value, arena: std.mem.Allocator) void {
     t.settle(1);
-    const all = transcripts orelse return;
     var filled = false;
-    if (a.selected) |id| if (a.transcript.entries.items.len == 0) if (all.get(id)) |v| {
-        a.transcript.apply(reset(arena, v) orelse return) catch {};
-        filled = true;
+    if (a.selected) |id| if (a.transcript.entries.items.len == 0) {
+        const entries = if (transcripts) |all| all.get(id) else null;
+        if (entries != null or (context_usage != null and a.transcript.window == null)) {
+            if (reset(arena, entries orelse .{ .array = .init(arena) })) |frame_val| {
+                var frame = frame_val;
+                if (context_usage) |u| frame.object.put(arena, "contextUsage", u) catch {};
+                a.transcript.apply(frame) catch {};
+                filled = true;
+            }
+        }
     };
-    for (a.peers.items) |*p| if (p.transcript.entries.items.len == 0) if (all.get(p.id)) |v| {
-        p.transcript.apply(reset(arena, v) orelse continue) catch {};
-        filled = true;
-    };
+    if (transcripts) |all| {
+        for (a.peers.items) |*p| if (p.transcript.entries.items.len == 0) if (all.get(p.id)) |v| {
+            p.transcript.apply(reset(arena, v) orelse continue) catch {};
+            filled = true;
+        };
+    }
     if (filled) t.settle(1);
 }
 

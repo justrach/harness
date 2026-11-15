@@ -10,6 +10,7 @@ const shortcuts = @import("shortcuts.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Section = enum {
+    account,
     appearance,
     notifications,
     shortcuts,
@@ -28,6 +29,7 @@ pub const Section = enum {
 
     pub fn label(s: Section) []const u8 {
         return switch (s) {
+            .account => "Account",
             .devices => "Devices",
             .harnesses => "Agents",
             .agents => "Accounts",
@@ -46,6 +48,7 @@ pub const Section = enum {
     /// The heading it sits under in the sidebar.
     pub fn group(s: Section) []const u8 {
         return switch (s) {
+            .account => "Account",
             .appearance, .notifications, .shortcuts, .files, .browsing => "General",
             .harnesses, .agents, .mcp, .github_ci => "Agents",
             .devices, .appshots, .archived => "Devices and data",
@@ -54,6 +57,7 @@ pub const Section = enum {
 
     pub fn icon(s: Section) icons.Name {
         return switch (s) {
+            .account => .@"user-rounded",
             .devices, .appshots => .monitor,
             .harnesses => .widget,
             .agents => .@"key-minimalistic",
@@ -105,6 +109,7 @@ pub const Prefs = struct {
     archive_on_close_chosen: bool = false,
     escape_stops_active_agent: bool = false,
     transcript_compact_mode: bool = true,
+    design_before_after_enabled: bool = true,
     pause_animations_in_background: bool = false,
     /// The Write page starts in the interface sans; Aa offers a serif.
     write_sans: bool = true,
@@ -122,6 +127,8 @@ pub const Prefs = struct {
     // Settings › Devices. Installation defaults on, independently of the legacy restart switch.
     automatically_install_updates: bool = true,
     restart_to_install_updates: bool = true,
+    // Sidebar `#star-banner` dismissal.
+    star_banner_dismissed: bool = false,
 };
 
 /// One of `Prefs`'s switches.
@@ -143,6 +150,7 @@ pub const Flag = enum {
     archive_on_close_chosen,
     escape_stops_active_agent,
     transcript_compact_mode,
+    design_before_after_enabled,
     pause_animations_in_background,
     write_sans,
     sidebar_compact,
@@ -156,6 +164,7 @@ pub const Flag = enum {
     appshot_sound_enabled,
     automatically_install_updates,
     restart_to_install_updates,
+    star_banner_dismissed,
 };
 
 pub const sidebar_min: f32 = 224;
@@ -723,6 +732,13 @@ pub const Store = struct {
             const copy = json.parseFromSliceLeaky(json.Value, a, body_copy, .{}) catch return;
             s.remember("projectFoldersByDevice", copy);
         }
+        if (o.get("skippedUpdates")) |v| if (v == .object) {
+            if (s.doc_arena == null) s.doc_arena = .init(s.gpa);
+            const a = s.doc_arena.?.allocator();
+            const body_copy = json.Stringify.valueAlloc(a, v, .{}) catch return;
+            const copy = json.parseFromSliceLeaky(json.Value, a, body_copy, .{}) catch return;
+            s.remember("skippedUpdates", copy);
+        };
         // The scalars, for pages to read: strings and numbers.
         var it = o.iterator();
         while (it.next()) |e| switch (e.value_ptr.*) {
@@ -961,6 +977,35 @@ pub const Store = struct {
         s.write("settingsSection", .{ .string = sec.key() });
     }
 
+    /// Whether the update row `id` with version/error `token` was skipped.
+    pub fn isUpdateSkipped(s: *const Store, id: []const u8, token: []const u8) bool {
+        const root = s.doc.get("skippedUpdates") orelse return false;
+        if (root != .object) return false;
+        const entry = root.object.get(id) orelse return false;
+        return entry == .string and std.mem.eql(u8, entry.string, token);
+    }
+
+    pub fn skipUpdate(s: *Store, id: []const u8, token: []const u8) void {
+        if (id.len == 0 or token.len == 0) return;
+        if (s.doc_arena == null) s.doc_arena = .init(s.gpa);
+        const a = s.doc_arena.?.allocator();
+        var root = s.doc.get("skippedUpdates") orelse json.Value{ .object = .empty };
+        if (root != .object) root = .{ .object = .empty };
+        const id_copy = a.dupe(u8, id) catch return;
+        const tok_copy = a.dupe(u8, token) catch return;
+        root.object.put(a, id_copy, .{ .string = tok_copy }) catch return;
+        s.remember("skippedUpdates", root);
+        s.write("skippedUpdates", root);
+    }
+
+    pub fn clearSkippedUpdate(s: *Store, id: []const u8) void {
+        var root = s.doc.get("skippedUpdates") orelse return;
+        if (root != .object) return;
+        if (!root.object.orderedRemove(id)) return;
+        s.remember("skippedUpdates", root);
+        s.write("skippedUpdates", root);
+    }
+
     /// Sets one key in the file as it is now (the other app may have
     /// written since), and swaps it in whole.
     fn write(s: *Store, key: []const u8, value: json.Value) void {
@@ -1066,9 +1111,10 @@ test "Nano keeps its own settings and starts by project without rewriting Harnes
 }
 
 test "sections in the GPUI app's order, groups and saved keys" {
-    try testing.expectEqual(Section.appearance, Section.all[0]);
-    try testing.expectEqual(Section.files, Section.all[3]);
-    try testing.expectEqual(Section.browsing, Section.all[4]);
+    try testing.expectEqual(Section.account, Section.all[0]);
+    try testing.expectEqual(Section.appearance, Section.all[1]);
+    try testing.expectEqual(Section.files, Section.all[4]);
+    try testing.expectEqual(Section.browsing, Section.all[5]);
     try testing.expectEqualStrings("Links & browsing", Section.browsing.label());
     try testing.expectEqualStrings("General", Section.browsing.group());
     try testing.expectEqual(icons.Name.global, Section.browsing.icon());
@@ -1374,4 +1420,19 @@ test "font size steps through the supported sizes and holds at the ends" {
     try testing.expectEqual(@as(f32, 12), stepUiFontSize(12, -1));
     // An off-table size steps from its nearest supported one.
     try testing.expectEqual(@as(f32, 18), stepUiFontSize(17, 1));
+}
+
+test "star banner dismissal and skipped updates persist per row version token" {
+    var s: Store = .{ .gpa = testing.allocator, .io = testing.io };
+    defer s.deinit();
+    try testing.expect(!s.get(.star_banner_dismissed));
+    s.set(.star_banner_dismissed, true);
+    try testing.expect(s.get(.star_banner_dismissed));
+
+    try testing.expect(!s.isUpdateSkipped("agent:local:codex", "0.169.0"));
+    s.skipUpdate("agent:local:codex", "0.169.0");
+    try testing.expect(s.isUpdateSkipped("agent:local:codex", "0.169.0"));
+    try testing.expect(!s.isUpdateSkipped("agent:local:codex", "0.170.0"));
+    s.clearSkippedUpdate("agent:local:codex");
+    try testing.expect(!s.isUpdateSkipped("agent:local:codex", "0.169.0"));
 }

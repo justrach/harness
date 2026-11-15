@@ -83,6 +83,7 @@ pub fn build(b: *std.Build) void {
     );
     const icons_svg = b.createModule(.{ .root_source_file = icons_root });
     const file_icons_data = @import("file_icons_build.zig").module(b);
+    const card_scenes_data = @import("card_scenes_build.zig").module(b);
     // The desktop catalog: GPUI deliberately recolors its Codegraff themes
     // without changing the mobile palette. crates/theme checks this export.
     const theme_files = b.addWriteFiles();
@@ -158,6 +159,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "fonts", .module = fonts },
         .{ .name = "icons_svg", .module = icons_svg },
         .{ .name = "file_icons_data", .module = file_icons_data },
+        .{ .name = "card_scenes_data", .module = card_scenes_data },
         .{ .name = "themes_json", .module = themes_json },
     };
 

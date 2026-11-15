@@ -498,6 +498,29 @@ pub fn gradientSpinner(c: *ui.Context) void {
     loaderFrame(c, 1.0 / 30.0);
 }
 
+pub const mini_spinner_w: f32 = 2 * 1.5 + 1;
+
+/// `mini_mono_spinner`: compact 2x3 monochrome snake shared by agent install/status rows.
+pub fn miniSpinner(c: *ui.Context, color: ui.Color) void {
+    const order = [_][2]u8{ .{ 0, 0 }, .{ 1, 0 }, .{ 1, 1 }, .{ 1, 2 }, .{ 0, 2 }, .{ 0, 1 } };
+    const step: usize = @intFromFloat(@mod(@floor(c.time * 15), 6));
+    const box = ui.div(c).column().gap(1);
+    defer box.end();
+    for (0..3) |rw| {
+        const r = ui.div(c).row().gap(1);
+        defer r.end();
+        for (0..2) |cl| {
+            var lit: f32 = 0.22;
+            for (0..3) |back| {
+                const o = order[(step + 6 - back) % 6];
+                if (o[0] == cl and o[1] == rw) lit = @max(lit, 1.0 - @as(f32, @floatFromInt(back)) * 0.3);
+            }
+            _ = c.leaf(.{ .width = .{ .px = 1.5 }, .height = .{ .px = 1.5 }, .background = color.alpha(lit) }, .none, null);
+        }
+    }
+    loaderFrame(c, 1.0 / 15.0);
+}
+
 /// `gspin_opacity`: full, down to `dim` over 45% of the period, resting,
 /// then back up over the last 8%.
 pub fn gspinOpacity(t_: f32, dim: f32) f32 {

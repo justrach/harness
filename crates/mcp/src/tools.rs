@@ -6,6 +6,7 @@
 //! deliver a message to a chat in this state" choice the composer makes
 //! for humans.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -53,6 +54,36 @@ pub struct Tools {
     peer: Arc<dyn graff_peer::PeerSend>,
     relay: relay_ledger::RelayLedger,
     bots: Arc<dyn bots::BotCli>,
+    settings_dir: Option<PathBuf>,
+}
+
+fn default_settings_dir() -> Option<PathBuf> {
+    for key in ["HARNESS_DATA_DIR", "DATA_DIR"] {
+        if let Some(dir) = std::env::var_os(key).filter(|v| !v.is_empty()) {
+            return Some(PathBuf::from(dir));
+        }
+    }
+    std::env::var_os("HOME")
+        .filter(|v| !v.is_empty())
+        .map(|home| Path::new(&home).join(".harness"))
+}
+
+fn read_design_before_after_setting(dir: Option<&Path>) -> bool {
+    let Some(dir) = dir else {
+        return true;
+    };
+    for name in ["nano-ui-settings.json", "ui-settings.json"] {
+        let Ok(raw) = std::fs::read_to_string(dir.join(name)) else {
+            continue;
+        };
+        let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        if let Some(enabled) = obj.get("designBeforeAfterEnabled").and_then(Value::as_bool) {
+            return enabled;
+        }
+    }
+    true
 }
 
 fn chat_key_schema(extra: Value) -> Value {
@@ -255,6 +286,34 @@ fn catalog() -> Vec<ToolDef> {
                 "required": ["path"]
             }),
         },
+        ToolDef {
+            name: "show_before_after",
+            description: "Display a paired Before and After design comparison card inline in this chat when you change UI, layout, or styling. Both image files must live inside the active chat workspace.",
+            input_schema: json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "before_path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4096,
+                        "description": "Before screenshot path, relative to the active workspace or an absolute path within it."
+                    },
+                    "after_path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4096,
+                        "description": "After screenshot path, relative to the active workspace or an absolute path within it."
+                    },
+                    "caption": {
+                        "type": "string",
+                        "maxLength": 160,
+                        "description": "Optional short title describing what changed visually."
+                    }
+                },
+                "required": ["before_path", "after_path"]
+            }),
+        },
     ]
 }
 
@@ -362,6 +421,14 @@ struct ShowImageArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ShowBeforeAfterArgs {
+    before_path: String,
+    after_path: String,
+    caption: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ShowVisualArgs {
     title: String,
     script: String,
@@ -455,15 +522,27 @@ impl Tools {
             peer: Arc::new(graff_peer::GraffCli),
             relay: relay_ledger::RelayLedger::on_device(),
             bots: Arc::new(bots::GraffBots::default()),
+            settings_dir: default_settings_dir(),
         }
+    }
+
+    pub fn from_chat_context(&self) -> bool {
+        self.from_chat()
+    }
+
+    pub fn design_before_after_enabled(&self) -> bool {
+        read_design_before_after_setting(self.settings_dir.as_deref())
     }
 
     pub fn list(&self) -> Vec<ToolDef> {
         let mut tools = catalog();
+        let before_after_on = self.design_before_after_enabled();
         if self.harness.origin().chat_id.is_none() {
             // Without an injected origin chat there is no destination to
             // publish into; hide rather than offer an arbitrary selector.
-            tools.retain(|t| !matches!(t.name, "show_image" | "show_visual"));
+            tools.retain(|t| !matches!(t.name, "show_image" | "show_before_after" | "show_visual"));
+        } else if !before_after_on {
+            tools.retain(|t| t.name != "show_before_after");
         }
         tools.extend(rooms::catalog());
         tools.extend(bots::catalog());
@@ -495,6 +574,7 @@ impl Tools {
             "rename_chat" => self.rename_chat(parse(args)?).await,
             "archive_chat" => self.archive_chat(parse(args)?).await,
             "show_image" => self.show_image(parse(args)?).await,
+            "show_before_after" => self.show_before_after(parse(args)?).await,
             "show_visual" => self.show_visual(parse(args)?).await,
             other if rooms::handles(other) => return self.call_room_tool(other, args).await,
             other if bots::handles(other) => return self.call_bot_tool(other, args).await,
@@ -1275,11 +1355,7 @@ impl Tools {
                 "show_image needs a chat context: this server is not running inside a chat"
             )
         })?;
-        // Whitespace is legal in filenames — only a fully blank path fails;
-        // the raw string forwards unchanged.
-        if args.path.trim().is_empty() || args.path.chars().count() > 4096 {
-            anyhow::bail!("show_image path must be 1-4096 characters");
-        }
+        Self::validate_image_path("show_image path", &args.path)?;
         if args
             .caption
             .as_deref()
@@ -1287,14 +1363,70 @@ impl Tools {
         {
             anyhow::bail!("show_image caption is limited to 200 characters");
         }
+        self.publish_image(&chat_id, &args.path, args.caption.as_deref())
+            .await
+    }
+
+    async fn show_before_after(&self, args: ShowBeforeAfterArgs) -> anyhow::Result<Value> {
+        let chat_id = self.harness.origin().chat_id.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "show_before_after needs a chat context: this server is not running inside a chat"
+            )
+        })?;
+        if !self.design_before_after_enabled() {
+            anyhow::bail!("show_before_after is disabled in Settings");
+        }
+        Self::validate_image_path("show_before_after before_path", &args.before_path)?;
+        Self::validate_image_path("show_before_after after_path", &args.after_path)?;
+        let caption = args
+            .caption
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty());
+        if caption.is_some_and(|c| c.chars().count() > 160) {
+            anyhow::bail!("show_before_after caption is limited to 160 characters");
+        }
+        let (before_caption, after_caption) = match caption {
+            Some(c) => (format!("Before: {c}"), format!("After: {c}")),
+            None => ("Before".to_owned(), "After".to_owned()),
+        };
+        let before = self
+            .publish_image(&chat_id, &args.before_path, Some(&before_caption))
+            .await?;
+        let after = self
+            .publish_image(&chat_id, &args.after_path, Some(&after_caption))
+            .await?;
+        Ok(json!({
+            "attached": true,
+            "pair": true,
+            "before": before,
+            "after": after,
+        }))
+    }
+
+    fn validate_image_path(label: &str, path: &str) -> anyhow::Result<()> {
+        // Whitespace is legal in filenames — only a fully blank path fails;
+        // the raw string forwards unchanged.
+        if path.trim().is_empty() || path.chars().count() > 4096 {
+            anyhow::bail!("{label} must be 1-4096 characters");
+        }
+        Ok(())
+    }
+
+    async fn publish_image(
+        &self,
+        chat_id: &str,
+        path: &str,
+        caption: Option<&str>,
+    ) -> anyhow::Result<Value> {
         self.harness
             .call(
                 harness_rpc::methods::SHOW_IMAGE,
                 json!({
                     "chatId": chat_id,
                     "id": uuid::Uuid::new_v4().to_string(),
-                    "path": args.path,
-                    "caption": args.caption,
+                    "path": path,
+                    "caption": caption,
                 }),
             )
             .await
@@ -1557,6 +1689,7 @@ mod tests {
         let client = memory_client(world);
         Tools {
             relay: relay_ledger::RelayLedger::at(scratch_dir()),
+            settings_dir: None,
             ..Tools::new(Arc::new(Harness::with_client(client, origin)))
         }
     }
@@ -1890,6 +2023,7 @@ mod tests {
             peer,
             relay: relay_ledger::RelayLedger::at(ledger),
             bots: Arc::new(bots::GraffBots::default()),
+            settings_dir: None,
         }
     }
 
@@ -2795,5 +2929,119 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("no active run"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn show_before_after_requires_origin_chat() {
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), Origin::default());
+        assert!(tools.has("show_before_after"));
+        assert!(tools.list().iter().all(|t| t.name != "show_before_after"));
+        let err = tools
+            .call(
+                "show_before_after",
+                json!({ "before_path": "before.png", "after_path": "after.png" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("chat context"), "{err}");
+        assert!(world.writes.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn show_before_after_forwards_paired_before_and_after_images_in_order() {
+        let world = Arc::new(World::default());
+        let tools = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-beta-2".into()),
+                device_id: Some("dev-local".into()),
+            },
+        );
+        assert!(tools.list().iter().any(|t| t.name == "show_before_after"));
+        let result = tools
+            .call(
+                "show_before_after",
+                json!({
+                    "before_path": "shots/before.png",
+                    "after_path": "shots/after.png",
+                    "caption": "Zen Settings header",
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["attached"], true);
+        assert_eq!(result["pair"], true);
+        assert_eq!(result["before"]["name"], "Before: Zen Settings header");
+        assert_eq!(result["after"]["name"], "After: Zen Settings header");
+
+        let writes = world.writes.lock().unwrap();
+        let show_calls: Vec<_> = writes.iter().filter(|(m, _)| m == "ShowImage").collect();
+        assert_eq!(show_calls.len(), 2);
+        assert_eq!(show_calls[0].1["chatId"], "chat-beta-2");
+        assert_eq!(show_calls[0].1["path"], "shots/before.png");
+        assert_eq!(show_calls[0].1["caption"], "Before: Zen Settings header");
+        assert_eq!(show_calls[1].1["chatId"], "chat-beta-2");
+        assert_eq!(show_calls[1].1["path"], "shots/after.png");
+        assert_eq!(show_calls[1].1["caption"], "After: Zen Settings header");
+        assert_ne!(show_calls[0].1["id"], show_calls[1].1["id"]);
+    }
+
+    #[tokio::test]
+    async fn show_before_after_respects_design_before_after_setting_toggle() {
+        struct TempDirGuard(PathBuf);
+        impl Drop for TempDirGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = TempDirGuard(
+            std::env::temp_dir().join(format!("harness-settings-test-{}", uuid::Uuid::new_v4())),
+        );
+        std::fs::create_dir_all(&dir.0).unwrap();
+
+        let world = Arc::new(World::default());
+        let origin = Origin {
+            chat_id: Some("chat-beta-2".into()),
+            device_id: Some("dev-local".into()),
+        };
+
+        // Default (missing setting key) enables show_before_after and advertises instructions.
+        std::fs::write(dir.0.join("nano-ui-settings.json"), "{}").unwrap();
+        let mut t = tools(world.clone(), origin.clone());
+        t.settings_dir = Some(dir.0.clone());
+        assert!(t.design_before_after_enabled());
+        assert!(t.list().iter().any(|d| d.name == "show_before_after"));
+        let init_on = crate::jsonrpc::handle_request(&t, json!(1), "initialize", json!({})).await;
+        assert!(
+            init_on["result"]["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("show_before_after")
+        );
+
+        // Explicitly disabling hides the tool, strips prompt guidance, and rejects calls.
+        std::fs::write(
+            dir.0.join("nano-ui-settings.json"),
+            r#"{"designBeforeAfterEnabled":false}"#,
+        )
+        .unwrap();
+        assert!(!t.design_before_after_enabled());
+        assert!(t.list().iter().all(|d| d.name != "show_before_after"));
+        let init_off = crate::jsonrpc::handle_request(&t, json!(2), "initialize", json!({})).await;
+        assert!(
+            !init_off["result"]["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("show_before_after")
+        );
+        let err = t
+            .call(
+                "show_before_after",
+                json!({ "before_path": "b.png", "after_path": "a.png" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("disabled in Settings"), "{err}");
     }
 }

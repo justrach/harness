@@ -19,7 +19,8 @@ pub const width: f32 = 520;
 const band_h: f32 = 38;
 
 pub fn host(c: *ui.Context, a: *App, k: theme.Colors) void {
-    const col = ui.div(c).column().wFull().hFull().bg(k.background).clip();
+    const bg = if (a.settings.uiMode() == .zen) @import("view_panel_chrome.zig").zenPageBg(k) else k.background;
+    const col = ui.div(c).column().wFull().hFull().bg(bg).clip();
     defer col.end();
     const t = a.panels.activeTab() orelse return picker(c, a, k);
     if (t.kind == .github) {

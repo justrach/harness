@@ -69,27 +69,59 @@ pub fn space(c: *ui.Context, h: f32) void {
 /// In the sidebar's place: "Settings", the search, the sections under their
 /// groups, and Back at the foot.
 pub fn nav(c: *ui.Context, a: *App, k: theme.Colors) void {
+    const zen = a.settings.uiMode() == .zen;
+    if (zen) {
+        const chrome = @import("panel_chrome.zig");
+        const panel_chrome = @import("view_panel_chrome.zig");
+        const side = ui.div(c).column().w(sidebar.widthOf(a)).hFull()
+            .pt(chrome.header_height).pl(chrome.zen_gutter).pr(chrome.zen_gutter / 2.0).pb(chrome.zen_gutter);
+        defer side.end();
+        ui.key(c, "zen-settings-nav-card");
+        const nav_card = panel_chrome.zenSidebar(c, k).wFull().grow().h(0).pt(4).clip();
+        defer nav_card.end();
+        navBody(c, a, k, true);
+        return;
+    }
     const side = ui.div(c).column().w(sidebar.widthOf(a)).hFull().bg(k.sidebar).pt(sidebar.titlebar_h);
     defer side.end();
+    navBody(c, a, k, false);
+}
+
+fn navBody(c: *ui.Context, a: *App, k: theme.Colors, zen: bool) void {
+    const panel_chrome = @import("view_panel_chrome.zig");
+    const nav_w = if (zen) sidebar.widthOf(a) - @import("panel_chrome.zig").zen_gutter * 1.5 else sidebar.widthOf(a);
     {
         const list = ui.div(c).column().wFull().grow().h(0).px(8).clip();
         defer list.end();
         {
-            const h = ui.div(c).row().wFull().px(4).pt(10).pb(8).itemsCenter();
+            const h = ui.div(c).row().wFull().px(if (zen) @as(f32, 0) else 4).pt(if (zen) @as(f32, 4) else 10).pb(8).itemsCenter();
             defer h.end();
             ui.key(c, "settings-top-back");
-            const top_back = kit.pressFeedback(ui.div(c).row().h(28).px(8).gap(6).itemsCenter().rounded(7).bg(k.ink(if (k.dark) 0.05 else 0.035)).border(k.border).borderW(1).hover(k.hover).control());
-            const top_hot = top_back.hovered();
-            icons.icon(c, .@"arrow-left", 13, if (top_hot) k.text else k.text.alpha(0.9), 0);
-            ui.text(c, "Back", st(c, 12.5, .{ .weight = .medium, .color = if (top_hot) k.text else k.text.alpha(0.9) }));
-            if (top_back.clicked()) close(a);
-            top_back.end();
-            ui.spacer(c);
-            ui.text(c, "Settings", st(c, 11, .{ .weight = .medium, .color = k.muted.alpha(0.75) }));
+            if (zen) {
+                const top_back = kit.pressFeedback(ui.div(c).row().wFull().h(30).px(8).gap(7).itemsCenter().rounded(7).hover(k.hover).control());
+                const top_hot = top_back.hovered();
+                icons.icon(c, .@"arrow-left", 14, if (top_hot) k.text else k.muted, 0);
+                ui.text(c, "Back to chats", st(c, 13, .{ .weight = .medium, .color = if (top_hot) k.text else k.muted }));
+                if (top_back.clicked()) close(a);
+                top_back.end();
+            } else {
+                const top_back = kit.pressFeedback(ui.div(c).row().h(28).px(8).gap(6).itemsCenter().rounded(7).bg(k.ink(if (k.dark) 0.05 else 0.035)).border(k.border).borderW(1).hover(k.hover).control());
+                const top_hot = top_back.hovered();
+                icons.icon(c, .@"arrow-left", 13, if (top_hot) k.text else k.text.alpha(0.9), 0);
+                ui.text(c, "Back", st(c, 12.5, .{ .weight = .medium, .color = if (top_hot) k.text else k.text.alpha(0.9) }));
+                if (top_back.clicked()) close(a);
+                top_back.end();
+                ui.spacer(c);
+                ui.text(c, "Settings", st(c, 11, .{ .weight = .medium, .color = k.muted.alpha(0.75) }));
+            }
         }
         {
             // 33 tall: GPUI's search is a composer input, 5 above and below.
-            const s = ui.div(c).row().wFull().h(33).px(8).gap(6).itemsCenter().rounded(8).bg(k.ink(0.04));
+            var s = ui.div(c).row().wFull().h(33).px(8).gap(6).itemsCenter().rounded(8);
+            s = if (zen)
+                s.bg(if (k.dark) k.ink(0.04) else ui.Color.white.alpha(0.75)).border(panel_chrome.zenEdge(k)).borderW(1)
+            else
+                s.bg(k.ink(0.04));
             defer s.end();
             icons.icon(c, .magnifer, 14, k.muted, 0);
             const f = ui.div(c).row().grow().w(0);
@@ -106,6 +138,7 @@ pub fn nav(c: *ui.Context, a: *App, k: theme.Colors) void {
             anim_h.update(std.mem.asBytes(&salt));
             _ = c.anims.remove(anim_h.final());
             _ = ui.textField(c, &a.view.settings_search, .{ .placeholder = "Search settings", .placeholder_color = k.faint, .width = .fill, .bare = true, .size = 14, .line_height = 22.75 });
+            if (zen and a.view.settings_search.text().len == 0) kit.kbdHint(c, k, "⌘F");
         }
         space(c, 8);
         const rows = ui.div(c).column().wFull().grow().h(0).gap(2).scrollY();
@@ -131,7 +164,7 @@ pub fn nav(c: *ui.Context, a: *App, k: theme.Colors) void {
                     a.redraw();
                 }
             }
-            for (found) |s| if (navRow(c, k, s, s == a.settings.section, true, sidebar.widthOf(a))) show(a, s);
+            for (found) |s| if (navRow(c, k, s, s == a.settings.section, true, nav_w)) show(a, s);
         } else {
             var group: []const u8 = "";
             for (Section.all) |s| {
@@ -141,23 +174,26 @@ pub fn nav(c: *ui.Context, a: *App, k: theme.Colors) void {
                     defer h.end();
                     ui.text(c, group, st(c, 11, .{ .weight = .medium, .color = k.muted.alpha(0.6) }));
                 }
-                if (navRow(c, k, s, s == a.settings.section, false, sidebar.widthOf(a))) show(a, s);
+                if (navRow(c, k, s, s == a.settings.section, false, nav_w)) show(a, s);
             }
         }
     }
     // A running cloud sandbox stays in view on every settings page too.
     if (!a.offscreen) @import("view_sandbox_strip.zig").strip(c, a, k, 4);
-    const foot = ui.div(c).column().wFull().px(8).pb(12);
-    defer foot.end();
-    ui.key(c, "settings-back");
-    const back = kit.pressFeedback(ui.div(c).row().wFull().h(34).px(10).gap(7).itemsCenter().rounded(8).bg(k.ink(if (k.dark) 0.05 else 0.035)).border(k.border).borderW(1).hover(k.hover).control());
-    defer back.end();
-    const hot = back.hovered();
-    icons.icon(c, .@"arrow-left", 14, if (hot) k.text else k.text.alpha(0.9), 0);
-    ui.text(c, "Back", st(c, 13, .{ .weight = .medium, .color = if (hot) k.text else k.text.alpha(0.9) }));
-    ui.spacer(c);
-    kit.kbdHint(c, k, "esc");
-    if (back.clicked()) close(a);
+    if (!zen) {
+        const foot = ui.div(c).column().wFull().px(8).pb(12);
+        defer foot.end();
+        ui.key(c, "settings-back");
+        const back_bg = k.ink(if (k.dark) 0.05 else 0.035);
+        const back = kit.pressFeedback(ui.div(c).row().wFull().h(34).px(10).gap(7).itemsCenter().rounded(8).bg(back_bg).border(k.border).borderW(1).hover(k.hover).control());
+        defer back.end();
+        const hot = back.hovered();
+        icons.icon(c, .@"arrow-left", 14, if (hot) k.text else k.text.alpha(0.9), 0);
+        ui.text(c, "Back", st(c, 13, .{ .weight = .medium, .color = if (hot) k.text else k.text.alpha(0.9) }));
+        ui.spacer(c);
+        kit.kbdHint(c, k, "esc");
+        if (back.clicked()) close(a);
+    }
 }
 
 fn navRow(c: *ui.Context, k: theme.Colors, s: Section, selected: bool, searching: bool, width: f32) bool {
@@ -192,10 +228,8 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
         c.virtual_list = true;
     }
     {
-        // GPUI's settings rail: shown while the page scrolls (`popover::rail`),
-        // with a nanoui that has overlay bars (justrach/nanoui#21).
-        var page_style: ui.Style = .{ .grow = 1, .width = .fill, .align_items = .center };
-        if (@hasField(ui.Style, "scrollbar")) page_style.scrollbar = .{ .overlay = k.faint.alpha(0.5) };
+        // GPUI's settings rail: shown while the page scrolls (`popover::rail`).
+        const page_style: ui.Style = .{ .grow = 1, .width = .fill, .align_items = .center, .scrollbar = .{ .overlay = k.faint.alpha(0.5) } };
         ui.scroll(c, page_style);
         defer ui.end(c);
         // `page_column`: 768 wide at most, centred, 24 either side, 32 above.
@@ -223,6 +257,7 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
         // Appearance's theme menu doesn't outlive its page.
         if (a.settings.section != .appearance) a.view.theme_menu = null;
         switch (a.settings.section) {
+            .account => @import("view_settings_profile.zig").page(c, a, k),
             .notifications => notifications(c, a, k),
             .files => files(c, a, k),
             .browsing => browsing(c, a, k),
@@ -288,7 +323,9 @@ pub fn fieldLabel(c: *ui.Context, k: theme.Colors, label: []const u8) void {
 /// box pads by its width.
 pub fn card(c: *ui.Context, k: theme.Colors) ui.Div {
     space(c, 24);
-    return ui.div(c).column().wFull().p(1).rounded(12).border(k.border).borderW(1).bg(if (k.frosted) k.card else k.shell);
+    const fill = k.ink(if (k.dark) 0.038 else 0.025);
+    const edge_col = if (k.dark) k.border else @import("view_panel_chrome.zig").zenEdge(k);
+    return ui.div(c).column().wFull().p(1).rounded(12).border(edge_col).borderW(1).bg(fill);
 }
 
 /// `card_row`: 20 by 14 inside, a line above all but the first.

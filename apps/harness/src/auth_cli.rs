@@ -250,6 +250,11 @@ mod tests {
             id: "user-1".into(),
             email: "user@example.com".into(),
             name: None,
+            avatar_url: None,
+            member_number: None,
+            started_at: None,
+            card_scenes: None,
+            card_traits: None,
         };
         assert!(
             !account_status(

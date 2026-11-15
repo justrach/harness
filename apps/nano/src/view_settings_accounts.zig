@@ -57,11 +57,18 @@ pub fn Slot(comptime T: type) type {
             return if (s.phase == .ready) s.value else null;
         }
 
-        fn take(s: *Self, ar: std.heap.ArenaAllocator, v: T) void {
+        pub fn take(s: *Self, ar: std.heap.ArenaAllocator, v: T) void {
             if (s.arena) |*old| old.deinit();
             s.arena = ar;
             s.value = v;
             s.phase = .ready;
+        }
+
+        pub fn clear(s: *Self) void {
+            if (s.arena) |*old| old.deinit();
+            s.arena = null;
+            s.phase = .idle;
+            s.call = null;
         }
 
         fn fail(s: *Self, gpa: Allocator, text: []const u8) void {
@@ -315,6 +322,45 @@ fn accountAction(a: *App, method: []const u8, acc: accounts.Account) void {
     replace(a.gpa, &p.busy_account, acc.id);
     p.notice.clearRetainingCapacity();
     a.call(method, .{ .id = acc.id, .accountId = acc.id, .harness = acc.harness, .targetDeviceId = target(a) }, .of(App, a, onAccountAction));
+}
+
+pub fn providerForHarness(harness_id: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, harness_id, "claude") or std.mem.eql(u8, harness_id, "claude-code")) return "claude-code";
+    if (std.mem.eql(u8, harness_id, "codex")) return "codex";
+    if (std.mem.eql(u8, harness_id, "cursor")) return "cursor";
+    if (std.mem.eql(u8, harness_id, "graff")) return "graff";
+    return null;
+}
+
+pub fn accountsForHarness(a: *const App, harness_id: []const u8, alloc: Allocator) []accounts.Account {
+    const snap = a.view.accounts.snapshot.get() orelse return &.{};
+    const mapped = providerForHarness(harness_id);
+    var out: std.ArrayList(accounts.Account) = .empty;
+    for (snap.accounts) |acc| {
+        const match_raw = std.mem.eql(u8, acc.harness, harness_id);
+        const match_mapped = if (mapped) |m| std.mem.eql(u8, acc.harness, m) else false;
+        if (match_raw or match_mapped) out.append(alloc, acc) catch {};
+    }
+    return out.toOwnedSlice(alloc) catch &.{};
+}
+
+pub fn activateAccount(a: *App, acc: accounts.Account) void {
+    accountAction(a, "ActivateAgentAccount", acc);
+}
+
+pub fn openAddAccount(a: *App, harness_id: []const u8) void {
+    a.picker = .none;
+    a.view.model_picker.account_submenu = false;
+    a.settings.setSection(.agents);
+    @import("view_settings.zig").open(a);
+    const mapped = providerForHarness(harness_id) orelse harness_id;
+    for (accounts.providers) |pv| {
+        if (std.mem.eql(u8, pv.harness.wire(), mapped)) {
+            login.begin(a, pv.harness, null);
+            break;
+        }
+    }
+    a.redraw();
 }
 
 fn onAccountAction(a: *App, _: u64, r: rpc.Reply) void {
