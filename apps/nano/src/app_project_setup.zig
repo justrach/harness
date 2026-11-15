@@ -65,6 +65,10 @@ pub const State = struct {
 };
 
 pub fn open(a: *App) void {
+    openOnDevice(a, a.draftDevice());
+}
+
+pub fn openOnDevice(a: *App, device: ?[]const u8) void {
     const s = &a.view.project_setup;
     if (s.busy) return;
     cancelReads(a);
@@ -72,7 +76,7 @@ pub fn open(a: *App) void {
     s.deinit();
     s.* = .{ .open = true, .generation = generation, .focus = true, .arena = .init(a.gpa) };
     // A panel's explicit remote host must not silently fall back to this Mac.
-    if (a.draftDevice()) |id| {
+    if (device) |id| {
         s.device = s.keep(id);
         s.device_name = s.keep(a.deviceName(id));
     }
