@@ -21,7 +21,7 @@ members = [
 exclude = ["tui"]
 
 [workspace.package]
-version = "0.2.201"
+version = "0.2.202"
 edition = "2024"
 license-file = "LICENSE"
 publish = false

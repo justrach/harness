@@ -121,15 +121,15 @@ test "⌘K opens the palette with its actions and chats; typing narrows it; ↓ 
     defer h.deinit();
     h.press(cmd_k);
     try testing.expect(h.a.view.palette.open);
-    for ([_][]const u8{ "Search commands and chats…", "New chat", "New project", "Open settings", "Switch to light theme", "Navigate", "Select", "Close" }) |s|
+    for ([_][]const u8{ "Search commands and chats…", "New chat", "New project", "Open settings", "Switch theme", "Default system theme", "Navigate", "Select", "Close" }) |s|
         try testing.expect(h.t.hasText(s));
     h.typed("a");
-    // "a": New chat, New project ("Open settings" hasn't one), the theme, both chats.
+    // "a": New chat, New project ("Open settings" hasn't one), Default system theme ("Default system theme" hasn't 'a', nor "Switch theme"), both chats.
     try testing.expect(!h.t.hasText("Open settings"));
     h.typed("lpha");
     // The palette's New chat is filtered out, and the sidebar has none.
     try testing.expectEqual(@as(usize, 0), h.count("New chat"));
-    try testing.expect(!h.t.hasText("Switch to light theme"));
+    try testing.expect(!h.t.hasText("Switch theme"));
     // Return answers the query as typed: Alpha is the only result.
     h.press(.{ .key = S.enter });
     try testing.expect(!h.a.view.palette.open);
@@ -157,9 +157,9 @@ test "the palette's arrows go round; Escape, ⌘K and a press outside close it; 
     try h.init(two, "a");
     defer h.deinit();
     h.press(cmd_k);
-    // Four actions, then the two chats.
+    // Five actions, then the two chats.
     h.press(.{ .key = S.up });
-    try testing.expectEqual(@as(usize, 5), h.a.view.palette.active);
+    try testing.expectEqual(@as(usize, 6), h.a.view.palette.active);
     h.press(.{ .key = S.down });
     try testing.expectEqual(@as(usize, 0), h.a.view.palette.active);
     h.press(.{ .key = S.down });
@@ -188,18 +188,84 @@ test "the palette's arrows go round; Escape, ⌘K and a press outside close it; 
     try testing.expectEqualStrings("a", h.selected());
 }
 
-test "the theme action switches the appearance and stays open, naming the other one" {
+test "the theme action switches the appearance and stays open, keeping Switch theme first" {
     var h: Harness = undefined;
     try h.init(two, "a");
     defer h.deinit();
     h.press(cmd_k);
     h.typed("theme");
+    try testing.expect(h.t.hasText("Switch theme"));
     h.press(.{ .key = S.enter });
     try testing.expect(h.a.view.palette.open);
     try testing.expectEqual(false, h.a.dark.?);
-    try testing.expect(h.t.hasText("Switch to dark theme"));
+    try testing.expect(h.t.hasText("Switch theme"));
     h.press(.{ .key = S.enter });
     try testing.expectEqual(true, h.a.dark.?);
+}
+
+test "⌘K Switch theme toggles repeatedly and Default system theme restores system mode and built-in palettes" {
+    const appearance = @import("view_settings_appearance.zig");
+    const theme = @import("theme.zig");
+    defer {
+        theme.light_id = appearance.default_light_id;
+        theme.dark_id = appearance.default_dark_id;
+    }
+
+    var h: Harness = undefined;
+    try h.init(two, "a");
+    defer h.deinit();
+
+    // 1. Typing "switch theme" works in both dark and light mode on repeat Enter.
+    h.press(cmd_k);
+    h.typed("switch theme");
+    h.press(.{ .key = S.enter });
+    try testing.expect(h.a.view.palette.open);
+    try testing.expectEqual(false, h.a.dark.?);
+    try testing.expect(h.t.hasText("Switch theme"));
+    h.press(.{ .key = S.enter });
+    try testing.expectEqual(true, h.a.dark.?);
+    h.press(.{ .key = S.escape });
+
+    // 2. Apply a custom theme preset + manual appearance, then reset via ⌘K "system".
+    const kyoto = @import("custom_themes.zig").findPreset("custom-kyoto-rain") orelse return error.MissingCuratedPreset;
+    @import("view_custom_theme_studio.zig").applyPreset(&h.a, kyoto.*);
+    h.t.settle(1);
+    try testing.expect(!appearance.isSystemDefault(&h.a));
+    try testing.expectEqualStrings("custom-kyoto-rain", h.a.settings.themeId(true));
+
+    h.press(cmd_k);
+    h.typed("system");
+    try testing.expect(h.t.hasText("Default system theme"));
+    h.press(.{ .key = S.enter });
+    try testing.expect(appearance.isSystemDefault(&h.a));
+    try testing.expect(h.a.dark == null);
+    try testing.expectEqualStrings(appearance.default_light_id, h.a.settings.themeId(false));
+    try testing.expectEqualStrings(appearance.default_dark_id, h.a.settings.themeId(true));
+    h.press(.{ .key = S.escape });
+
+    // 3. Switching away again and clicking "Use default" or "Default System" card in Settings › Appearance restores it too.
+    @import("view_custom_theme_studio.zig").applyPreset(&h.a, kyoto.*);
+    @import("view_settings.zig").open(&h.a);
+    h.a.settings.setSection(.appearance);
+    h.t.settle(1);
+    try testing.expect(h.t.hasText("Default system theme"));
+    try testing.expect(h.t.hasText("Default System"));
+    try h.t.clickText("Use default");
+    h.t.settle(1);
+    try testing.expect(appearance.isSystemDefault(&h.a));
+    try testing.expect(h.a.dark == null);
+
+    appearance.setMode(&h.a, .light);
+    h.t.settle(1);
+    try testing.expect(!appearance.isSystemDefault(&h.a));
+    if (h.t.findText("Theme")) |anchor| {
+        h.t.scroll(anchor.x + 20, anchor.y + 40, -640);
+        h.t.settle(1);
+    }
+    try h.t.clickText("Default System");
+    h.t.settle(1);
+    try testing.expect(appearance.isSystemDefault(&h.a));
+    try testing.expect(h.a.dark == null);
 }
 
 test "the split's other panes lead the results; picking one moves focus there" {
@@ -279,7 +345,7 @@ test "other tools' conversations come after the chats, five until something's ty
         external += 1;
     };
     try testing.expectEqual(@as(usize, 5), external);
-    try testing.expect(idle[4] == .import_all);
+    try testing.expect(idle[5] == .import_all);
     try testing.expect(idle[idle.len - 1] == .external);
     const typed = try palette.entries(&h.a, testing.allocator, "codex app");
     defer testing.allocator.free(typed);

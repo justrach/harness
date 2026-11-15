@@ -75,6 +75,9 @@ jobs:
           ../../scripts/heavy-build.sh xcodebuild -project Harness.xcodeproj -scheme Harness \
             -configuration Release \
             -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_ID" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -IDEPackageSupportDisableManifestSandbox=YES \
+            -IDEPackageSupportDisablePluginExecutionSandbox=YES \
             -resultBundlePath "$RUNNER_TEMP/reauth-tests.xcresult" \
             -only-testing:HarnessTests/AgentReauthenticationTests \
             -only-testing:HarnessTests/GeneratedImageTests \
@@ -86,7 +89,7 @@ jobs:
             -only-testing:HarnessTests/PerfOTLPTests \
             -only-testing:HarnessTests/PerfFramesTests \
             -only-testing:HarnessTests/LivePerfTests \
-            ENABLE_TESTABILITY=YES CODE_SIGNING_ALLOWED=NO test
+            ENABLE_TESTABILITY=YES SWIFTC_DISABLE_SANDBOX=YES CODE_SIGNING_ALLOWED=NO test
       # The layout probes and scroll matrix are intentionally DEBUG-only.
       # Keep this separate from the Release diagnostics/privacy regressions.
       - name: Run transcript scroll matrix
@@ -95,10 +98,13 @@ jobs:
           ../../scripts/heavy-build.sh xcodebuild -project Harness.xcodeproj -scheme Harness \
             -configuration Debug \
             -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_ID" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -IDEPackageSupportDisableManifestSandbox=YES \
+            -IDEPackageSupportDisablePluginExecutionSandbox=YES \
             -resultBundlePath "$RUNNER_TEMP/scroll-matrix-tests.xcresult" \
             -only-testing:HarnessTests/TranscriptScrollMatrixTests \
             -only-testing:HarnessTests/TextSelectionTests \
-            CODE_SIGNING_ALLOWED=NO test
+            SWIFTC_DISABLE_SANDBOX=YES CODE_SIGNING_ALLOWED=NO test
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4

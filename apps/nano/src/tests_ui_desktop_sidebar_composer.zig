@@ -742,9 +742,9 @@ test "zen mode flattens sidebar and footer hierarchy while developer mode restor
     try testing.expect(!h.a.settings.hierarchyProfile().shows_git_checkout_chrome);
     try testing.expect(!h.t.hasText("New worktree"));
 
-    // Command palette preserves 4 idle actions and surfaces mode/part switches when queried.
+    // Command palette preserves 5 idle actions and surfaces mode/part switches when queried.
     const pal = @import("palette.zig");
-    try testing.expectEqual(@as(usize, 4), pal.actionsFor("", true).len);
+    try testing.expectEqual(@as(usize, 5), pal.actionsFor("", true).len);
     try testing.expect(pal.actionsFor("zen", true).len >= 1);
     try testing.expect(pal.actionsFor("rail", true).len >= 1);
 }
@@ -1060,7 +1060,7 @@ test "sidebar star banner, right-click menu, bottom account row, and compact mod
     try testing.expect(!h.t.hasText("Star on GitHub"));
 
     // Clicking Sign in in bottom sidebar account row opens Settings directly on the Account section
-    // with symmetric rounded-12 Settings cards at y == 42, single Back to chats (no esc badge, no orphaned toggle).
+    // with symmetric rounded-12 Settings cards at y == 42, single Back to chats + esc hints, and no duplicate Back button.
     try h.t.clickText("Sign in");
     h.t.settle(0.4);
     try testing.expect(h.a.view.settings_open);
@@ -1073,7 +1073,7 @@ test "sidebar star banner, right-click menu, bottom account row, and compact mod
     var settings_right_card = false;
     var duplicate_back_row = false;
     var topbar_nav_control = false;
-    var stacked_esc_badge = false;
+    var esc_badge_count: usize = 0;
     for (h.t.ctx.nodes.items) |n| {
         if (n.style.radius == 12 and @abs(n.rect.y - 42) < 0.5 and n.rect.h > 400) {
             if (n.rect.x < side_w and n.rect.w > side_w - 20) settings_left_card = true;
@@ -1082,7 +1082,7 @@ test "sidebar star banner, right-click menu, bottom account row, and compact mod
         switch (n.content) {
             .text => |tx| {
                 if (std.mem.eql(u8, tx.str, "Back")) duplicate_back_row = true;
-                if (std.mem.eql(u8, tx.str, "esc")) stacked_esc_badge = true;
+                if (std.mem.eql(u8, tx.str, "esc")) esc_badge_count += 1;
             },
             else => {},
         }
@@ -1093,7 +1093,15 @@ test "sidebar star banner, right-click menu, bottom account row, and compact mod
     try testing.expect(settings_left_card and settings_right_card);
     try testing.expect(!duplicate_back_row);
     try testing.expect(!topbar_nav_control);
-    try testing.expect(!stacked_esc_badge);
+    try testing.expect(esc_badge_count >= 2);
+
+    // Pressing Escape exits Zen Settings cleanly; reopening and clicking "Back to chats" also exits.
+    _ = h.t.shortcut(.{ .key = @import("nanoui").ui.Shortcut.escape });
+    h.t.settle(0.4);
+    try testing.expect(!h.a.view.settings_open);
+    try h.t.clickText("Sign in");
+    h.t.settle(0.4);
+    try testing.expect(h.a.view.settings_open);
 
     // Click the single "Back to chats" row to close Settings while remaining in the draft workspace.
     try h.t.clickText("Back to chats");

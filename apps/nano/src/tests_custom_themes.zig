@@ -162,8 +162,8 @@ test "custom theme persistence round-trip, slash completion, and palette preserv
     try testing.expectEqualStrings("Kyoto Moss Lantern", reloaded.name);
     try testing.expect(custom_themes.findBackdrop("ai-kyoto-moss-lantern", "auto", reloaded.colors) != null);
 
-    // Command palette preserves exactly 4 core entries on empty query, and filters custom scenes on non-empty queries.
-    try testing.expectEqual(@as(usize, 4), palette.actionsFor("", true).len);
+    // Command palette preserves 5 core entries on empty query, and filters custom scenes on non-empty queries.
+    try testing.expectEqual(@as(usize, 5), palette.actionsFor("", true).len);
     const studio_hits = palette.actionsFor("studio", true);
     var found_studio = false;
     for (studio_hits.slice()) |e| if (e == .custom_theme_studio) {

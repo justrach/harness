@@ -102,6 +102,8 @@ fn navBody(c: *ui.Context, a: *App, k: theme.Colors, zen: bool) void {
                 const top_hot = top_back.hovered();
                 icons.icon(c, .@"arrow-left", 14, if (top_hot) k.text else k.muted, 0);
                 ui.text(c, "Back to chats", st(c, 13, .{ .weight = .medium, .color = if (top_hot) k.text else k.muted }));
+                ui.spacer(c);
+                kit.kbdHint(c, k, "esc");
                 if (top_back.clicked()) close(a);
                 top_back.end();
             } else {
@@ -253,6 +255,13 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
                 a.view.settings_search_focus = true;
                 a.redraw();
             }
+            ui.key(c, "settings-page-esc");
+            const esc_btn = kit.pressFeedback(ui.div(c).row().px(10).py(6).gap(6).itemsCenter().rounded(8).hover(k.ink(0.06)).control());
+            const esc_hot = esc_btn.hovered();
+            ui.text(c, "Close", st(c, 13, .{ .color = if (esc_hot) k.text else k.muted }));
+            kit.kbdHint(c, k, "esc");
+            if (esc_btn.clicked()) close(a);
+            esc_btn.end();
         }
         // Appearance's theme menu doesn't outlive its page.
         if (a.settings.section != .appearance) a.view.theme_menu = null;
