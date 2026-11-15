@@ -14,7 +14,26 @@ on:
 permissions:
   contents: read
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      cursor_rust: ${{ steps.scope.outputs.cursor_rust }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: scope
+        run: |
+          python3 scripts/ci-changed-scopes.py \
+            --event-name "${{ github.event_name }}" \
+            --base "${{ github.event.pull_request.base.sha || github.event.before }}" \
+            --head "${{ github.event.pull_request.head.sha || github.sha }}" \
+            --github-output "$GITHUB_OUTPUT"
+
   cursor-compatibility:
+    needs: changes
+    if: needs.changes.outputs.cursor_rust == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:

@@ -49,8 +49,28 @@ defaults:
     working-directory: apps/android
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      android: ${{ steps.scope.outputs.android }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: scope
+        working-directory: .
+        run: |
+          python3 scripts/ci-changed-scopes.py \
+            --event-name "${{ github.event_name }}" \
+            --base "${{ github.event.pull_request.base.sha || github.event.before }}" \
+            --head "${{ github.event.pull_request.head.sha || github.sha }}" \
+            --github-output "$GITHUB_OUTPUT"
+
   test:
     name: unit tests, lint and debug build
+    needs: changes
+    if: needs.changes.outputs.android == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -89,6 +109,8 @@ jobs:
 
   release-build:
     name: release-like build
+    needs: changes
+    if: needs.changes.outputs.android == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -117,6 +139,8 @@ jobs:
 
   emulator:
     name: instrumented tests (emulator)
+    needs: changes
+    if: needs.changes.outputs.android == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
