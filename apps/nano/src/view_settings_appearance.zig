@@ -261,6 +261,32 @@ fn options(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
 }
 
+pub const default_light_id = "codegraff-light";
+pub const default_dark_id = "codegraff-dark";
+
+pub fn isSystemDefault(a: *const App) bool {
+    const scene = a.settings.backdropScene();
+    const clean_scene = scene.len == 0 or std.mem.eql(u8, scene, "auto") or std.mem.eql(u8, scene, "off") or std.mem.eql(u8, scene, "none");
+    return mode(a) == .system and
+        std.mem.eql(u8, a.settings.themeId(false), default_light_id) and
+        std.mem.eql(u8, a.settings.themeId(true), default_dark_id) and
+        clean_scene;
+}
+
+pub fn applySystemDefault(a: *App) void {
+    setMode(a, .system);
+    a.settings.setTheme(false, default_light_id);
+    a.settings.setTheme(true, default_dark_id);
+    a.settings.setBackdropScene("auto");
+    a.redraw();
+}
+
+pub fn toggleLightDark(a: *App) void {
+    const currently_dark = a.dark orelse nanoui.isDark();
+    setMode(a, if (currently_dark) .light else .dark);
+    a.redraw();
+}
+
 pub fn setMode(a: *App, m: Mode) void {
     a.settings.setText("appearance", @tagName(m));
     a.dark = switch (m) {
@@ -301,8 +327,24 @@ fn bar(c: *ui.Context, w: f32, color: Color) void {
 fn themeCard(c: *ui.Context, a: *App, k: theme.Colors) void {
     const cd = card(c, k);
     defer cd.end();
-    inline for (.{ .{ .sun, "Light theme", false }, .{ .moon, "Dark theme", true } }, 0..) |t, i| {
-        const r = set.row(c, k, i == 0, false);
+    {
+        const r = set.row(c, k, true, false);
+        defer r.end();
+        set.tile(c, k, .monitor);
+        words(c, k, "Default system theme", "Follow macOS Light and Dark automatically with Harness's built-in desktop palette.", 124);
+        ui.spacer(c);
+        ui.key(c, "settings-default-system-theme");
+        if (isSystemDefault(a)) {
+            const pill = ui.div(c).row().h(28).px(10).gap(5).itemsCenter().rounded(7).border(k.accent.alpha(0.45)).borderW(1).bg(k.accent_wash);
+            defer pill.end();
+            icons.icon(c, .check, 12, k.accent, 0);
+            ui.text(c, "Active", .{ .size = 11.5, .line_height = 11.5 * phi, .weight = .medium, .color = k.accent });
+        } else {
+            if (compactAction(c, k, "Use default")) applySystemDefault(a);
+        }
+    }
+    inline for (.{ .{ .sun, "Light theme", false }, .{ .moon, "Dark theme", true } }) |t| {
+        const r = set.row(c, k, false, false);
         defer r.end();
         set.tile(c, k, t[0]);
         words(c, k, t[1], "Used whenever this appearance is active.", 218);
@@ -427,6 +469,7 @@ pub fn themeMenu(c: *ui.Context, a: *App, k: theme.Colors) void {
 fn themeMenuRow(c: *ui.Context, a: *App, k: theme.Colors, picked: []const u8, dark: bool, v: *const themes.Variant, has_backdrop: bool) void {
     ui.key(c, c.print("theme-{s}", .{v.id}));
     const active = std.mem.eql(u8, v.id, picked);
+    const is_default = std.mem.eql(u8, v.id, default_light_id) or std.mem.eql(u8, v.id, default_dark_id);
     const base = ui.div(c).row().wFull().px(8).py(5).gap(10).itemsCenter().rounded(7);
     const lh = kit.listenerHover(&a.view.hovers, if (active) base.bg(if (k.is_harp) k.active else k.selected) else base, k.hover);
     const row = lh.div;
@@ -438,10 +481,18 @@ fn themeMenuRow(c: *ui.Context, a: *App, k: theme.Colors, picked: []const u8, da
         defer n.end();
         ui.text(c, v.name, set.st(c, 13, .{ .color = if (active or hot) k.text else k.text.alpha(0.9) }));
     }
+    if (is_default) ui.text(c, "Default", set.st(c, 11, .{ .color = k.muted.alpha(0.75) }));
     if (active) icons.icon(c, .check, 14, k.accent, 0);
     if (row.clicked()) {
         a.settings.setTheme(dark, v.id);
-        if (has_backdrop) a.settings.setBackdropScene("auto");
+        if (has_backdrop) {
+            a.settings.setBackdropScene("auto");
+        } else {
+            const cur_scene = a.settings.backdropScene();
+            if (!std.mem.eql(u8, cur_scene, "off") and !std.mem.eql(u8, cur_scene, "none")) {
+                a.settings.setBackdropScene("auto");
+            }
+        }
         a.view.theme_menu = null;
         c.changed = true;
         a.redraw();

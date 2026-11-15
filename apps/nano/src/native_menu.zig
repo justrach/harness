@@ -18,13 +18,15 @@ pub fn install(app: *nanoui.App, a: *App) !void {
     });
 }
 
-pub fn viewItems(a: *App) [7]nanoui.MenuItem {
+pub fn viewItems(a: *App) [9]nanoui.MenuItem {
     return .{
         .{ .label = "Bigger Text", .accelerator = "Cmd+=", .click = .of(a, zoomIn) },
         .{ .label = "Smaller Text", .accelerator = "Cmd+-", .click = .of(a, zoomOut) },
         .{ .label = "Actual Size", .accelerator = "Cmd+0", .click = .of(a, resetZoom) },
         .separator,
         .{ .label = "Toggle Zen / Developer Mode", .accelerator = "Cmd+Shift+M", .click = .of(a, toggleUiMode) },
+        .{ .label = "Switch Theme", .click = .of(a, switchTheme) },
+        .{ .label = "Default System Theme", .click = .of(a, useSystemTheme) },
         .separator,
         .{ .role = .toggle_full_screen },
     };
@@ -70,6 +72,22 @@ fn toggleUiMode(a: *App, _: ItemArg) void {
     const was = a.view.in_pre_tree;
     a.view.in_pre_tree = true;
     a.settings.toggleUiMode();
+    a.view.in_pre_tree = was;
+    a.redraw();
+}
+
+fn switchTheme(a: *App, _: ItemArg) void {
+    const was = a.view.in_pre_tree;
+    a.view.in_pre_tree = true;
+    @import("view_settings_appearance.zig").toggleLightDark(a);
+    a.view.in_pre_tree = was;
+    a.redraw();
+}
+
+fn useSystemTheme(a: *App, _: ItemArg) void {
+    const was = a.view.in_pre_tree;
+    a.view.in_pre_tree = true;
+    @import("view_settings_appearance.zig").applySystemDefault(a);
     a.view.in_pre_tree = was;
     a.redraw();
 }

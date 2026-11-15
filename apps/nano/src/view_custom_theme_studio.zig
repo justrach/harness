@@ -379,6 +379,7 @@ fn renderPresetGrid(c: *ui.Context, a: *App, k: theme.Colors, inner_w: f32) void
     const cols: usize = if (inner_w >= 540) 3 else if (inner_w >= 340) 2 else 1;
     const card_w = @max(120, @floor((inner_w - gap * @as(f32, @floatFromInt(cols - 1))) / @as(f32, @floatFromInt(cols))));
     const active_id = a.settings.themeId(k.dark);
+    const include_default = gallery_filter != .custom;
 
     var filtered: [96]*const custom_themes.Preset = undefined;
     var count: usize = 0;
@@ -396,26 +397,77 @@ fn renderPresetGrid(c: *ui.Context, a: *App, k: theme.Colors, inner_w: f32) void
         }
     }
 
-    if (count == 0) {
+    const total = count + @intFromBool(include_default);
+    if (total == 0) {
         ui.text(c, "No generated scenes yet. Enter a prompt above to create your first custom theme.", .{ .size = 12, .color = k.muted, .wrap = true });
         return;
     }
 
-    var idx: usize = 0;
-    while (idx < count) {
+    var slot: usize = 0;
+    while (slot < total) {
         const row = ui.div(c).row().wFull().gap(gap);
         defer row.end();
         var col: usize = 0;
-        while (col < cols and idx < count) : ({
+        while (col < cols and slot < total) : ({
             col += 1;
-            idx += 1;
+            slot += 1;
         }) {
-            const p = filtered[idx];
-            const selected = std.mem.eql(u8, active_id, p.id) and k.dark == p.variant.dark;
-            ui.key(c, c.print("preset-card-{s}", .{p.id}));
-            presetCard(c, a, k, p, card_w, selected);
+            if (include_default and slot == 0) {
+                systemDefaultCard(c, a, k, card_w);
+            } else {
+                const p = filtered[slot - @intFromBool(include_default)];
+                const selected = std.mem.eql(u8, active_id, p.id) and k.dark == p.variant.dark;
+                ui.key(c, c.print("preset-card-{s}", .{p.id}));
+                presetCard(c, a, k, p, card_w, selected);
+            }
         }
     }
+}
+
+fn systemDefaultCard(c: *ui.Context, a: *App, k: theme.Colors, card_w: f32) void {
+    const appearance = @import("view_settings_appearance.zig");
+    const selected = appearance.isSystemDefault(a);
+    ui.key(c, "preset-card-system-default");
+    const box = kit.pressFeedback(ui.div(c)
+        .w(card_w)
+        .p(6)
+        .column()
+        .gap(6)
+        .rounded(10)
+        .border(if (selected) k.accent else k.border)
+        .borderW(if (selected) 1.5 else 1)
+        .bg(if (selected) k.accent_wash else k.ink(0.02))
+        .hover(k.ink(0.05))
+        .control());
+    defer box.end();
+
+    const thumb_w = @max(60, card_w - 14);
+    {
+        const thumb = ui.div(c).row().w(thumb_w).h(54).rounded(7).border(k.border).borderW(1).clip();
+        defer thumb.end();
+        appearance.miniature(c, theme.builtin(false), thumb_w / 2, .left);
+        appearance.miniature(c, theme.builtin(true), thumb_w / 2, .right);
+    }
+
+    {
+        const meta = ui.div(c).column().wFull().gap(2);
+        defer meta.end();
+        {
+            const top = ui.div(c).row().wFull().gap(5).itemsCenter();
+            defer top.end();
+            icons.icon(c, .monitor, 11, if (selected) k.accent else k.muted, 0);
+            const title_w = @max(40, thumb_w - 28);
+            {
+                const title_box = ui.div(c).grow().w(0);
+                defer title_box.end();
+                kit.ellipsisText(c, "Default System", .{ .size = 12, .weight = .medium, .color = k.text }, title_w);
+            }
+            if (selected) icons.icon(c, .check, 11, k.accent, 0);
+        }
+        kit.ellipsisText(c, "Auto Light & Dark · Clean", .{ .size = 10.5, .color = k.muted }, thumb_w);
+    }
+
+    if (box.clicked()) appearance.applySystemDefault(a);
 }
 
 fn matchesFilter(p: *const custom_themes.Preset, f: GalleryFilter) bool {

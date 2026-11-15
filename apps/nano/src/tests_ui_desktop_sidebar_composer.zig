@@ -742,9 +742,9 @@ test "zen mode flattens sidebar and footer hierarchy while developer mode restor
     try testing.expect(!h.a.settings.hierarchyProfile().shows_git_checkout_chrome);
     try testing.expect(!h.t.hasText("New worktree"));
 
-    // Command palette preserves 4 idle actions and surfaces mode/part switches when queried.
+    // Command palette preserves 5 idle actions and surfaces mode/part switches when queried.
     const pal = @import("palette.zig");
-    try testing.expectEqual(@as(usize, 4), pal.actionsFor("", true).len);
+    try testing.expectEqual(@as(usize, 5), pal.actionsFor("", true).len);
     try testing.expect(pal.actionsFor("zen", true).len >= 1);
     try testing.expect(pal.actionsFor("rail", true).len >= 1);
 }
