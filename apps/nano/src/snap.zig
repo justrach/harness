@@ -73,6 +73,9 @@ pub fn main(init: std.process.Init) !void {
     if (scene.get("auth")) |v| a.account.user = try acct.readUser(gpa, v);
     if (scene.get("codegraff")) |v| a.account.codegraff = try acct.readCodegraff(gpa, v);
     try applySceneExtras(&a, init.arena.allocator(), scene);
+    if (str(scene, "selectedSpace") orelse first(scene, "spaces", "id")) |sp| {
+        if (a.space == null) a.space = try gpa.dupe(u8, sp);
+    }
     if (str(scene, "open")) |id| a.openChat(id, null);
     if (str(scene, "openSettings")) |sec_key| {
         if (@import("settings.zig").Section.fromKey(sec_key)) |sec| a.settings.setSection(sec);
@@ -442,6 +445,11 @@ fn applySceneExtras(a: *App, arena: std.mem.Allocator, scene: json.ObjectMap) !v
 /// open one, its split's other panes) its transcript from the scene.
 fn settle(t: *ui.Tester, a: *App, transcripts: ?json.ObjectMap, context_usage: ?json.Value, arena: std.mem.Allocator) void {
     t.settle(1);
+    var rounds: usize = 0;
+    while (a.engine.queued.items.len > 0 and rounds < 16) : (rounds += 1) {
+        _ = a.engine.pump();
+        t.settle(1);
+    }
     var filled = false;
     if (a.selected) |id| if (a.transcript.entries.items.len == 0) {
         const entries = if (transcripts) |all| all.get(id) else null;

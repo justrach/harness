@@ -488,6 +488,8 @@ pub const App = struct {
     settings: @import("settings.zig").Store,
     /// Settings › MCP servers, kept between visits.
     mcp: @import("view_settings_mcp.zig").Mcp,
+    /// Settings › Extensions: bounded native plugin panels.
+    extensions: @import("view_settings_extensions.zig").State = .{},
     /// graff Bots: the user's standing roles, and the page shown for them.
     bots: @import("bots.zig").Bots,
     /// The workspace's scope, the Harness account and the Codegraff
@@ -601,6 +603,7 @@ pub const App = struct {
         a.cloud_sandboxes.deinit();
         a.settings.deinit();
         a.mcp.deinit(a.gpa);
+        a.extensions.deinit(a.gpa);
         a.bots.deinit(a.gpa);
         a.view.deinit(a.gpa);
         question.deinit(a);

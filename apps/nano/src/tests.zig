@@ -69,6 +69,11 @@ test {
     _ = @import("view_settings_appearance.zig");
     _ = @import("view_drag.zig");
     _ = @import("view_settings_mcp.zig");
+    _ = @import("extension_panel.zig");
+    _ = @import("view_settings_extensions.zig");
+    _ = @import("tests_ui_extensions.zig");
+    _ = @import("github_runners_plugin.zig");
+    _ = @import("github_runners_json.zig");
     _ = @import("bots.zig");
     _ = @import("view_bots.zig");
     _ = @import("tests_ui_bots.zig");

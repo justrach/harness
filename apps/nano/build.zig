@@ -256,6 +256,17 @@ pub fn build(b: *std.Build) void {
     const write_vectors = b.addRunArtifact(vectors);
     write_vectors.addArg(b.pathJoin(&.{ protocol, "requests.json" }));
     b.step("vectors", "Write protocol/desktop/requests.json").dependOn(&write_vectors.step);
+
+    const gh_runners = b.addExecutable(.{ .name = "harness-github-runners", .root_module = b.createModule(.{
+        .root_source_file = b.path("src/github_runners_main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .strip = optimize != .debug,
+    }) });
+    gh_runners.use_llvm = true;
+    if (target.result.os.tag == .macos) gh_runners.root_module.link_libc = true;
+    if (target.result.os.tag == .windows and target.result.abi == .msvc) gh_runners.linkage = .static;
+    b.installArtifact(gh_runners);
     // Large UI artifacts must never use Zig's self-hosted backend.
     inline for (.{ exe, tests, snap, profile, vectors }) |artifact| {
         artifact.use_llvm = true;
