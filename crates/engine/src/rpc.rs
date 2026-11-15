@@ -2229,6 +2229,13 @@ impl RpcService for EngineRpc {
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&self.registry.title_settings())
             }
+            methods::GENERATE_CUSTOM_THEME => {
+                let p: crate::custom_theme_gen::GenerateCustomThemeParams = parse_params(params)?;
+                let generated =
+                    crate::custom_theme_gen::generate(&self.registry, self.repos.data_dir(), p)
+                        .await;
+                RpcReply::value(&generated)
+            }
             methods::SET_HARNESS_ENABLED => {
                 let p: SetHarnessEnabledParams = parse_params(params)?;
                 update_harness_enabled(&self.registry, p.harness, p.enabled).await?;
@@ -4012,7 +4019,19 @@ impl RpcService for EngineRpc {
                 .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&start)
             }
-            methods::LIST_GRAFF_LOGINS => RpcReply::value(&self.agent_accounts.list_graff_logins()),
+            methods::LIST_GRAFF_LOGINS => {
+                let p: ListAgentAccountsParams = if params.is_null() {
+                    ListAgentAccountsParams { force_usage: None }
+                } else {
+                    parse_params(params)?
+                };
+                RpcReply::value(
+                    &self
+                        .agent_accounts
+                        .list_graff_logins_with_usage(p.force_usage.unwrap_or(false))
+                        .await,
+                )
+            }
             methods::LIST_NATIVE_EXTENSIONS | methods::INVOKE_NATIVE_EXTENSION => {
                 let p: crate::native_extensions::Params = parse_params(params)?;
                 let space = self.local_project_action_space(&p.space_id)?;

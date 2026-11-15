@@ -36,6 +36,7 @@ mod compaction;
 mod devin_models;
 mod elicitation;
 pub mod exo_bridge;
+pub mod graff_accounts;
 pub mod graff_bot;
 pub mod graff_client;
 #[cfg(target_os = "macos")]
@@ -2852,6 +2853,7 @@ fn session_update_events(
             subagents.observe(update);
             Vec::new()
         }
+        "_codegraff/usage" => graff_accounts::usage_events(params),
         _ => Vec::new(),
     };
     if method == "session/update" {
@@ -4514,16 +4516,17 @@ async fn run_session(session: Session) {
                     // with nothing further on the wire — verified live,
                     // 1.18.18). One such frame must not disarm the watchdog
                     // for the whole turn; only turn progress counts.
-                    let boilerplate = method == "session/update"
-                        && matches!(
-                            params
-                                .get("update")
-                                .and_then(|u| u.get("sessionUpdate"))
-                                .and_then(Value::as_str),
-                            Some("available_commands_update")
-                                | Some("config_option_update")
-                                | Some("current_mode_update")
-                        );
+                    let boilerplate = method == "_codegraff/usage"
+                        || (method == "session/update"
+                            && matches!(
+                                params
+                                    .get("update")
+                                    .and_then(|u| u.get("sessionUpdate"))
+                                    .and_then(Value::as_str),
+                                Some("available_commands_update")
+                                    | Some("config_option_update")
+                                    | Some("current_mode_update")
+                            ));
                     if !boilerplate {
                         prompt_stall_deadline = None;
                     }
@@ -6754,4 +6757,39 @@ fn jev_effort_change_requires_matching_success_and_live_config() {
         })
     );
     assert_eq!(tracker.observe(&config("none")), None);
+}
+
+#[cfg(test)]
+#[test]
+fn codegraff_usage_notification_maps_to_plan_usage_event() {
+    let mut subagents = SubagentObserver::Graff(Default::default());
+    let mut trackers = SessionTrackers::default();
+    let params = json!({
+        "sessionId": "s1",
+        "provider": "anthropic",
+        "usage": {
+            "planWindows": [
+                {
+                    "label": "Session",
+                    "usedPercent": 18.0,
+                    "resetsAtUnix": 1_800_000_000_i64
+                },
+                {
+                    "label": "Fable",
+                    "usedPercent": 85.0
+                }
+            ]
+        }
+    });
+    let events = session_update_events("_codegraff/usage", &params, "s1", &mut subagents, &mut trackers);
+    assert_eq!(events.len(), 1);
+    let AgentEvent::PlanUsage { provider, windows } = &events[0] else {
+        panic!("expected PlanUsage event, got {events:?}");
+    };
+    assert_eq!(provider.as_deref(), Some("anthropic"));
+    assert_eq!(windows.len(), 2);
+    assert_eq!(windows[0].label, "Session");
+    assert!((windows[0].used_fraction - 0.18).abs() < 1e-6);
+    assert_eq!(windows[1].label, "Fable");
+    assert!((windows[1].used_fraction - 0.85).abs() < 1e-6);
 }

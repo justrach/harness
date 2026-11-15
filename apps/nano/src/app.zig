@@ -237,11 +237,23 @@ pub const View = struct {
         active: bool = false,
         origin: nanoui.ui.Point = .{},
     } = .{},
+    /// Cached listed archived count from `lists()` so `zenFooter` avoids a second O(N*M) scan.
+    cached_archived_count: usize = 0,
+    /// Custom Themes & Animated Backdrops studio modal state (`/custom-theme`).
+    custom_theme_open: bool = false,
+    custom_theme_generating: bool = false,
+    custom_theme_req_id: ?[]u8 = null,
+    custom_theme_prompt: nanoui.ui.TextBuffer = .{},
+    custom_theme_error: std.ArrayList(u8) = .empty,
+    custom_theme_list_dirty: bool = false,
 
     pub fn deinit(v: *View, gpa: Allocator) void {
         @import("text_buffer.zig").deinit(&v.settings_search);
         v.project_setup.deinit();
         v.open_chooser.deinit();
+        @import("text_buffer.zig").deinit(&v.custom_theme_prompt);
+        if (v.custom_theme_req_id) |id| gpa.free(id);
+        v.custom_theme_error.deinit(gpa);
         @import("text_buffer.zig").deinit(&v.search.query);
         @import("text_buffer.zig").deinit(&v.strip.query);
         v.tool_ui.deinit(gpa);
@@ -1938,6 +1950,20 @@ pub const App = struct {
         if (std.mem.eql(u8, prompt, "/resume")) {
             a.composer.clear();
             return @import("view_palette.zig").toggle(a, .replace_current);
+        }
+        if (std.mem.eql(u8, prompt, "/zen")) {
+            a.composer.clear();
+            a.settings.toggleUiMode();
+            return a.redraw();
+        }
+        if (std.mem.eql(u8, prompt, "/custom-theme") or std.mem.startsWith(u8, prompt, "/custom-theme ")) {
+            const raw_arg = if (prompt.len > "/custom-theme".len) std.mem.trim(u8, prompt["/custom-theme".len..], " \t\r\n") else "";
+            var arg_buf: [512]u8 = undefined;
+            const n = @min(raw_arg.len, arg_buf.len);
+            if (n > 0) @memcpy(arg_buf[0..n], raw_arg[0..n]);
+            a.composer.clear();
+            const studio = @import("view_custom_theme_studio.zig");
+            if (n > 0) return studio.openWithPrompt(a, arg_buf[0..n]) else return studio.open(a);
         }
         if (prompt.len == 0 or a.engine.state != .connected) return;
         // A plain chat with no Auto tier would fall to graff's own default.

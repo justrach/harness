@@ -33,6 +33,7 @@ pub(super) fn normalize_legacy_id(id: &str) -> Cow<'_, str> {
         || !matches!(
             provider,
             "anthropic"
+                | "chatgpt-new"
                 | "claude-agent"
                 | "codegraff"
                 | "codex"
@@ -291,20 +292,26 @@ fn models_from_acp(catalog: &Value) -> Result<Vec<Model>, HarnessError> {
             }
         }
         let context = row.get("context").and_then(Value::as_u64);
+        let separate_quota = row.get("separateQuota").and_then(Value::as_bool) == Some(true);
         let text = |key: &str| {
             row.get(key)
                 .and_then(Value::as_str)
                 .filter(|v| !v.is_empty())
                 .map(str::to_owned)
         };
+        let billing = match (text("cost").as_deref(), separate_quota) {
+            (Some("plan"), true) => Some("plan*".to_owned()),
+            (Some(cost), _) => Some(cost.to_owned()),
+            (None, _) => None,
+        };
         let model = Model {
             id: format!("{provider}/{name}"),
             label: name.to_owned(),
-            description: Some(describe(provider, context)),
+            description: Some(describe_acp(provider, context, separate_quota)),
             reasoning_levels,
             options: Vec::new(),
             maker: text("maker"),
-            billing: text("cost"),
+            billing,
             context,
         };
         if current.is_some_and(|c| {
@@ -450,6 +457,15 @@ fn describe(provider: &str, context: Option<u64>) -> String {
     match context {
         Some(context) => format!("{provider} · {} context", context_label(context)),
         None => provider.to_owned(),
+    }
+}
+
+fn describe_acp(provider: &str, context: Option<u64>, separate_quota: bool) -> String {
+    let base = describe(provider, context);
+    if separate_quota {
+        format!("{base} · separate limit")
+    } else {
+        base
     }
 }
 
@@ -931,6 +947,27 @@ openrouter:\n\
                 (Some(272_000), Some("codex · 272k context")),
                 (None, Some("lmstudio"))
             ]
+        );
+    }
+
+    #[test]
+    fn acp_catalog_surfaces_separate_quota_billing_and_description() {
+        let catalog = json!({"models": [
+            {"provider": "anthropic", "name": "claude-fable-5-2", "authenticated": true,
+             "cost": "plan", "maker": "anthropic", "context": 1000000, "separateQuota": true},
+            {"provider": "anthropic", "name": "claude-opus-5-5", "authenticated": true,
+             "cost": "plan", "maker": "anthropic", "context": 1000000}
+        ]});
+        let models = models_from_acp(&catalog).unwrap();
+        assert_eq!(models[0].billing.as_deref(), Some("plan*"));
+        assert_eq!(
+            models[0].description.as_deref(),
+            Some("anthropic · 1M context · separate limit")
+        );
+        assert_eq!(models[1].billing.as_deref(), Some("plan"));
+        assert_eq!(
+            models[1].description.as_deref(),
+            Some("anthropic · 1M context")
         );
     }
 

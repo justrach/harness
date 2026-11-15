@@ -159,4 +159,15 @@ theorem tween_column_exact_at_cap (tweening : Bool) (raw_col max_col : Nat)
   rw [hlt, Bool.and_false]
   rfl
 
+/-- Upper bound on prefix-width queries in binary-searched `fadeText`
+(`fadePrefixStart` in `view_kit.zig`): `⌈log₂(len + 1)⌉ + 1` prefix probes
+plus at most `1` initial total-width probe (`O(log L)` vs `O(L)` linear shaping). -/
+def fadeSearchSteps (len : Nat) : Nat :=
+  Nat.log2 (len + 1) + 2
+
+theorem fade_search_logarithmic_vs_linear :
+    fadeSearchSteps 256 ≤ 10 ∧
+    [16, 32, 64, 128, 256, 512, 1024].all (fun n => decide (fadeSearchSteps n < n)) = true := by
+  native_decide
+
 end Nano.Tween

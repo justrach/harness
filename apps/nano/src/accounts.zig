@@ -93,6 +93,12 @@ pub const GraffLogin = struct {
     signed_in: bool = false,
     account: ?[]const u8 = null,
     plan_usage: ?bool = null,
+    display_name: ?[]const u8 = null,
+    organization: ?[]const u8 = null,
+    plan_label: ?[]const u8 = null,
+    usage_windows: []const Window = &.{},
+    prepaid_cents: ?i64 = null,
+    reset_credits: ?f64 = null,
 };
 
 /// `CodegraffUsage`'s reply when signed in.
@@ -171,22 +177,26 @@ fn array(v: ?json.Value) []const json.Value {
     return if (x == .array) x.array.items else &.{};
 }
 
+fn parseWindows(ar: Allocator, v: ?json.Value) ![]const Window {
+    var windows: std.ArrayList(Window) = .empty;
+    for (array(v)) |w| {
+        if (w != .object) continue;
+        const resets = try str(ar, w.object, "resetsAt");
+        try windows.append(ar, .{
+            .label = (try str(ar, w.object, "label")) orelse "",
+            .used_fraction = @floatCast(number(w.object, "usedFraction") orelse 0),
+            .resets_ms = if (resets) |r| rules.parseTime(r) else null,
+        });
+    }
+    return windows.items;
+}
+
 pub fn parseSnapshot(ar: Allocator, v: json.Value) !Snapshot {
     if (v != .object) return error.Unexpected;
     var accounts: std.ArrayList(Account) = .empty;
     for (array(v.object.get("accounts"))) |item| {
         if (item != .object) continue;
         const o = item.object;
-        var windows: std.ArrayList(Window) = .empty;
-        for (array(o.get("usageWindows"))) |w| {
-            if (w != .object) continue;
-            const resets = try str(ar, w.object, "resetsAt");
-            try windows.append(ar, .{
-                .label = (try str(ar, w.object, "label")) orelse "",
-                .used_fraction = @floatCast(number(w.object, "usedFraction") orelse 0),
-                .resets_ms = if (resets) |r| rules.parseTime(r) else null,
-            });
-        }
         try accounts.append(ar, .{
             .id = (try str(ar, o, "id")) orelse continue,
             .harness = (try str(ar, o, "harness")) orelse "",
@@ -195,7 +205,7 @@ pub fn parseSnapshot(ar: Allocator, v: json.Value) !Snapshot {
             .plan_label = try str(ar, o, "planLabel"),
             .active = flag(o, "active"),
             .switchable = flag(o, "switchable"),
-            .usage = windows.items,
+            .usage = try parseWindows(ar, o.get("usageWindows")),
             .usage_error = try str(ar, o, "usageError"),
         });
     }
@@ -223,6 +233,12 @@ pub fn parseGraffLogins(ar: Allocator, v: json.Value) ![]const GraffLogin {
             .signed_in = flag(o, "signedIn"),
             .account = try str(ar, o, "account"),
             .plan_usage = if (plan) |p| (if (p == .bool) p.bool else null) else null,
+            .display_name = try str(ar, o, "displayName"),
+            .organization = try str(ar, o, "organization"),
+            .plan_label = try str(ar, o, "planLabel"),
+            .usage_windows = try parseWindows(ar, o.get("usageWindows")),
+            .prepaid_cents = int(o, "prepaidCents"),
+            .reset_credits = number(o, "resetCredits"),
         });
     }
     return out.items;
@@ -435,7 +451,14 @@ pub fn openaiLogin(s: Snapshot) OpenAi {
 }
 
 /// `GRAFF_LOGIN_PROVIDERS`' names.
-const graff_names = [_][2][]const u8{ .{ "xai", "xAI" }, .{ "kimi", "Kimi" }, .{ "zai", "Z.AI" }, .{ "chatgpt-new", "ChatGPT" }, .{ "anthropic", "Anthropic Console" } };
+const graff_names = [_][2][]const u8{
+    .{ "xai", "xAI" },
+    .{ "kimi", "Kimi" },
+    .{ "zai", "Z.AI" },
+    .{ "chatgpt-new", "ChatGPT" },
+    .{ "anthropic", "Anthropic Console" },
+    .{ "claude-agent", "Claude Agent" },
+};
 
 /// A graff provider's name for the sign-in dialog (`graff_provider_name`).
 pub fn graffProviderName(id: ?[]const u8) []const u8 {
@@ -462,13 +485,16 @@ pub const Chatgpt = union(enum) {
     ready: ?[]const u8,
     plan_off: ?[]const u8,
 
+    pub fn rowFromListing(rows: ?[]const GraffLogin) ?GraffLogin {
+        const list = rows orelse return null;
+        for (list) |r| if (std.mem.eql(u8, r.id, "chatgpt-new")) return r;
+        return null;
+    }
+
     pub fn fromListing(rows: ?[]const GraffLogin) Chatgpt {
-        const list = rows orelse return .unknown;
-        for (list) |r| if (std.mem.eql(u8, r.id, "chatgpt-new")) {
-            if (r.signed_in) return .{ .ready = r.account };
-            if (r.plan_usage) |p| if (!p) return .{ .plan_off = r.account };
-            return .signed_out;
-        };
+        const r = rowFromListing(rows) orelse return if (rows == null) .unknown else .signed_out;
+        if (r.signed_in) return .{ .ready = r.account };
+        if (r.plan_usage) |p| if (!p) return .{ .plan_off = r.account };
         return .signed_out;
     }
 
@@ -485,8 +511,24 @@ pub const Chatgpt = union(enum) {
 /// A graff provider row's line.
 pub fn graffStatus(buf: []u8, p: GraffLogin) []const u8 {
     if (!p.signed_in) return "Not signed in";
-    const who = p.account orelse return "Signed in on this device";
-    return std.fmt.bufPrint(buf, "Signed in as {s}", .{who}) catch "Signed in";
+    const head = if (p.account) |who|
+        std.fmt.bufPrint(buf, "Signed in as {s}", .{who}) catch return "Signed in"
+    else
+        std.fmt.bufPrint(buf, "Signed in on this device", .{}) catch return "Signed in";
+    var len = head.len;
+    if (p.organization) |org| {
+        if (std.fmt.bufPrint(buf[len..], " \u{00b7} {s}", .{org})) |tail| {
+            len += tail.len;
+        } else |_| {}
+    }
+    if (p.prepaid_cents) |cents| if (cents > 0) {
+        const dollars = @divTrunc(cents, 100);
+        const rem_cents: u64 = @intCast(@rem(cents, 100));
+        if (std.fmt.bufPrint(buf[len..], " \u{00b7} ${d}.{d:0>2} prepaid", .{ dollars, rem_cents })) |tail| {
+            len += tail.len;
+        } else |_| {}
+    };
+    return buf[0..len];
 }
 
 /// The legacy Codex login's line under graff's providers.
@@ -882,4 +924,32 @@ test "account usage rules: error parsing, ring fractions, Cursor pools, optimist
     try testing.expectEqualStrings("5h: resets 12:05 PM \u{00b7} 7d: resets Sun", tip);
     try testing.expectEqualStrings("Cursor \u{00b7} Other", usageResets(ar, s.accounts[2].usage, now_ms, 0));
     try testing.expectEqualStrings("", usageResets(ar, &.{}, now_ms, 0));
+}
+
+test "graff login metadata parsing, organization/prepaid status, and provider name" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    const p = try parsed(
+        \\[
+        \\ {"id":"xai","name":"xAI","signedIn":true,"account":"ada@example.test","planLabel":"SuperGrok Heavy","prepaidCents":1250,"resetCredits":50.0,
+        \\  "usageWindows":[{"label":"Credits","usedFraction":0.35,"resetsAt":"2027-02-01T00:00:00Z"}]},
+        \\ {"id":"anthropic","name":"Anthropic Console","signedIn":true,"account":"ops@acme.test","organization":"Acme Labs","planLabel":"Max",
+        \\  "usageWindows":[{"label":"Session","usedFraction":0.18},{"label":"Fable","usedFraction":0.85}]},
+        \\ {"id":"claude-agent","name":"Claude Agent","signedIn":true,"account":"dev@studio.test","organization":"Studio Team","planLabel":"Claude Max 20x"}
+        \\]
+    );
+    defer p.deinit();
+    const rows = try parseGraffLogins(ar, p.value);
+    try testing.expectEqual(@as(usize, 3), rows.len);
+    try testing.expectEqualStrings("SuperGrok Heavy", rows[0].plan_label.?);
+    try testing.expectEqual(@as(?i64, 1250), rows[0].prepaid_cents);
+    try testing.expectEqual(@as(?f64, 50.0), rows[0].reset_credits);
+    try testing.expectEqual(@as(usize, 1), rows[0].usage_windows.len);
+    try testing.expectEqualStrings("Fable", rows[1].usage_windows[1].label);
+
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("Signed in as ada@example.test \u{00b7} $12.50 prepaid", graffStatus(&buf, rows[0]));
+    try testing.expectEqualStrings("Signed in as ops@acme.test \u{00b7} Acme Labs", graffStatus(&buf, rows[1]));
+    try testing.expectEqualStrings("Claude Agent", graffProviderName("claude-agent"));
 }

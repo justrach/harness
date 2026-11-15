@@ -120,6 +120,7 @@ pub fn cases(gpa: std.mem.Allocator) ![]Case {
         try case(gpa, "cancel an agent CLI update", r.cancelHarnessUpdate("claude-code", "host-parity"), false),
         try case(gpa, "dismiss an agent CLI update", r.dismissHarnessUpdate("claude-code", "2.1.322", "host-parity"), false),
         try case(gpa, "set agent CLI auto-update policy", r.setHarnessUpdatePolicy("claude-code", true, "host-parity"), false),
+        try case(gpa, "generate custom theme and animated backdrop", r.generateCustomTheme("kyoto rain at midnight", true, null), false),
     };
     return gpa.dupe(Case, &list);
 }

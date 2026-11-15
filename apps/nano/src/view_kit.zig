@@ -99,6 +99,53 @@ pub fn activityText(c: *ui.Context, k: theme.Colors, text: []const u8, st: ui.Te
     loaderFrame(c, 1.0 / 30.0);
 }
 
+pub fn toggleSwitch(c: *ui.Context, k: theme.Colors, on: bool) bool {
+    const track = ui.div(c).row().w(32).h(18).roundedFull()
+        .bg(if (on) k.solid else k.ink(if (k.dark) 0.18 else 0.13))
+        .border(if (on) k.solid else k.ink(0.10)).borderW(1)
+        .pl(if (on) 15 else 1).itemsCenter();
+    defer track.end();
+    _ = c.leaf(.{
+        .width = .{ .px = 14 },
+        .height = .{ .px = 14 },
+        .radius = 7,
+        .background = if (on) k.on_solid else (if (k.dark) ui.Color.white.alpha(0.88) else ui.Color.white),
+    }, .none, null);
+    return track.clicked();
+}
+
+/// Largest UTF-8 codepoint boundary in `s` whose shaped prefix width does not
+/// exceed `limit` via binary search (`O(log L)` width calls vs `O(L)` linear scan).
+pub fn fadePrefixStart(c: *ui.Context, s: []const u8, st: ui.TextStyle, limit: f32) struct { byte: usize, width: f32 } {
+    if (limit <= 0 or s.len == 0) return .{ .byte = 0, .width = 0 };
+    var lo: usize = 0;
+    var hi: usize = s.len;
+    var lo_w: f32 = 0;
+    while (lo < hi) {
+        var mid = lo + (hi - lo + 1) / 2;
+        while (mid > lo and mid < s.len and (s[mid] & 0xC0) == 0x80) mid -= 1;
+        if (mid == lo) {
+            mid = lo + 1;
+            while (mid < hi and (s[mid] & 0xC0) == 0x80) mid += 1;
+            const w_hi = c.text.width(s[0..hi], st);
+            if (w_hi <= limit) {
+                lo = hi;
+                lo_w = w_hi;
+            }
+            break;
+        }
+        const w = c.text.width(s[0..mid], st);
+        if (w <= limit) {
+            lo = mid;
+            lo_w = w;
+        } else {
+            hi = mid - 1;
+            while (hi > lo and (s[hi] & 0xC0) == 0x80) hi -= 1;
+        }
+    }
+    return .{ .byte = lo, .width = lo_w };
+}
+
 /// `s` in one line at most `max_w` wide: as is when it fits, else cut and
 /// faded over its last 20 points (`fade_title`, crates/ui/src/shell.rs).
 pub fn fadeText(c: *ui.Context, s: []const u8, st: ui.TextStyle, max_w: f32) void {
@@ -113,10 +160,11 @@ pub fn fadeText(c: *ui.Context, s: []const u8, st: ui.TextStyle, max_w: f32) voi
     const band: f32 = 20;
     const p = std.math.clamp((total - max_w) / band, 0, 1);
     const right = max_w + band * (1 - p * p * (3 - 2 * p));
+    const start = fadePrefixStart(c, s, st, @max(0, right - band));
     var spans: std.ArrayList(ui.Span) = .empty;
-    var at: usize = 0;
-    var x0: f32 = 0;
-    var it = std.unicode.Utf8View.initUnchecked(s).iterator();
+    var at: usize = start.byte;
+    var x0: f32 = start.width;
+    var it = std.unicode.Utf8View.initUnchecked(s[at..]).iterator();
     while (it.nextCodepointSlice()) |cp| {
         if (x0 >= max_w) break;
         const x1 = c.text.width(s[0 .. at + cp.len], st);

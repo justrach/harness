@@ -185,4 +185,5 @@ test {
     _ = @import("ascii_field.zig");
     _ = @import("member_card.zig");
     _ = @import("view_settings_profile.zig");
+    _ = @import("tests_custom_themes.zig");
 }
