@@ -666,8 +666,9 @@ final class AppModel {
                     harness: chat.config?.harness ?? "claude-code"),
                 phase: phase,
                 startedAt: Date(timeIntervalSince1970: Double(started) / 1000),
-                detail: LiveActivityPlan.detail(chat.lastMessagePreview),
-                tasks: tasks)
+                detail: SessionVoiceRegistry.shared.detailOverride(for: chat.id) ?? LiveActivityPlan.detail(chat.lastMessagePreview),
+                tasks: tasks,
+                voiceState: SessionVoiceRegistry.shared.activeVoiceState(for: chat.id))
         }
     }
 
