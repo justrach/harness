@@ -8,7 +8,6 @@
 // 44pt menu trigger sits on top of it. The menu keeps its native actions and
 // accessibility, and its transition never touches what you see.
 
-import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -21,7 +20,7 @@ struct QueuedImageEditor: View {
     @State private var draft: QueuedAttachmentDraft
     @State private var saving = false
     @State private var error: String?
-    @State private var pickerItems: [PhotosPickerItem] = []
+    @State private var pickerItems: [PickedPhoto] = []
     @State private var showPhotos = false
     @State private var showFiles = false
     @State private var showCamera = false
@@ -274,7 +273,7 @@ struct QueuedImageEditor: View {
         }
     }
 
-    private func stagePicked(_ items: [PhotosPickerItem]) async {
+    private func stagePicked(_ items: [PickedPhoto]) async {
         var images: [Data] = []
         var failed = 0
         for item in items {

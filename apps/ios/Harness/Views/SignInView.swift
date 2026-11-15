@@ -4,7 +4,6 @@
 // Endpoints are fixed to production (the old app's rule: mobile always talks
 // to prod; a stale override once broke sign-in in the worst ghost way).
 
-import AuthenticationServices
 import CryptoKit
 import SwiftUI
 
@@ -105,46 +104,95 @@ struct SignInView: View {
 
 // MARK: - Auth session plumbing
 
-/// Wraps ASWebAuthenticationSession with a presentation anchor.
+@objc private protocol WebAuthSessionAPI: NSObjectProtocol {
+    @objc(initWithURL:callbackURLScheme:completionHandler:)
+    init(url: URL, callbackURLScheme: String?, completionHandler: @escaping (URL?, Error?) -> Void)
+    var presentationContextProvider: AnyObject? { get set }
+    var prefersEphemeralWebBrowserSession: Bool { get set }
+    @discardableResult func start() -> Bool
+    func cancel()
+}
+
+/// Wraps ASWebAuthenticationSession with a presentation anchor. The framework
+/// loads when a sign-in starts (LateFramework).
 @MainActor
-final class AuthSessionCoordinator: NSObject, ASWebAuthenticationPresentationContextProviding {
-    enum Outcome {
+final class AuthSessionCoordinator: NSObject {
+    enum Outcome: Equatable {
         case success(URL)
         case cancelled
         case failure(String)
     }
 
-    private var session: ASWebAuthenticationSession?
+    /// ASWebAuthenticationSessionError: its domain and `.canceledLogin`.
+    nonisolated static let sessionErrorDomain = "com.apple.AuthenticationServices.WebAuthenticationSession"
+    nonisolated static let canceledLoginCode = 1
+
+    private var session: WebAuthSessionAPI?
+    /// Moves on each start and cancel, so a sign-in cancelled while the framework
+    /// was still loading doesn't open its sheet.
+    private var attempt = 0
 
     /// Close the sheet: the sign-in finished somewhere else (a magic link
     /// opened in Safari). The completion then reports `.cancelled`.
     func cancel() {
+        attempt += 1
         session?.cancel()
         session = nil
     }
 
     func start(url: URL, callbackScheme: String, completion: @escaping (Outcome) -> Void) {
-        let session = ASWebAuthenticationSession(url: url,
-                                                 callbackURLScheme: callbackScheme) { callbackURL, error in
-            if let callbackURL {
-                completion(.success(callbackURL))
-            } else if let error = error as? ASWebAuthenticationSessionError,
-                      error.code == .canceledLogin {
+        attempt += 1
+        let started = attempt
+        Task { @MainActor in
+            let loaded = await LateFramework.authenticationServices.load()
+            guard started == attempt else {
                 completion(.cancelled)
-            } else {
-                completion(.failure(error?.localizedDescription ?? "Sign-in failed"))
+                return
             }
+            guard loaded, let session = makeSession(url: url, callbackScheme: callbackScheme, completion: completion) else {
+                completion(.failure("Sign-in failed"))
+                return
+            }
+            self.session = session
+            session.start()
+        }
+    }
+
+    /// Nil until the framework is loaded.
+    private func makeSession(url: URL, callbackScheme: String,
+                             completion: @escaping (Outcome) -> Void) -> WebAuthSessionAPI? {
+        guard let sessionClass = NSClassFromString("ASWebAuthenticationSession") else { return nil }
+        LateFramework.adopt("ASWebAuthenticationPresentationContextProviding", on: AuthSessionCoordinator.self)
+        let session = unsafeBitCast(sessionClass, to: WebAuthSessionAPI.Type.self).init(
+            url: url, callbackURLScheme: callbackScheme
+        ) { callbackURL, error in
+            completion(Self.outcome(callbackURL: callbackURL, error: error))
         }
         session.presentationContextProvider = self
         // Private browser session: sharing Safari's cookies meant a signed-in
         // codegraff.com (or Google) account was reused silently, so signing
         // out and back in could never switch accounts.
         session.prefersEphemeralWebBrowserSession = true
-        self.session = session
-        session.start()
+        return session
     }
 
-    nonisolated func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+    /// For tests: a session as `start` configures it, without opening it.
+    func preparedSession(url: URL, callbackScheme: String,
+                         completion: @escaping (Outcome) -> Void = { _ in }) -> NSObject? {
+        makeSession(url: url, callbackScheme: callbackScheme, completion: completion) as? NSObject
+    }
+
+    nonisolated static func outcome(callbackURL: URL?, error: Error?) -> Outcome {
+        if let callbackURL { return .success(callbackURL) }
+        if let error = error as NSError?, error.domain == sessionErrorDomain, error.code == canceledLoginCode {
+            return .cancelled
+        }
+        return .failure(error?.localizedDescription ?? "Sign-in failed")
+    }
+
+    /// ASWebAuthenticationPresentationContextProviding.
+    @objc(presentationAnchorForWebAuthenticationSession:)
+    nonisolated func presentationAnchor(for session: NSObject) -> UIWindow {
         MainActor.assumeIsolated {
             let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
             if let keyWindow = scenes.compactMap(\.keyWindow).first {
@@ -153,7 +201,7 @@ final class AuthSessionCoordinator: NSObject, ASWebAuthenticationPresentationCon
             guard let scene = scenes.first else {
                 preconditionFailure("Authentication requested without a connected window scene")
             }
-            return ASPresentationAnchor(windowScene: scene)
+            return UIWindow(windowScene: scene)
         }
     }
 }

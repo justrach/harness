@@ -1633,6 +1633,7 @@ final class AppModel {
     private func storeIsProtected(_ store: SessionStore) -> Bool {
         !store.pendingSends.isEmpty
             || !store.outbox.isEmpty
+            || store.docIsBusy
             || store.entries.last?.status == .streaming
     }
 
@@ -1662,6 +1663,7 @@ final class AppModel {
     }
 
     private func evictForMemoryWarning() {
+        TextViewPool.drain()
         let newest = storeLastUsed.max { $0.value < $1.value }?.key
         let before = sessionStores.count
         let order = Self.evictionOrder(lastUsed: storeLastUsed) { [weak self] id in
