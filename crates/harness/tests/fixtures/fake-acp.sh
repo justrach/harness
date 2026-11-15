@@ -112,6 +112,21 @@ pid=$(rid "$promptline")
 
 case "$promptline" in
 
+*scenario:command-intent*)
+  if has "$promptline" 'harness-invoke:'; then
+    state='canonical link leaked'
+  elif has "$promptline" '"harness/command":true'; then
+    state='selected command'
+  elif has "$promptline" '"harness/command":false'; then
+    state='literal prompt'
+  else
+    state='missing command intent'
+  fi
+  update "{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"$state\"}}"
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  exit 0
+  ;;
+
 *scenario:reauth-*)
   if has "$promptline" 'reauth-legacy-token-expired'; then
     emit "{\"id\":$pid,\"error\":{\"code\":-32603,\"message\":\"chatgpt-new api error [token_expired]: Provided authentication token is expired.\"}}"
