@@ -112,7 +112,7 @@ test "transactional streaming does not copy history or allocate an undo log for 
     try testing.expectEqualStrings("Second synthetic question!", t.entries.items[2].parts.items[0].text.items);
 }
 
-test "a waiting second turn retains visible history through timer frames and resizes" {
+test "a waiting second turn stays visible and retains scrollable history through timer frames and resizes" {
     @import("theme.zig").registerFonts();
     var a: App = .init(testing.allocator, testing.io, 1);
     defer a.deinit();
@@ -152,8 +152,10 @@ test "a waiting second turn retains visible history through timer frames and res
         t.advance(1.0 / 15.0);
         const shown = if (a.selected != null) &a.transcript else &a.peer("synthetic-history").?.transcript;
         try testing.expectEqual(@as(usize, 3), shown.entries.items.len);
-        try visible(&t, "First synthetic question");
-        try visible(&t, "The previous synthetic answer");
+        // The live turn now starts near the top. Older messages remain
+        // mounted and scrollable, not forced into that same reading viewport.
+        try testing.expect(t.containsText("First synthetic question"));
+        try testing.expect(t.containsText("The previous synthetic answer"));
         try visible(&t, "Second synthetic question");
         var elapsed_buf: [32]u8 = undefined;
         try testing.expect(t.hasText(try std.fmt.bufPrint(&elapsed_buf, "{d}s", .{seconds})));

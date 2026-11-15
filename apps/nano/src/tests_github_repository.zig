@@ -289,11 +289,11 @@ test "repository github browser inspects PR summary code and activity natively" 
         try testing.expect(!h.t.hasText(files.files[0].patch.?));
         try h.t.clickText("src/navigation.zig");
         h.t.settle(0.1);
-        try testing.expect(h.t.hasText(files.files[0].patch.?));
+        try testing.expect(h.t.hasText("pub const label = \"Repository navigation\";"));
         try screenshot(&h, if (dark) "code-dark" else "code-light");
         try h.t.clickText("assets/navigation.png");
         h.t.settle(0.1);
-        try testing.expect(!h.t.hasText(files.files[0].patch.?));
+        try testing.expect(!h.t.hasText("pub const label = \"Repository navigation\";"));
         try testing.expect(h.t.hasText("Patch incomplete; open on GitHub for the full diff."));
         try h.t.clickText("Activity");
         h.t.settle(0.1);
@@ -478,4 +478,53 @@ test "repository github browser masks raw errors rejects changed repo replies an
     const url = try flow.itemUrl(testing.allocator, repo, 42, true);
     defer testing.allocator.free(url);
     try testing.expectEqualStrings("https://github.com/demo/fieldnotes/pull/42", url);
+}
+
+const review_line = "pub const message = \"Keep long source lines intact while reviewing repository changes, without turning one source line into a paragraph.\";";
+const review_files: flow.Page = .{ .repository = repo, .kind = .files, .files = &.{
+    .{ .filename = "src/navigation.zig", .status = "modified", .additions = 2, .deletions = 1, .patch = "@@ -40,2 +40,3 @@ fn render() {\n const stable = true;\n-pub const label = \"Old navigation\";\n+pub const label = \"Repository navigation\";\n+" ++ review_line },
+    .{ .filename = "assets/navigation.png", .previousFilename = "assets/old-navigation.png", .status = "renamed", .additions = 0, .deletions = 0, .patchTruncated = true },
+    .{ .filename = "src/keyboard.zig", .status = "added", .additions = 1, .deletions = 0, .patch = "@@ -0,0 +1 @@\n+pub const focus_retained = true;" },
+} };
+
+test "github code review uses numbered colored source rows instead of wrapped patch prose" {
+    for ([_]bool{ false, true }) |dark| {
+        var h: Harness = undefined;
+        try setup(&h, dark, &.{ pulls, detail, review_files });
+        defer h.deinit();
+        try h.t.clickText("Repository");
+        try h.t.clickText("Polish repository navigation");
+        try h.t.clickText("Code");
+        h.a.view.strip.expanded = .host;
+        h.t.resize(660, 860);
+        h.t.settle(0.2);
+        try h.t.clickText("src/navigation.zig");
+        h.t.settle(0.2);
+        try screenshot(&h, if (dark) "code-review-dark" else "code-review-light");
+        try testing.expect(h.t.hasText(review_line));
+        try testing.expect(h.t.hasText("pub const label = \"Old navigation\";"));
+        try testing.expect(h.t.hasText("40"));
+        try testing.expect(h.t.hasText("42"));
+        const code = textRect(&h, review_line) orelse return error.MissingSourceLine;
+        try testing.expect(code.h <= 24);
+        const header = textRect(&h, "src/navigation.zig").?;
+        const viewport = for (h.t.ctx.nodes.items) |node| {
+            if (node.style.scroll_x and node.rect.y <= code.y and node.rect.y + node.rect.h >= code.y + code.h) break node.rect;
+        } else return error.MissingHorizontalDiffViewport;
+        h.t.hscroll(viewport.x + viewport.w / 2, code.y + code.h / 2, -140);
+        h.t.settle(0.2);
+        try testing.expect(textRect(&h, review_line).?.x < code.x - 50);
+        try testing.expectEqual(header.x, textRect(&h, "src/navigation.zig").?.x);
+        const calls = try githubCalls(&h);
+        try h.t.clickText("src/keyboard.zig");
+        h.t.settle(0.2);
+        try testing.expect(!h.t.hasText(review_line));
+        try testing.expect(h.t.hasText("pub const focus_retained = true;"));
+        try h.t.clickText("assets/navigation.png");
+        h.t.settle(0.2);
+        try testing.expect(h.t.hasText("Previously: assets/old-navigation.png"));
+        try testing.expect(h.t.hasText("Patch incomplete; open on GitHub for the full diff."));
+        try testing.expect(h.t.hasText("Patch not supplied by GitHub (binary, large or omitted)."));
+        try testing.expectEqual(calls, try githubCalls(&h));
+    }
 }

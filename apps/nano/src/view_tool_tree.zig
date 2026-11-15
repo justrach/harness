@@ -33,7 +33,10 @@ pub fn group(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, parts
     const box = ui.div(c).column().wFull();
     defer box.end();
     const arrivals = c.alloc().alloc(Arrival, parts.len) catch return;
-    for (parts, arrivals, 0..) |p, *arrival, i| {
+    // Keep transcript storage and group/detail keys chronological. Only the
+    // displayed children run newest-first; stagger and rails follow that order.
+    for (arrivals, 0..) |*arrival, i| {
+        const p = &parts[parts.len - 1 - i];
         const id = state.key(parent, e.id, p.id);
         const r = a.view.tool_ui.observe(a.gpa, id, e.status != .streaming or (p.kind != .reasoning and p.resolved), e.status == .streaming, c.time, 0.090 + @as(f64, @floatFromInt(@min(i, 12))) * 0.065);
         arrival.* = .{ .row = r, .progress = rules.rowProgress(r.reveal, c.time, c.reduced_motion), .connector = rules.connectorProgress(r.reveal, c.time, c.reduced_motion), .predecessor = i > 0 };
@@ -70,7 +73,8 @@ pub fn group(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, parts
     defer children.end();
     rememberHeight(c, a, fold_id, children.index);
     if (is_animating) c.frameIn(1.0 / 30.0);
-    for (parts, arrivals) |*p, arrival| {
+    for (arrivals, 0..) |arrival, i| {
+        const p = &parts[parts.len - 1 - i];
         ui.key(c, c.print("tool-{s}", .{p.id}));
         rowImpl(c, a, k, e, p, parent, arrival);
         if ((arrival.progress < 1 or arrival.connector < 1) and !c.reduced_motion) c.frameIn(1.0 / 30.0);

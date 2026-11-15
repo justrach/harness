@@ -144,14 +144,22 @@ pub const Lifecycle = struct {
             }
             return;
         }
+        self.state.window = try native.newWindow(self.windowOptions());
+    }
+
+    /// Shared by first open and reopen; inspectable without creating a window.
+    pub fn windowOptions(self: *Lifecycle) nanoui.WindowOptions {
         const size = self.state.settings.windowSize();
-        self.state.window = try native.newWindow(.{
+        return .{
             .title = "Harness",
             .width = size.width,
             .height = size.height,
             .min_width = 760,
             .min_height = 480,
             .title_bar = .hidden,
+            // AppKit's default titlebar is shorter than our custom row. Use
+            // nanoui's native placement hook (also maintained after resize).
+            .traffic_lights = if (builtin.os.tag == .macos) .{ .x = 20, .y = @import("panel_chrome.zig").header_height / 2 } else null,
             .theme = theme.ui(nanoui.isDark()),
             .on_close = .{ .ctx = self, .func = closed },
             .should_close = .{ .ctx = self, .func = shouldClose },
@@ -160,7 +168,7 @@ pub const Lifecycle = struct {
                 view.after_frame = @import("performance.zig").completed;
                 break :blk view;
             } },
-        });
+        };
     }
 
     /// Called before App.deinit, even when startup fails. Closing its surface

@@ -118,6 +118,11 @@ test "an unfocused window slows loader redraws and an off-screen spinner schedul
     var t: ui.Tester = undefined;
     try t.init(testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 900, .height = 420, .dark = true });
     defer t.deinit();
+    // Measure the loader, not a focused composer caret or the initial
+    // anchor's delayed overlay-scrollbar fade. `settle` does not advance
+    // through an idle delayed timer, so explicitly let that hold expire.
+    t.ctx.focus = 0;
+    t.advance(2);
     t.frame();
     const focused = t.ctx.frame_in orelse return error.LoaderNotScheduled;
     try testing.expectApproxEqAbs(@as(f32, 0.5), focused, 0.001);
@@ -232,6 +237,74 @@ test "live streaming reply dissolves incoming words with a 120Hz veil and balanc
     t.advance(0.6);
     t.frame();
     try testing.expect(!a.view.tool_ui.veils.isFading(part_id));
+}
+
+test "current reply stays near the top instead of following growing work to the bottom" {
+    @import("theme.zig").registerFonts();
+    for ([_]usize{ 0, 24 }) |history_count| {
+        var a: App = .init(testing.allocator, testing.io, 1);
+        defer a.deinit();
+        a.offscreen = true;
+        a.dark = false;
+        a.view.sidebar_open = false;
+        a.settings.set(.transcript_compact_mode, false);
+        a.openChat("synthetic-top", null);
+        var frame: std.ArrayList(u8) = .empty;
+        defer frame.deinit(testing.allocator);
+        try frame.appendSlice(testing.allocator, "{\"reset\":[");
+        for (0..history_count) |i| try frame.print(testing.allocator, "{{\"id\":\"old-{d}\",\"role\":\"assistant\",\"status\":\"complete\",\"parts\":[{{\"id\":\"p\",\"kind\":\"text\",\"text\":\"An earlier completed reply.\"}}]}},", .{i});
+        try frame.appendSlice(testing.allocator,
+            \\{"id":"prompt","role":"user","parts":[{"id":"p","kind":"text","text":"Inspect this synthetic turn"}]},
+            \\{"id":"reply","role":"assistant","status":"streaming","parts":[{"id":"p","kind":"text","text":"Current reply begins here"}]}]}
+        );
+        try apply(&a, frame.items);
+        var t: ui.Tester = undefined;
+        try t.init(testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 900, .height = 750, .dark = false });
+        defer t.deinit();
+        t.settle(1);
+        if (std.c.getenv("NANO_TURN_SNAP_DIR")) |dir| {
+            var path: [1024]u8 = undefined;
+            try t.screenshot(try std.fmt.bufPrint(&path, "{s}/reply-start-{d}.png", .{ std.mem.span(dir), history_count }));
+        }
+        const start = t.findText("Current reply begins here") orelse return error.MissingReplyStart;
+        try testing.expect(start.y >= 38 and start.y < 200);
+        const box = a.view.jump_box;
+        try testing.expect(!(t.ctx.scroll_follow.get(box) orelse true));
+        frame.clearRetainingCapacity();
+        try frame.appendSlice(testing.allocator,
+            \\{"append":[{"entry":"reply","part":"p","text":"
+        );
+        for (0..50) |_| try frame.appendSlice(testing.allocator, "\\n\\nMore synthetic work arriving below the current reply.");
+        const grown_len = "Current reply begins here".len + 50 * "\n\nMore synthetic work arriving below the current reply.".len;
+        try frame.print(testing.allocator, "\",\"len\":{d}}}]}}", .{grown_len});
+        try apply(&a, frame.items);
+        t.settle(1);
+        try testing.expectApproxEqAbs(start.y, t.findText("Current reply begins here").?.y, 1);
+        try testing.expect(!(t.ctx.scroll_follow.get(box) orelse true));
+        if (std.c.getenv("NANO_TURN_SNAP_DIR")) |dir| {
+            var path: [1024]u8 = undefined;
+            try t.screenshot(try std.fmt.bufPrint(&path, "{s}/reply-top-{d}.png", .{ std.mem.span(dir), history_count }));
+        }
+        // The reader can still explicitly request bottom-follow.
+        t.frame();
+        const pill = t.findText("Scroll to bottom") orelse return error.MissingBottomChoice;
+        t.click(pill.x + 8, pill.y + 8);
+        t.settle(1);
+        try testing.expect(t.ctx.scroll_follow.get(box) orelse false);
+        t.scroll(450, 300, 100);
+        t.settle(0.2);
+        const manual = t.ctx.scroll.get(box).?;
+        try testing.expect(!(t.ctx.scroll_follow.get(box) orelse true));
+        frame.clearRetainingCapacity();
+        try frame.print(
+            testing.allocator,
+            "{{\"append\":[{{\"entry\":\"reply\",\"part\":\"p\",\"text\":\"\\n\\nOne more update must not reclaim the reader's scroll.\",\"len\":{d}}}]}}",
+            .{grown_len + "\n\nOne more update must not reclaim the reader's scroll.".len},
+        );
+        try apply(&a, frame.items);
+        t.settle(0.2);
+        try testing.expectApproxEqAbs(manual, t.ctx.scroll.get(box).?, 0.1);
+    }
 }
 
 test "build.zig keeps src/main.zig as the single root module so std and nanoui never split across optimize modes" {

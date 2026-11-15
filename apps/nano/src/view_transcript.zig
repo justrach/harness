@@ -86,7 +86,7 @@ pub fn transcript(c: *ui.Context, a: *App, k: theme.Colors) void {
     const drawn = entries(c, a, k, &a.transcript, pane_w, a.w_doc.id != null, 64 - sidebar.titlebar_h);
     if (a.settings.hierarchyProfile().shows_prompt_rail)
         rail.rail(c, k, &a.view.rail, &a.transcript, drawn.ticks, drawn.box, pane_w + a.view.seam_inset);
-    if (!just_stuck) recoverBlank(c, a, drawn);
+    if (!just_stuck and !drawn.turn_anchored) recoverBlank(c, a, drawn);
     a.view.jump_box = drawn.box;
     a.view.jump_distance = drawn.from_end;
 }
@@ -122,6 +122,9 @@ fn recoverBlank(c: *ui.Context, a: *App, drawn: Drawn) void {
 /// laid out.
 pub const Drawn = struct {
     box: u64 = 0,
+    /// The current turn owns positioning; historical blank recovery must
+    /// not replace its deliberate top anchor with bottom-follow.
+    turn_anchored: bool = false,
     ticks: []const @import("view_rail.zig").Tick = &.{},
     /// How far the reader is from the end. The jump pill shows past GPUI's
     /// `SCROLL_BUTTON_THRESHOLD_PX`.
@@ -129,8 +132,8 @@ pub const Drawn = struct {
 };
 
 /// A transcript `w` wide: the open chat's, or a split pane's neighbor's.
-/// The first row sits `top` points down; rows settle at the bottom, over
-/// the composer, until they fill it.
+/// The first row sits `top` points down. Live turns keep a top reading
+/// anchor; untouched completed history opens at its normal end position.
 pub fn entries(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f32, loading: bool, top: f32) Drawn {
     const frame = ui.div(c).column().grow().wFull().h(0);
     defer frame.end();
@@ -153,6 +156,10 @@ fn topFade(c: *ui.Context, k: theme.Colors) void {
         _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.background.alpha(1 - (y + 0.5) / band), .absolute = true, .offset = .{ .x = 0, .y = y } }, .none, null);
     }
 }
+
+/// A live turn is positioned once, not chased as its content grows. Only an
+/// explicit send starts another anchor; manual scrolling always remains free.
+pub const TurnAnchor = struct { turn: u64, pending: bool = true };
 
 fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f32, loading: bool, top: f32) Drawn {
     const tweening = a.view.sidebar_tween != null or a.view.split_reveal != null;
@@ -200,16 +207,57 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     var drawn: Drawn = .{ .box = c.node(scroll).id };
     const entries_ = t.entries.items;
     const streaming = entries_.len > 0 and entries_[entries_.len - 1].status == .streaming;
+    // Keep the prompt and current reply near the top, with enough runway
+    // below a short turn to position it there. Completed history retains its
+    // normal end position until a live turn has established an anchor.
+    const turn_start: ?usize = blk: {
+        if (subagent != null or entries_.len == 0) break :blk null;
+        var i = entries_.len;
+        while (i > 0) {
+            i -= 1;
+            if (entries_[i].isHumanPrompt()) break :blk i;
+        }
+        break :blk entries_.len - 1;
+    };
+    var anchor: ?*TurnAnchor = null;
+    if (turn_start) |i| {
+        const turn = std.hash.Wyhash.hash(drawn.box, entries_[i].id);
+        const previous = a.view.reply_anchors.get(drawn.box);
+        const session = if (chat_id) |id| @import("workspace.zig").sessionOf(a.sessions.items, id) else null;
+        const pending = if (chat_id) |id| @import("app_send_feedback.zig").active(a, id, t) != null else false;
+        const live = streaming or (entries_[entries_.len - 1].role == .user and (pending or (session != null and session.?.status == .working)));
+        if (live or (previous != null and previous.?.turn == turn)) {
+            const slot = a.view.reply_anchors.getOrPut(a.gpa, drawn.box) catch null;
+            if (slot) |s| {
+                if (!s.found_existing or s.value_ptr.turn != turn) s.value_ptr.* = .{
+                    .turn = turn,
+                    .pending = !c.scroll.contains(drawn.box) or (c.scroll_follow.get(drawn.box) orelse true),
+                };
+                anchor = s.value_ptr;
+                c.node(scroll).style.justify = .start;
+            }
+        }
+    }
     // Just sent: past the end, which layout clamps to it, and moving the
     // offset there makes the box follow its end again (`follow_end`).
     const just_stuck = subagent == null and t == &a.transcript and a.view.stick_end;
-    if (just_stuck) {
+    if (just_stuck and anchor != null) {
+        a.view.stick_end = false;
+        anchor.?.pending = true;
+    } else if (just_stuck) {
         a.view.stick_end = false;
         const sync = @import("motion_rules.zig").stickEndScroll(c.scroll_max.get(drawn.box));
         c.scroll_follow.put(c.gpa, drawn.box, sync.follow) catch {};
         c.scroll.put(c.gpa, drawn.box, sync.scroll) catch {};
         c.scroll_seen.put(c.gpa, drawn.box, sync.seen) catch {};
     }
+    drawn.turn_anchored = anchor != null;
+    if (anchor) |target| if (target.pending) {
+        const offset = c.scroll.get(drawn.box) orelse 0;
+        c.scroll.put(c.gpa, drawn.box, offset) catch {};
+        c.scroll_seen.put(c.gpa, drawn.box, offset) catch {};
+        c.scroll_follow.put(c.gpa, drawn.box, false) catch {};
+    };
     if (subagent == null and t == &a.transcript) {
         if (streaming and !a.offscreen and !c.reduced_motion and !just_stuck and a.view.rail.glide == null) {
             const last_e = &entries_[entries_.len - 1];
@@ -267,7 +315,27 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     const steer_chat: ?u64 = if (subagent == null) (if (chat_id) |id| steer_order.hash(id) else null) else null;
     if (steer_chat) |chat| steer.observe(chat, entries_);
     const steered = if (steer_chat) |chat| steer.any(chat) else false;
+    var turn_node: ?u32 = null;
+    defer if (turn_node != null) c.end();
     for (entries_, 0..) |*e, i| {
+        if (turn_start != null and i == turn_start.?) {
+            const height = if (anchor != null and scroll_rect != null) @max(0, scroll_rect.?.h - top - st.padding.bottom) else 0;
+            turn_node = c.open(.{ .direction = .column, .width = .fill, .min_height = height }, null);
+            // The wrapper remains after completion so tool/detail identities
+            // do not change when streaming stops or resumes.
+            c.node(turn_node.?).id = std.hash.Wyhash.hash(drawn.box, e.id);
+            if (anchor != null and anchor.?.pending) {
+                if (scroll_rect) |viewport| if (c.rects.get(anchor.?.turn)) |r| {
+                    const anchored_offset = @max(0, (c.scroll.get(drawn.box) orelse 0) + r.y - viewport.y - top);
+                    c.scroll.put(c.gpa, drawn.box, anchored_offset) catch {};
+                    c.scroll_seen.put(c.gpa, drawn.box, anchored_offset) catch {};
+                    c.scroll_follow.put(c.gpa, drawn.box, false) catch {};
+                    anchor.?.pending = false;
+                    c.changed = true;
+                };
+                if (anchor.?.pending) c.frameIn(0);
+            }
+        }
         const tail = if (steered and e.role == .user) steer_order.tailAfter(steer, steer_chat.?, entries_, i) else null;
         // After its message, whether that was drawn or is off screen.
         defer if (tail) |x| steerTail(c, a, k, x, entries_, i, chat_id, cull, just_stuck);
@@ -278,7 +346,7 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
         // `top_gap_for`: every entry's first row opens a turn (`SPACE_LG`).
         if (i > 0) _ = c.leaf(.{ .height = .{ .px = 16 } }, .none, null);
         ui.key(c, c.print("entry-{s}-{s}", .{ chat_id orelse "", e.id }));
-        if (spacer(c, cull, (!just_stuck or i + 1 < entries_.len) and e.status != .streaming, &e.cached_h, &e.cached_w, &e.measured_w)) |r| {
+        if (spacer(c, cull, (!just_stuck or i + 1 < entries_.len) and !(anchor != null and i == turn_start.?) and e.status != .streaming, &e.cached_h, &e.cached_w, &e.measured_w)) |r| {
             if (e.isHumanPrompt()) {
                 ticks.append(c.alloc(), .{ .entry = i, .top = r.y - (if (i > 0) @as(f32, 16) else 0) }) catch {};
             }

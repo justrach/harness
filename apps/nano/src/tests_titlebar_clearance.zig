@@ -72,3 +72,18 @@ test "titlebar clearance keeps collapsed history and mode controls beside the se
         try testing.expect(h.a.view.strip.menu == .history);
     }
 }
+
+test "titlebar clearance native traffic lights share the custom control center" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    var lifecycle: @import("window_lifecycle.zig").Lifecycle = .{ .state = &h.a };
+    const options = lifecycle.windowOptions();
+    const lights = options.traffic_lights orelse return error.NativeLightsNotAligned;
+    const history = h.t.ctx.nodes.items[try h.button("clock-circle")].rect;
+    const mode = h.t.ctx.nodes.items[try h.button("magic-stick-3")].rect;
+    try testing.expectApproxEqAbs(history.y + history.h / 2, lights.y, 0.01);
+    try testing.expectApproxEqAbs(mode.y + mode.h / 2, lights.y, 0.01);
+    try testing.expect(lights.x + 2 * 20 + 7 < @import("window_chrome.zig").leading);
+}
