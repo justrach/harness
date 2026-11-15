@@ -989,7 +989,7 @@ test "all 20 card scenes and 8 shared Ensō layers decode cleanly through nanoui
                     s.all_sized = false;
                     continue;
                 };
-                if (sz.w != 432 or sz.h != 576) s.all_sized = false;
+                if (sz.w != 696 or sz.h != 904) s.all_sized = false;
                 if (!ui.image(c, .{
                     .key = kname,
                     .source = .{ .encoded = en.bytes },
@@ -1017,7 +1017,7 @@ test "all 20 card scenes and 8 shared Ensō layers decode cleanly through nanoui
                         s.all_sized = false;
                         continue;
                     };
-                    if (sz.w != 432 or sz.h != 576) s.all_sized = false;
+                    if (sz.w != 696 or sz.h != 904) s.all_sized = false;
                     if (!ui.image(c, .{
                         .key = kname,
                         .source = .{ .encoded = pair.bytes },
