@@ -183,6 +183,20 @@ class HeavyBuildTests(unittest.TestCase):
         self.assertEqual(list(self.wait_dir.iterdir()), [])
         self.assertFalse(self.lock.exists())
 
+    def test_nested_wrapper_inside_owner_runs_without_deadlock(self):
+        nested_done = self.root / "nested-done"
+        outer = self.start(
+            "import subprocess, sys; "
+            "subprocess.run(['bash', sys.argv[1], sys.executable, '-c', "
+            "'from pathlib import Path; import sys; Path(sys.argv[1]).touch()', sys.argv[2]], check=True)",
+            WRAPPER,
+            nested_done,
+        )
+        self.finish(outer)
+        self.assertTrue(nested_done.exists())
+        self.assertEqual(list(self.wait_dir.iterdir()), [])
+        self.assertFalse(self.lock.exists())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
