@@ -42,10 +42,11 @@ else
 fi
 
 rm -rf "$APP" "$DMG" "$APP_TARBALL"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/bin"
 install -m 755 "$BUILD_BINARY" "$APP/Contents/MacOS/harness"
 (cd "$ROOT/apps/nano" && "$ROOT/scripts/heavy-build.sh" zig build -Doptimize=ReleaseSafe)
 install -m 755 "$ROOT/apps/nano/zig-out/bin/harness-nano" "$APP/Contents/MacOS/harness-nano"
+install -m 755 "$ROOT/apps/nano/zig-out/bin/harness-github-runners" "$APP/Contents/Resources/bin/harness-github-runners"
 sed "s/__VERSION__/$VERSION/" "$ROOT/dist/macos/Info.plist" >"$APP/Contents/Info.plist"
 # ADR 0008: Verify both binaries inside the bundle carry the exact Cargo.toml
 # release version so a stale build cache can never trigger an update loop.
@@ -138,6 +139,8 @@ if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
   # The entitlements let dictation reach the microphone, and dropped or
   # picked files from any folder stay readable, under the hardened runtime
   # (dist/macos/Harness.entitlements).
+  codesign --force --options runtime --timestamp \
+    --entitlements "$ROOT/dist/macos/Harness.entitlements" --sign "$CODESIGN_IDENTITY" "$APP/Contents/Resources/bin/harness-github-runners"
   codesign --force --options runtime --timestamp \
     --entitlements "$ROOT/dist/macos/Harness.entitlements" --sign "$CODESIGN_IDENTITY" "$APP/Contents/MacOS/harness-nano"
   codesign --force --options runtime --timestamp \

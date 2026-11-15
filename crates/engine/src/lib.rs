@@ -42,6 +42,7 @@ pub mod local_import;
 pub mod localhost_view;
 pub mod mcp_servers;
 mod model_catalogs;
+pub mod native_extensions;
 pub mod profile;
 pub mod project_actions;
 pub mod registry;

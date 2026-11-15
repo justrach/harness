@@ -1599,6 +1599,9 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         // Allow the adapter discovery budget plus relay and shutdown overhead.
         methods::LIST_MODELS | methods::LIST_COMMANDS => Duration::from_secs(100),
         // A reconnect handshakes every server; a login waits on a browser page.
+        methods::LIST_NATIVE_EXTENSIONS | methods::INVOKE_NATIVE_EXTENSION => {
+            Duration::from_secs(190)
+        }
         methods::LIST_MCP_SERVERS => Duration::from_secs(70),
         methods::MCP_SERVER_ACTION => Duration::from_secs(6 * 60),
         // A bot's first run may wait on graff's model list.
@@ -1721,6 +1724,8 @@ fn forwardable(method: &str) -> bool {
             | methods::LIST_GRAFF_LOGINS
             | methods::SIGN_OUT_GRAFF_LOGIN
             // graff's MCP config, caches and sign-ins are per device.
+            | methods::LIST_NATIVE_EXTENSIONS
+            | methods::INVOKE_NATIVE_EXTENSION
             | methods::LIST_MCP_SERVERS
             | methods::MCP_SERVER_ACTION
             // graff's bots live in the home of the device that runs them.
@@ -4026,6 +4031,33 @@ impl RpcService for EngineRpc {
                         .list_graff_logins_with_usage(p.force_usage.unwrap_or(false))
                         .await,
                 )
+            }
+            methods::LIST_NATIVE_EXTENSIONS | methods::INVOKE_NATIVE_EXTENSION => {
+                let p: crate::native_extensions::Params = parse_params(params)?;
+                let space = self.local_project_action_space(&p.space_id)?;
+                if method == methods::LIST_NATIVE_EXTENSIONS
+                    && (p.plugin.is_some() || p.action.is_some())
+                {
+                    return Err(RpcError::Failed(
+                        "List requests cannot invoke actions".into(),
+                    ));
+                }
+                if method == methods::INVOKE_NATIVE_EXTENSION
+                    && (p.plugin.is_none() || p.action.is_none())
+                {
+                    return Err(RpcError::Failed(
+                        "Say which extension action to invoke".into(),
+                    ));
+                }
+                let value = crate::native_extensions::run(
+                    &self.agent_accounts.graff_home(),
+                    std::path::Path::new(&space.path),
+                    p.plugin.as_deref(),
+                    p.action.as_deref(),
+                )
+                .await
+                .map_err(|err| RpcError::Failed(err.to_string()))?;
+                RpcReply::value(&value)
             }
             methods::LIST_MCP_SERVERS => {
                 let p: ListMcpServersParams = parse_params(params)?;

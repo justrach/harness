@@ -19,6 +19,7 @@ pub const Section = enum {
     harnesses,
     agents,
     mcp,
+    extensions,
     github_ci,
     devices,
     appshots,
@@ -41,6 +42,7 @@ pub const Section = enum {
             .appshots => "Appshots",
             .archived => "Archived sessions",
             .mcp => "MCP servers",
+            .extensions => "Extensions",
             .github_ci => "GitHub CI",
         };
     }
@@ -50,7 +52,7 @@ pub const Section = enum {
         return switch (s) {
             .account => "Account",
             .appearance, .notifications, .shortcuts, .files, .browsing => "General",
-            .harnesses, .agents, .mcp, .github_ci => "Agents",
+            .harnesses, .agents, .mcp, .extensions, .github_ci => "Agents",
             .devices, .appshots, .archived => "Devices and data",
         };
     }
@@ -67,7 +69,7 @@ pub const Section = enum {
             .notifications => .bell,
             .shortcuts => .keyboard,
             .archived => .@"archive-minimalistic",
-            .mcp => .@"remote-server",
+            .mcp, .extensions => .@"remote-server",
             .github_ci => .@"pull-request",
         };
     }
@@ -1162,6 +1164,7 @@ test "sections in the GPUI app's order, groups and saved keys" {
     try testing.expectEqualStrings("Agents", Section.harnesses.label());
     try testing.expectEqualStrings("Devices and data", Section.archived.group());
     try testing.expectEqual(@as(?Section, .github_ci), Section.fromKey("github-ci"));
+    try testing.expectEqual(@as(?Section, .extensions), Section.fromKey("extensions"));
     try testing.expectEqual(@as(?Section, null), Section.fromKey("nope"));
     try testing.expectEqualStrings("soundCompletionEnabled", comptime camel("sound_completion_enabled"));
 }

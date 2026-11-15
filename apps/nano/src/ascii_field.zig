@@ -41,7 +41,7 @@ pub const Holo = enum(u3) {
             .reverse => "REVERSE FOIL",
             .secret => "SECRET RARE",
             .starlight => "STARLIGHT FOIL",
-            .glyph => "GLYPH FOIL",
+            .glyph => "KUMIKO FOIL",
         };
     }
 };

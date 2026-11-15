@@ -309,6 +309,8 @@ pub mod methods {
     pub const SIGN_OUT_GRAFF_LOGIN: &str = "SignOutGraffLogin";
     // graff's MCP servers on a device (`graff mcp status|reconnect|enable|
     // disable|login`); per-device like the sign-ins above.
+    pub const LIST_NATIVE_EXTENSIONS: &str = "ListNativeExtensions";
+    pub const INVOKE_NATIVE_EXTENSION: &str = "InvokeNativeExtension";
     pub const LIST_MCP_SERVERS: &str = "ListMcpServers";
     pub const MCP_SERVER_ACTION: &str = "McpServerAction";
     // graff's Bots on a device (`graff bot --user …`): standing roles with
