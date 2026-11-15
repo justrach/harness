@@ -8,11 +8,14 @@ on:
       - 'rust-toolchain.toml'
       - 'crates/**'
       - 'protocol/**'
+      - 'scripts/ci-changed-scopes.py'
+      - 'scripts/test-ci-changed-scopes.py'
       - 'scripts/test-linux-browser.sh'
       - 'scripts/heavy-build.sh'
       - 'scripts/test-heavy-build.py'
       - 'scripts/run-macos-browser-fixture.sh'
       - 'dist/macos/Info.plist'
+      - 'apps/nano/**'
       - 'apps/ios/**'
       - 'apps/parity/**'
       - '.github/workflows/ui-tests.yml'
@@ -24,11 +27,14 @@ on:
       - 'rust-toolchain.toml'
       - 'crates/**'
       - 'protocol/**'
+      - 'scripts/ci-changed-scopes.py'
+      - 'scripts/test-ci-changed-scopes.py'
       - 'scripts/test-linux-browser.sh'
       - 'scripts/heavy-build.sh'
       - 'scripts/test-heavy-build.py'
       - 'scripts/run-macos-browser-fixture.sh'
       - 'dist/macos/Info.plist'
+      - 'apps/nano/**'
       - 'apps/ios/**'
       - 'apps/parity/**'
       - '.github/workflows/ui-tests.yml'
@@ -42,7 +48,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      nano_ui: ${{ steps.scope.outputs.nano_ui }}
+      ui_session_sync: ${{ steps.scope.outputs.ui_session_sync }}
+      ui_macos_rust: ${{ steps.scope.outputs.ui_macos_rust }}
+      ui_macos_job: ${{ steps.scope.outputs.ui_macos_job }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: scope
+        run: |
+          python3 scripts/test-ci-changed-scopes.py
+          python3 scripts/ci-changed-scopes.py \
+            --event-name "${{ github.event_name }}" \
+            --base "${{ github.event.pull_request.base.sha || github.event.before }}" \
+            --head "${{ github.event.pull_request.head.sha || github.sha }}" \
+            --github-output "$GITHUB_OUTPUT"
+
   macos-runner:
+    needs: changes
+    if: needs.changes.outputs.ui_macos_job == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -63,6 +92,8 @@ jobs:
           fi
 
   session-sync-regressions:
+    needs: changes
+    if: needs.changes.outputs.ui_session_sync == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -104,6 +135,8 @@ jobs:
           cargo test --locked -p harness-engine --test desktop_requests
 
   ui-tests:
+    needs: changes
+    if: needs.changes.outputs.nano_ui == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -125,23 +158,28 @@ jobs:
 
   macos-frame-recovery:
     name: macos-frame-recovery
-    needs: macos-runner
+    needs: [changes, macos-runner]
+    if: needs.changes.outputs.ui_macos_job == 'true'
     runs-on: ${{ needs.macos-runner.outputs.label || 'macos-latest' }}
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - name: Rust toolchain
+        if: needs.changes.outputs.ui_macos_rust == 'true'
         run: rustup show active-toolchain || rustup toolchain install
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0
       - uses: Swatinem/rust-cache@v2
+        if: needs.changes.outputs.ui_macos_rust == 'true'
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
       - name: Check macOS application
+        if: needs.changes.outputs.ui_macos_rust == 'true'
         run: ./scripts/heavy-build.sh cargo check --release --locked -p harness
       - name: Nano UI macOS tests
+        if: needs.changes.outputs.nano_ui == 'true' || needs.changes.outputs.ui_macos_rust == 'true'
         working-directory: apps/nano
         run: ../../scripts/heavy-build.sh zig build test --summary all
 
