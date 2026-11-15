@@ -638,6 +638,22 @@ fn keys(c: *ui.Context, a: *App) void {
             a.redraw();
             return;
         }
+        if (a.view.updates_popover and (c.shortcut(.{ .key = S.escape }) or c.input.key == .escape)) {
+            a.view.updates_popover = false;
+            a.redraw();
+            return;
+        }
+        if (a.view.account_usage.open and (c.shortcut(.{ .key = S.escape }) or c.input.key == .escape)) {
+            a.view.account_usage.open = false;
+            a.view.account_usage.card = null;
+            a.redraw();
+            return;
+        }
+        if (a.view.star_menu and (c.shortcut(.{ .key = S.escape }) or c.input.key == .escape)) {
+            a.view.star_menu = false;
+            a.redraw();
+            return;
+        }
         if (!chat_menu.anyOpen(a) and !header_menus.anyOpen(a) and a.view.strip.menu == null and
             (c.shortcut(.{ .key = S.escape }) or c.input.key == .escape))
         {

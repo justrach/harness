@@ -24,7 +24,7 @@ pub fn description(section: Section) []const u8 {
 fn keywords(section: Section) []const u8 {
     return switch (section) {
         .account => "profile member card join date sign in out cloud sync avatar",
-        .appearance => "font colors dark light compact animation reduce motion before after design preview comparison visual diff",
+        .appearance => "font colors dark light compact animation reduce motion before after design preview comparison visual diff switch theme default system auto",
         .notifications => "privacy telemetry metrics responsiveness scroll statistics consent sound volume banner",
         .shortcuts => "keys hotkey enter return slash commands suggestions stop escape",
         .files => "hidden ignored directory starting folder editor save wrap",

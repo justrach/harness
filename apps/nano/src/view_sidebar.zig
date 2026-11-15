@@ -1809,7 +1809,7 @@ fn zenFooter(c: *ui.Context, a: *App, k: theme.Colors, archived_count: usize) vo
         }
     }
 
-    const row = ui.div(c).row().wFull().h(38).px(8).pt(2).pb(4).gap(4).itemsCenter();
+    const row = ui.div(c).row().wFull().h(38).px(7).pt(2).pb(4).gap(3).itemsCenter();
     defer row.end();
     {
         const account = @import("app_account.zig");
@@ -1847,7 +1847,7 @@ fn zenFooter(c: *ui.Context, a: *App, k: theme.Colors, archived_count: usize) vo
             else
                 false;
             if (!drew_avatar) renderFallbackAvatar(c, k, label, has_identity);
-            const label_room = @max(36, cardInnerW(a) - 8 - 16 - 56 - 30 - 4 - 20 - 8 - 10);
+            const label_room = @max(44, cardInnerW(a) - 159);
             kit.ellipsisText(c, label, .{
                 .size = 12.5,
                 .line_height = 17,
@@ -1864,11 +1864,12 @@ fn zenFooter(c: *ui.Context, a: *App, k: theme.Colors, archived_count: usize) vo
             a.redraw();
         }
     }
+    sidebarThemeButton(c, a, k);
     {
         const dev = a.settings.uiMode() == .developer;
         ui.key(c, "sidebar-ui-mode-pill");
         var pill = tip.on(
-            ui.div(c).row().h(26).px(7).gap(4).itemsCenter().rounded(6)
+            ui.div(c).row().h(26).px(6).gap(4).itemsCenter().rounded(6)
                 .bg(if (dev) k.ink(0.08) else .transparent)
                 .border(if (dev) k.muted.alpha(0.35) else k.muted.alpha(0.22)).borderW(1)
                 .hover(k.hover),
@@ -1893,7 +1894,7 @@ fn zenFooter(c: *ui.Context, a: *App, k: theme.Colors, archived_count: usize) vo
     {
         ui.key(c, "sidebar-settings-button");
         const gear = tip.on(
-            ui.div(c).row().size(30, 30).center().rounded(7).hover(k.hover).control(),
+            ui.div(c).row().size(26, 26).center().rounded(7).hover(k.hover).control(),
             k,
             .{ .text = "Settings (⌘,)", .delay = tip.quick },
         );
@@ -1911,6 +1912,30 @@ fn zenFooter(c: *ui.Context, a: *App, k: theme.Colors, archived_count: usize) vo
             @import("view_sidebar_menus.zig").openView(a);
             a.redraw();
         }
+    }
+}
+
+fn sidebarThemeButton(c: *ui.Context, a: *App, k: theme.Colors) void {
+    const appearance = @import("view_settings_appearance.zig");
+    const sys = appearance.isSystemDefault(a);
+    const glyph: icons.Name = if (sys) .monitor else if (k.dark) .moon else .sun;
+    ui.key(c, "sidebar-theme-button");
+    const btn = tip.on(
+        ui.div(c).row().size(24, 24).center().rounded(6).hover(k.hover).control(),
+        k,
+        .{ .text = "Click to switch theme · Right-click for Default system theme", .delay = tip.quick },
+    );
+    const clicked = btn.clicked();
+    const rclick = kit.secondaryClicked(btn);
+    const hot = btn.hovered();
+    {
+        defer btn.end();
+        icons.icon(c, glyph, 14, if (sys) k.accent else if (hot) k.text else k.muted, 0);
+    }
+    if (clicked) {
+        appearance.toggleLightDark(a);
+    } else if (rclick) {
+        appearance.applySystemDefault(a);
     }
 }
 
