@@ -14,6 +14,8 @@
 import Foundation
 import Loro
 
+private struct QueueWriteFailed: Error {}
+
 extension SessionStore {
     // MARK: Read
 
@@ -60,26 +62,38 @@ extension SessionStore {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         let id = UUID().uuidString.lowercased()
-        let list = doc.getMovableList(id: "queue")
-        do {
-            let map = try list.insertMapContainer(pos: list.len(), child: LoroMap())
-            try map.insert(key: "id", v: id)
-            try map.insert(key: "text", v: text)
-            try map.insert(key: "issuedBy", v: deviceId)
-            try map.insert(key: "issuedAt", v: nowMs())
-            if holdForTurnEnd {
-                try map.insert(key: "holdForTurnEnd", v: true)
+        let deviceId = self.deviceId
+        let issuedAt = nowMs()
+        let attachmentsValue = LoroValue.fromJSON(attachments)
+        let written = writeDoc({ doc in
+            let list = doc.getMovableList(id: "queue")
+            do {
+                let map = try list.insertMapContainer(pos: list.len(), child: LoroMap())
+                try map.insert(key: "id", v: id)
+                try map.insert(key: "text", v: text)
+                try map.insert(key: "issuedBy", v: deviceId)
+                try map.insert(key: "issuedAt", v: issuedAt)
+                if holdForTurnEnd {
+                    try map.insert(key: "holdForTurnEnd", v: true)
+                }
+                if !attachments.isEmpty {
+                    try map.insert(key: "attachments", v: attachmentsValue)
+                }
+                doc.commit()
+                return true
+            } catch {
+                return false
             }
-            if !attachments.isEmpty {
-                try map.insert(key: "attachments", v: LoroValue.fromJSON(attachments))
-            }
-            doc.commit()
-        } catch {
-            return nil
+        }, then: { [weak self] ok in
+            self?.refreshQueue()
+            if ok { self?.nudgeHost() }
+        })
+        if written == nil {
+            showQueue(queue + [QueuedMessage(id: id, text: text, attachments: attachments,
+                                             issuedBy: deviceId, issuedAt: issuedAt,
+                                             holdForTurnEnd: holdForTurnEnd)])
         }
-        refreshQueue()
-        nudgeHost()
-        return id
+        return written == false ? nil : id
     }
 
     // MARK: Protected editing
@@ -199,7 +213,7 @@ extension SessionStore {
     @discardableResult
     func applyQueuedAttachmentsLocally(id: String, text: String, attachments: [String]) -> Bool {
         let list = doc.getMovableList(id: "queue")
-        guard let index = queueIndex(of: id, in: list),
+        guard let index = Self.queueIndex(of: id, in: list),
               let row = list.get(index: UInt32(index))?.asLoroMap() else { return false }
         do {
             try row.insert(key: "text", v: text)
@@ -217,16 +231,26 @@ extension SessionStore {
     func moveQueued(id: String, to: Int) {
         guard !queueActionsPending.contains(id),
               queue.first(where: { $0.id == id })?.deliveryGate == nil else { return }
-        let list = doc.getMovableList(id: "queue")
-        let count = Int(list.len())
-        guard count > 0, let from = queueIndex(of: id, in: list) else { return }
-        let target = min(max(to, 0), count - 1)
-        guard from != target else { return }
-        do {
-            try list.mov(from: UInt32(from), to: UInt32(target))
-            doc.commit()
-        } catch { return }
-        refreshQueue()
+        let written = writeDoc({ doc in
+            let list = doc.getMovableList(id: "queue")
+            let count = Int(list.len())
+            guard count > 0, let from = Self.queueIndex(of: id, in: list) else { return false }
+            let target = min(max(to, 0), count - 1)
+            guard from != target else { return false }
+            do {
+                try list.mov(from: UInt32(from), to: UInt32(target))
+                doc.commit()
+                return true
+            } catch {
+                return false
+            }
+        }, then: { [weak self] _ in self?.refreshQueue() })
+        if written == nil, let from = queue.firstIndex(where: { $0.id == id }) {
+            var next = queue
+            let row = next.remove(at: from)
+            next.insert(row, at: min(max(to, 0), next.count))
+            showQueue(next)
+        }
     }
 
     /// Nudge a row one slot up (-1) or down (+1).
@@ -264,12 +288,19 @@ extension SessionStore {
             }
             // Apply only a confirmed removal. Sends leave projection to sync.
             if action == .remove {
-                let list = doc.getMovableList(id: "queue")
-                if let index = queueIndex(of: id, in: list) {
-                    try list.delete(pos: UInt32(index), len: 1)
-                    doc.commit()
-                    refreshQueue()
-                }
+                let written = writeDoc({ doc in
+                    let list = doc.getMovableList(id: "queue")
+                    guard let index = Self.queueIndex(of: id, in: list) else { return true }
+                    do {
+                        try list.delete(pos: UInt32(index), len: 1)
+                        doc.commit()
+                        return true
+                    } catch {
+                        return false
+                    }
+                }, then: { [weak self] _ in self?.refreshQueue() })
+                if written == nil { showQueue(queue.filter { $0.id != id }) }
+                if written == false { throw QueueWriteFailed() }
             }
             return true
         } catch {
@@ -282,7 +313,7 @@ extension SessionStore {
 
     // MARK: Plumbing
 
-    private func queueIndex(of id: String, in list: LoroMovableList) -> Int? {
+    nonisolated private static func queueIndex(of id: String, in list: LoroMovableList) -> Int? {
         (0..<Int(list.len())).first { i in
             list.get(index: UInt32(i))?.asLoroMap()?.get(key: "id")?.asValue()?.stringValue == id
         }

@@ -34,6 +34,90 @@ test "new tab chooses its computer and folder in the shared sheet" {
     try testing.expectEqualStrings("remote-project", h.a.newChatSpace().?.id);
 }
 
+test "project shortcut: Cmd D inherits the source project without opening a picker" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    // The global draft destination can differ from the source chat.
+    h.a.select("a", "remote-project");
+    h.a.setSpaceFilter("remote-project");
+    try testing.expectEqualStrings("remote-project", h.a.space.?);
+    h.a.composer.set("Original synthetic prompt");
+    h.press(.{ .key = 'd', .cmd = true });
+    try testing.expectEqual(@as(usize, 2), strip.chatCount(&h.a));
+    try testing.expect(h.a.view.strip.menu == null);
+    try testing.expect(h.a.view.strip.pending_folder == null);
+    try testing.expect(!h.a.view.open_chooser.open);
+    try testing.expect(h.a.selected == null);
+    try testing.expectEqualStrings("local-project", h.a.newChatSpace().?.id);
+    try testing.expectEqualStrings("local", h.a.draftDevice().?);
+    try testing.expectEqualStrings("", h.a.composer.text());
+    try testing.expectEqual(h.a.view.composer_id, h.t.ctx.focus);
+    h.t.typeText("New split prompt");
+    try testing.expectEqualStrings("New split prompt", h.a.composer.text());
+    h.a.focusPane(0);
+    h.t.settle(1);
+    try testing.expectEqualStrings("a", h.a.selected.?);
+    try testing.expectEqualStrings("Original synthetic prompt", h.a.composer.text());
+}
+
+test "project shortcut: Cmd Shift D does nothing, including with a folder menu open" {
+    for ([_]bool{ false, true }) |menu_open| {
+        var h: Harness = undefined;
+        try h.init(true);
+        defer h.deinit();
+        h.a.composer.set("Keep this prompt");
+        if (menu_open) {
+            h.a.splitPane(.horizontal);
+            h.t.settle(1);
+            try @import("tests_ui_strip_folder_search.zig").openFolderMenu(&h);
+            h.t.typeText("field");
+            h.t.settle(1);
+        }
+        const panes = strip.chatCount(&h.a);
+        const focus = h.t.ctx.focus;
+        h.press(.{ .key = 'd', .cmd = true, .shift = true });
+        try testing.expectEqual(panes, strip.chatCount(&h.a));
+        try testing.expectEqual(focus, h.t.ctx.focus);
+        try testing.expect(!h.a.view.open_chooser.open);
+        if (menu_open) {
+            try testing.expect(h.a.view.strip.menu == .folder);
+            try testing.expectEqualStrings("field", h.a.view.strip.query.text());
+        } else {
+            try testing.expectEqualStrings("a", h.a.selected.?);
+            try testing.expectEqualStrings("Keep this prompt", h.a.composer.text());
+        }
+    }
+}
+
+test "project shortcut: Cmd T asks for a project before creating a top-level tab" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.splitPane(.horizontal);
+    h.a.composer.set("Parked split prompt");
+    h.t.settle(1);
+    h.press(.{ .key = 't', .cmd = true });
+    try testing.expect(h.a.view.open_chooser.open);
+    try testing.expectEqual(@as(usize, 1), h.a.tabs.items.items.len);
+    try testing.expectEqual(@as(usize, 2), strip.chatCount(&h.a));
+    try testing.expectEqualStrings("Parked split prompt", h.a.composer.text());
+    try h.t.clickText("Build box");
+    h.t.settle(1);
+    h.press(.{ .key = @import("nanoui").ui.Shortcut.enter });
+    try testing.expect(!h.a.view.open_chooser.open);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+    try testing.expect(h.a.tabs.layout() == null);
+    try testing.expect(h.a.selected == null);
+    try testing.expectEqualStrings("remote-project", h.a.newChatSpace().?.id);
+    try testing.expectEqualStrings("remote", h.a.draftDevice().?);
+    try testing.expectEqualStrings("", h.a.composer.text());
+    h.a.showTab(0);
+    h.t.settle(1);
+    try testing.expectEqual(@as(usize, 2), strip.chatCount(&h.a));
+    try testing.expectEqualStrings("Parked split prompt", h.a.composer.text());
+}
+
 test "shared sheet fades and lifts into place on open" {
     var h: Harness = undefined;
     try h.init(false);

@@ -567,3 +567,151 @@ test "the model picker keeps its agent tabs below the titlebar in a short window
         try testing.expect(h.t.hasText(label));
     }
 }
+
+test "compact model picker exposes Orchestrator Off Auto On, sends Mutate setChatConfig on open chats" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.togglePicker(); // close initial full picker
+    h.t.settle(1);
+
+    const orch_catalog = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"codex/gpt-6-astra","label":"GPT-6 Astra","maker":"openai","billing":"plan","context":272000,
+        \\  "reasoningLevels":["low","medium","high","xhigh"],
+        \\  "options":[{"id":"orchestrator","label":"Orchestrator","choices":[{"id":"off","label":"Off"},{"id":"auto","label":"Auto"},{"id":"on","label":"On"}],"defaultChoice":"auto"}]}]
+    , .{});
+    defer orch_catalog.deinit();
+    try h.a.models.replace(orch_catalog.value);
+
+    // 1. Open chat: picking "On" sends Mutate(setChatConfig) with modelOptions.orchestrator == "on".
+    const chats = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"c-orch","deviceId":"synthetic-device","title":"Orchestrator chat","spaceId":"synthetic-project","archived":false,
+        \\  "config":{"harness":"graff","model":"codex/gpt-6-astra","reasoning":"high","modelOptions":{}}}]
+    , .{});
+    defer chats.deinit();
+    try h.a.chats.replace(chats.value);
+    h.a.openChatInTab("c-orch");
+    h.t.settle(1);
+
+    h.a.togglePickerCompact();
+    h.t.settle(1);
+    for ([_][]const u8{ "Orchestrator", "Off", "Auto", "On" }) |label| {
+        try testing.expect(h.t.hasText(label));
+    }
+    h.a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"Mutate":{}}
+    , .{});
+    h.a.engine.state = .connected;
+    try h.t.clickText("On");
+    h.t.settle(1);
+
+    var sent_set = false;
+    for (h.a.engine.sent.items) |frame| {
+        if (std.mem.indexOf(u8, frame, "\"Mutate\"") != null and
+            std.mem.indexOf(u8, frame, "\"setChatConfig\"") != null and
+            std.mem.indexOf(u8, frame, "\"orchestrator\":\"on\"") != null)
+        {
+            sent_set = true;
+            break;
+        }
+    }
+    try testing.expect(sent_set);
+    try testing.expectEqualStrings("on", h.a.findChat("c-orch").?.orchestrator.?);
+}
+
+test "compact model picker new-chat Orchestrator choice writes modelOptionsByModel while preserving fastMode" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const rel = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer testing.allocator.free(rel);
+    const base = try std.Io.Dir.cwd().realPathFileAlloc(testing.io, rel, testing.allocator);
+    defer testing.allocator.free(base);
+    const settings_path = try std.fs.path.join(testing.allocator, &.{ base, "ui-settings.json" });
+    defer testing.allocator.free(settings_path);
+    const defaults_path = try std.fs.path.join(testing.allocator, &.{ base, "composer-defaults.json" });
+    defer testing.allocator.free(defaults_path);
+    try std.Io.Dir.cwd().writeFile(testing.io, .{
+        .sub_path = defaults_path,
+        .data =
+        \\{"harness":"graff",
+        \\ "modelByHarness":{"graff":{"id":"codex/gpt-6-astra","label":"GPT-6 Astra"}},
+        \\ "modelOptionsByModel":{"graff":{"codex/gpt-6-astra":{"fastMode":"on"}}}}
+        ,
+    });
+
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.togglePicker(); // close initial full picker
+    const orch_catalog = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"codex/gpt-6-astra","label":"GPT-6 Astra","maker":"openai","billing":"plan","context":272000,
+        \\  "reasoningLevels":["low","medium","high","xhigh"],
+        \\  "options":[{"id":"orchestrator","label":"Orchestrator","choices":[{"id":"off","label":"Off"},{"id":"auto","label":"Auto"},{"id":"on","label":"On"}],"defaultChoice":"auto"}]}]
+    , .{});
+    defer orch_catalog.deinit();
+    try h.a.models.replace(orch_catalog.value);
+
+    h.a.settings.path = try testing.allocator.dupe(u8, settings_path);
+    h.a.new_model = try testing.allocator.dupe(u8, "codex/gpt-6-astra");
+    h.t.settle(1);
+
+    h.a.togglePickerCompact();
+    h.t.settle(1);
+    try h.t.clickText("On");
+    h.t.settle(1);
+
+    const body = try std.Io.Dir.cwd().readFileAlloc(testing.io, defaults_path, testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(body);
+    var saved_arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer saved_arena.deinit();
+    const saved = try std.json.parseFromSliceLeaky(std.json.Value, saved_arena.allocator(), body, .{});
+    const per_model = saved.object.get("modelOptionsByModel").?.object.get("graff").?.object.get("codex/gpt-6-astra").?.object;
+    try testing.expectEqualStrings("on", per_model.get("orchestrator").?.string);
+    try testing.expectEqualStrings("on", per_model.get("fastMode").?.string);
+}
+
+test "live graff chat renders account usage ring alongside context ring and opens graff accounts popover" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.togglePicker(); // close initial picker
+
+    const chats = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"c-graff-usage","deviceId":"synthetic-device","title":"Graff usage footer session","spaceId":"synthetic-project","archived":false,
+        \\  "config":{"harness":"graff","model":"codex/gpt-6-astra","reasoning":"high","modelOptions":{}}}]
+    , .{});
+    defer chats.deinit();
+    try h.a.chats.replace(chats.value);
+
+    h.a.openChatInTab("c-graff-usage");
+    const doc = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"u1","role":"user","status":"complete","parts":[{"id":"p1","kind":"text","text":"Check graff footer ring"}]}],
+        \\ "contextUsage":{"tokens":46000,"window":200000}}
+    , .{});
+    defer doc.deinit();
+    try h.a.transcript.apply(doc.value);
+    h.t.settle(1);
+
+    const logins = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"chatgpt-new","name":"ChatGPT","signedIn":true,"planUsage":true,"account":"dev@acme.test","planLabel":"Pro",
+        \\  "usageWindows":[{"label":"Session","usedFraction":0.38,"resetsAt":"2026-11-16T06:00:00Z"},
+        \\                  {"label":"Week","usedFraction":0.24,"resetsAt":"2026-11-21T00:00:00Z"}]}]
+    , .{});
+    defer logins.deinit();
+    @import("view_settings_accounts.zig").setGraffLogins(&h.a, logins.value);
+    h.t.settle(1);
+    h.t.frame();
+
+    try testing.expect(h.t.hasText("38%"));
+    try testing.expect(h.t.hasText("23%"));
+    const acct_anchor = h.a.view.account_usage.anchor orelse return error.NoAccountUsageAnchor;
+    const ctx_anchor = h.a.view.context.anchor orelse return error.NoContextUsageAnchor;
+    try testing.expect(acct_anchor.x + acct_anchor.w <= ctx_anchor.x + 0.01);
+
+    h.t.click(acct_anchor.x + acct_anchor.w / 2, acct_anchor.y + acct_anchor.h / 2);
+    h.t.settle(1);
+    try testing.expect(h.a.view.account_usage.open);
+    for ([_][]const u8{ "graff accounts", "dev@acme.test", "ChatGPT \u{00b7} Pro", "In use", "Session", "Week", "38%", "24%" }) |needle| {
+        try testing.expect(h.t.hasText(needle));
+    }
+}

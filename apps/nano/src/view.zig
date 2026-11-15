@@ -2,7 +2,7 @@
 //! on the left, the open chat on the right with its header in the title
 //! bar's row, and over both the title bar's buttons: the sidebar toggle,
 //! back and forward through the tabs, and a new tab. A split tab shows its
-//! panes side by side (⌘D) or stacked (⌘⇧D), each its share of the column.
+//! panes side by side (⌘D) or stacked via the panel menu.
 const std = @import("std");
 const nanoui = @import("nanoui");
 const ui = nanoui.ui;
@@ -148,6 +148,11 @@ pub fn view(a: *App, c: *ui.Context) void {
     c.setZoom(a.settings.uiFontSize() / 16.0);
     if (!a.offscreen and c.time < a.view.resize_until) c.frameIn(1.0 / 120.0);
     a.syncPeers();
+    // Replies can arrive after select() marked the chat seen. Clear their
+    // Done check before drawing the sidebar, including on window activation.
+    if (c.input.window_active and selectedChatVisible(a)) {
+        if (a.selected) |id| a.markSeen(id);
+    }
     a.view.in_pre_tree = false;
     {
         const root = ui.div(c).row().sizeFull().bg(k.shell);
@@ -379,6 +384,12 @@ fn chatPanel(c: *ui.Context, a: *App, k: theme.Colors) void {
     focused(c, a, k);
 }
 
+fn selectedChatVisible(a: *const App) bool {
+    return !a.view.settings_open and !a.view.write_open and
+        a.bots.page == .none and a.view.setup == null and
+        (a.view.strip.expanded == null or a.view.strip.expanded.? == .chat);
+}
+
 fn focused(c: *ui.Context, a: *App, k: theme.Colors) void {
     // The Write page takes the pane: the transcript and composer step aside.
     if (a.view.write_open) return @import("view_write.zig").page(c, a, k, transcript_view.paneWidth(c, a));
@@ -576,7 +587,7 @@ fn neighbor(c: *ui.Context, a: *App, k: theme.Colors, ix: usize, chat_id: ?[]con
     return false;
 }
 
-/// ⌘B the sidebar, ⌘T or ⌘N a new tab; ⌘D and ⌘⇧D split the chat, ⌘[ and
+/// ⌘B the sidebar, ⌘T or ⌘N a new tab; ⌘D splits the chat, ⌘[ and
 /// ⌘] step through its panes (through tabs with none), ⌥⌘ and ⌃⌘ with an
 /// arrow focus and resize them, ⌃⌘= evens them, ⌘⇧↩ zooms one; ⌘W closes
 /// the pane, then the tab; Escape closes what is open
@@ -747,7 +758,7 @@ fn keys(c: *ui.Context, a: *App) void {
     }
     if (a.selected != null and boundShortcut(c, a, "toggleFiles")) @import("app_files.zig").toggle(a);
     if (a.selected != null and (boundShortcut(c, a, "toggleChanges") or boundShortcut(c, a, "toggleTerminal"))) @import("app_panels.zig").toggleHost(a);
-    if (boundShortcut(c, a, "newSession") or c.shortcut(.{ .key = 'n', .cmd = true })) a.newTab();
+    if (boundShortcut(c, a, "newSession") or c.shortcut(.{ .key = 'n', .cmd = true })) @import("app_open_chooser.zig").open(a, .new_workspace_tab);
     if (boundShortcut(c, a, "archiveSession")) {
         if (a.selected) |sel| a.setArchived(sel, true);
     }

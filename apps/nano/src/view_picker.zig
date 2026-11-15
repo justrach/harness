@@ -112,20 +112,25 @@ pub fn stageCurrentCompact(a: *App) void {
         };
         if (level == null) level = levels.len - 1;
     }
+    const orch: ?[]u8 = if (resolved.orchestrator_supported)
+        (a.gpa.dupe(u8, t.orchestrator orelse resolved.orchestrator_default orelse "auto") catch null)
+    else
+        null;
     p.clearStage(a.gpa);
-    p.stage = .{ .harness = harness, .model = id, .level = level, .compact = true };
+    p.stage = .{ .harness = harness, .model = id, .level = level, .orchestrator = orch, .compact = true };
     p.focus = false;
     p.detail = null;
     p.hover_target = null;
     var tmp_arena: std.heap.ArenaAllocator = .init(a.gpa);
     defer tmp_arena.deinit();
     const acct_count = accounts_view.accountsForHarness(a, t.harness, tmp_arena.allocator()).len;
-    p.height = compactCardHeight(acct_count > 0, levels.len > 1);
+    p.height = compactCardHeight(acct_count > 0, resolved.orchestrator_supported, levels.len > 1);
 }
 
-fn compactCardHeight(has_accounts: bool, has_levels: bool) f32 {
+fn compactCardHeight(has_accounts: bool, has_orchestrator: bool, has_levels: bool) f32 {
     var h: f32 = compact_single_height; // border(2) + body_pad(8) + model_row(34) + 2
     if (has_accounts) h += 37; // divider(5) + account_row(32)
+    if (has_orchestrator) h += 37; // divider(5) + orchestrator_row(32)
     if (has_levels) h += 88; // divider(5) + header(40) + slider_row(42) + 1
     return h;
 }
@@ -224,7 +229,11 @@ fn stage(c: *ui.Context, a: *App, r: models.Row) void {
     }
     const return_compact = p.can_return_compact;
     p.can_return_compact = false;
-    p.stage = .{ .harness = harness, .model = id, .level = level, .compact = return_compact };
+    const orch: ?[]u8 = if (r.model.orchestrator_supported and !return_compact)
+        (a.gpa.dupe(u8, a.target().orchestrator orelse r.model.orchestrator_default orelse "auto") catch null)
+    else
+        null;
+    p.stage = .{ .harness = harness, .model = id, .level = level, .orchestrator = orch, .compact = return_compact };
     p.slider_seeded = false;
     p.drag_fraction = null;
     p.effort_anim = null;
@@ -237,7 +246,7 @@ fn stage(c: *ui.Context, a: *App, r: models.Row) void {
         var tmp_arena: std.heap.ArenaAllocator = .init(a.gpa);
         defer tmp_arena.deinit();
         const acct_count = accounts_view.accountsForHarness(a, harness, tmp_arena.allocator()).len;
-        break :blk compactCardHeight(acct_count > 0, levels.len > 1);
+        break :blk compactCardHeight(acct_count > 0, r.model.orchestrator_supported, levels.len > 1);
     } else (if (levels.len > 1) stage_height else 245);
     if (return_compact) {
         p.focus = false;
@@ -882,7 +891,8 @@ fn compactPage(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) voi
     const levels = levelsOf(a, harness_id, m);
     const is_binary = models.binary(levels);
     const accts = accounts_view.accountsForHarness(a, harness_id, c.alloc());
-    const wanted_h = compactCardHeight(accts.len > 0, levels.len > 1);
+    const has_orch = m.orchestrator_supported;
+    const wanted_h = compactCardHeight(accts.len > 0, has_orch, levels.len > 1);
     if (@abs(p.height - wanted_h) > 0.5) {
         p.height = wanted_h;
         c.changed = true;
@@ -916,7 +926,7 @@ fn compactPage(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) voi
         }
     }
 
-    if (accts.len > 0 or levels.len > 1) {
+    if (accts.len > 0 or has_orch or levels.len > 1) {
         const sep = ui.div(c).row().wFull().px(4).py(2);
         defer sep.end();
         _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border.alpha(0.6) }, .none, null);
@@ -945,13 +955,68 @@ fn compactPage(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) voi
             p.account_submenu = !p.account_submenu;
             c.changed = true;
         }
-        if (levels.len > 1) {
+        if (has_orch or levels.len > 1) {
             const sep2 = ui.div(c).row().wFull().px(4).py(2);
             defer sep2.end();
             _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border.alpha(0.6) }, .none, null);
         }
     } else {
         p.account_submenu = false;
+    }
+
+    // 2b. Optional Orchestrator mode row (`Off · Auto · On`) when supported.
+    if (has_orch) {
+        const cur_orch = st.orchestrator orelse a.target().orchestrator orelse m.orchestrator_default orelse "auto";
+        ui.key(c, "compact-orchestrator-row");
+        const orch_row = ui.div(c).row().wFull().h(32).px(8).gap(8).itemsCenter();
+        {
+            defer orch_row.end();
+            ui.text(c, "Orchestrator", .{ .size = 13, .line_height = 17, .color = k.text });
+            ui.spacer(c);
+            const seg_group = ui.div(c).row().h(24).p(2).gap(2).itemsCenter().rounded(7).bg(k.ink(0.06));
+            defer seg_group.end();
+            const choices = [_]struct { id: []const u8, label: []const u8 }{
+                .{ .id = "off", .label = "Off" },
+                .{ .id = "auto", .label = "Auto" },
+                .{ .id = "on", .label = "On" },
+            };
+            for (choices) |choice| {
+                ui.key(c, c.print("compact-orchestrator-{s}", .{choice.id}));
+                const active = std.mem.eql(u8, cur_orch, choice.id);
+                var seg = ui.div(c).row().h(20).px(8).center().rounded(5).control();
+                if (active) {
+                    seg = seg.bg(look_color.alpha(if (k.dark) 0.20 else 0.14)).border(look_color.alpha(0.45)).borderW(1);
+                } else {
+                    seg = seg.hover(k.ink(0.05));
+                }
+                const seg_hot = seg.hovered();
+                const seg_clicked = seg.clicked();
+                {
+                    defer seg.end();
+                    ui.text(c, choice.label, .{
+                        .size = 11.5,
+                        .line_height = 15,
+                        .weight = if (active) .semibold else .medium,
+                        .color = if (active or seg_hot) k.text else k.muted,
+                    });
+                }
+                if (seg_clicked and open) {
+                    if (p.stage) |*s| {
+                        if (a.gpa.dupe(u8, choice.id)) |copy| {
+                            if (s.orchestrator) |old| p.retired_strings.append(a.gpa, old) catch a.gpa.free(old);
+                            s.orchestrator = copy;
+                        } else |_| {}
+                    }
+                    a.applyLiveOrchestrator(choice.id);
+                    c.changed = true;
+                }
+            }
+        }
+        if (levels.len > 1) {
+            const sep_orch = ui.div(c).row().wFull().px(4).py(2);
+            defer sep_orch.end();
+            _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border.alpha(0.6) }, .none, null);
+        }
     }
 
     // 3. Reasoning header + Fast-tier toggle + capsule EffortSlider.

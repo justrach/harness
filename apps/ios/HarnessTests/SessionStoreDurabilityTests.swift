@@ -454,10 +454,10 @@ final class SessionStoreDurabilityTests: XCTestCase {
         store.doc.commit()
 
         var newBatchIDs: Set<String> = []
-        for _ in 0..<20 {
-            await Task.yield()
+        for _ in 0..<500 {
             newBatchIDs = Set(store.outbox.map(\.batchId)).subtracting(baseline)
-            if !newBatchIDs.isEmpty { break }
+            if !newBatchIDs.isEmpty, newBatchIDs.isSubset(of: store.admittedBatchIDs) { break }
+            try await Task.sleep(for: .milliseconds(10))
         }
         XCTAssertEqual(newBatchIDs.count, 1)
         let loaded = try XCTUnwrap(DocDisk.loadChat2(into: LoroDoc(), id: id))

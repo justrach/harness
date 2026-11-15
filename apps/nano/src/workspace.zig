@@ -48,6 +48,7 @@ pub const Chat = struct {
     harness: ?[]const u8,
     model: ?[]const u8,
     reasoning: ?[]const u8 = null,
+    orchestrator: ?[]const u8 = null,
     /// A plain chat, not a coding session (`ChatConfig::chat_mode`).
     chat_mode: bool = false,
     cwd: ?[]const u8,
@@ -184,6 +185,8 @@ pub const Model = struct {
     /// Its levels; a chat without one picked shows `rules.defaultReasoning`.
     reasoning_default: ?[]const u8 = null,
     levels: []const []const u8 = &.{},
+    orchestrator_supported: bool = false,
+    orchestrator_default: ?[]const u8 = null,
     /// Its context window in tokens, when the catalog says (`Model::context`).
     context: ?u64 = null,
 };
@@ -196,11 +199,12 @@ pub const Sessions = List(Session, parseSession);
 
 /// Reflect a just-queued config edit while the engine's watch catches up.
 /// The strings live in the list's arena until its next whole replacement.
-pub fn setChatConfig(l: *Chats, id: []const u8, model: ?[]const u8, reasoning: ?[]const u8) bool {
+pub fn setChatConfig(l: *Chats, id: []const u8, model: ?[]const u8, reasoning: ?[]const u8, orchestrator: ?[]const u8) bool {
     const alloc = l.arena.allocator();
     for (l.items) |*chat| if (std.mem.eql(u8, chat.id, id)) {
         chat.model = if (model) |v| alloc.dupe(u8, v) catch chat.model else null;
         chat.reasoning = if (reasoning) |v| alloc.dupe(u8, v) catch chat.reasoning else null;
+        chat.orchestrator = if (orchestrator) |v| alloc.dupe(u8, v) catch chat.orchestrator else null;
         return true;
     };
     return false;
@@ -261,6 +265,7 @@ fn parseChat(a: Allocator, o: json.ObjectMap) ?Chat {
         .harness = if (config) |c| str(a, c, "harness") else null,
         .model = if (config) |c| str(a, c, "model") else null,
         .reasoning = if (config) |c| str(a, c, "reasoning") else null,
+        .orchestrator = if (config) |c| (if (c.get("modelOptions")) |mo| (if (mo == .object) str(a, mo.object, "orchestrator") else null) else null) else null,
         .chat_mode = if (config) |c| (if (c.get("chatMode")) |v| v == .bool and v.bool else false) else false,
         .cwd = str(a, o, "cwd"),
         .harness_session_id = str(a, o, "harnessSessionId"),
@@ -317,6 +322,16 @@ fn parseHarness(a: Allocator, o: json.ObjectMap) ?Harness {
 fn parseModel(a: Allocator, o: json.ObjectMap) ?Model {
     const id = str(a, o, "id") orelse return null;
     const levels = stringList(a, o, "reasoningLevels");
+    var orchestrator_supported = false;
+    var orchestrator_default: ?[]const u8 = null;
+    if (o.get("options")) |opts| if (opts == .array) for (opts.array.items) |opt| if (opt == .object) {
+        const opt_id = if (opt.object.get("id")) |v| (if (v == .string) v.string else "") else "";
+        if (std.mem.eql(u8, opt_id, "orchestrator")) {
+            orchestrator_supported = true;
+            orchestrator_default = str(a, opt.object, "defaultChoice") orelse "auto";
+            break;
+        }
+    };
     return .{
         .id = id,
         .label = str(a, o, "label") orelse id,
@@ -325,6 +340,8 @@ fn parseModel(a: Allocator, o: json.ObjectMap) ?Model {
         .billing = str(a, o, "billing"),
         .reasoning_default = rules.defaultReasoning(levels),
         .levels = levels,
+        .orchestrator_supported = orchestrator_supported,
+        .orchestrator_default = orchestrator_default,
         .context = if (o.get("context")) |v| (if (v == .integer and v.integer > 0) @as(u64, @intCast(v.integer)) else null) else null,
     };
 }

@@ -21,13 +21,23 @@ struct SessionLiveActivity: Widget {
             let state = context.state
             return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    MarkTile(harness: attributes.harness, size: 40)
-                        .padding(.leading, 6)
-                        .padding(.top, 4)
+                    Group {
+                        if let voice = state.voiceState {
+                            VoiceOrbTile(voice: voice, size: 40)
+                        } else {
+                            MarkTile(harness: attributes.harness, size: 40)
+                        }
+                    }
+                    .padding(.leading, 6)
+                    .padding(.top, 4)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
                     VStack(alignment: .trailing, spacing: 4) {
-                        StatusPill(phase: state.phase)
+                        if let voice = state.voiceState {
+                            VoiceStatusPill(voice: voice)
+                        } else {
+                            StatusPill(phase: state.phase)
+                        }
                         if state.phase == .working {
                             ElapsedTimer(startedAt: state.startedAt)
                                 .font(.system(.subheadline, design: .rounded).weight(.semibold))
@@ -56,18 +66,29 @@ struct SessionLiveActivity: Widget {
                     .padding(.bottom, 4)
                 }
             } compactLeading: {
-                BrandGlyph(harness: attributes.harness, size: 17)
-                    .padding(.leading, 2)
+                if let voice = state.voiceState {
+                    VoiceCompactOrb(voice: voice)
+                        .padding(.leading, 2)
+                } else {
+                    BrandGlyph(harness: attributes.harness, size: 17)
+                        .padding(.leading, 2)
+                }
             } compactTrailing: {
                 CompactStatus(state: state)
             } minimal: {
                 ZStack {
-                    Circle().strokeBorder(phaseColor(state.phase), lineWidth: 2)
-                    BrandGlyph(harness: attributes.harness, size: 11)
+                    Circle().strokeBorder(state.voiceState.map(voiceColor) ?? phaseColor(state.phase), lineWidth: 2)
+                    if let voice = state.voiceState {
+                        Image(systemName: voiceSymbol(voice))
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(voiceColor(voice))
+                    } else {
+                        BrandGlyph(harness: attributes.harness, size: 11)
+                    }
                 }
             }
             .widgetURL(attributes.url)
-            .keylineTint(phaseColor(state.phase))
+            .keylineTint(state.voiceState.map(voiceColor) ?? phaseColor(state.phase))
         }
     }
 }
@@ -80,7 +101,11 @@ private struct LockScreenCard: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            MarkTile(harness: attributes.harness, size: 44)
+            if let voice = state.voiceState {
+                VoiceOrbTile(voice: voice, size: 44)
+            } else {
+                MarkTile(harness: attributes.harness, size: 44)
+            }
             VStack(alignment: .leading, spacing: 5) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(attributes.title)
@@ -88,7 +113,11 @@ private struct LockScreenCard: View {
                         .foregroundStyle(.white)
                         .lineLimit(1)
                     Spacer(minLength: 4)
-                    StatusPill(phase: state.phase)
+                    if let voice = state.voiceState {
+                        VoiceStatusPill(voice: voice)
+                    } else {
+                        StatusPill(phase: state.phase)
+                    }
                 }
                 WorkLine(state: state)
                 HStack(spacing: 8) {
@@ -162,6 +191,17 @@ private struct CompactStatus: View {
     let state: SessionActivityAttributes.ContentState
 
     var body: some View {
+        if let voice = state.voiceState {
+            Text(voiceShortLabel(voice))
+                .font(.system(.caption2, design: .rounded).weight(.semibold))
+                .foregroundStyle(voiceColor(voice))
+        } else {
+            phaseBody
+        }
+    }
+
+    @ViewBuilder
+    private var phaseBody: some View {
         switch state.phase {
         case .working:
             HStack(spacing: 5) {
@@ -290,4 +330,100 @@ private func projectColor(_ index: Int?) -> Color {
     guard let index else { return .white.opacity(0.55) }
     let hues: [Double] = [0.02, 0.10, 0.36, 0.48, 0.56, 0.66, 0.76, 0.92]
     return Color(hue: hues[index % hues.count], saturation: 0.5, brightness: 0.95)
+}
+
+
+private typealias VoiceState = SessionActivityAttributes.ContentState.VoiceState
+
+private struct VoiceOrbTile: View {
+    let voice: VoiceState
+    let size: CGFloat
+
+    var body: some View {
+        let tint = voiceColor(voice)
+        ZStack {
+            Circle()
+                .fill(tint.opacity(0.22))
+                .frame(width: size, height: size)
+            Circle()
+                .strokeBorder(tint.opacity(0.55), lineWidth: 1.5)
+                .frame(width: size * 0.82, height: size * 0.82)
+            Image(systemName: voiceSymbol(voice))
+                .font(.system(size: size * 0.38, weight: .semibold))
+                .foregroundStyle(tint)
+        }
+        .frame(width: size, height: size)
+    }
+}
+
+private struct VoiceCompactOrb: View {
+    let voice: VoiceState
+
+    var body: some View {
+        let tint = voiceColor(voice)
+        ZStack {
+            Circle()
+                .fill(tint.opacity(0.24))
+                .frame(width: 20, height: 20)
+            Image(systemName: voiceSymbol(voice))
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(tint)
+        }
+    }
+}
+
+private struct VoiceStatusPill: View {
+    let voice: VoiceState
+
+    var body: some View {
+        let tint = voiceColor(voice)
+        HStack(spacing: 5) {
+            Image(systemName: voiceSymbol(voice))
+                .font(.system(size: 10, weight: .bold))
+            Text(voiceLabel(voice))
+                .font(.caption.weight(.semibold))
+                .lineLimit(1)
+        }
+        .foregroundStyle(tint)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(tint.opacity(0.18), in: Capsule())
+        .fixedSize()
+    }
+}
+
+private func voiceLabel(_ voice: VoiceState) -> String {
+    switch voice {
+    case .listening: return "Listening"
+    case .processing: return "Thinking"
+    case .speaking: return "Speaking"
+    case .muted: return "Voice muted"
+    }
+}
+
+private func voiceShortLabel(_ voice: VoiceState) -> String {
+    switch voice {
+    case .listening: return "Listen"
+    case .processing: return "Think"
+    case .speaking: return "Speak"
+    case .muted: return "Muted"
+    }
+}
+
+private func voiceSymbol(_ voice: VoiceState) -> String {
+    switch voice {
+    case .listening: return "waveform"
+    case .processing: return "ellipsis"
+    case .speaking: return "speaker.wave.2.fill"
+    case .muted: return "mic.slash.fill"
+    }
+}
+
+private func voiceColor(_ voice: VoiceState) -> Color {
+    switch voice {
+    case .listening: return Color(red: 0.20, green: 0.83, blue: 0.60)
+    case .processing: return Color(red: 0.96, green: 0.45, blue: 0.71)
+    case .speaking: return Color(red: 0.38, green: 0.68, blue: 0.98)
+    case .muted: return Color.white.opacity(0.65)
+    }
 }

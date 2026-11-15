@@ -47,11 +47,15 @@ pub fn runBot(bot: []const u8, message: ?[]const u8, routine: ?[]const u8) Reque
 
 // ── chats ────────────────────────────────────────────────────────────
 
+pub const ModelOptions = struct {
+    orchestrator: ?[]const u8 = null,
+};
+
 pub const Config = struct {
     harness: []const u8,
     model: ?[]const u8 = null,
     reasoning: ?[]const u8 = null,
-    modelOptions: Empty = .{},
+    modelOptions: ModelOptions = .{},
     sandbox: []const u8 = "workspace-write",
     /// A plain chat (`chatMode`); left out for a coding session.
     chatMode: ?bool = null,
@@ -186,7 +190,7 @@ pub const RunRequest = struct {
     harness: ?[]const u8 = null,
     model: ?[]const u8 = null,
     reasoning: ?[]const u8 = null,
-    modelOptions: Empty = .{},
+    modelOptions: ModelOptions = .{},
     cwd: []const u8,
     sandbox: []const u8 = "workspace-write",
     autoApprove: bool = false,
@@ -405,4 +409,3 @@ pub const GenerateCustomTheme = struct {
 pub fn generateCustomTheme(prompt: []const u8, dark: ?bool, harness: ?[]const u8) Request(GenerateCustomTheme) {
     return .{ .method = "GenerateCustomTheme", .params = .{ .prompt = prompt, .dark = dark, .harness = harness } };
 }
-

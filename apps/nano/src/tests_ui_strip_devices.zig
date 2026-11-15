@@ -245,11 +245,12 @@ test "Nanoui request: an existing conversation keeps its execution computer" {
     try testing.expectEqualStrings("local", h.a.device_id.?);
 }
 
-test "split slot computer picker fits its chevron and switches directly while Cmd+D folder menu is open" {
+test "split slot computer picker fits its chevron and switches directly while its folder menu is open" {
     var h: Harness = undefined;
     try h.init(true);
     defer h.deinit();
     h.press(.{ .key = 'd', .cmd = true });
+    try @import("tests_ui_strip_folder_search.zig").openFolderMenu(&h);
     try testing.expect(h.a.view.strip.menu == .folder);
     const label = @import("strip_device.zig").localLabel();
     var slot_computer: ?@import("nanoui").ui.Rect = null;
@@ -270,7 +271,7 @@ test "split slot computer picker fits its chevron and switches directly while Cm
         }
     }
     try testing.expect(chevron_fits);
-    // Clicking `This Mac` while the Cmd+D folder menu is open switches directly to `.device`.
+    // Clicking `This Mac` while the folder menu is open switches directly to `.device`.
     h.t.click(comp.x + comp.w / 2, comp.y + comp.h / 2);
     h.t.settle(1);
     try testing.expectEqual(strip.Menu.device, h.a.view.strip.menu.?);

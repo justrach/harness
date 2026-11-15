@@ -20,6 +20,37 @@ final class TextSelectionTests: XCTestCase {
         return (window, host)
     }
 
+    /// A text view scrolled off is the next row's. It must arrive blank: another
+    /// row's selection or focus would show up on text the user never touched.
+    func testAReusedTextViewCarriesNothingFromItsLastRow() async throws {
+        TextViewPool.drain()
+        let original = "Keep this passage selected"
+        let (window, host) = await mount(AnyView(SelectableText(text: NSAttributedString(string: original))))
+        defer { window.isHidden = true; window.rootViewController = nil }
+        let first = try XCTUnwrap(textViews(in: host.view).first)
+        XCTAssertTrue(first.becomeFirstResponder())
+        first.selectedRange = (original as NSString).range(of: "this passage")
+
+        host.rootView = AnyView(EmptyView())
+        try? await Task.sleep(for: .milliseconds(100))
+        window.layoutIfNeeded()
+        XCTAssertGreaterThanOrEqual(TextViewPool.waiting, 1, "the row gave its view back")
+        XCTAssertFalse(first.isFirstResponder)
+        XCTAssertEqual(first.text, "")
+        XCTAssertNil(first.superview)
+
+        let next = "Another row entirely"
+        host.rootView = AnyView(SelectableText(text: NSAttributedString(string: next), lineHeight: 40))
+        try? await Task.sleep(for: .milliseconds(100))
+        window.layoutIfNeeded()
+        let second = try XCTUnwrap(textViews(in: host.view).first)
+        XCTAssertTrue(second === first, "the row took the waiting view")
+        XCTAssertEqual(second.text, next)
+        XCTAssertEqual(second.selectedRange, NSRange(location: 0, length: 0))
+        XCTAssertFalse(second.isFirstResponder)
+        XCTAssertGreaterThan(second.bounds.height, 0, "it lays out in its new place")
+    }
+
     func testRepeatedLayoutProposalsReuseNativeMeasurement() {
         let view = CountingSizingTextView()
         view.isScrollEnabled = false

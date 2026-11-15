@@ -2723,7 +2723,7 @@ fn config_option_sets_with_modes(
             // (approvalPolicy "never" + danger-full-access sandbox), Devin
             // `bypass`. Cursor instead exposes agent/plan/ask — those arrive
             // as a Traits "Mode" option and win when the run selected one.
-            ("select", Some("mode")) => model_options
+            ("select", Some("mode")) if config_id == "mode" => model_options
                 .get("mode")
                 .and_then(Value::as_str)
                 .filter(|c| available.contains(c))
@@ -3064,11 +3064,19 @@ fn prompt_turn(
     allowed: Vec<String>,
     images: bool,
     prompt_id: Option<String>,
+    harness: HarnessId,
 ) -> BoxFuture<'static, Result<Value, HarnessError>> {
     Box::pin(async move {
         // A room delivery's tag line becomes `_meta["harness/room"]`, so the
         // agent can tell another agent's post from the user's words.
         let (text, room) = harness_proto::room_delivery::lift(&text);
+        let (text, command) = if harness == HarnessId::Graff {
+            let (text, selected) = harness_proto::invocation::graff_command_prompt(&text);
+            // Room deliveries are advisory, never the user's completion acceptance.
+            (text, Some(selected && room.is_none()))
+        } else {
+            (text, None)
+        };
         let prompt = prompt_images::prompt_blocks(text, &extra, &allowed, images).await;
         let mut params = json!({
             "sessionId": session_id,
@@ -3079,6 +3087,9 @@ fn prompt_turn(
         }
         if let Some(room) = room {
             params["_meta"]["harness/room"] = room;
+        }
+        if let Some(command) = command {
+            params["_meta"]["harness/command"] = command.into();
         }
         client.request("session/prompt", params).await
     })
@@ -3789,7 +3800,17 @@ async fn run_session(session: Session) {
                         "{agent_name} isn't signed in. Use Settings → Agents → Sign in."
                     )));
                 }
-                // A missing/foreign session falls back to a fresh one.
+                Err(e) if harness == HarnessId::Graff => {
+                    // Never send a retry without its native conversation context
+                    // or replace the stored reference with an empty session.
+                    return Err(HarnessError::Protocol(format!(
+                        "{agent_name} could not restore the previous session; your message was \
+                         not sent and the previous session reference was kept. Restore the \
+                         saved session and retry, or explicitly start a new chat without the \
+                         previous context. Restore error: {e}"
+                    )));
+                }
+                // Other agents retain their missing/foreign-session fallback.
                 Err(e) => {
                     tracing::debug!(
                         target: "harness_adapters::acp",
@@ -4198,6 +4219,7 @@ async fn run_session(session: Session) {
             allowed_images.clone(),
             images_supported,
             current_prompt_id.clone(),
+            harness,
         )
     });
     // Steers waiting for the turn boundary (agents without the extension, or
@@ -4411,7 +4433,7 @@ async fn run_session(session: Session) {
                     prompt_stall_deadline = prompt_stall.map(|d| tokio::time::Instant::now() + d);
                     turn = Some(prompt_turn(
                         client.clone(), session_id.clone(), clarification_resume::PROMPT.into(),
-                        Vec::new(), allowed_images.clone(), images_supported, current_prompt_id.clone(),
+                        Vec::new(), allowed_images.clone(), images_supported, current_prompt_id.clone(), harness,
                     ));
                     continue 'main;
                 }
@@ -4496,6 +4518,7 @@ async fn run_session(session: Session) {
                         allowed_images.clone(),
                         images_supported,
                         current_prompt_id.clone(),
+                        harness,
                     ));
                 } else if !steering_open {
                     break 'main;
@@ -4858,6 +4881,7 @@ async fn run_session(session: Session) {
                         allowed_images.clone(),
                         images_supported,
                         current_prompt_id.clone(),
+                        harness,
                     ));
                 }
                 while let Some(next_text) = steer_backlog.pop_front() {
@@ -4915,6 +4939,7 @@ async fn run_session(session: Session) {
                         allowed_images.clone(),
                         images_supported,
                         current_prompt_id.clone(),
+                        harness,
                     ));
                 } else if turn.is_none() && !steering_open {
                     // Mailbox closed while the flush waited: nothing left.
@@ -4992,6 +5017,7 @@ async fn run_session(session: Session) {
                         allowed_images.clone(),
                         images_supported,
                         current_prompt_id.clone(),
+                        harness,
                     ));
                 } else if !steering_open {
                     // Mirror the normal turn-settled exit: mailbox closed
@@ -5057,6 +5083,7 @@ async fn run_session(session: Session) {
                         allowed_images.clone(),
                         images_supported,
                         current_prompt_id.clone(),
+                        harness,
                     ));
                     } else if steer_ext {
                         // Mid-turn injection via the `_session/steering`
@@ -5992,6 +6019,41 @@ mod tests {
             config_option_sets(&json!({"sessionId": "s"}), Some("x"), &["high"], &no_opts),
             Vec::new()
         );
+    }
+
+    #[test]
+    fn config_option_sets_orchestrator_under_mode_category() {
+        let response = json!({
+            "sessionId": "s-1",
+            "configOptions": [
+                {
+                    "id": "orchestrator",
+                    "name": "Orchestrator",
+                    "category": "mode",
+                    "type": "select",
+                    "currentValue": "auto",
+                    "options": [
+                        { "value": "off", "name": "Off" },
+                        { "value": "auto", "name": "Auto" },
+                        { "value": "on", "name": "On" },
+                    ],
+                },
+            ],
+        });
+        let no_opts = serde_json::Map::new();
+        assert_eq!(
+            config_option_sets(&response, None, &[], &no_opts),
+            Vec::new()
+        );
+        let mut opts = serde_json::Map::new();
+        opts.insert("orchestrator".into(), json!("on"));
+        assert_eq!(
+            config_option_sets(&response, None, &[], &opts),
+            vec![("orchestrator".to_owned(), json!({ "value": "on" }))]
+        );
+        let mut same = serde_json::Map::new();
+        same.insert("orchestrator".into(), json!("auto"));
+        assert_eq!(config_option_sets(&response, None, &[], &same), Vec::new());
     }
 
     #[test]

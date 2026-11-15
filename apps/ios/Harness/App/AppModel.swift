@@ -666,8 +666,9 @@ final class AppModel {
                     harness: chat.config?.harness ?? "claude-code"),
                 phase: phase,
                 startedAt: Date(timeIntervalSince1970: Double(started) / 1000),
-                detail: LiveActivityPlan.detail(chat.lastMessagePreview),
-                tasks: tasks)
+                detail: SessionVoiceRegistry.shared.detailOverride(for: chat.id) ?? LiveActivityPlan.detail(chat.lastMessagePreview),
+                tasks: tasks,
+                voiceState: SessionVoiceRegistry.shared.activeVoiceState(for: chat.id))
         }
     }
 
@@ -1632,6 +1633,7 @@ final class AppModel {
     private func storeIsProtected(_ store: SessionStore) -> Bool {
         !store.pendingSends.isEmpty
             || !store.outbox.isEmpty
+            || store.docIsBusy
             || store.entries.last?.status == .streaming
     }
 
@@ -1661,6 +1663,7 @@ final class AppModel {
     }
 
     private func evictForMemoryWarning() {
+        TextViewPool.drain()
         let newest = storeLastUsed.max { $0.value < $1.value }?.key
         let before = sessionStores.count
         let order = Self.evictionOrder(lastUsed: storeLastUsed) { [weak self] id in

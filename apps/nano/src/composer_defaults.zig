@@ -30,6 +30,7 @@ pub fn apply(a: *App) void {
         .null => setNew(a, &a.new_reasoning, null),
         else => {},
     };
+    if (readModelOrchestrator(root, harness, a.new_model)) |choice| setNew(a, &a.new_orchestrator, choice);
 }
 
 /// The picks remembered for `harness`, after a harness switch: its model and
@@ -51,6 +52,23 @@ pub fn adopt(a: *App, harness: []const u8) void {
     if (root.get("reasoning")) |reasoning| {
         if (reasoning == .string and reasoning.string.len > 0) setNew(a, &a.new_reasoning, reasoning.string);
     }
+    setNew(a, &a.new_orchestrator, readModelOrchestrator(root, harness, a.new_model));
+}
+
+pub fn adoptModelOptions(a: *App, harness: []const u8, model_id: ?[]const u8) void {
+    var root_storage = load(a) orelse {
+        setNew(a, &a.new_orchestrator, null);
+        return;
+    };
+    defer root_storage.deinit();
+    const root = switch (root_storage.value) {
+        .object => |o| o,
+        else => {
+            setNew(a, &a.new_orchestrator, null);
+            return;
+        },
+    };
+    setNew(a, &a.new_orchestrator, readModelOrchestrator(root, harness, model_id));
 }
 
 pub fn rememberHarness(a: *App) void {
@@ -65,7 +83,11 @@ pub fn rememberReasoning(a: *App) void {
     save(a, .reasoning);
 }
 
-const Change = enum { harness, model, reasoning };
+pub fn rememberOrchestrator(a: *App) void {
+    save(a, .orchestrator);
+}
+
+const Change = enum { harness, model, reasoning, orchestrator };
 
 /// Only the new-chat canvas is sticky. An open chat's config belongs to its
 /// own row (`SetChatConfig`), and plain chats keep their code defaults.
@@ -112,8 +134,48 @@ fn save(a: *App, change: Change) void {
             labels.put(gpa, id, .{ .string = label }) catch return;
             root.put(gpa, "modelLabels", .{ .object = labels }) catch return;
         },
+        .orchestrator => {
+            const id = a.new_model orelse (if (a.models.items.len > 0) a.models.items[0].id else null) orelse {
+                write(a, gpa, root) catch {};
+                return;
+            };
+            var by_harness: json.ObjectMap = .empty;
+            if (root.get("modelOptionsByModel")) |v| if (v == .object) {
+                by_harness = v.object;
+            };
+            var by_model: json.ObjectMap = .empty;
+            if (by_harness.get(a.new_harness)) |v| if (v == .object) {
+                by_model = v.object;
+            };
+            var opts: json.ObjectMap = .empty;
+            if (by_model.get(id)) |v| if (v == .object) {
+                opts = v.object;
+            };
+            if (a.new_orchestrator) |choice| {
+                opts.put(gpa, "orchestrator", .{ .string = choice }) catch return;
+            }
+            by_model.put(gpa, id, .{ .object = opts }) catch return;
+            by_harness.put(gpa, a.new_harness, .{ .object = by_model }) catch return;
+            root.put(gpa, "modelOptionsByModel", .{ .object = by_harness }) catch return;
+        },
     }
     write(a, gpa, root) catch {};
+}
+
+fn readModelOrchestrator(root: json.ObjectMap, harness: []const u8, model_id: ?[]const u8) ?[]const u8 {
+    const id = model_id orelse return null;
+    const by_harness = root.get("modelOptionsByModel") orelse return null;
+    if (by_harness != .object) return null;
+    const by_model = by_harness.object.get(harness) orelse return null;
+    if (by_model != .object) return null;
+    const opts = by_model.object.get(id) orelse return null;
+    if (opts != .object) return null;
+    const val = opts.object.get("orchestrator") orelse return null;
+    if (val != .string) return null;
+    if (std.mem.eql(u8, val.string, "off") or std.mem.eql(u8, val.string, "auto") or std.mem.eql(u8, val.string, "on")) {
+        return val.string;
+    }
+    return null;
 }
 
 fn modelLabel(a: *const App, id: []const u8) []const u8 {

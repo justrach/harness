@@ -449,6 +449,7 @@ pub const App = struct {
     /// A draft's execution target; never changes this machine's identity.
     new_device: ?[]u8 = null,
     new_reasoning: ?[]u8 = null,
+    new_orchestrator: ?[]u8 = null,
     /// The agent `models` lists models for (owned).
     models_for: []u8 = &.{},
     /// The model chip's picker is open.
@@ -635,6 +636,7 @@ pub const App = struct {
         if (a.device_id) |d| a.gpa.free(d);
         if (a.new_model) |m| a.gpa.free(m);
         if (a.new_reasoning) |m| a.gpa.free(m);
+        if (a.new_orchestrator) |o| a.gpa.free(o);
         if (a.new_device) |id| a.gpa.free(id);
         if (a.new_ref) |r| a.gpa.free(r);
         a.gpa.free(a.models_for);
@@ -661,6 +663,7 @@ pub const App = struct {
     pub const pickReasoning = agent.pickReasoning;
     pub const pickModelAndReasoning = agent.pickModelAndReasoning;
     pub const applyLiveModelAndReasoning = agent.applyLiveModelAndReasoning;
+    pub const applyLiveOrchestrator = agent.applyLiveOrchestrator;
     pub const ensureModels = agent.ensureModels;
     pub const newChatSpace = agent.newChatSpace;
     pub fn setArchived(a: *App, id: []const u8, archived: bool) void {
@@ -1027,7 +1030,16 @@ pub const App = struct {
             if (at.panel_tab) |ix| a.showPaneTab(ix);
             return;
         }
-        const project = a.findChat(chat_id).?.space_id;
+        const chat = a.findChat(chat_id).?;
+        const project = chat.space_id;
+        // Reading history is not a project-pane replacement. Keep the live
+        // workspace (including its split and drafts) visible in its own tab.
+        if (chat.archived) {
+            a.newWorkspaceSession();
+            a.tabs.setCurrent(chat_id);
+            a.select(chat_id, project);
+            return;
+        }
         const destination: ?usize = if (sameProject(a.workspaceProject(a.tabs.active), project))
             a.tabs.active
         else for (0..a.tabs.items.items.len) |ix| {
@@ -1452,6 +1464,9 @@ pub const App = struct {
     }
 
     fn archiveClosedAfter(a: *App, id: []const u8, may_archive: bool, queued: bool) void {
+        // Closing an archived view cannot archive it again, nor did a busy
+        // status prevent archival. Do not show the live-session warning.
+        if (a.findChat(id)) |chat| if (chat.archived) return;
         const ac = @import("archive_close.zig");
         const st = workspace.statusOf(a.sessions.items, id);
         var sending = false;
@@ -1966,6 +1981,12 @@ pub const App = struct {
             if (n > 0) return studio.openWithPrompt(a, arg_buf[0..n]) else return studio.open(a);
         }
         if (prompt.len == 0 or a.engine.state != .connected) return;
+        if (a.selected == null and !a.new_chat_mode and !a.new_no_project and
+            a.space != null and a.newChatSpace() == null)
+        {
+            a.setNotice("This project's details are not available yet. Wait for sync or choose another project.");
+            return a.redraw();
+        }
         // A plain chat with no Auto tier would fall to graff's own default.
         if (@import("app_agent.zig").chatSendBlocked(a)) return;
         if (a.queues()) {
@@ -1992,6 +2013,7 @@ pub const App = struct {
         var harness: ?[]const u8 = null;
         var model: ?[]const u8 = null;
         var reasoning: ?[]const u8 = null;
+        var orchestrator: ?[]const u8 = null;
         var cwd: []const u8 = "~";
         var worktree: ?requests.WorktreeSpec = null;
         const chat_id = if (a.selected) |id| blk: {
@@ -1999,6 +2021,7 @@ pub const App = struct {
                 harness = c.harness;
                 model = c.model;
                 reasoning = c.reasoning;
+                orchestrator = c.orchestrator;
                 if (c.cwd) |d| cwd = d;
             }
             break :blk id;
@@ -2018,10 +2041,12 @@ pub const App = struct {
             harness = if (plain) t.harness else a.new_harness;
             model = if (plain) t.model else a.new_model;
             reasoning = a.new_reasoning;
+            orchestrator = if (plain) null else t.orchestrator;
             const config: requests.Config = .{
                 .harness = harness.?,
                 .model = model,
                 .reasoning = reasoning,
+                .modelOptions = .{ .orchestrator = orchestrator },
                 .chatMode = if (plain) true else null,
             };
             // A chat with no project names its device instead.
@@ -2041,6 +2066,7 @@ pub const App = struct {
             .harness = harness,
             .model = model,
             .reasoning = reasoning,
+            .modelOptions = .{ .orchestrator = orchestrator },
             .cwd = cwd,
             .worktree = worktree,
         }), .of(feedback.Pending, pending, feedback.Pending.onReply));

@@ -40,6 +40,10 @@ test "deep shortcuts rebound new and split defaults stay replaced inside folder 
         try testing.expectEqualStrings("field", h.a.view.strip.query.text());
         h.press(custom);
         if (std.mem.eql(u8, key, "newSession")) {
+            try testing.expect(h.a.view.open_chooser.open);
+            try testing.expectEqual(before, h.a.tabs.items.items.len);
+            try testing.expectEqual(@import("app_open_chooser.zig").Intent.new_workspace_tab, h.a.view.open_chooser.intent);
+            @import("app_open_chooser.zig").choose(&h.a, "local-project");
             try testing.expectEqual(before + 1, h.a.tabs.items.items.len);
             try testing.expect(h.a.tabs.find("a") != null);
         } else try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
@@ -653,6 +657,10 @@ test "retention custom new chat and project chords dispatch their saved bindings
         const before = h.a.tabs.items.items.len;
         h.press(custom);
         if (std.mem.eql(u8, key, "newSession")) {
+            try testing.expect(h.a.view.open_chooser.open);
+            try testing.expectEqual(before, h.a.tabs.items.items.len);
+            try testing.expectEqual(@import("app_open_chooser.zig").Intent.new_workspace_tab, h.a.view.open_chooser.intent);
+            @import("app_open_chooser.zig").choose(&h.a, "local-project");
             try testing.expectEqual(before + 1, h.a.tabs.items.items.len);
             try testing.expect(h.a.tabs.find("a") != null);
         } else if (std.mem.eql(u8, key, "newProject")) {
@@ -676,11 +684,14 @@ test "retention custom panel chords reach their actual panel actions (#793)" {
         } else if (std.mem.eql(u8, key, "toggleChanges") or std.mem.eql(u8, key, "toggleTerminal")) {
             try testing.expect(h.a.panels.host_open);
         } else {
-            // The keyboard split flow creates the pane immediately, then
-            // offers its inherited folder under the new pane's header.
+            // Keyboard splits inherit the source destination without a picker,
+            // including when dispatched through a saved custom binding.
             const split = h.a.tabs.layout() orelse return error.MissingCustomShortcutSplit;
             try testing.expectEqual(@as(usize, 2), split.panes.items.len);
-            try testing.expectEqual(@import("view_tab_strip.zig").Menu.folder, h.a.view.strip.menu.?);
+            try testing.expectEqual(if (std.mem.eql(u8, key, "splitTerminal")) @import("tabs.zig").Axis.horizontal else .vertical, split.axis);
+            try testing.expect(h.a.view.strip.menu == null);
+            try testing.expectEqualStrings("local-project", h.a.newChatSpace().?.id);
+            try testing.expectEqualStrings("local", h.a.draftDevice().?);
         }
     }
 }
