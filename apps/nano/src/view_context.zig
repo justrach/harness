@@ -28,6 +28,7 @@ pub const State = struct {
     /// Where the pointer was when the card opened: it hangs from there.
     at: ui.Point = .{ .x = 0, .y = 0 },
     open: bool = false,
+    pinned: bool = false,
     /// The savings meter's part under the pointer.
     saved_hover: ?cw.SavedPart = null,
 };
@@ -47,6 +48,8 @@ pub fn indicator(c: *ui.Context, a: *App, k: theme.Colors) void {
     const s = &a.view.context;
     if (!hasWindow(a)) {
         s.anchor = null;
+        s.open = false;
+        s.pinned = false;
         return;
     }
     const f = cw.fraction(a.transcript.tokens, a.transcript.window);
@@ -64,9 +67,32 @@ pub fn indicator(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (hot) pill = pill.bg(k.ink(0.05));
     defer pill.end();
     if (c.rects.get(c.node(pill.index).id)) |r| s.anchor = r;
-    ring(c, f, color, k.faint.alpha(0.25));
+    if (pill.clicked() or hit.clicked()) {
+        if (s.open and s.pinned) {
+            s.open = false;
+            s.pinned = false;
+            s.opened_at = null;
+            s.leave_since = null;
+        } else {
+            s.open = true;
+            s.pinned = true;
+            s.opened_at = c.time;
+            s.leave_since = null;
+            s.at = if (s.anchor) |r| .{ .x = r.x + r.w, .y = r.y } else c.input.mouse;
+            a.view.account_usage.open = false;
+            a.picker = .none;
+            a.view.model_picker.account_submenu = false;
+        }
+        c.changed = true;
+        return;
+    }
+    drawRing(c, f, color, k.faint.alpha(0.25));
     const pct = if (f) |v| c.print("{d:.0}%", .{v * 100}) else "—";
     ui.text(c, pct, .{ .tabular = true, .size = 12, .line_height = 12 * 1.618, .color = color });
+    if (a.view.account_usage.open) {
+        s.hover_since = null;
+        return;
+    }
     // Open after a rest; the card keeps itself open while the pointer is
     // over it (`hoverable`), so its meter's parts can be hovered.
     const over_card = if (s.card) |r| inside(c.input.mouse, r) else false;
@@ -76,6 +102,7 @@ pub fn indicator(c: *ui.Context, a: *App, k: theme.Colors) void {
         const waited = c.time - s.hover_since.?;
         if (!s.open and waited >= open_delay) {
             s.open = true;
+            s.pinned = false;
             s.opened_at = c.time;
             s.at = c.input.mouse;
             c.changed = true;
@@ -84,7 +111,7 @@ pub fn indicator(c: *ui.Context, a: *App, k: theme.Colors) void {
         s.leave_since = null;
     } else {
         s.hover_since = null;
-        if (!s.open) return;
+        if (!s.open or s.pinned) return;
         if (s.leave_since == null) s.leave_since = c.time;
         const gone = c.time - s.leave_since.?;
         if (gone < hide_delay) return c.frameIn(@floatCast(hide_delay - gone));
@@ -121,7 +148,7 @@ fn inside(p: ui.Point, r: ui.Rect) bool {
 }
 
 /// A 16-point ring: the track whole, the fill an arc from twelve o'clock.
-fn ring(c: *ui.Context, fraction: ?f32, color: ui.Color, track: ui.Color) void {
+pub fn drawRing(c: *ui.Context, fraction: ?f32, color: ui.Color, track: ui.Color) void {
     const cv = ui.canvas(c, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 } });
     const center: ui.Point = .{ .x = 8, .y = 8 };
     cv.ring(center, 6 + 0.9, 1.8, track);
@@ -178,10 +205,29 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
     const s = &a.view.context;
     if (!s.open or !hasWindow(a) or a.picker != .none) {
         s.card = null;
+        if (a.picker != .none) s.pinned = false;
         return;
     }
     const anchor = s.anchor orelse return;
     const b = cw.breakdown(a.transcript.tokens, a.transcript.window, a.transcript.savings, a.transcript.entries.items) orelse return;
+    if (s.pinned) {
+        if (c.shortcut(.{ .key = ui.Shortcut.escape })) {
+            s.open = false;
+            s.pinned = false;
+            s.opened_at = null;
+            c.changed = true;
+            return;
+        }
+        const back = ui.div(c).fixed().offset(0, 0).size(c.size.w, c.size.h).layer(5);
+        defer back.end();
+        if (back.clicked()) {
+            s.open = false;
+            s.pinned = false;
+            s.opened_at = null;
+            c.changed = true;
+            return;
+        }
+    }
     if (s.card_id != 0) if (c.rects.get(s.card_id)) |r| {
         s.card = r;
     };

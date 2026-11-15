@@ -70,6 +70,7 @@ pub const Account = struct {
     active: bool = false,
     switchable: bool = false,
     usage: []const Window = &.{},
+    usage_error: ?[]const u8 = null,
 
     /// The row's title (`email`, else the display name).
     pub fn title(a: Account) []const u8 {
@@ -195,6 +196,7 @@ pub fn parseSnapshot(ar: Allocator, v: json.Value) !Snapshot {
             .active = flag(o, "active"),
             .switchable = flag(o, "switchable"),
             .usage = windows.items,
+            .usage_error = try str(ar, o, "usageError"),
         });
     }
     var warnings: std.ArrayList(Warning) = .empty;
@@ -301,6 +303,119 @@ pub fn parsePoll(ar: Allocator, v: json.Value) !Poll {
 /// order: switching must not move a row).
 pub fn isOf(a: Account, h: Harness) bool {
     return std.mem.eql(u8, a.harness, h.wire());
+}
+
+/// Maps a chat/account wire harness string to its usage-reporting provider.
+pub fn providerHarness(harness_wire: []const u8) ?Harness {
+    if (std.mem.eql(u8, harness_wire, "claude") or std.mem.eql(u8, harness_wire, "claude-code")) return .claude_code;
+    if (std.mem.eql(u8, harness_wire, "codex")) return .codex;
+    if (std.mem.eql(u8, harness_wire, "cursor")) return .cursor;
+    return null;
+}
+
+/// Human-readable provider title for account usage headers.
+pub fn providerName(h: Harness) []const u8 {
+    return switch (h) {
+        .claude_code => "Claude Code",
+        .codex => "Codex",
+        .cursor => "Cursor",
+        .graff => "graff",
+    };
+}
+
+/// Whether `harness_wire` reports rate-limit usage windows.
+pub fn reportsUsage(harness_wire: []const u8) bool {
+    return providerHarness(harness_wire) != null;
+}
+
+fn matchesProvider(acc: Account, h: Harness) bool {
+    return providerHarness(acc.harness) == h;
+}
+
+/// Maximum clamped usage fraction across `acc.usage`, or null when empty.
+pub fn usedFraction(acc: Account) ?f32 {
+    if (acc.usage.len == 0) return null;
+    var best: f32 = 0;
+    for (acc.usage) |w| {
+        best = @max(best, std.math.clamp(w.used_fraction, 0, 1));
+    }
+    return best;
+}
+
+/// Whether a Cursor model draws from the first-party Cursor pool rather than Other.
+pub fn cursorModelIsFirstParty(model: []const u8) bool {
+    const m = std.mem.trim(u8, model, " \t\n\r");
+    const prefixes = [_][]const u8{ "default", "auto", "composer", "vega", "grok", "cursor-grok" };
+    for (prefixes) |prefix| {
+        if (std.mem.startsWith(u8, m, prefix) and (m.len == prefix.len or m[prefix.len] == '-' or m[prefix.len] == '.')) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Fraction shown on the footer ring for `(harness_wire, model)`.
+/// Cursor prefers the pool matching `model` ("Cursor" vs "Other") before falling back to `usedFraction`.
+pub fn ringFraction(acc: Account, harness_wire: []const u8, model: ?[]const u8) ?f32 {
+    if (providerHarness(harness_wire) == .cursor) {
+        if (model) |raw| {
+            const m = std.mem.trim(u8, raw, " \t\n\r");
+            if (m.len > 0) {
+                const want = if (cursorModelIsFirstParty(m)) "Cursor" else "Other";
+                for (acc.usage) |w| {
+                    if (std.mem.eql(u8, w.label, want)) return std.math.clamp(w.used_fraction, 0, 1);
+                }
+            }
+        }
+    }
+    return usedFraction(acc);
+}
+
+/// First active account belonging to `harness_wire`'s provider.
+pub fn activeAccountForHarness(snap: Snapshot, harness_wire: []const u8) ?Account {
+    const h = providerHarness(harness_wire) orelse return null;
+    for (snap.accounts) |acc| {
+        if (matchesProvider(acc, h) and acc.active) return acc;
+    }
+    return null;
+}
+
+/// Optimistically flips `active` inside `harness_wire` without reordering rows.
+pub fn markSwitched(items: []Account, id: []const u8, harness_wire: []const u8) void {
+    const h = providerHarness(harness_wire) orelse return;
+    var found = false;
+    for (items) |acc| {
+        if (matchesProvider(acc, h) and std.mem.eql(u8, acc.id, id)) {
+            found = true;
+            break;
+        }
+    }
+    if (!found) return;
+    for (items) |*acc| {
+        if (matchesProvider(acc.*, h)) acc.active = std.mem.eql(u8, acc.id, id);
+    }
+}
+
+/// Joins each window's label and formatted reset time with ` · ` for tooltips.
+pub fn usageResets(ar: Allocator, windows: []const Window, now_ms: i64, fixed_offset_s: ?i64) []const u8 {
+    if (windows.len == 0) return "";
+    var out: std.ArrayList(u8) = .empty;
+    for (windows, 0..) |w, i| {
+        if (i > 0) out.appendSlice(ar, " \u{00b7} ") catch return out.items;
+        if (w.resets_ms) |at| {
+            const off = fixed_offset_s orelse localOffset(at);
+            var buf: [48]u8 = undefined;
+            if (formatReset(&buf, at, now_ms, off)) |reset_str| {
+                const part = std.fmt.allocPrint(ar, "{s}: {s}", .{ w.label, reset_str }) catch continue;
+                out.appendSlice(ar, part) catch {};
+            } else {
+                out.appendSlice(ar, w.label) catch {};
+            }
+        } else {
+            out.appendSlice(ar, w.label) catch {};
+        }
+    }
+    return out.toOwnedSlice(ar) catch out.items;
 }
 
 pub fn countOf(s: Snapshot, h: Harness) usize {
@@ -707,4 +822,64 @@ test "a login's start and poll replies" {
     const poll = try parsePoll(arena.allocator(), q.value);
     try testing.expectEqual(PollStatus.pending, poll.status);
     try testing.expectEqualStrings("Still waiting", poll.message.?);
+}
+
+test "account usage rules: error parsing, ring fractions, Cursor pools, optimistic switch, and reset tooltip" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    const p = try parsed(
+        \\{"accounts": [
+        \\ {"id": "c1", "harness": "claude-code", "email": "first@example.com", "active": true, "switchable": true,
+        \\  "usageWindows": [{"label": "5h", "usedFraction": 0.24, "resetsAt": "2026-10-01T12:05:00Z"},
+        \\                   {"label": "7d", "usedFraction": 1.30, "resetsAt": "2026-10-04T10:00:00Z"}]},
+        \\ {"id": "c2", "harness": "claude-code", "email": "second@example.com", "active": false, "switchable": true,
+        \\  "usageError": "Rate limit probe timed out"},
+        \\ {"id": "cu1", "harness": "cursor", "email": "dev@example.com", "active": true, "switchable": false,
+        \\  "usageWindows": [{"label": "Cursor", "usedFraction": 0.18}, {"label": "Other", "usedFraction": 0.72}]},
+        \\ {"id": "cu2", "harness": "cursor", "email": "month@example.com", "active": false, "switchable": false,
+        \\  "usageWindows": [{"label": "Month", "usedFraction": -0.2}]}
+        \\]}
+    );
+    defer p.deinit();
+    const s = try parseSnapshot(ar, p.value);
+
+    try testing.expect(reportsUsage("claude"));
+    try testing.expect(reportsUsage("claude-code"));
+    try testing.expect(reportsUsage("codex"));
+    try testing.expect(reportsUsage("cursor"));
+    try testing.expect(!reportsUsage("graff"));
+    try testing.expectEqualStrings("Claude Code", providerName(providerHarness("claude").?));
+    try testing.expectEqualStrings("Rate limit probe timed out", s.accounts[1].usage_error.?);
+
+    try testing.expectEqual(@as(?f32, 1.0), usedFraction(s.accounts[0]));
+    try testing.expectEqual(@as(?f32, null), usedFraction(s.accounts[1]));
+    try testing.expectEqual(@as(?f32, 0.0), usedFraction(s.accounts[3]));
+
+    try testing.expect(cursorModelIsFirstParty("composer-2.5"));
+    try testing.expect(cursorModelIsFirstParty("grok-4.7"));
+    try testing.expect(cursorModelIsFirstParty("default"));
+    try testing.expect(!cursorModelIsFirstParty("grokker-1"));
+    try testing.expect(!cursorModelIsFirstParty("claude-opus-5-5"));
+    try testing.expect(!cursorModelIsFirstParty("gpt-5.5"));
+
+    try testing.expectEqual(@as(?f32, 0.18), ringFraction(s.accounts[2], "cursor", "composer-2.5"));
+    try testing.expectEqual(@as(?f32, 0.72), ringFraction(s.accounts[2], "cursor", "claude-opus-5-5"));
+    try testing.expectEqual(@as(?f32, 0.0), ringFraction(s.accounts[3], "cursor", "claude-opus-5-5"));
+
+    try testing.expectEqualStrings("c1", activeAccountForHarness(s, "claude").?.id);
+    markSwitched(@constCast(s.accounts), "c2", "claude-code");
+    try testing.expect(!s.accounts[0].active);
+    try testing.expect(s.accounts[1].active);
+    try testing.expect(s.accounts[2].active); // unrelated harness untouched
+    try testing.expectEqualStrings("c2", activeAccountForHarness(s, "claude-code").?.id);
+    // Switching to an unknown id leaves active accounts untouched.
+    markSwitched(@constCast(s.accounts), "missing", "claude-code");
+    try testing.expect(s.accounts[1].active);
+
+    const now_ms = rules.parseTime("2026-10-01T10:00:00Z").?;
+    const tip = usageResets(ar, s.accounts[0].usage, now_ms, 0);
+    try testing.expectEqualStrings("5h: resets 12:05 PM \u{00b7} 7d: resets Sun", tip);
+    try testing.expectEqualStrings("Cursor \u{00b7} Other", usageResets(ar, s.accounts[2].usage, now_ms, 0));
+    try testing.expectEqualStrings("", usageResets(ar, &.{}, now_ms, 0));
 }

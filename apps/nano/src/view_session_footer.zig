@@ -64,11 +64,13 @@ pub fn footer(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
     const model_w = @import("view_composer.zig").chip(c, a, k);
     @import("view_composer.zig").followUpChip(c, a, k, false);
     {
+        const rings_w: f32 = if (@import("view_account_usage.zig").hasRing(a)) 128 else 64;
         const slot = ui.div(c).row().grow().w(0).hFull().itemsCenter().clip();
         defer slot.end();
-        const slot_w = if (c.rects.get(c.node(slot.index).id)) |sr| sr.w else @max(0, w - 20 - model_w - 64);
+        const slot_w = if (c.rects.get(c.node(slot.index).id)) |sr| sr.w else @max(0, w - 20 - model_w - rings_w);
         session(c, a, k, slot_w);
     }
+    @import("view_account_usage.zig").indicator(c, a, k);
     @import("view_context.zig").indicator(c, a, k);
 }
 

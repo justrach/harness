@@ -17,6 +17,8 @@ const icons = @import("icons.zig");
 const kit = @import("view_kit.zig");
 const tip = @import("view_tooltip.zig");
 const graff_update = @import("graff_update.zig");
+const agent_updates = @import("agent_updates.zig");
+const rules = @import("rules.zig");
 const App = @import("app.zig").App;
 
 pub const max_highlights = 4;
@@ -671,6 +673,7 @@ pub fn openExternalUrl(url: []const u8) void {
 
 /// Height contributed to the sidebar footer by any active update pills.
 pub fn sidebarFooterExtraHeight(a: *const App) f32 {
+    if (a.settings.uiMode() == .zen) return 0;
     var h: f32 = 0;
     if (graffVisible(a)) h += 34;
     if (restartPlace(appUpdateVersion(a), sidebarFits(a), a.updates.restartDismissed()) == .sidebar_row) h += 34;
@@ -685,6 +688,8 @@ pub fn sidebarFooterRows(c: *ui.Context, a: *App, k: theme.Colors) void {
     a.updates.dirty = false;
     a.updates.release();
     if (was_dirty) c.changed = true;
+
+    if (a.settings.uiMode() == .zen) return;
 
     const show_graff = graffVisible(a);
     const update_ver = appUpdateVersion(a);
@@ -794,6 +799,7 @@ fn sidebarAppUpdateRow(c: *ui.Context, a: *App, k: theme.Colors, ver: []const u8
 }
 
 pub fn titlebarVisible(a: *const App) bool {
+    if (a.settings.uiMode() == .zen) return false;
     const ver = appUpdateVersion(a) orelse return false;
     if (appRestartVersion(a)) |rver| {
         if (restartPlace(rver, sidebarFits(a), a.updates.restartDismissed()) != .titlebar) return false;
@@ -837,6 +843,550 @@ pub fn overlayCard(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (!graffVisible(a) or !a.updates.graff_card_open) return;
     if (a.updates.graff_kind != .updated and a.updates.graff_kind != .available) return;
     graffNoticeCard(c, a, k);
+}
+
+pub const UnifiedKind = enum {
+    app,
+    engine,
+    agent,
+};
+
+pub const UnifiedAction = union(enum) {
+    none,
+    app_update: []const u8,
+    app_restart: []const u8,
+    graff_update_now,
+    graff_notes: []const u8,
+    agent_rpc: struct {
+        device_id: []const u8,
+        method: []const u8,
+        harness: []const u8,
+    },
+    open_settings,
+    dismiss_done,
+};
+
+pub const UnifiedRow = struct {
+    kind: UnifiedKind,
+    id: []const u8,
+    token: []const u8,
+    title: []const u8,
+    detail: []const u8,
+    mark_id: []const u8,
+    busy: bool = false,
+    updated: bool = false,
+    failed: bool = false,
+    skippable: bool = true,
+    enabled: bool = true,
+    action_label: ?[]const u8 = null,
+    action: UnifiedAction = .none,
+
+    pub fn isBatchUpdatable(r: UnifiedRow) bool {
+        if (!r.enabled) return false;
+        return switch (r.action) {
+            .app_update, .graff_update_now => !r.failed,
+            .agent_rpc => |rpc_act| std.mem.eql(u8, rpc_act.method, "ApplyHarnessUpdate") and !r.failed,
+            else => false,
+        };
+    }
+};
+
+pub fn skipToken(alloc: std.mem.Allocator, st: agent_updates.Status) []const u8 {
+    if (st.phase == .failed) {
+        return std.fmt.allocPrint(alloc, "failed:{s}:{s}", .{
+            st.latest_version orelse "",
+            st.error_message orelse "",
+        }) catch "failed";
+    }
+    return st.latest_version orelse st.installed_version orelse @tagName(st.phase);
+}
+
+fn deviceLabel(a: *const App, id: []const u8) []const u8 {
+    for (a.devices.items) |d| if (std.mem.eql(u8, d.id, id)) return d.name;
+    if (a.device_id) |me| if (std.mem.eql(u8, me, id)) return "This Mac";
+    return id;
+}
+
+pub fn collectUnifiedRows(a: *const App, alloc: std.mem.Allocator) []const UnifiedRow {
+    var out: std.ArrayList(UnifiedRow) = .empty;
+
+    // 1. Desktop app update (`app:harness`).
+    if (appUpdateVersion(a)) |ver| {
+        const dismissed = if (a.updates.restartDismissed()) |d| std.mem.eql(u8, d, ver) else false;
+        const app_tok = if (a.updates.appFailed()) |err|
+            (std.fmt.allocPrint(alloc, "failed:{s}:{s}", .{ ver, err }) catch ver)
+        else
+            ver;
+        const skipped = !a.updates.app_downloading and !a.updates.app_ready and a.settings.isUpdateSkipped("app:harness", app_tok);
+        if (!dismissed and !skipped) {
+            const cur = @import("build_info").version;
+            const ready = a.updates.app_ready or std.mem.eql(u8, ver, "preview");
+            const detail = if (ready)
+                (std.fmt.allocPrint(alloc, "{s} \u{2192} {s} · Ready", .{ cur, ver }) catch "Ready to restart")
+            else if (a.updates.app_downloading)
+                (std.fmt.allocPrint(alloc, "Downloading v{s}…", .{ver}) catch "Downloading…")
+            else if (a.updates.appFailed()) |err|
+                err
+            else
+                (std.fmt.allocPrint(alloc, "{s} \u{2192} {s}", .{ cur, ver }) catch ver);
+
+            out.append(alloc, .{
+                .kind = .app,
+                .id = "app:harness",
+                .token = app_tok,
+                .title = "Harness",
+                .detail = detail,
+                .mark_id = "graff",
+                .busy = a.updates.app_downloading,
+                .updated = ready,
+                .failed = !ready and !a.updates.app_downloading and a.updates.appFailed() != null,
+                .skippable = !a.updates.app_downloading,
+                .enabled = !a.updates.app_downloading,
+                .action_label = if (ready) "Restart" else if (a.updates.app_downloading) "Updating…" else if (a.updates.appFailed() != null) "Retry" else "Update",
+                .action = if (ready) .{ .app_restart = ver } else if (a.updates.app_downloading) .none else .{ .app_update = ver },
+            }) catch {};
+        }
+    }
+
+    // 2. Managed Codegraff engine update (`engine:graff`).
+    if (graffVisible(a)) {
+        if (a.updates.graffTo()) |to| {
+            const busy = a.updates.graff_kind == .updating or a.updates.graff_updating_manual;
+            const skipped = !busy and a.settings.isUpdateSkipped("engine:graff", to);
+            if (!skipped) {
+                const detail = if (a.updates.graffFrom()) |from|
+                    (std.fmt.allocPrint(alloc, "{s} \u{2192} {s}", .{ from, to }) catch to)
+                else
+                    (std.fmt.allocPrint(alloc, "v{s}", .{to}) catch to);
+                out.append(alloc, .{
+                    .kind = .engine,
+                    .id = "engine:graff",
+                    .token = to,
+                    .title = "Codegraff",
+                    .detail = detail,
+                    .mark_id = "graff",
+                    .busy = busy,
+                    .updated = !busy and a.updates.graff_kind == .updated,
+                    .skippable = !busy,
+                    .enabled = !busy,
+                    .action_label = if (busy) "Updating…" else if (a.updates.graff_kind == .updated) "Notes" else "Update",
+                    .action = if (busy) .none else if (a.updates.graff_kind == .updated) .{ .graff_notes = to } else .graff_update_now,
+                }) catch {};
+            }
+        }
+    }
+
+    // 3. CLI agent updates (`agent:<device>:<harness>`).
+    var dev_with_notices: usize = 0;
+    for (a.agent_updates.devices.items) |w| {
+        var any_for_dev = false;
+        for (w.statuses) |st| {
+            if (!st.showUpdateNotice()) continue;
+            const row_id = std.fmt.allocPrint(alloc, "agent:{s}:{s}", .{ w.device_id, st.harness }) catch continue;
+            const tok = skipToken(alloc, st);
+            const active = st.phase.isActive();
+            if (!active and a.settings.isUpdateSkipped(row_id, tok)) continue;
+            any_for_dev = true;
+            break;
+        }
+        if (any_for_dev) dev_with_notices += 1;
+    }
+
+    for (a.agent_updates.devices.items) |w| {
+        const connected = w.online and w.connected;
+        const dev_name = deviceLabel(a, w.device_id);
+        for (w.statuses) |st| {
+            if (!st.showUpdateNotice()) continue;
+            const row_id = std.fmt.allocPrint(alloc, "agent:{s}:{s}", .{ w.device_id, st.harness }) catch continue;
+            const tok = skipToken(alloc, st);
+            const active = st.phase.isActive();
+            if (!active and a.settings.isUpdateSkipped(row_id, tok)) continue;
+
+            const base_detail: []const u8 = if (st.installed_version != null and st.latest_version != null and !std.mem.eql(u8, st.installed_version.?, st.latest_version.?))
+                (std.fmt.allocPrint(alloc, "{s} \u{2192} {s}", .{ st.installed_version.?, st.latest_version.? }) catch "Update available")
+            else switch (st.phase) {
+                .updated => if (st.latest_version orelse st.installed_version) |ver|
+                    (std.fmt.allocPrint(alloc, "{s} · Updated", .{ver}) catch "Updated")
+                else
+                    "Updated",
+                .failed => st.error_message orelse if (st.error_kind == .install) "Update failed" else "Couldn't check for updates",
+                .waiting_for_idle => "Waiting for current run",
+                .preparing => "Preparing update…",
+                .downloading => st.progress_message orelse "Downloading…",
+                .installing => "Installing…",
+                .verifying => "Verifying…",
+                .manual_action_required => "Check and update",
+                else => if (st.latest_version) |lat|
+                    (std.fmt.allocPrint(alloc, "v{s} available", .{lat}) catch "Update available")
+                else
+                    "Update available",
+            };
+
+            const detail = if (dev_with_notices > 1)
+                (std.fmt.allocPrint(alloc, "{s} · {s}", .{ base_detail, dev_name }) catch base_detail)
+            else
+                base_detail;
+
+            const action_label: ?[]const u8 = switch (st.phase) {
+                .available => if (st.can_apply) "Update" else "Steps",
+                .manual_action_required => if (st.can_apply) "Check and update" else null,
+                .waiting_for_idle, .preparing, .downloading => "Cancel",
+                .failed => if (st.can_apply and st.error_kind == .install) "Retry" else "Check",
+                .updated => "Done",
+                else => null,
+            };
+
+            const action: UnifiedAction = switch (st.phase) {
+                .available => if (st.can_apply)
+                    .{ .agent_rpc = .{ .device_id = w.device_id, .method = "ApplyHarnessUpdate", .harness = st.harness } }
+                else
+                    .open_settings,
+                .manual_action_required => if (st.can_apply)
+                    .{ .agent_rpc = .{ .device_id = w.device_id, .method = "ApplyHarnessUpdate", .harness = st.harness } }
+                else
+                    .none,
+                .waiting_for_idle, .preparing, .downloading => .{ .agent_rpc = .{
+                    .device_id = w.device_id,
+                    .method = "CancelHarnessUpdate",
+                    .harness = st.harness,
+                } },
+                .failed => .{ .agent_rpc = .{
+                    .device_id = w.device_id,
+                    .method = if (st.can_apply and st.error_kind == .install) "ApplyHarnessUpdate" else "CheckHarnessUpdates",
+                    .harness = st.harness,
+                } },
+                .updated => .dismiss_done,
+                else => .none,
+            };
+
+            const can_act = switch (action) {
+                .agent_rpc => connected,
+                .none => false,
+                else => true,
+            };
+
+            out.append(alloc, .{
+                .kind = .agent,
+                .id = row_id,
+                .token = tok,
+                .title = agent_updates.agentName(st.harness),
+                .detail = detail,
+                .mark_id = st.harness,
+                .busy = active,
+                .updated = st.phase == .updated,
+                .failed = st.phase == .failed,
+                .skippable = !active and st.phase != .updated,
+                .enabled = can_act,
+                .action_label = action_label,
+                .action = action,
+            }) catch {};
+        }
+    }
+
+    return out.items;
+}
+
+pub fn topbarUpdatesCount(a: *const App) usize {
+    var count: usize = 0;
+
+    if (appUpdateVersion(a)) |ver| {
+        const dismissed = if (a.updates.restartDismissed()) |d| std.mem.eql(u8, d, ver) else false;
+        var tok_buf: [256]u8 = undefined;
+        const app_tok = if (a.updates.appFailed()) |err|
+            (std.fmt.bufPrint(&tok_buf, "failed:{s}:{s}", .{ ver, err }) catch ver)
+        else
+            ver;
+        const skipped = !a.updates.app_downloading and !a.updates.app_ready and a.settings.isUpdateSkipped("app:harness", app_tok);
+        if (!dismissed and !skipped) count += 1;
+    }
+
+    if (graffVisible(a)) {
+        if (a.updates.graffTo()) |to| {
+            const busy = a.updates.graff_kind == .updating or a.updates.graff_updating_manual;
+            const skipped = !busy and a.settings.isUpdateSkipped("engine:graff", to);
+            if (!skipped) count += 1;
+        }
+    }
+
+    for (a.agent_updates.devices.items) |w| {
+        for (w.statuses) |st| {
+            if (!st.showUpdateNotice()) continue;
+            var id_buf: [192]u8 = undefined;
+            const row_id = std.fmt.bufPrint(&id_buf, "agent:{s}:{s}", .{ w.device_id, st.harness }) catch continue;
+            var tok_buf: [256]u8 = undefined;
+            const tok = if (st.phase == .failed)
+                (std.fmt.bufPrint(&tok_buf, "failed:{s}:{s}", .{
+                    st.latest_version orelse "",
+                    st.error_message orelse "",
+                }) catch "failed")
+            else
+                (st.latest_version orelse st.installed_version orelse @tagName(st.phase));
+            if (!st.phase.isActive() and a.settings.isUpdateSkipped(row_id, tok)) continue;
+            count += 1;
+        }
+    }
+
+    return count;
+}
+
+pub fn topbarUpdatesWidth(a: *const App) f32 {
+    const n = topbarUpdatesCount(a);
+    if (n == 0) return 0;
+    const tiles: usize = @min(n, 3);
+    const stack_w: f32 = 20 + @as(f32, @floatFromInt(tiles - 1)) * 15;
+    return 5 + stack_w + 6 + 16 + 8;
+}
+
+pub fn topbarTrailingReserve(a: *const App) f32 {
+    if (a.view.settings_open) return 0;
+    const uw = topbarUpdatesWidth(a);
+    const zen = a.settings.uiMode() == .zen;
+    if (uw == 0 and !zen) return 0;
+    const total = uw + (if (uw > 0 and zen) @as(f32, 6) else 0) + (if (zen) @as(f32, 28) else 0);
+    return total + 4;
+}
+
+pub fn topbarUpdatesButton(c: *ui.Context, a: *App, k: theme.Colors) void {
+    a.updates.acquire();
+    const was_dirty = a.updates.dirty;
+    a.updates.dirty = false;
+    a.updates.release();
+    if (was_dirty) c.changed = true;
+
+    const rows = collectUnifiedRows(a, c.alloc());
+    if (rows.len == 0) {
+        a.view.updates_anchor = null;
+        a.view.updates_popover = false;
+        return;
+    }
+
+    const tiles: usize = @min(rows.len, 3);
+    const stack_w: f32 = 20 + @as(f32, @floatFromInt(tiles - 1)) * 15;
+    var any_busy = false;
+    var all_updated = true;
+    for (rows) |r| {
+        if (r.busy) any_busy = true;
+        if (!r.updated) all_updated = false;
+    }
+
+    ui.key(c, "updates-button");
+    const bg = if (a.view.updates_popover) k.hover else k.ink(if (k.dark) 0.085 else 0.055);
+    const btn = tip.on(
+        ui.div(c).row().h(28).pl(5).pr(8).gap(6).itemsCenter().roundedFull()
+            .bg(bg).border(k.border).borderW(1).hover(k.hover).control(),
+        k,
+        .{ .text = if (rows.len == 1) "1 update" else c.print("{d} updates", .{rows.len}), .delay = tip.quick },
+    );
+    const clicked = btn.clicked();
+    if (c.rects.get(c.node(btn.index).id)) |r| a.view.updates_anchor = r;
+    {
+        defer btn.end();
+        {
+            const stack = ui.div(c).row().size(stack_w, 20).itemsCenter();
+            defer stack.end();
+            var idx = tiles;
+            while (idx > 0) {
+                idx -= 1;
+                const mark = icons.harnessMark(rows[idx].mark_id);
+                const plate = ui.div(c).row().absolute().offset(@as(f32, @floatFromInt(idx)) * 15, 0)
+                    .size(20, 20).center().roundedFull().bg(ui.Color.white)
+                    .border(k.shell).borderW(1.5);
+                defer plate.end();
+                icons.icon(c, mark.name, 11, mark.brand orelse ui.Color.hex(0x18181b), 0);
+            }
+        }
+        {
+            const glyph = ui.div(c).row().size(16, 16).center();
+            defer glyph.end();
+            if (any_busy) {
+                kit.snake(c, k);
+            } else if (all_updated) {
+                icons.icon(c, .check, 14, k.success, 0);
+            } else {
+                icons.icon(c, .@"download-minimalistic", 14, k.text.alpha(0.88), 0);
+            }
+        }
+    }
+    if (clicked) {
+        a.view.updates_popover = !a.view.updates_popover;
+        a.redraw();
+    }
+}
+
+pub fn updatesPopover(c: *ui.Context, a: *App, k: theme.Colors) void {
+    if (!a.view.updates_popover) return;
+    const rows = collectUnifiedRows(a, c.alloc());
+    if (rows.len == 0) {
+        a.view.updates_popover = false;
+        return;
+    }
+    if (c.shortcut(.{ .key = ui.Shortcut.escape })) {
+        a.view.updates_popover = false;
+        c.changed = true;
+        return;
+    }
+    {
+        const back = ui.div(c).fixed().offset(0, 0).size(c.size.w, c.size.h).layer(5);
+        defer back.end();
+        if (back.clicked()) {
+            a.view.updates_popover = false;
+            return;
+        }
+    }
+
+    const pop_w: f32 = 340;
+    const anchor = a.view.updates_anchor orelse ui.Rect{ .x = c.size.w - 110, .y = 6, .w = 80, .h = 28 };
+    const px = rules.snapToWindow(anchor.x + anchor.w - pop_w, pop_w, c.size.w, 8);
+    const py = anchor.y + anchor.h + 8;
+
+    ui.key(c, "updates-popover");
+    const card = @import("view_sidebar_menus.zig").held(kit.shadowLg(
+        ui.div(c).fixed().offset(px, py).w(pop_w).layer(6).column().p(12).gap(8)
+            .bg(k.composer).border(k.border).borderW(1).rounded(12),
+    ));
+    defer card.end();
+
+    var updatable_count: usize = 0;
+    for (rows) |row| if (row.isBatchUpdatable()) {
+        updatable_count += 1;
+    };
+
+    if (updatable_count >= 2) {
+        const top = ui.div(c).row().wFull().justifyEnd().itemsCenter();
+        defer top.end();
+        ui.key(c, "updates-update-all");
+        const all_btn = ui.div(c).row().h(28).px(12).center().roundedFull()
+            .bg(k.text).hover(k.text.alpha(0.86)).control();
+        const all_clicked = all_btn.clicked();
+        {
+            defer all_btn.end();
+            ui.text(c, "Update all", .{
+                .size = 12,
+                .line_height = 16,
+                .weight = .medium,
+                .color = k.shell,
+            });
+        }
+        if (all_clicked) {
+            for (rows) |row| {
+                if (row.isBatchUpdatable()) triggerUnifiedAction(a, row);
+            }
+        }
+    }
+
+    if (rows.len > 3) {
+        ui.key(c, "updates-popover-list");
+        const list = ui.div(c).column().wFull().maxH(164).gap(8).scrollY()
+            .scrollbar(.{ .overlay = k.faint.alpha(0.5) });
+        c.node(list.index).style.scroll_edge_fade = 18;
+        defer list.end();
+        for (rows) |row| drawUnifiedRow(c, a, k, row);
+    } else {
+        for (rows) |row| drawUnifiedRow(c, a, k, row);
+    }
+}
+
+fn drawUnifiedRow(c: *ui.Context, a: *App, k: theme.Colors, row: UnifiedRow) void {
+    ui.key(c, c.print("updates-row-{s}", .{row.id}));
+    const line = ui.div(c).row().wFull().py(4).gap(10).itemsCenter();
+    defer line.end();
+
+    {
+        const plate = ui.div(c).row().size(32, 32).center().rounded(8)
+            .bg(ui.Color.white).border(ui.Color.black.alpha(0.08)).borderW(1);
+        defer plate.end();
+        const mark = icons.harnessMark(row.mark_id);
+        icons.icon(c, mark.name, 18, mark.brand orelse ui.Color.hex(0x18181b), 0);
+    }
+
+    {
+        const info = ui.div(c).column().grow().w(0).gap(2);
+        defer info.end();
+        kit.ellipsisText(c, row.title, .{
+            .size = 13,
+            .line_height = 17,
+            .weight = .medium,
+            .color = k.text,
+        }, 136);
+        kit.ellipsisText(c, row.detail, .{
+            .size = 11.5,
+            .line_height = 15,
+            .color = if (row.failed) k.danger else k.muted,
+        }, 152);
+    }
+
+    const ctrl = ui.div(c).row().gap(8).itemsCenter();
+    defer ctrl.end();
+    if (row.skippable) {
+        ui.key(c, c.print("updates-skip-{s}", .{row.id}));
+        const skip_btn = ui.div(c).row().h(26).px(6).center().roundedFull().hover(k.hover).control();
+        const skip_hot = skip_btn.hovered();
+        const skip_clicked = skip_btn.clicked();
+        {
+            defer skip_btn.end();
+            ui.text(c, "Skip", .{
+                .size = 11.5,
+                .line_height = 15,
+                .color = if (skip_hot) k.text else k.muted,
+            });
+        }
+        if (skip_clicked) skipUnifiedRow(a, row);
+    }
+
+    if (row.action_label) |lbl| {
+        ui.key(c, c.print("updates-act-{s}", .{row.id}));
+        var act_btn = ui.div(c).row().h(26).px(12).center().roundedFull()
+            .bg(k.ink(if (k.dark) 0.08 else 0.06)).border(k.border.alpha(0.7)).borderW(1);
+        act_btn = if (row.enabled) act_btn.hover(k.hover).control() else act_btn.opacity(0.45);
+        const act_clicked = row.enabled and act_btn.clicked();
+        {
+            defer act_btn.end();
+            ui.text(c, lbl, .{
+                .size = 11.5,
+                .line_height = 15,
+                .weight = .medium,
+                .color = k.text,
+            });
+        }
+        if (act_clicked) triggerUnifiedAction(a, row);
+    }
+}
+
+fn skipUnifiedRow(a: *App, row: UnifiedRow) void {
+    a.settings.skipUpdate(row.id, row.token);
+    switch (row.kind) {
+        .app => {
+            if (appUpdateVersion(a)) |ver| {
+                const n = @min(ver.len, a.updates.restart_dismissed.len);
+                @memcpy(a.updates.restart_dismissed[0..n], ver[0..n]);
+                a.updates.restart_dismissed_len = n;
+            }
+        },
+        .engine => dismissGraff(a),
+        .agent => {},
+    }
+    a.redraw();
+}
+
+fn triggerUnifiedAction(a: *App, row: UnifiedRow) void {
+    switch (row.action) {
+        .none => {},
+        .app_update => |ver| triggerAppUpdate(a, ver),
+        .app_restart => |ver| triggerAppUpdate(a, ver),
+        .graff_update_now => {
+            a.updates.graff_updating_manual = true;
+            graff_update.startManual(a);
+            a.redraw();
+        },
+        .graff_notes => |ver| openExternalUrl(std.fmt.allocPrint(a.gpa, "https://github.com/justrach/codegraff/releases/tag/v{s}", .{ver}) catch "https://github.com/justrach/codegraff/releases"),
+        .agent_rpc => |r| agent_updates.runAction(a, r.device_id, r.method, r.harness),
+        .open_settings => {
+            a.view.updates_popover = false;
+            a.settings.setSection(.agents);
+            @import("view_settings.zig").open(a);
+        },
+        .dismiss_done => skipUnifiedRow(a, row),
+    }
 }
 
 fn appUpdatedCard(c: *ui.Context, a: *App, k: theme.Colors) void {

@@ -38,6 +38,11 @@ or send progress updates with `send_message`; use unmentioned room posts for pro
 Send only actionable questions, blockers, or final requested results. If your earlier \
 message is still queued, stop sending rather than retrying. Reply chains are bounded.";
 
+const DESIGN_BEFORE_AFTER_INSTRUCTIONS: &str = "\n\n\
+When you make a UI, layout, or styling change in this chat, capture synthetic \
+Before and After screenshots inside the workspace and call `show_before_after` \
+so the user can compare them inline in the conversation.";
+
 const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
@@ -140,6 +145,10 @@ pub async fn handle_request(tools: &Tools, id: Value, method: &str, params: Valu
             } else {
                 LATEST_PROTOCOL
             };
+            let mut instructions = String::from(INSTRUCTIONS);
+            if tools.from_chat_context() && tools.design_before_after_enabled() {
+                instructions.push_str(DESIGN_BEFORE_AFTER_INSTRUCTIONS);
+            }
             ok_response(
                 id,
                 json!({
@@ -149,7 +158,7 @@ pub async fn handle_request(tools: &Tools, id: Value, method: &str, params: Valu
                         "name": "harness",
                         "version": env!("CARGO_PKG_VERSION"),
                     },
-                    "instructions": INSTRUCTIONS,
+                    "instructions": instructions,
                 }),
             )
         }

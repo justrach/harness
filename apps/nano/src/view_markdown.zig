@@ -178,9 +178,30 @@ fn rich(c: *ui.Context, in: md.Inline, style: ui.TextStyle) void {
         var prose = in;
         prose.images = &.{};
         rich(c, prose, style);
+        const before_after = @import("view_before_after.zig");
+        var skip_next = false;
         for (in.images, 0..) |image, i| {
-            ui.key(c, c.print("md-picture-{d}", .{i}));
+            if (skip_next) {
+                skip_next = false;
+                continue;
+            }
             const alt = in.text[image.start..image.end];
+            if (github_images_app == null) {
+                if (link_owner) |owner| {
+                    if (owner.app.settings.get(.design_before_after_enabled) and i + 1 < in.images.len) {
+                        const next = in.images[i + 1];
+                        const next_alt = in.text[next.start..next.end];
+                        if (before_after.matchPair(alt, next_alt)) |caption| {
+                            ui.key(c, c.print("md-before-after-{d}", .{i}));
+                            const id = before_after.cardId(owner.parent, image.src, next.src, caption);
+                            before_after.drawPair(c, owner.app, k, owner.parent, id, image.src, alt, next.src, next_alt, caption, 580);
+                            skip_next = true;
+                            continue;
+                        }
+                    }
+                }
+            }
+            ui.key(c, c.print("md-picture-{d}", .{i}));
             if (github_images_app) |app| {
                 @import("github_images.zig").draw(c, app, k, image.src, alt, image.width);
             } else if (link_owner) |owner| {

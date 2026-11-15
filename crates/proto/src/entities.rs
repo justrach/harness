@@ -874,12 +874,32 @@ pub struct CheckoutFileDiffText {
     pub stale: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CardTraits {
+    pub scene: u32,
+    pub sky: u32,
+    pub enso: u32,
+    pub holo: u32,
+    pub seal: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserProfile {
     pub id: String,
     pub email: String,
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_number: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card_scenes: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card_traits: Option<CardTraits>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -19,6 +19,7 @@ const tr = @import("transcript.zig");
 const steer_order = @import("steer_order.zig");
 const attachment_refs = @import("attachment_refs.zig");
 const attachment_images = @import("app_attachment_images.zig");
+const before_after = @import("view_before_after.zig");
 const sidebar = @import("view_sidebar.zig");
 const App = @import("app.zig").App;
 const rows_st = @import("view_settings_accounts_rows.zig").st;
@@ -55,7 +56,9 @@ pub fn paneWidth(c: *ui.Context, a: *const App) f32 {
     const s = a.tabs.layout() orelse return w;
     if (s.zoomed or s.axis != .horizontal or s.panes.items.len <= 1) return w;
     const total = a.view.chrome.chat_width;
-    const target = @import("panel_chrome.zig").paneSpan(total, s.shares.items[s.focus], s.panes.items.len, true);
+    const chrome = @import("panel_chrome.zig");
+    const ws_gutter = if (a.settings.uiMode() == .zen) chrome.zen_gutter else chrome.gutter;
+    const target = chrome.paneSpanIn(total, s.shares.items[s.focus], s.panes.items.len, true, ws_gutter);
     const span = if (a.view.split_reveal) |r| blk: {
         if (r.tab != a.tabs.active or r.new_index >= s.panes.items.len) break :blk target;
         const start = r.started orelse c.time;
@@ -138,7 +141,7 @@ pub fn entries(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript
     const frame = ui.div(c).column().grow().wFull().h(0);
     defer frame.end();
     const drawn = rows(c, a, k, t, w, loading, top);
-    topFade(c, k);
+    topFade(c, a, k, drawn.box);
     return drawn;
 }
 
@@ -146,14 +149,20 @@ pub fn entries(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript
 /// under the title bar, gone by its edge (shell.rs `edge_faded`, its
 /// `inset_top(TITLEBAR_HEIGHT)`), here as the column's colour laid over
 /// them a point at a time.
-fn topFade(c: *ui.Context, k: theme.Colors) void {
+fn topFade(c: *ui.Context, a: *const App, k: theme.Colors, scroll_box: u64) void {
+    const zen = a.settings.uiMode() == .zen;
     // A tint overlay can imitate a solid background, not a native backdrop:
     // on glass it makes an opaque stripe even when there is no text here.
-    if (k.frosted) return;
-    const band: f32 = 24;
+    if (!zen and k.frosted) return;
+    // In Zen mode, leave unscrolled conversations completely clean at the top
+    // and gently fade scrolled rows into the Zen panel plane instead of the
+    // darker shell background.
+    if (zen and (c.scroll.get(scroll_box) orelse 0) <= 1.0) return;
+    const fade_bg = if (zen) @import("view_panel_chrome.zig").zenPageBg(k) else k.background;
+    const band: f32 = if (zen) 18 else 24;
     var y: f32 = 0;
     while (y < band) : (y += 1) {
-        _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.background.alpha(1 - (y + 0.5) / band), .absolute = true, .offset = .{ .x = 0, .y = y } }, .none, null);
+        _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = fade_bg.alpha(1 - (y + 0.5) / band), .absolute = true, .offset = .{ .x = 0, .y = y } }, .none, null);
     }
 }
 
@@ -632,7 +641,13 @@ fn partRows(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, parts:
         ui.text(c, "Unable to render reply: out of memory", .{ .size = 12, .color = k.danger });
         return;
     };
-    for (tools.runs(buf, parts)) |r| {
+    const runs = tools.runs(buf, parts);
+    var skip_next = false;
+    for (runs, 0..) |r, ri| {
+        if (skip_next) {
+            skip_next = false;
+            continue;
+        }
         const p = &parts[r.start];
         ui.key(c, c.print("run-{s}-{s}", .{ e.id, p.id }));
         if (r.group) {
@@ -643,6 +658,19 @@ fn partRows(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, parts:
             } else true;
             group(c, a, k, e, parts[r.start..r.end], tail, at.chat_id);
             continue;
+        }
+        if (p.kind == .image and a.settings.get(.design_before_after_enabled) and ri + 1 < runs.len) {
+            const nr = runs[ri + 1];
+            if (!nr.group) {
+                const np = &parts[nr.start];
+                if (np.kind == .image) {
+                    if (before_after.matchPair(p.text.items, np.text.items)) |caption| {
+                        before_after.drawPair(c, a, k, at.chat_id, before_after.cardId(at.chat_id, e.id, p.id, np.id), p.path, p.text.items, np.path, np.text.items, caption, at.col);
+                        skip_next = true;
+                        continue;
+                    }
+                }
+            }
         }
         part(c, a, k, e, p, at, answer);
     }
@@ -721,7 +749,12 @@ fn compactParts(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, at
     };
     var answer = answer_in;
     answer.label = work.items.len == 0;
+    var skip_next = false;
     for (items, 0..) |*p, i| {
+        if (skip_next) {
+            skip_next = false;
+            continue;
+        }
         if (compact.isWork(i, p, reply)) {
             if (i != first.?) continue;
             if (work.items.len > 0) {
@@ -732,6 +765,16 @@ fn compactParts(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, at
             continue;
         }
         ui.key(c, c.print("part-{s}-{s}", .{ e.id, p.id }));
+        if (p.kind == .image and a.settings.get(.design_before_after_enabled) and i + 1 < items.len) {
+            const np = &items[i + 1];
+            if (!compact.isWork(i + 1, np, reply) and np.kind == .image) {
+                if (before_after.matchPair(p.text.items, np.text.items)) |caption| {
+                    before_after.drawPair(c, a, k, at.chat_id, before_after.cardId(at.chat_id, e.id, p.id, np.id), p.path, p.text.items, np.path, np.text.items, caption, at.col);
+                    skip_next = true;
+                    continue;
+                }
+            }
+        }
         part(c, a, k, e, p, at, answer);
     }
 }

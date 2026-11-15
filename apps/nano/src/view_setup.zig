@@ -28,7 +28,7 @@ pub const questions: usize = 4;
 /// main: Nano matches main's GPUI, which neither runs first-run setup at
 /// launch nor shows Settings › Agents' Autonomy card. `HARNESS_SETUP_STEP`
 /// still opens it, for working on it.
-pub const enabled = false;
+pub const enabled = true;
 
 /// What agents on a device may do without asking (`harness_proto::Autonomy`).
 pub const Autonomy = enum {
@@ -89,9 +89,34 @@ pub fn readAutonomy(v: json.Value) ?Read {
     return .{ .autonomy = au, .chosen = chosen };
 }
 
-const extras = [_][]const u8{ "claude-code", "codex" };
-const extra_names = [_][]const u8{ "Claude Code", "OpenAI Codex" };
-const extra_icons = [_]icons.Name{ .@"claude-mark", .@"openai-mark" };
+const Extra = struct {
+    id: []const u8,
+    name: []const u8,
+    summary_name: []const u8,
+    cli: []const u8,
+    cmd: []const u8,
+    icon: icons.Name,
+};
+
+const extra_list = [_]Extra{
+    .{
+        .id = "claude-code",
+        .name = "Claude Code",
+        .summary_name = "Claude Code",
+        .cli = "claude CLI",
+        .cmd = "curl -fsSL https://claude.ai/install.sh | bash",
+        .icon = .@"claude-mark",
+    },
+    .{
+        .id = "codex",
+        .name = "ChatGPT · OpenAI Codex",
+        .summary_name = "OpenAI Codex",
+        .cli = "codex CLI",
+        .cmd = "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+        .icon = .@"openai-mark",
+    },
+};
+
 const starters = [_][]const u8{ "Tour this project and tell me how it fits together", "Find one small bug and fix it" };
 const starter_labels = [_][]const u8{ "Tour this project", "Fix a small bug" };
 const capabilities = [_][]const u8{ "Read files and run searches", "Edit files in this project", "Run commands outside it", "Approve its own requests" };
@@ -102,6 +127,13 @@ pub const Setup = struct {
     extras_on: [2]bool = .{ false, false },
     extras_was: [2]bool = .{ false, false },
     extras_seen: bool = false,
+    /// Which CLI index (`0` = Claude Code, `1` = Codex) is currently installing.
+    installing: ?usize = null,
+    install_both_pending: bool = false,
+    install_call: ?u64 = null,
+    refresh_call: ?u64 = null,
+    copied: ?usize = null,
+    copied_until: f64 = 0,
     /// The picked one of Graff's first three models.
     model: usize = 0,
     /// The picked rung of its ladder; null is its default.
@@ -110,7 +142,7 @@ pub const Setup = struct {
     autonomy_call: ?u64 = null,
     notify: bool = true,
     starter: ?usize = null,
-    /// A write that failed (static text).
+    /// A write or CLI install that failed (static text).
     err: ?[]const u8 = null,
 };
 
@@ -156,6 +188,7 @@ fn check(a: *App) void {
 pub fn open(a: *App, step: usize) void {
     a.view.setup = .{ .step = @min(step, questions) };
     if (a.view.settings_open) set.close(a);
+    seed(a, &a.view.setup.?);
     if (a.engine.up()) {
         const s = &a.view.setup.?;
         if (a.engine.call("GetAutonomy", .{}, .of(App, a, onAutonomy))) |id| s.autonomy_call = id;
@@ -180,10 +213,29 @@ fn onAutonomy(a: *App, id: u64, r: rpc.Reply) void {
 fn seed(a: *App, s: *Setup) void {
     if (s.extras_seen or a.harnesses.items.len == 0) return;
     s.extras_seen = true;
-    for (extras, 0..) |id, i| if (harness(a, id)) |h| {
+    for (extra_list, 0..) |ex, i| if (harness(a, ex.id)) |h| {
         s.extras_on[i] = h.offered and h.installed;
         s.extras_was[i] = s.extras_on[i];
     };
+}
+
+fn allExtrasMissing(a: *const App, s: *const Setup) bool {
+    if (!s.extras_seen) return false;
+    for (extra_list) |ex| {
+        const h = harness(a, ex.id) orelse return false;
+        if (h.installed) return false;
+    }
+    return true;
+}
+
+fn installableMissingCount(a: *const App, s: *const Setup) usize {
+    if (!s.extras_seen) return 0;
+    var count: usize = 0;
+    for (extra_list) |ex| {
+        const h = harness(a, ex.id) orelse continue;
+        if (!h.installed and h.can_install) count += 1;
+    }
+    return count;
 }
 
 fn harness(a: *const App, id: []const u8) ?workspace.Harness {
@@ -235,16 +287,139 @@ fn levelBlurb(level: []const u8) []const u8 {
 
 // The answers.
 
+fn syncAgentsPage(a: *App, v: json.Value) void {
+    const page = @import("view_settings_agents.zig");
+    if (a.view.agents.list != null and a.view.agents.target == null) page.setList(a, v);
+}
+
 fn onEnabled(a: *App, _: u64, r: rpc.Reply) void {
     switch (r) {
         .ok => |v| {
             a.harnesses.replace(v) catch {};
-            const page = @import("view_settings_agents.zig");
-            if (a.view.agents.list != null and a.view.agents.target == null) page.setList(a, v);
+            syncAgentsPage(a, v);
         },
         .err => if (a.view.setup) |*s| {
             s.err = "Couldn't switch that agent. Try again from Settings > Agents.";
         },
+        else => {},
+    }
+    a.redraw();
+}
+
+pub fn installExtra(a: *App, idx: usize) void {
+    const s = if (a.view.setup) |*x| x else return;
+    if (idx >= extra_list.len or s.installing != null) return;
+    s.err = null;
+    s.installing = idx;
+    s.install_call = null;
+    if (a.engine.call("InstallHarness", .{
+        .harness = extra_list[idx].id,
+        .targetDeviceId = @as(?[]const u8, null),
+        .beta = false,
+    }, .of(App, a, onInstall))) |id| {
+        if (a.view.setup) |*cur| cur.install_call = id;
+    }
+    a.redraw();
+}
+
+fn installBoth(a: *App) void {
+    const s = if (a.view.setup) |*x| x else return;
+    if (s.installing != null) return;
+    s.install_both_pending = true;
+    for (extra_list, 0..) |ex, i| {
+        const h = harness(a, ex.id) orelse continue;
+        if (!h.installed and h.can_install) return installExtra(a, i);
+    }
+    s.install_both_pending = false;
+}
+
+fn onInstall(a: *App, id: u64, r: rpc.Reply) void {
+    const s = if (a.view.setup) |*x| x else return;
+    const which = s.installing orelse return;
+    if (id != 0 and s.install_call != id) return;
+    s.install_call = null;
+    s.installing = null;
+    switch (r) {
+        .ok => |v| {
+            a.harnesses.replace(v) catch {};
+            syncAgentsPage(a, v);
+            s.extras_seen = true;
+            if (harness(a, extra_list[which].id)) |h| {
+                s.extras_was[which] = h.offered and h.installed;
+                if (h.installed) s.extras_on[which] = true;
+            }
+            if (s.install_both_pending) {
+                s.install_both_pending = false;
+                for (extra_list, 0..) |ex, i| {
+                    const h = harness(a, ex.id) orelse continue;
+                    if (!h.installed and h.can_install) {
+                        installExtra(a, i);
+                        return;
+                    }
+                }
+            }
+        },
+        .err => {
+            s.install_both_pending = false;
+            s.err = "Couldn't install that CLI automatically. Run the command below in Terminal, then click Check again.";
+        },
+        else => s.install_both_pending = false,
+    }
+    a.redraw();
+}
+
+fn cancelInstall(a: *App) void {
+    const s = if (a.view.setup) |*x| x else return;
+    const which = s.installing orelse return;
+    s.installing = null;
+    s.install_call = null;
+    s.install_both_pending = false;
+    _ = a.engine.call("CancelInstall", .{
+        .harness = extra_list[which].id,
+        .targetDeviceId = @as(?[]const u8, null),
+        .beta = false,
+    }, .of(App, a, onCancelInstall));
+    a.redraw();
+}
+
+fn onCancelInstall(a: *App, _: u64, r: rpc.Reply) void {
+    if (r == .ok) {
+        a.harnesses.replace(r.ok) catch {};
+        syncAgentsPage(a, r.ok);
+    }
+    a.redraw();
+}
+
+fn refreshClis(a: *App) void {
+    const s = if (a.view.setup) |*x| x else return;
+    if (s.refresh_call != null or s.installing != null) return;
+    s.err = null;
+    s.refresh_call = null;
+    if (a.engine.call("ListHarnesses", .{}, .of(App, a, onRefresh))) |id| {
+        if (a.view.setup) |*cur| cur.refresh_call = id;
+    }
+    a.redraw();
+}
+
+fn onRefresh(a: *App, id: u64, r: rpc.Reply) void {
+    const s = if (a.view.setup) |*x| x else return;
+    if (id != 0 and s.refresh_call != id) return;
+    s.refresh_call = null;
+    switch (r) {
+        .ok => |v| {
+            var was_installed = [_]bool{ false, false };
+            for (extra_list, 0..) |ex, i| if (harness(a, ex.id)) |h| {
+                was_installed[i] = h.installed;
+            };
+            a.harnesses.replace(v) catch {};
+            syncAgentsPage(a, v);
+            s.extras_seen = true;
+            for (extra_list, 0..) |ex, i| if (harness(a, ex.id)) |h| {
+                if (h.installed and !was_installed[i]) s.extras_on[i] = true else if (!s.extras_on[i]) s.extras_on[i] = h.offered and h.installed;
+                s.extras_was[i] = h.offered and h.installed;
+            };
+        },
+        .err => s.err = "Couldn't re-check installed CLIs right now.",
         else => {},
     }
     a.redraw();
@@ -265,9 +440,9 @@ pub fn next(a: *App) void {
     const s = if (a.view.setup) |*x| x else return;
     s.err = null;
     switch (s.step) {
-        0 => for (extras, 0..) |id, i| if (s.extras_on[i] != s.extras_was[i]) {
+        0 => for (extra_list, 0..) |ex, i| if (s.extras_on[i] != s.extras_was[i]) {
             s.extras_was[i] = s.extras_on[i];
-            _ = a.engine.call("SetHarnessEnabled", .{ .harness = id, .enabled = s.extras_on[i] }, .of(App, a, onEnabled));
+            _ = a.engine.call("SetHarnessEnabled", .{ .harness = ex.id, .enabled = s.extras_on[i] }, .of(App, a, onEnabled));
         },
         2 => _ = a.engine.call("SetAutonomy", .{ .autonomy = s.autonomy.wire() }, .of(App, a, onSaved)),
         else => {},
@@ -292,8 +467,8 @@ fn nudge(a: *App, by: i32) void {
             s.level = @intCast(std.math.clamp(at + by, 0, @as(i32, @intCast(e.levels.len - 1))));
         },
         2 => {
-            const at: i32 = @intFromEnum(s.autonomy);
-            s.autonomy = @enumFromInt(@as(u2, @intCast(std.math.clamp(at + by, 0, 2))));
+            const at: i32 = @backingInt(s.autonomy);
+            s.autonomy = @fromBackingInt(@intCast(@as(u2, @intCast(std.math.clamp(at + by, 0, 2)))));
         },
         else => {},
     }
@@ -347,7 +522,7 @@ pub fn keys(c: *ui.Context, a: *App) bool {
 
 const left_w: f32 = 420;
 const text_w: f32 = left_w - 2 * 40;
-const right_w: f32 = 480;
+const right_w: f32 = 500;
 
 pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (!a.view.setup_checked) {
@@ -372,9 +547,12 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
 }
 
-fn copy(step: usize) [2][]const u8 {
-    return switch (step) {
-        0 => .{ "Start with Graff", "Graff is already connected through your CodeGraff sign-in. Add Claude Code or Codex too if you use them." },
+fn copy(a: *const App, s: *const Setup) [2][]const u8 {
+    return switch (s.step) {
+        0 => if (allExtrasMissing(a, s))
+            .{ "Set up your coding CLIs", "Graff works right away. Neither Claude Code nor ChatGPT (Codex CLI) was found on this computer — install either below or use Graff first." }
+        else
+            .{ "Start with Graff", "Graff is already connected through your CodeGraff sign-in. Add Claude Code or ChatGPT (Codex CLI) below, or install any missing CLI right here." },
         1 => .{ "How hard should it think?", "Your default for new Graff sessions. Change it per message from the composer." },
         2 => .{ "How much can it do without asking?", "Applies to every agent on this computer. Change it any time in Settings > Agents." },
         3 => .{ "Ping you when it needs you?", "A desktop banner when a session waits on you or finishes while Harness is in the background." },
@@ -400,7 +578,7 @@ fn questionPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup) void {
         icons.icon(c, .check, 14, k.success, 0);
         ui.text(c, "All set", set.st(c, 12, .{ .weight = .medium, .color = k.success }));
     }
-    const words = copy(s.step);
+    const words = copy(a, s);
     {
         const t = ui.div(c).column().w(text_w).gap(8);
         defer t.end();
@@ -484,42 +662,131 @@ fn agentsPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup) void {
                 defer b.end();
                 ui.text(c, "Recommended", set.st(c, 10.5, .{ .weight = .medium, .color = k.success_muted }));
             }
-            if (a.harnesses.items.len == 0) status(c, k, false, "Checking this computer…") else status(c, k, true, "Connected with CodeGraff");
+            if (a.harnesses.items.len == 0)
+                status(c, k, false, "Checking this computer…")
+            else
+                status(c, k, true, "Connected with CodeGraff — no extra CLI needed");
         }
         checkCircle(c, k, true);
     }
-    set.space(c, 6);
-    ui.text(c, "O\u{200A}P\u{200A}T\u{200A}I\u{200A}O\u{200A}N\u{200A}A\u{200A}L\u{2002}E\u{200A}X\u{200A}T\u{200A}R\u{200A}A\u{200A}S", set.st(c, 10.5, .{ .weight = .medium, .color = k.muted }));
-    for (extras, 0..) |id, i| {
-        const h = harness(a, id);
-        const installed = if (h) |x| x.installed else false;
-        ui.key(c, c.print("setup-extra-{s}", .{id}));
-        var e = card(c, k, s.extras_on[i]);
-        if (!installed and s.extras_seen) e = e.opacity(0.6);
-        defer e.end();
-        icons.icon(c, extra_icons[i], 24, k.text, 0);
-        {
-            const t = ui.div(c).column().grow().w(0).gap(3);
-            defer t.end();
-            ui.text(c, extra_names[i], set.st(c, 14, .{ .weight = .medium, .color = k.text }));
-            if (!s.extras_seen)
-                status(c, k, false, "Checking this computer…")
-            else if (!installed)
-                status(c, k, false, "Not installed. Install it from Settings > Agents")
-            else if (s.extras_on[i])
-                status(c, k, true, "Optional, on")
-            else
-                status(c, k, true, "Optional, ready");
+    set.space(c, 4);
+    {
+        const hdr = ui.div(c).row().wFull().gap(8).itemsCenter();
+        defer hdr.end();
+        ui.text(c, "C\u{200A}L\u{200A}A\u{200A}U\u{200A}D\u{200A}E\u{2002}C\u{200A}O\u{200A}D\u{200A}E\u{2002}&\u{2002}C\u{200A}H\u{200A}A\u{200A}T\u{200A}G\u{200A}P\u{200A}T\u{2002}C\u{200A}L\u{200A}I\u{200A}S", set.st(c, 10.5, .{ .weight = .medium, .color = k.muted }));
+        ui.spacer(c);
+        if (installableMissingCount(a, s) >= 2 and s.installing == null) {
+            ui.key(c, "setup-install-both");
+            const both = ui.div(c).row().px(10).py(4).roundedFull().gap(5).itemsCenter().bg(k.text).hover(k.text.alpha(0.88));
+            defer both.end();
+            icons.icon(c, .@"download-minimalistic", 11, k.on_solid, 0);
+            ui.text(c, "Install both", set.st(c, 11, .{ .weight = .medium, .color = k.on_solid }));
+            if (both.clicked()) installBoth(a);
         }
-        checkCircle(c, k, s.extras_on[i]);
-        if (installed and e.clicked()) {
-            s.extras_on[i] = !s.extras_on[i];
-            a.redraw();
+        if (s.installing == null) {
+            ui.key(c, "setup-refresh-clis");
+            const ref = ui.div(c).row().px(10).py(4).roundedFull().gap(5).itemsCenter().border(k.border).borderW(1).bg(k.card).hover(k.ink(0.05));
+            defer ref.end();
+            if (s.refresh_call != null) {
+                kit.miniSpinner(c, k.muted);
+                ui.text(c, "Checking…", set.st(c, 11, .{ .color = k.muted }));
+            } else {
+                icons.icon(c, .refresh, 11, k.muted, 0);
+                ui.text(c, "Check again", set.st(c, 11, .{ .color = k.muted }));
+                if (ref.clicked()) refreshClis(a);
+            }
         }
     }
-    const note = ui.div(c).column().w(right_w).pt(4);
+    for (extra_list, 0..) |ex, i| {
+        const h = harness(a, ex.id);
+        const installed = if (h) |x| x.installed else false;
+        const can_install = if (h) |x| x.can_install else false;
+        const busy = s.installing == i;
+        const picked = s.extras_on[i];
+        const border_c = if (picked) k.text else if (busy) k.border_strong else k.border;
+        ui.key(c, c.print("setup-extra-{s}", .{ex.id}));
+        const card_box = ui.div(c).column().wFull().px(16).py(12).gap(10).rounded(12).border(border_c).borderW(1).bg(k.card);
+        defer card_box.end();
+        {
+            const top = ui.div(c).row().wFull().gap(12).itemsCenter();
+            defer top.end();
+            {
+                const mark = icons.harnessMark(ex.id);
+                const tile = ui.div(c).row().w(34).h(34).rounded(8).bg(k.ink(0.04)).center();
+                defer tile.end();
+                icons.icon(c, mark.name, 20, mark.brand orelse k.text, 0);
+            }
+            {
+                const t = ui.div(c).column().grow().w(0).gap(3);
+                defer t.end();
+                {
+                    const title_row = ui.div(c).row().gap(6).itemsCenter();
+                    defer title_row.end();
+                    ui.text(c, ex.name, set.st(c, 14, .{ .weight = .medium, .color = k.text }));
+                    const badge = ui.div(c).row().px(6).py(2).roundedFull().bg(k.ink(0.06));
+                    defer badge.end();
+                    ui.text(c, ex.cli, set.st(c, 10, .{ .mono = true, .color = k.muted }));
+                }
+                if (!s.extras_seen)
+                    status(c, k, false, "Checking this computer…")
+                else if (busy) {
+                    const sr = ui.div(c).row().gap(6).itemsCenter();
+                    defer sr.end();
+                    kit.miniSpinner(c, k.muted);
+                    ui.text(c, "Installing CLI on this computer…", set.st(c, 12, .{ .color = k.muted }));
+                } else if (installed and picked)
+                    status(c, k, true, "Optional, on")
+                else if (installed)
+                    status(c, k, true, "Optional, ready")
+                else
+                    status(c, k, false, "Not installed on this computer");
+            }
+            if (busy) {
+                ui.key(c, c.print("setup-cancel-{s}", .{ex.id}));
+                const cancel_btn = ui.div(c).row().px(10).py(5).rounded(7).border(k.border).borderW(1).hover(k.ink(0.05));
+                defer cancel_btn.end();
+                ui.text(c, "Cancel", set.st(c, 11.5, .{ .color = k.muted }));
+                if (cancel_btn.clicked()) cancelInstall(a);
+            } else if (installed) {
+                checkCircle(c, k, picked);
+            } else if (s.extras_seen and can_install) {
+                const blocked = s.installing != null;
+                ui.key(c, c.print("setup-install-{s}", .{ex.id}));
+                var inst = ui.div(c).row().px(11).py(5).rounded(7).gap(5).itemsCenter().bg(if (blocked) k.ink(0.15) else k.text);
+                if (!blocked) inst = inst.hover(k.text.alpha(0.88));
+                defer inst.end();
+                icons.icon(c, .@"download-minimalistic", 11.5, if (blocked) k.muted else k.on_solid, 0);
+                ui.text(c, "Install CLI", set.st(c, 11.5, .{ .weight = .medium, .color = if (blocked) k.muted else k.on_solid }));
+                if (!blocked and inst.clicked()) installExtra(a, i);
+            }
+            if (installed and !busy and top.clicked()) {
+                s.extras_on[i] = !s.extras_on[i];
+                a.redraw();
+            }
+        }
+        if (s.extras_seen and !installed and !busy) {
+            const cmd_bar = ui.div(c).row().wFull().px(10).py(6).rounded(8).bg(k.shell).border(k.border).borderW(1).gap(8).itemsCenter();
+            defer cmd_bar.end();
+            ui.text(c, "$", set.st(c, 11, .{ .mono = true, .color = k.faint }));
+            kit.ellipsisText(c, ex.cmd, set.st(c, 11, .{ .mono = true, .color = k.muted }), right_w - 134);
+            ui.spacer(c);
+            const copied = s.copied == i and c.time < s.copied_until;
+            ui.key(c, c.print("setup-copy-{s}", .{ex.id}));
+            const cp = ui.div(c).row().px(8).py(3).rounded(6).gap(4).itemsCenter().bg(k.ink(0.05)).hover(k.ink(0.09));
+            defer cp.end();
+            icons.icon(c, if (copied) .check else .copy, 11, if (copied) k.success else k.muted, 0);
+            ui.text(c, if (copied) "Copied" else "Copy", set.st(c, 11, .{ .weight = .medium, .color = if (copied) k.success else k.muted }));
+            if (cp.clicked()) {
+                c.clipboard.write(c.clipboard.ctx, ex.cmd);
+                s.copied = i;
+                s.copied_until = c.time + 2.0;
+                a.redraw();
+            }
+        }
+    }
+    const note = ui.div(c).column().w(right_w).pt(2);
     defer note.end();
-    ui.text(c, "No extras are fine: Graff does everything here. Add more later in Settings > Agents.", set.st(c, 12, .{ .wrap = true, .color = k.faint }));
+    ui.text(c, "Built-in Graff works without installing anything. Or install either CLI above and click Check again once it finishes.", set.st(c, 12, .{ .wrap = true, .color = k.faint }));
 }
 
 fn effortPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup) void {
@@ -660,9 +927,9 @@ fn readyPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup) void {
     defer col.end();
     var names: std.ArrayList(u8) = .empty;
     names.appendSlice(c.alloc(), "Graff") catch {};
-    for (extra_names, 0..) |n, i| if (s.extras_on[i]) {
+    for (extra_list, 0..) |ex, i| if (s.extras_on[i]) {
         names.appendSlice(c.alloc(), ", ") catch {};
-        names.appendSlice(c.alloc(), n) catch {};
+        names.appendSlice(c.alloc(), ex.summary_name) catch {};
     };
     const e = effort(a, s);
     const model = if (e) |x| x.model.label else "Default";

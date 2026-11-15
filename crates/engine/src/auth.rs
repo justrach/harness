@@ -164,11 +164,22 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AuthUser {
     pub id: String,
     pub email: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_number: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card_scenes: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card_traits: Option<harness_proto::CardTraits>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,6 +230,11 @@ impl AuthState {
             id: user.id.clone(),
             email: user.email.clone(),
             name: user.name.clone(),
+            avatar_url: user.avatar_url.clone(),
+            member_number: user.member_number,
+            started_at: user.started_at,
+            card_scenes: user.card_scenes,
+            card_traits: user.card_traits,
         };
         match self {
             AuthState::SignedOut => harness_proto::AuthState::SignedOut,
@@ -498,6 +514,11 @@ impl Auth {
                     id: config.dev_user_id.clone(),
                     email: config.dev_user_id.clone(),
                     name: None,
+                    avatar_url: None,
+                    member_number: None,
+                    started_at: None,
+                    card_scenes: None,
+                    card_traits: None,
                 },
                 org_id: None,
             },
@@ -666,8 +687,10 @@ impl Auth {
             let mut wake = harness_sync::wake::subscribe();
             let mut online = harness_sync::wake::subscribe_online();
             let mut retry_rx = auth.inner.retry_tx.subscribe();
+            let mut profile_synced_for: Option<String> = None;
             loop {
                 if !state_rx.borrow().is_signed_in() {
+                    profile_synced_for = None;
                     if auth.inner.config.sandbox_token_file.is_some() {
                         // A sandbox whose token was refused (paused, re-attached, revoked) signs itself
                         // back in as soon as its file holds a token the edge accepts.
@@ -688,12 +711,22 @@ impl Auth {
                     }
                     continue;
                 }
-                let remaining = lock(&auth.inner.access)
+                let (cached_token, remaining) = lock(&auth.inner.access)
                     .as_ref()
-                    .map(AccessEntry::remaining)
-                    .unwrap_or(Duration::ZERO);
+                    .map(|e| (Some(e.token.clone()), e.remaining()))
+                    .unwrap_or((None, Duration::ZERO));
                 let wait = remaining.saturating_sub(TOKEN_SLACK);
                 if wait > Duration::ZERO {
+                    if let Some(uid) = auth.state().user().map(|u| u.id.clone())
+                        && profile_synced_for.as_deref() != Some(uid.as_str())
+                        && let Some(token) = cached_token
+                    {
+                        profile_synced_for = Some(uid);
+                        let auth_bg = auth.clone();
+                        tokio::spawn(async move {
+                            auth_bg.fetch_member_profile_with_token(&token).await;
+                        });
+                    }
                     // Re-evaluate at least once a minute rather than parking
                     // on one long timer: tokio timers ride the monotonic
                     // clock, which excludes system suspend — a laptop waking
@@ -949,16 +982,6 @@ impl Auth {
         self.ensure_secure_transport()?;
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
-        struct WireUser {
-            id: String,
-            email: String,
-            #[serde(default)]
-            first_name: Option<String>,
-            #[serde(default)]
-            last_name: Option<String>,
-        }
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
         struct GraffKey {
             api_key: String,
             email: String,
@@ -1018,18 +1041,8 @@ impl Auth {
         {
             tracing::warn!(error = %err, "couldn't save the graff key from sign-in");
         }
-        let name = [body.user.first_name, body.user.last_name]
-            .into_iter()
-            .flatten()
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
         Ok(SignInResult {
-            user: AuthUser {
-                id: body.user.id,
-                email: body.user.email,
-                name: (!name.is_empty()).then_some(name),
-            },
+            user: body.user.into_auth_user(None),
             access_token: body.access_token,
             refresh_token: body.refresh_token,
         })
@@ -1442,6 +1455,139 @@ impl Auth {
         tokio::spawn(loopback_loop(listener, weak));
         tracing::info!(port, "auth: sign-in callback listening");
         Ok(port)
+    }
+
+    /// Best-effort refresh of Harness member card fields (`GET /auth/me`).
+    /// Failures or 404s never revoke or disrupt the live auth session.
+    pub async fn refresh_member_profile(&self) -> Result<(), EngineError> {
+        if self.inner.codegraff.is_none() {
+            return Ok(());
+        }
+        let token = self
+            .access_token()
+            .await
+            .map_err(|e| EngineError::Other(e.to_string()))?;
+        self.fetch_member_profile_with_token(&token).await;
+        Ok(())
+    }
+
+    async fn fetch_member_profile_with_token(&self, token: &str) {
+        if self.inner.codegraff.is_none() {
+            return;
+        }
+        #[derive(Deserialize)]
+        struct MeResponse {
+            user: WireUser,
+        }
+        let url = format!(
+            "{}/auth/me",
+            self.inner.config.edge_url.trim_end_matches('/')
+        );
+        let Ok(res) = self.inner.http.get(&url).bearer_auth(token).send().await else {
+            return;
+        };
+        if !res.status().is_success() {
+            return;
+        }
+        let Ok(body) = res.json::<MeResponse>().await else {
+            return;
+        };
+        let updated_pair = {
+            let _sign_in = lock(&self.inner.sign_in);
+            let mut stored = lock(&self.inner.stored);
+            match stored.as_mut() {
+                Some(session) if session.user.id == body.user.id => {
+                    let prev = session.user.clone();
+                    let next = body.user.into_auth_user(Some(&prev.email));
+                    let merged = AuthUser {
+                        id: next.id,
+                        email: next.email,
+                        name: next.name.or(prev.name.clone()),
+                        avatar_url: next.avatar_url.or(prev.avatar_url.clone()),
+                        member_number: next.member_number.or(prev.member_number),
+                        started_at: next.started_at.or(prev.started_at),
+                        card_scenes: next.card_scenes.or(prev.card_scenes),
+                        card_traits: next.card_traits.or(prev.card_traits),
+                    };
+                    if merged != prev {
+                        session.user = merged.clone();
+                        Some((merged, session.org_id.clone(), session.clone()))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        };
+        let Some((user, org_id, session)) = updated_pair else {
+            return;
+        };
+        self.persist(Some(&session));
+        self.inner.state_tx.send_replace(state_for(user, org_id));
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireUser {
+    id: String,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    first_name: Option<String>,
+    #[serde(default)]
+    last_name: Option<String>,
+    #[serde(default)]
+    avatar_url: Option<String>,
+    #[serde(default)]
+    member_number: Option<u64>,
+    #[serde(default)]
+    started_at: Option<i64>,
+    #[serde(default)]
+    card_scenes: Option<u32>,
+    #[serde(default)]
+    card_traits: Option<harness_proto::CardTraits>,
+}
+
+impl WireUser {
+    fn resolved_name(&self) -> Option<String> {
+        if let Some(name) = self
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(name.to_owned());
+        }
+        let joined = [&self.first_name, &self.last_name]
+            .into_iter()
+            .flatten()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        (!joined.is_empty()).then_some(joined)
+    }
+
+    fn into_auth_user(self, fallback_email: Option<&str>) -> AuthUser {
+        let name = self.resolved_name();
+        let email = self
+            .email
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| fallback_email.map(str::to_owned))
+            .unwrap_or_default();
+        AuthUser {
+            id: self.id,
+            email,
+            name,
+            avatar_url: self.avatar_url.filter(|s| !s.trim().is_empty()),
+            member_number: self.member_number,
+            started_at: self.started_at,
+            card_scenes: self.card_scenes,
+            card_traits: self.card_traits,
+        }
     }
 }
 
@@ -1887,6 +2033,11 @@ mod tests {
             id: "u1".into(),
             email: "u@x".into(),
             name: None,
+            avatar_url: None,
+            member_number: None,
+            started_at: None,
+            card_scenes: None,
+            card_traits: None,
         };
         let signed_in = AuthState::SignedIn {
             user: user.clone(),
@@ -2031,6 +2182,135 @@ mod tests {
         mode.store(1, Ordering::SeqCst);
         assert_eq!(auth.access_token().await, Err(TokenError::SignedOut));
         assert_eq!(auth.state(), AuthState::SignedOut);
+
+        server.abort();
+    }
+
+    #[test]
+    fn auth_state_serializes_member_card_fields_as_camel_case() {
+        let user = AuthUser {
+            id: "42".into(),
+            email: "ada@example.com".into(),
+            name: Some("Ada Lovelace".into()),
+            avatar_url: Some("https://cdn.example.com/ada.png".into()),
+            member_number: Some(12),
+            started_at: Some(1_700_000_000),
+            card_scenes: Some(20),
+            card_traits: Some(harness_proto::CardTraits {
+                scene: 3,
+                sky: 11,
+                enso: 5,
+                holo: 2,
+                seal: 6,
+            }),
+        };
+        let state = AuthState::SignedIn {
+            user,
+            org_id: Some("org_42".into()),
+        };
+        let value = serde_json::to_value(&state).expect("json");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "state": "signedIn",
+                "user": {
+                    "id": "42",
+                    "email": "ada@example.com",
+                    "name": "Ada Lovelace",
+                    "avatarUrl": "https://cdn.example.com/ada.png",
+                    "memberNumber": 12,
+                    "startedAt": 1_700_000_000,
+                    "cardScenes": 20,
+                    "cardTraits": {
+                        "scene": 3,
+                        "sky": 11,
+                        "enso": 5,
+                        "holo": 2,
+                        "seal": 6,
+                    },
+                },
+                "orgId": "org_42",
+            })
+        );
+        let proto = state.to_proto();
+        let round_tripped: harness_proto::AuthState =
+            serde_json::from_value(value).expect("proto round-trip");
+        assert_eq!(proto, round_tripped);
+    }
+
+    #[tokio::test]
+    async fn refresh_member_profile_merges_edge_me_and_ignores_errors() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mode = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let mode_bg = mode.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mode_req = mode_bg.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let _ = stream.read(&mut buf).await;
+                    let (status, body) = match mode_req.load(std::sync::atomic::Ordering::SeqCst) {
+                        0 => (
+                            "200 OK",
+                            r#"{"user":{"id":"user_1","email":"ada@example.com","name":"Ada","avatarUrl":"https://cdn.example/a.png","memberNumber":7,"startedAt":1700000123,"cardScenes":20,"cardTraits":{"scene":4,"sky":9,"enso":2,"holo":1,"seal":5}}}"#,
+                        ),
+                        _ => ("404 Not Found", r#"{"error":"not_found"}"#),
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("session.json"),
+            r#"{"refreshToken":"harness_rt_test","user":{"id":"user_1","email":"old@example.com"},"orgId":"org_1"}"#,
+        )
+        .unwrap();
+        let mut cfg = AuthConfig::new(format!("http://127.0.0.1:{port}"), dir.path());
+        cfg.codegraff_client_id = Some("cg_client_test".into());
+        cfg.codegraff_api_base = "https://codegraff.example".into();
+        let auth = Auth::new(cfg);
+        *lock(&auth.inner.access) = Some(AccessEntry::fresh("live-access-token".into()));
+
+        auth.refresh_member_profile().await.unwrap();
+        let user = auth.state().user().expect("signed in").clone();
+        assert_eq!(user.email, "ada@example.com");
+        assert_eq!(user.name.as_deref(), Some("Ada"));
+        assert_eq!(
+            user.avatar_url.as_deref(),
+            Some("https://cdn.example/a.png")
+        );
+        assert_eq!(user.member_number, Some(7));
+        assert_eq!(user.started_at, Some(1_700_000_123));
+        assert_eq!(user.card_scenes, Some(20));
+        assert_eq!(
+            user.card_traits,
+            Some(harness_proto::CardTraits {
+                scene: 4,
+                sky: 9,
+                enso: 2,
+                holo: 1,
+                seal: 5,
+            })
+        );
+
+        // Subsequent 404 from /auth/me must keep the session & member profile intact.
+        mode.store(1, std::sync::atomic::Ordering::SeqCst);
+        auth.refresh_member_profile().await.unwrap();
+        let kept = auth.state().user().expect("still signed in").clone();
+        assert_eq!(kept, user);
 
         server.abort();
     }

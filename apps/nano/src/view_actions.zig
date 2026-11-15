@@ -321,7 +321,8 @@ pub fn dock(c: *ui.Context, a: *App, k: theme.Colors) void {
     const x = &a.actions;
     if (dockHeight(a) == 0) return;
     _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
-    const d = ui.div(c).column().wFull().h(dock_h).bg(k.background);
+    const bg = if (a.settings.uiMode() == .zen) @import("view_panel_chrome.zig").zenPageBg(k) else k.background;
+    const d = ui.div(c).column().wFull().h(dock_h).bg(bg);
     defer d.end();
     {
         const strip = ui.div(c).row().wFull().h(32).px(8).gap(4).itemsCenter();

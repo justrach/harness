@@ -4,6 +4,8 @@
 const std = @import("std");
 
 pub const gutter: f32 = 8;
+pub const zen_gutter: f32 = 6;
+pub const zen_radius: f32 = 12;
 pub const titlebar_height: f32 = 38;
 pub const top_pad: f32 = 4;
 pub const header_height: f32 = titlebar_height + top_pad;
@@ -86,10 +88,48 @@ pub fn frameWithSide(width: f32, height: f32, sidebar: f32, expanded_sidebar: f3
     };
 }
 
-pub fn paneSpan(total: f32, share: f32, count: usize, horizontal: bool) f32 {
-    // Horizontal workspace gutters are 8; stacked clearance is 5.
-    const gap = if (horizontal) gutter else tab_top;
+/// Zen inset-card workspace geometry: keeps a symmetric `6pt` outer margin and
+/// `6pt` inter-card gap (`3pt` on the sidebar card + `3pt` leading here when open).
+pub fn zenFrameWithSide(width: f32, height: f32, sidebar: f32, expanded_sidebar: f32, chat_panels: usize, horizontal: bool, host: bool, files: bool, preferred: f32) Frame {
+    const t = std.math.clamp(sidebar / @max(1, expanded_sidebar), 0, 1);
+    const leading: f32 = zen_gutter - (zen_gutter / 2.0) * t;
+    const chats = if (horizontal) @max(chat_panels, 1) else 1;
+    const count = chats + @intFromBool(host) + @intFromBool(files);
+    const room = @max(0, width - sidebar - leading - zen_gutter);
+    const gaps = zen_gutter * @as(f32, @floatFromInt(count - 1));
+    const available = @max(0, room - gaps);
+    const host_width: f32 = if (host and horizontal)
+        available * sidePanelShare(room, count - 1, preferred)
+    else if (host)
+        available / @as(f32, @floatFromInt(count))
+    else
+        0;
+    const other_count = count - @intFromBool(host and horizontal);
+    const other_room = if (host and horizontal) @max(0, available - host_width) else available;
+    const each = if (other_count > 0) other_room / @as(f32, @floatFromInt(other_count)) else 0;
+    const files_width = if (files) each else 0;
+    const chat_width = each * @as(f32, @floatFromInt(chats)) + zen_gutter * @as(f32, @floatFromInt(chats - 1));
+    return .{
+        .x = sidebar + leading,
+        .y = header_height,
+        .width = @min(room, each * @as(f32, @floatFromInt(chats + @intFromBool(files))) + host_width + gaps),
+        .height = @max(0, height - header_height - zen_gutter),
+        .chat_width = chat_width,
+        .host_width = host_width,
+        .files_width = files_width,
+        .leading = leading,
+        .strip = chat_panels > 1 or host or files,
+    };
+}
+
+pub fn paneSpanIn(total: f32, share: f32, count: usize, horizontal: bool, gap_across: f32) f32 {
+    // Stacked clearance is 5; across-split gap matches the active workspace gutter.
+    const gap = if (horizontal) gap_across else tab_top;
     return @max(0, (total - gap * @as(f32, @floatFromInt(count -| 1))) * share);
+}
+
+pub fn paneSpan(total: f32, share: f32, count: usize, horizontal: bool) f32 {
+    return paneSpanIn(total, share, count, horizontal, gutter);
 }
 
 pub fn tabWidth(width: f32, count: usize) f32 {
@@ -147,4 +187,17 @@ test "a side panel gets the old width when the others can spare it" {
     const tight = 1136.0 - 8.0 * 3.0;
     try std.testing.expectApproxEqAbs(@as(f32, (tight - 660.0) / tight), sidePanelShare(1136, 3, 520), 0.001);
     try std.testing.expectEqual(@as(f32, 0.25), sidePanelShare(600, 3, 520));
+}
+
+test "zen frame geometry aligns cards below 42pt header with symmetric 6pt gutters" {
+    const open = zenFrameWithSide(1200, 780, 256, 256, 1, true, false, false, right_pane_default);
+    const closed = zenFrameWithSide(1200, 780, 0, 256, 1, true, false, false, right_pane_default);
+    try std.testing.expectEqual(@as(f32, 42), open.y);
+    try std.testing.expectEqual(@as(f32, 780 - 42 - 6), open.height);
+    try std.testing.expectEqual(@as(f32, 3), open.leading);
+    try std.testing.expectEqual(@as(f32, 259), open.x);
+    try std.testing.expectEqual(@as(f32, 1200 - 256 - 3 - 6), open.width);
+    try std.testing.expectEqual(@as(f32, 6), closed.leading);
+    try std.testing.expectEqual(@as(f32, 6), closed.x);
+    try std.testing.expectEqual(@as(f32, 1200 - 12), closed.width);
 }

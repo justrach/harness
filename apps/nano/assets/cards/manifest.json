@@ -1,0 +1,206 @@
+{
+  "ensos": [
+    {
+      "slug": "kinpaku-gold",
+      "label": "KINPAKU GOLD",
+      "file": "ensos/kinpaku-gold.png"
+    },
+    {
+      "slug": "sumi-vermilion",
+      "label": "SUMI VERMILION",
+      "file": "ensos/sumi-vermilion.png"
+    },
+    {
+      "slug": "kohaku-amber",
+      "label": "KOHAKU AMBER",
+      "file": "ensos/kohaku-amber.png"
+    },
+    {
+      "slug": "sumi-ink",
+      "label": "SUMI INK",
+      "file": "ensos/sumi-ink.png"
+    },
+    {
+      "slug": "urushi-crimson",
+      "label": "URUSHI CRIMSON",
+      "file": "ensos/urushi-crimson.png"
+    },
+    {
+      "slug": "seiji-celadon",
+      "label": "SEIJI CELADON",
+      "file": "ensos/seiji-celadon.png"
+    },
+    {
+      "slug": "aizome-indigo",
+      "label": "AIZOME INDIGO",
+      "file": "ensos/aizome-indigo.png"
+    },
+    {
+      "slug": "ginpaku-silver",
+      "label": "GINPAKU SILVER",
+      "file": "ensos/ginpaku-silver.png"
+    }
+  ],
+  "scenes": [
+    {
+      "slug": "enso-kintsugi",
+      "title": "KINTSUGI ENSO",
+      "finish": "KINPAKU GOLD",
+      "skyRgb": "enso-kintsugi/sky.rgb",
+      "skyFile": "enso-kintsugi/sky.jpg",
+      "nearFile": "enso-kintsugi/near.png"
+    },
+    {
+      "slug": "torii-dawn",
+      "title": "VERMILION GATE",
+      "finish": "URUSHI VERMILION",
+      "skyRgb": "torii-dawn/sky.rgb",
+      "skyFile": "torii-dawn/sky.jpg",
+      "nearFile": "torii-dawn/near.png"
+    },
+    {
+      "slug": "fuji-sumi",
+      "title": "SACRED PEAK",
+      "finish": "WASHI WOODBLOCK",
+      "skyRgb": "fuji-sumi/sky.rgb",
+      "skyFile": "fuji-sumi/sky.jpg",
+      "nearFile": "fuji-sumi/near.png"
+    },
+    {
+      "slug": "pagoda-autumn",
+      "title": "KYOTO AUTUMN",
+      "finish": "MOMIJI AMBER",
+      "skyRgb": "pagoda-autumn/sky.rgb",
+      "skyFile": "pagoda-autumn/sky.jpg",
+      "nearFile": "pagoda-autumn/near.png"
+    },
+    {
+      "slug": "karesansui-zen",
+      "title": "STONE GARDEN",
+      "finish": "MOSS & GRANITE",
+      "skyRgb": "karesansui-zen/sky.rgb",
+      "skyFile": "karesansui-zen/sky.jpg",
+      "nearFile": "karesansui-zen/near.png"
+    },
+    {
+      "slug": "arashiyama-bamboo",
+      "title": "BAMBOO GROVE",
+      "finish": "MATCHA MIST",
+      "skyRgb": "arashiyama-bamboo/sky.rgb",
+      "skyFile": "arashiyama-bamboo/sky.jpg",
+      "nearFile": "arashiyama-bamboo/near.png"
+    },
+    {
+      "slug": "tsuru-flight",
+      "title": "GOLDEN CRANES",
+      "finish": "RADEN PEARL",
+      "skyRgb": "tsuru-flight/sky.rgb",
+      "skyFile": "tsuru-flight/sky.jpg",
+      "nearFile": "tsuru-flight/near.png"
+    },
+    {
+      "slug": "hotaru-river",
+      "title": "LANTERN STREAM",
+      "finish": "HOTARU GLOW",
+      "skyRgb": "hotaru-river/sky.rgb",
+      "skyFile": "hotaru-river/sky.jpg",
+      "nearFile": "hotaru-river/near.png"
+    },
+    {
+      "slug": "ukiyo-wave",
+      "title": "GREAT WAVE",
+      "finish": "PRUSSIAN INDIGO",
+      "skyRgb": "ukiyo-wave/sky.rgb",
+      "skyFile": "ukiyo-wave/sky.jpg",
+      "nearFile": "ukiyo-wave/near.png"
+    },
+    {
+      "slug": "koi-lotus",
+      "title": "NISHIKIGOI POND",
+      "finish": "KOI BROCADE",
+      "skyRgb": "koi-lotus/sky.rgb",
+      "skyFile": "koi-lotus/sky.jpg",
+      "nearFile": "koi-lotus/near.png"
+    },
+    {
+      "slug": "himeji-sakura",
+      "title": "WHITE HERON KEEP",
+      "finish": "SHIRASAGI PLASTER",
+      "skyRgb": "himeji-sakura/sky.rgb",
+      "skyFile": "himeji-sakura/sky.jpg",
+      "nearFile": "himeji-sakura/near.png"
+    },
+    {
+      "slug": "inari-kitsune",
+      "title": "SHRINE GUARDIAN",
+      "finish": "INARI VERMILION",
+      "skyRgb": "inari-kitsune/sky.rgb",
+      "skyFile": "inari-kitsune/sky.jpg",
+      "nearFile": "inari-kitsune/near.png"
+    },
+    {
+      "slug": "raku-chawan",
+      "title": "RAKU TEA BOWL",
+      "finish": "KURO RAKU GLAZE",
+      "skyRgb": "raku-chawan/sky.rgb",
+      "skyFile": "raku-chawan/sky.jpg",
+      "nearFile": "raku-chawan/near.png"
+    },
+    {
+      "slug": "taiko-momiji",
+      "title": "CRIMSON BRIDGE",
+      "finish": "MOMIJI VERMILION",
+      "skyRgb": "taiko-momiji/sky.rgb",
+      "skyFile": "taiko-momiji/sky.jpg",
+      "nearFile": "taiko-momiji/near.png"
+    },
+    {
+      "slug": "yakushima-cedar",
+      "title": "ANCIENT CEDAR",
+      "finish": "SUGI MOSS",
+      "skyRgb": "yakushima-cedar/sky.rgb",
+      "skyFile": "yakushima-cedar/sky.jpg",
+      "nearFile": "yakushima-cedar/near.png"
+    },
+    {
+      "slug": "tsukimi-susuki",
+      "title": "HARVEST MOON",
+      "finish": "SUSUKI GOLD",
+      "skyRgb": "tsukimi-susuki/sky.rgb",
+      "skyFile": "tsukimi-susuki/sky.jpg",
+      "nearFile": "tsukimi-susuki/near.png"
+    },
+    {
+      "slug": "origami-tsuru",
+      "title": "WASHI ORIGAMI",
+      "finish": "CHIYOGAMI GOLD",
+      "skyRgb": "origami-tsuru/sky.rgb",
+      "skyFile": "origami-tsuru/sky.jpg",
+      "nearFile": "origami-tsuru/near.png"
+    },
+    {
+      "slug": "daruma-zen",
+      "title": "SEVEN FALLS",
+      "finish": "TAKASAKI LACQUER",
+      "skyRgb": "daruma-zen/sky.rgb",
+      "skyFile": "daruma-zen/sky.jpg",
+      "nearFile": "daruma-zen/near.png"
+    },
+    {
+      "slug": "tsubaki-snow",
+      "title": "WINTER CAMELLIA",
+      "finish": "YABUTSUBAKI SNOW",
+      "skyRgb": "tsubaki-snow/sky.rgb",
+      "skyFile": "tsubaki-snow/sky.jpg",
+      "nearFile": "tsubaki-snow/near.png"
+    },
+    {
+      "slug": "kumiko-lantern",
+      "title": "HINOKI LANTERN",
+      "finish": "KUMIKO AMBER",
+      "skyRgb": "kumiko-lantern/sky.rgb",
+      "skyFile": "kumiko-lantern/sky.jpg",
+      "nearFile": "kumiko-lantern/near.png"
+    }
+  ]
+}

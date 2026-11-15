@@ -183,7 +183,7 @@ fn meta(c: *ui.Context, a: *App, k: theme.Colors, d: agents.Descriptor, enabled:
 fn fragW(c: *ui.Context, a: *App, f: Frag, w: f32) f32 {
     return switch (f) {
         .text => |t| c.text.width(t.s, .{ .size = 12 }),
-        .working => |s| spinner_w + 6 + c.text.width(s, .{ .size = 12 }),
+        .working => |s| kit.mini_spinner_w + 6 + c.text.width(s, .{ .size = 12 }),
         .compact => compactW(c, a, w),
         .dot => c.text.width("·", .{ .size = 12 }),
     };
@@ -199,8 +199,8 @@ fn drawFrag(c: *ui.Context, a: *App, k: theme.Colors, f: Frag, w: f32) void {
         .working => |s| {
             const r = ui.div(c).row().gap(6).itemsCenter();
             defer r.end();
-            spinner(c, k.muted);
-            const box = ui.div(c).column().w(@min(c.text.width(s, .{ .size = 12 }) + 1, w - spinner_w - 6));
+            kit.miniSpinner(c, k.muted);
+            const box = ui.div(c).column().w(@min(c.text.width(s, .{ .size = 12 }) + 1, w - kit.mini_spinner_w - 6));
             defer box.end();
             ui.text(c, s, set.st(c, 12, .{ .wrap = true, .color = k.muted.alpha(0.65) }));
         },
@@ -279,27 +279,4 @@ fn compact(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
         ui.text(c, help, set.st(c, 12, .{ .wrap = true, .color = k.muted }));
     }
     if (custom(a)) |pct| ui.text(c, c.print("Currently {d}%, set on this device.", .{pct}), set.st(c, 12, .{ .color = k.muted.alpha(0.65) }));
-}
-
-const spinner_w: f32 = 2 * 1.5 + 1;
-
-/// `mini_mono_spinner`: the snake in one tone, cells 1.5 across.
-fn spinner(c: *ui.Context, color: ui.Color) void {
-    const order = [_][2]u8{ .{ 0, 0 }, .{ 1, 0 }, .{ 1, 1 }, .{ 1, 2 }, .{ 0, 2 }, .{ 0, 1 } };
-    const step: usize = @intFromFloat(@mod(@floor(c.time * 15), 6));
-    const box = ui.div(c).column().gap(1);
-    defer box.end();
-    for (0..3) |rw| {
-        const r = ui.div(c).row().gap(1);
-        defer r.end();
-        for (0..2) |cl| {
-            var lit: f32 = 0.22;
-            for (0..3) |back| {
-                const o = order[(step + 6 - back) % 6];
-                if (o[0] == cl and o[1] == rw) lit = @max(lit, 1.0 - @as(f32, @floatFromInt(back)) * 0.3);
-            }
-            _ = c.leaf(.{ .width = .{ .px = 1.5 }, .height = .{ .px = 1.5 }, .background = color.alpha(lit) }, .none, null);
-        }
-    }
-    kit.loaderFrame(c, 1.0 / 15.0);
 }

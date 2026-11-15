@@ -1,6 +1,7 @@
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { issueRefreshCredential, issueToken, personalOrgId, verifyRefreshCredential } from "./auth";
 import type { Env } from "./env";
+import { ensureHarnessMemberProfile } from "./member-profile";
 
 const ISSUER = "https://codegraff.com";
 const TOKEN_URL = `${ISSUER}/api/oauth/token`;
@@ -108,8 +109,9 @@ export const exchange = async (
     throw new CodegraffAuthFailed("CodeGraff identity could not be verified");
   }
   const graff = graffKey && token.access_token ? await requestGraffKey(token.access_token, graffKey) : undefined;
+  const user = await ensureHarnessMemberProfile(env, payload.sub, payload.email);
   return {
-    user: { id: payload.sub, email: payload.email },
+    user,
     accessToken: await issueToken(env, payload.sub),
     refreshToken: await issueRefreshCredential(env, payload.sub, token.refresh_token),
     ...(graff ? { graffKey: graff } : {})
@@ -139,8 +141,9 @@ export const sandboxExchange = async (env: Env, token: string, fetchImpl: typeof
     throw new CodegraffAuthFailed("the gateway returned an incomplete identity");
   }
   const id = String(who.user_id);
+  const user = await ensureHarnessMemberProfile(env, id, who.email);
   return {
-    user: { id, email: who.email },
+    user,
     orgId: personalOrgId(id),
     accessToken: await issueToken(env, id)
   };

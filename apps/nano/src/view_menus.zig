@@ -23,7 +23,7 @@ pub fn menus(c: *ui.Context, a: *App, k: theme.Colors) void {
         v.strip.footer_folder = true;
     };
     strip.menus(c, a, k);
-    if (!v.account_menu and !v.space_menu and !v.checkout_menu and !v.ref_menu) return;
+    if (!v.account_menu and !v.space_menu and !v.checkout_menu and !v.ref_menu and !v.star_menu) return;
     {
         // Behind the menu: a click anywhere else closes it.
         const back = ui.div(c).fixed().offset(0, 0).size(c.size.w, c.size.h).layer(4);
@@ -33,6 +33,7 @@ pub fn menus(c: *ui.Context, a: *App, k: theme.Colors) void {
             v.space_menu = false;
             v.checkout_menu = false;
             v.ref_menu = false;
+            v.star_menu = false;
             return;
         }
     }
@@ -59,6 +60,26 @@ pub fn menus(c: *ui.Context, a: *App, k: theme.Colors) void {
         refMenu(c, a, k, r);
     };
     if (v.account_menu) if (v.account_anchor) |r| accountMenu(c, a, k, r);
+    if (v.star_menu) starBannerMenu(c, a, k);
+}
+
+fn starBannerMenu(c: *ui.Context, a: *App, k: theme.Colors) void {
+    const sidebar = @import("view_sidebar.zig");
+    const mw: f32 = 184;
+    const mh: f32 = 68;
+    const x = rules.snapToWindow(a.view.star_menu_pos.x, mw, c.size.w, 8);
+    const y = rules.snapToWindow(a.view.star_menu_pos.y, mh, c.size.h, 8);
+    ui.key(c, "star-banner-menu");
+    const m = panel(c, k, x, y, mw);
+    defer m.end();
+    if (item(c, k, .@"arrow-up-right", "Open in browser", false)) {
+        a.openExternalUrl(sidebar.star_github_url);
+        a.view.star_menu = false;
+    }
+    if (item(c, k, .copy, "Copy link", false)) {
+        c.clipboard.write(c.clipboard.ctx, sidebar.star_github_url);
+        a.view.star_menu = false;
+    }
 }
 
 /// Place a compact popover above `anchor` when docked near the bottom edge
