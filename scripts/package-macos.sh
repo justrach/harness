@@ -6,6 +6,8 @@
 #
 # Usage: scripts/package-macos.sh
 # Env:   CODESIGN_IDENTITY="Developer ID Application: …" to sign the bundle.
+#        CODESIGN_KEYCHAIN=/absolute/path/to/keychain-db to restrict signing
+#        identity lookup to an ephemeral CI keychain.
 #        GRAFF_BINARY=/absolute/path/to/graff to bundle an exact CLI build.
 #        HARNESS_BINARY=/absolute/path/to/harness to package a tested build
 #        without invoking a second Cargo profile (for local preview DMGs).
@@ -41,7 +43,7 @@ else
   BUILD_BINARY="$TARGET_DIR/$PROFILE/harness"
 fi
 
-rm -rf "$APP" "$DMG" "$APP_TARBALL"
+rm -rf "$APP" "$OUT_DIR"/harness-*-macos-*.dmg "$OUT_DIR"/harness-*-macos-*-app.tar.gz
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/bin"
 install -m 755 "$BUILD_BINARY" "$APP/Contents/MacOS/harness"
 (cd "$ROOT/apps/nano" && "$ROOT/scripts/heavy-build.sh" zig build -Doptimize=ReleaseSafe)
@@ -123,6 +125,11 @@ done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/harness.icns"
 rm -rf "$ICONSET"
 
+KEYCHAIN_ARGS=()
+if [[ -n "${CODESIGN_KEYCHAIN:-}" ]]; then
+  KEYCHAIN_ARGS=(--keychain "$CODESIGN_KEYCHAIN")
+fi
+
 if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
   # Hardened runtime + secure timestamp are both notarization requirements.
   # (No --deep: Apple deprecated it; the bundle is a single Mach-O anyway.)
@@ -130,23 +137,23 @@ if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
   # signed yet (a local GRAFF_BINARY build).
   codesign --verify --strict "$APP/Contents/Resources/bin/graff" 2>/dev/null &&
     codesign -dv "$APP/Contents/Resources/bin/graff" 2>&1 | grep -q "Authority=Developer ID Application" ||
-    codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP/Contents/Resources/bin/graff"
+    codesign --force --options runtime --timestamp ${KEYCHAIN_ARGS[@]+"${KEYCHAIN_ARGS[@]}"} --sign "$CODESIGN_IDENTITY" "$APP/Contents/Resources/bin/graff"
   # codedb likewise: keep a Developer ID signature, else sign it ourselves so
   # the bundle notarizes.
   codesign --verify --strict "$APP/Contents/Resources/bin/codedb" 2>/dev/null &&
     codesign -dv "$APP/Contents/Resources/bin/codedb" 2>&1 | grep -q "Authority=Developer ID Application" ||
-    codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP/Contents/Resources/bin/codedb"
+    codesign --force --options runtime --timestamp ${KEYCHAIN_ARGS[@]+"${KEYCHAIN_ARGS[@]}"} --sign "$CODESIGN_IDENTITY" "$APP/Contents/Resources/bin/codedb"
   # The entitlements let dictation reach the microphone, and dropped or
   # picked files from any folder stay readable, under the hardened runtime
   # (dist/macos/Harness.entitlements).
   codesign --force --options runtime --timestamp \
-    --entitlements "$ROOT/dist/macos/Harness.entitlements" --sign "$CODESIGN_IDENTITY" "$APP/Contents/Resources/bin/harness-github-runners"
+    --entitlements "$ROOT/dist/macos/Harness.entitlements" ${KEYCHAIN_ARGS[@]+"${KEYCHAIN_ARGS[@]}"} --sign "$CODESIGN_IDENTITY" "$APP/Contents/Resources/bin/harness-github-runners"
   codesign --force --options runtime --timestamp \
-    --entitlements "$ROOT/dist/macos/Harness.entitlements" --sign "$CODESIGN_IDENTITY" "$APP/Contents/MacOS/harness-nano"
+    --entitlements "$ROOT/dist/macos/Harness.entitlements" ${KEYCHAIN_ARGS[@]+"${KEYCHAIN_ARGS[@]}"} --sign "$CODESIGN_IDENTITY" "$APP/Contents/MacOS/harness-nano"
   codesign --force --options runtime --timestamp \
-    --entitlements "$ROOT/dist/macos/Harness.entitlements" --sign "$CODESIGN_IDENTITY" "$APP/Contents/MacOS/harness"
+    --entitlements "$ROOT/dist/macos/Harness.entitlements" ${KEYCHAIN_ARGS[@]+"${KEYCHAIN_ARGS[@]}"} --sign "$CODESIGN_IDENTITY" "$APP/Contents/MacOS/harness"
   codesign --force --options runtime --timestamp \
-    --entitlements "$ROOT/dist/macos/Harness.entitlements" --sign "$CODESIGN_IDENTITY" "$APP"
+    --entitlements "$ROOT/dist/macos/Harness.entitlements" ${KEYCHAIN_ARGS[@]+"${KEYCHAIN_ARGS[@]}"} --sign "$CODESIGN_IDENTITY" "$APP"
 else
   # Ad-hoc signature so the app launches on Apple silicon (Gatekeeper still
   # requires right-click → Open on first launch without notarization).
@@ -260,7 +267,7 @@ PY
 rm -f "$BG_TIFF"
 if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
   # Gatekeeper assesses the dmg's own signature too, not just the app inside.
-  codesign --force --timestamp --sign "$CODESIGN_IDENTITY" "$DMG"
+  codesign --force --timestamp ${KEYCHAIN_ARGS[@]+"${KEYCHAIN_ARGS[@]}"} --sign "$CODESIGN_IDENTITY" "$DMG"
 fi
 if $NOTARIZE; then
   notarize "$DMG"
