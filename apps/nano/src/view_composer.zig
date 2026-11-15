@@ -35,19 +35,33 @@ pub fn docked(c: *ui.Context, a: *App, k: theme.Colors) void {
     const w = dockedWidth(transcript_view.paneWidth(c, a), transcript_view.column_w);
     const queue_view = @import("view_queue.zig");
     const queued = a.queue.items.len > 0;
-    // 16 points of padding, over the window's 24-point status strip; the
-    // pill covers the queue tray's foot, so it moves up as much.
-    const outer = ui.div(c).column().wFull().px(16).pb(if (queued) 40 - queue_view.tuck else 40).itemsCenter();
+    // Queue and input are separate flow surfaces. Never lift the input over
+    // the queue's scroll viewport or use decorative padding as scroll content.
+    const outer = ui.div(c).column().wFull().px(16).pb(40).gap(if (queued) queue_view.gap else 0).itemsCenter();
     defer outer.end();
+    // Above-dock affordances anchor to the whole stack, not just the input:
+    // queued rows and attachments must not grow underneath the jump button.
+    {
+        ui.key(c, "dock-overlays");
+        const top = ui.div(c).column().w(w).h(0);
+        defer top.end();
+        jumpToBottom(c, a, k, w);
+        const work = @import("view_turn_work.zig");
+        if (work.changes(c, a)) |t| {
+            ui.key(c, "turn-work-cue");
+            const cue = ui.div(c).row().absolute().offset(-8, -(work.cardHeight(c, a, t, w + 16) + work.gap + (if (a.view.jump_shown) @as(f32, 36) else 0)));
+            defer cue.end();
+            work.card(c, a, k, t, w + 16);
+        }
+    }
     // Keyed: the tray coming and going must not change the input's id
     // (which would take its focus).
     dictationStatus(c, a, k, w);
     ui.key(c, "queue-tray");
     _ = queue_view.tray(c, a, k, w);
     ui.key(c, "composer");
-    const lift: f32 = if (queued) -queue_view.tuck else 0;
     if (a.wizard != null) {
-        const q = ui.div(c).column().offset(0, lift);
+        const q = ui.div(c).column();
         defer q.end();
         // The question may be taller than its pane (a split, a short
         // window): it is told the room the dock has, the pane as last laid
@@ -68,12 +82,11 @@ pub fn docked(c: *ui.Context, a: *App, k: theme.Colors) void {
         std.mem.indexOfScalar(u8, a.composer.text(), '\n') != null,
     );
     a.view.composer_expanded = expanded;
-    const p = ui.div(c).column().offset(0, lift);
+    const p = ui.div(c).column();
     defer p.end();
     pill(c, a, k, w, if (expanded) .expanded else .compact, radius);
     // The session footer, in the slot the 40 points under the pill keep
-    // for it (`SESSION_FOOTER_HEIGHT`, 8 under the pill); drawn over that
-    // padding so the queue tray's tuck needn't move it.
+    // for it (`SESSION_FOOTER_HEIGHT`, 8 under the pill).
     {
         // This zero-height flow anchor follows THIS frame's pill bottom.
         // Offsetting from composer_anchor used its previous height, making
@@ -83,17 +96,6 @@ pub fn docked(c: *ui.Context, a: *App, k: theme.Colors) void {
         const f = ui.div(c).row().absolute().offset(0, footer_view.gap);
         defer f.end();
         if (a.selected == null) @import("view_newchat.zig").footer(c, a, k, w) else footer_view.footer(c, a, k, w);
-    }
-    // The finished turn's "N files changed" card floats over the
-    // transcript's foot, 8 clear of the pill and 8 wider either side,
-    // growing upward as its names wrap.
-    jumpToBottom(c, a, k, w);
-    const work = @import("view_turn_work.zig");
-    if (work.changes(c, a)) |t| {
-        ui.key(c, "turn-work-cue");
-        const cue = ui.div(c).row().absolute().offset(-8, -(work.cardHeight(c, a, t, w + 16) + work.gap));
-        defer cue.end();
-        work.card(c, a, k, t, w + 16);
     }
 }
 
@@ -562,7 +564,7 @@ fn send(c: *ui.Context, a: *App, k: theme.Colors) void {
 const jump_show: f32 = 320;
 const jump_hide: f32 = 70;
 
-/// GPUI's labeled pill, six pixels above the composer (`render_jump_to_bottom`
+/// GPUI's labeled pill, six pixels above the entire dock (`render_jump_to_bottom`
 /// uses `top(-36)` on a 30-point chip). Shown once the reader is 320 points
 /// off the end, and kept until they are within 70.
 fn jumpToBottom(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {

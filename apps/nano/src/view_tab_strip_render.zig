@@ -13,6 +13,7 @@ const caption = @import("window_chrome.zig");
 
 pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (a.view.settings_open) return;
+    if (!strip.hasHost(a)) a.view.strip.host_tab_rect = null;
     const left = @max(strip.leftInset(a), a.view.chrome.leading);
     if (strip.count(a) <= 1) return single(c, a, k, left);
     var targets: [tabs.max_panes + 2]strip.Panel = undefined;
@@ -22,6 +23,9 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
     const github = @import("app_github_repository.zig");
     const child_parent = if (strip.hasHost(a) and github.surface(a)) github.parentPane(a) else null;
     for (0..strip.chatCount(a)) |ix| {
+        // In the temporary focused layout keep its source and child tabs
+        // together; the other panes return when the window has room again.
+        if (a.view.chrome.compact_host and a.view.strip.expanded == null and child_parent != null and ix != child_parent.?) continue;
         targets[n] = .{ .chat = ix };
         widths[n] = if (split) |s| chrome.paneSpan(a.view.chrome.chat_width, s.shares.items[ix], s.panes.items.len, true) else a.view.chrome.chat_width;
         n += 1;
@@ -42,7 +46,7 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
         n += 1;
     }
     var aligned: [tabs.max_panes + 2]f32 = undefined;
-    const in_row = (if (split) |s| s.axis == .horizontal and !s.zoomed else true) and a.view.strip.expanded == null and a.view.chrome.width <= c.size.w - a.view.chrome.x + 0.5;
+    const in_row = (if (split) |s| s.axis == .horizontal and !s.zoomed else true) and strip.layoutExpanded(a) == null and a.view.chrome.width <= c.size.w - a.view.chrome.x + 0.5;
     const columns = in_row and chrome.columns(widths[0..n], a.view.chrome.leading, left, 8 + caption.trailing, &aligned);
     const other_tabs: usize = if (a.tabs.items.items.len > 1) a.tabs.items.items.len - 1 else 0;
     const avail_bar = @max(0, c.size.w - a.view.sidebar_width - left - caption.trailing - 8 - 32);
@@ -148,6 +152,14 @@ fn topWorkspacePill(c: *ui.Context, a: *App, k: theme.Colors, ws: usize, pill_w:
 }
 
 fn slot(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: usize, width: f32) void {
+    if (target == .host and @import("app_github_repository.zig").surface(a)) {
+        // A narrower centered cap leaves room for both outward shoulders
+        // as the child tab flows into its wider reading surface.
+        const lane = ui.div(c).row().size(width, chrome.tab_height).center();
+        defer lane.end();
+        slotBox(c, a, k, target, ix, @max(0, @min(chrome.slot_max, width - 2 * chrome.shoulder)), false);
+        return;
+    }
     if (target == .chat) {
         if (a.tabs.layout()) |s| {
             const pane = target.chat;
@@ -212,7 +224,16 @@ fn slotBox(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: us
     const project = strip.folder(a, target);
     var box = ui.div(c).row().size(width, chrome.tab_height).pl(7).pr(4).gap(6).itemsCenter().rounded(6).clip().control();
     box = if (on) box.bg(k.ink(if (k.dark) 0.16 else 0.10)) else box.bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover);
-    if (github_child) box = box.border(k.accent.alpha(0.28)).borderW(1);
+    if (github_child) {
+        box = box.bg(k.background);
+        const measured = c.rects.get(c.node(box.index).id);
+        if (!std.meta.eql(measured, a.view.strip.host_tab_rect)) {
+            a.view.strip.host_tab_rect = measured;
+            // The body is drawn before the strip. Give its contour the new
+            // cap bounds after a resize instead of leaving a stale shoulder.
+            c.animationFrame();
+        }
+    }
     defer box.end();
     const hot = box.hovered() or group_hot;
     const show_controls = hot or c.focus == c.node(box.index).id;
@@ -224,7 +245,7 @@ fn slotBox(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: us
         const mark = ui.div(c).row().size(14, 14).center();
         defer mark.end();
         ui.div(c).size(7, 7).rounded(3.5).bg(color).end();
-    } else icons.icon(c, strip.glyph(a, target), 14, k.muted, 0);
+    } else icons.icon(c, strip.glyph(a, target), 14, if (github_child) k.accent else k.muted, 0);
     {
         const text = ui.div(c).column().grow().w(0).clip();
         defer text.end();

@@ -284,6 +284,124 @@ test "reply images actual native and Markdown pictures open an inspection previe
     }
 }
 
+fn controlId(tester: *ui.Tester, label: []const u8) !u64 {
+    for (tester.ctx.nodes.items) |n| {
+        if (n.content == .text and std.mem.eql(u8, n.content.text.str, label)) return tester.ctx.node(n.parent).id;
+    }
+    return error.MissingControl;
+}
+
+test "reply images dialog contains keyboard focus and restores its trigger" {
+    var a: App = undefined;
+    try setup(&a, false);
+    defer a.deinit();
+    try reset(&a, false);
+    var tester: ui.Tester = undefined;
+    try initTester(&a, &tester);
+    defer tester.deinit();
+    _ = a.engine.pump();
+    tester.settle(3);
+    var trigger: u64 = 0;
+    for (tester.ctx.nodes.items) |n| {
+        if (n.content == .image and n.rect.w >= 100) trigger = n.id;
+    }
+    try clickPicture(&tester);
+    try t.expectEqual(try controlId(&tester, "Close preview"), tester.ctx.focus);
+    const order = [_][]const u8{ "Zoom out", "Zoom in", "Fit", "Close preview", "Zoom out", "Zoom in" };
+    for (order) |label| {
+        tester.key(.tab);
+        try t.expectEqual(try controlId(&tester, label), tester.ctx.focus);
+    }
+    const cache = &a.attachments.images;
+    tester.key(.enter);
+    tester.settle(1);
+    try t.expect(cache.zoom > 1);
+    tester.key(.tab);
+    _ = tester.shortcut(.{ .key = ' ' });
+    tester.settle(1);
+    try t.expectEqual(@as(f32, 1), cache.zoom);
+    tester.setMods(.{ .shift = true });
+    tester.key(.tab);
+    try t.expectEqual(try controlId(&tester, "Zoom in"), tester.ctx.focus);
+    const focused = for (tester.ctx.nodes.items) |n| {
+        if (n.id == tester.ctx.focus) break n;
+    } else return error.MissingFocusRing;
+    try t.expect(focused.style.border != null and focused.style.border_width > 0);
+    if (std.c.getenv("NANO_SNAP_DIR")) |dir| {
+        var buffer: [1024]u8 = undefined;
+        const output = try std.fmt.bufPrint(&buffer, "{s}/image-preview-keyboard-focus.png", .{std.mem.span(dir)});
+        try tester.screenshot(output);
+    }
+    tester.setMods(.{});
+    _ = tester.shortcut(.{ .key = ui.Shortcut.escape });
+    tester.settle(1);
+    try t.expect(cache.preview == null);
+    try t.expectEqual(trigger, tester.ctx.focus);
+    tester.key(.enter);
+    tester.settle(1);
+    try t.expect(cache.preview != null);
+    try t.expectEqual(try controlId(&tester, "Close preview"), tester.ctx.focus);
+    tester.key(.enter);
+    tester.settle(1);
+    try t.expect(cache.preview == null);
+    try t.expectEqual(trigger, tester.ctx.focus);
+}
+
+test "reply images wheel zoom is smooth cursor anchored and isolated from the page" {
+    var a: App = undefined;
+    try setup(&a, false);
+    defer a.deinit();
+    try reset(&a, false);
+    var tester: ui.Tester = undefined;
+    try initTester(&a, &tester);
+    defer tester.deinit();
+    _ = a.engine.pump();
+    tester.settle(3);
+    try clickPicture(&tester);
+    const cache = &a.attachments.images;
+    const requests = a.engine.sent.items.len;
+    var picture: ui.Rect = undefined;
+    for (tester.ctx.nodes.items) |n| {
+        if (n.content == .image and n.rect.w > 100 and n.rect.h > 100) picture = n.rect;
+    }
+    const x = picture.x + picture.w * 0.65;
+    const y = picture.y + picture.h * 0.55;
+    tester.moveTo(x, y);
+    tester.scroll(x, y, 80);
+    try t.expect(cache.zoom > 1);
+    try t.expect(cache.inspection.inverse < 1 and cache.inspection.inverse > 1 / cache.zoom);
+    // The source pixel under the pointer is fixed even during the easing.
+    try t.expectApproxEqAbs(@as(f32, 0.65), cache.inspection.center.x + 0.15 * cache.inspection.inverse, 0.001);
+    tester.settle(3);
+    try t.expectApproxEqAbs(@as(f32, 0.65), cache.center.x + 0.15 / cache.zoom, 0.001);
+    try t.expect(!tester.ctx.animating);
+    const before_drag = cache.center.x;
+    tester.drag(x, y, x + 20, y);
+    try t.expect(cache.center.x < before_drag);
+    try t.expectApproxEqAbs(cache.center.x, cache.inspection.center.x, 0.0001);
+    tester.pinch(x, y, 2, 0, 0);
+    tester.settle(3);
+    try t.expect(cache.zoom > 2);
+    tester.scroll(x, y, 10000);
+    tester.settle(3);
+    try t.expectEqual(@as(f32, 4), cache.zoom);
+    const previous = cache.zoom;
+    tester.moveTo(5, 5);
+    tester.pinch(5, 5, 0.5, 0, 0);
+    try t.expectEqual(previous, cache.zoom);
+    tester.ctx.reduced_motion = true;
+    tester.moveTo(x, y);
+    tester.scroll(x, y, -10000);
+    try t.expectEqual(@as(f32, 1), cache.zoom);
+    try t.expectEqual(@as(f32, 1), cache.inspection.inverse);
+    try t.expectEqual(@as(f32, 0.5), cache.inspection.center.x);
+    try t.expectEqual(requests, a.engine.sent.items.len);
+    try tester.clickText("Zoom in");
+    try t.expectEqual(1 / cache.zoom, cache.inspection.inverse);
+    try tester.clickText("Fit");
+    try t.expectEqual(@as(f32, 1), cache.inspection.inverse);
+}
+
 test "reply images production pane opens and closes assistant and sent pictures" {
     for (0..3) |kind| {
         var a: App = undefined;

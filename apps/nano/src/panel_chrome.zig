@@ -18,6 +18,8 @@ pub const slot_room_for_close: f32 = 136;
 pub const device_room: f32 = 120;
 pub const panel_min: f32 = 220;
 pub const right_pane_default: f32 = 520;
+/// Below this, repository controls and readable diffs need a focused outlet.
+pub const github_min_width: f32 = 420;
 pub const new_tab_room: f32 = 24 + gutter;
 
 pub const Frame = struct {
@@ -30,6 +32,8 @@ pub const Frame = struct {
     files_width: f32 = 0,
     leading: f32 = 0,
     strip: bool = false,
+    /// Derived each frame, never persisted as the user's expand/zoom choice.
+    compact_host: bool = false,
 };
 
 /// How much of `width` a new side panel gets (`side_panel_share` in

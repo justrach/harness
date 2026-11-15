@@ -46,6 +46,8 @@ pub const State = struct {
     device_anchor: ?ui.Rect = null,
     pending: ?Action = null,
     expanded: ?Panel = null,
+    /// Last measured GitHub cap, for the body's shared curved contour.
+    host_tab_rect: ?ui.Rect = null,
     cursor: usize = 0,
     rows: usize = 0,
     activate: bool = false,
@@ -69,6 +71,14 @@ pub fn hasHost(a: *const App) bool {
 pub fn hasFiles(a: *const App) bool {
     return a.panels.files_open;
 }
+/// An undersized GitHub split temporarily focuses a full-width outlet.
+/// Widening restores the split; no saved shares or explicit zoom are changed.
+pub fn layoutExpanded(a: *const App) ?Panel {
+    if (a.view.strip.expanded) |panel| return panel;
+    if (!a.view.chrome.compact_host or !hasHost(a)) return null;
+    return if (a.view.strip.focused == .host) .host else .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
+}
+
 pub fn count(a: *const App) usize {
     return chatCount(a) + @intFromBool(hasHost(a)) + @intFromBool(hasFiles(a));
 }

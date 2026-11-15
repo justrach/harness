@@ -148,6 +148,8 @@ fn meta(c: *ui.Context, a: *App, k: theme.Colors, d: agents.Descriptor, enabled:
         const what = if (p.installing_beta and d.id == .graff) "Installing Codegraff engine beta…" else agents.installLabel(al, d.name) catch "";
         frags.append(al, .{ .working = what }) catch {};
     }
+    if (d.id == .antigravity and d.installed and !signing and failure == null)
+        frags.append(al, .{ .text = .{ .s = "Uses Antigravity's own account. Sign in only if needed.", .color = k.muted } }) catch {};
     if (d.installed and !enabled and !agents.defaultOn(d.id)) frags.append(al, .{ .text = .{ .s = "Off by default — turn on to use", .color = k.muted } }) catch {};
     if (!d.installed) {
         frags.append(al, .{ .text = .{ .s = agents.installHint(al, d.id, enabled, d.can_install) catch "", .color = warningMuted(k).alpha(0.9) } }) catch {};

@@ -49,8 +49,11 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, chat_id: ?[]const u8, src:
                 .max_height = 360,
                 .scale = 1,
             })) {
-                const picture = c.interact(@intCast(c.nodes.items.len - 1), .{ .focusable = true });
-                if (picture.clicked or box.clicked()) @import("view_image_preview.zig").open(a, chat_id, image);
+                const picture = @import("preview_focus.zig").action(c, @intCast(c.nodes.items.len - 1), k, c.print("Open image preview: {s}", .{alt}));
+                if (picture or box.clicked()) {
+                    c.focus = c.node(@intCast(c.nodes.items.len - 1)).id;
+                    @import("view_image_preview.zig").open(a, chat_id, image);
+                }
                 return;
             }
         } else if (image.status == .loading) {

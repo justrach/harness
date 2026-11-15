@@ -388,6 +388,7 @@ pub const App = struct {
     /// ↑/↓ through the open chat's earlier prompts.
     prompt_nav: @import("prompt_history.zig").Nav = .{},
     attachments: @import("app_attachments.zig").State = .{},
+    artifacts: @import("artifact_links.zig").State = .{},
     file_drop: @import("view_attachment_drop.zig").State = .{},
     /// The last error the engine gave, shown under the composer.
     notice: [200]u8 = undefined,
@@ -541,6 +542,7 @@ pub const App = struct {
         @import("app_surface.zig").deinit(a);
         // Live callbacks must be cancelled before their engine is destroyed.
         @import("app_progress.zig").deinit(a);
+        a.artifacts.deinit(a);
         // An engine started from here stays up: others may be on it now.
         a.engine.deinit();
         a.completion.deinit(a.gpa);

@@ -23,7 +23,7 @@ pub fn expanded(c: *ui.Context, a: *const App) bool {
     const width = @import("view_composer.zig").dockedWidth(@import("view_transcript.zig").paneWidth(c, a), @import("view_transcript.zig").column_w);
     var height = a.view.chrome.height;
     if (a.tabs.layout()) |s| {
-        if (!s.zoomed and s.axis == .vertical and a.view.strip.expanded == null) height = @import("panel_chrome.zig").paneSpan(height, s.shares.items[s.focus], s.panes.items.len, false);
+        if (!s.zoomed and s.axis == .vertical and @import("view_tab_strip.zig").layoutExpanded(a) == null) height = @import("panel_chrome.zig").paneSpan(height, s.shares.items[s.focus], s.panes.items.len, false);
     }
     const actions = @import("view_actions.zig");
     return width < 360 or height - actions.toolbarHeight(a) - actions.dockHeight(a) < 320;

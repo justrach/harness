@@ -197,11 +197,12 @@ fn menuRow(c: *ui.Context, k: theme.Colors, icon: icons.Name, tint: ui.Color, la
     if (opacity < 1) row = row.opacity(opacity);
     defer row.end();
     const hot = row.hovered();
+    const activated = @import("control_behavior.zig").activate(c, row.control(), k, label, true, false);
     icons.icon(c, icon, 16, tint, 0);
     const t = ui.div(c).row().grow().w(0).clip();
     defer t.end();
     ui.text(c, label, .{ .size = 13, .line_height = 13 * phi, .color = if (hot) k.text else k.text.alpha(0.9) });
-    return row.clicked();
+    return activated;
 }
 
 /// A hairline from border to border, through the card's inset
@@ -223,7 +224,7 @@ fn item(c: *ui.Context, k: theme.Colors, icon: icons.Name, label: []const u8, on
     var r = ui.div(c).row().wFull().h(30).px(8).gap(8).itemsCenter().rounded(7).hover(k.hover);
     if (on) r = r.bg(k.selected);
     defer r.end();
-    const clicked = r.clicked();
+    const clicked = @import("control_behavior.zig").activate(c, r.control(), k, label, true, on);
     icons.icon(c, icon, 15, k.muted, 0);
     ui.text(c, label, .{ .size = 13, .color = k.text });
     ui.spacer(c);

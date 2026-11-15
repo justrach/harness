@@ -26,9 +26,15 @@ const Allocator = std.mem.Allocator;
 
 pub const Phase = enum { idle, loading, ready, failed };
 
+/// As in app_reauth: an immediate send failure can call back before call()
+/// returns. Only the request currently being sent may accept that reply.
+const in_call: u64 = std.math.maxInt(u64);
+const SignInStart = struct { attempt: u64, call: u64 = in_call };
+
 /// A sign-in that switches its agent on once done (`SignIn`).
 pub const SignIn = struct {
     harness: agents.Id,
+    attempt: u64 = 0,
     /// Known once the engine took the start.
     login_id: ?[]u8 = null,
     message: ?[]const u8 = null,
@@ -92,6 +98,10 @@ pub const Page = struct {
     installing_beta: bool = false,
     install_call: ?u64 = null,
     sign_in: ?SignIn = null,
+    /// Keep cancelled starts until their reply: it owns the engine login
+    /// which must be cancelled even though the visible flow has gone away.
+    sign_in_starts: std.ArrayList(SignInStart) = .empty,
+    sign_in_attempt: u64 = 0,
     sign_in_failure: ?SignInFailure = null,
     /// Screen Recording's Allow was used: System Settings and the restart
     /// instead (macOS asks once).
@@ -104,6 +114,7 @@ pub const Page = struct {
         if (p.target) |t| gpa.free(t);
         if (p.title_model) |m| gpa.free(m);
         if (p.sign_in) |*s| s.deinit(gpa);
+        p.sign_in_starts.deinit(gpa);
         if (p.sign_in_failure) |f| gpa.free(f.message);
     }
 
@@ -268,9 +279,27 @@ pub fn startSignIn(a: *App, id: agents.Id) void {
     }
     p.err.clearRetainingCapacity();
     clearFailure(a);
-    if (p.sign_in) |*s| s.deinit(a.gpa);
-    p.sign_in = .{ .harness = id };
-    send(a, &p.sign_in.?.call, "StartAgentLogin", .{ .harness = id.wire() }, .of(App, a, onSignInStart));
+    cancelSignIn(a);
+    p.sign_in_attempt += 1;
+    const attempt = p.sign_in_attempt;
+    p.sign_in = .{ .harness = id, .attempt = attempt };
+    p.sign_in_starts.append(a.gpa, .{ .attempt = attempt }) catch return failSignIn(a, "Sign-in failed to start: Out of memory");
+    p.sign_in.?.call = in_call;
+    const call = a.engine.call("StartAgentLogin", .{ .harness = id.wire() }, .of(App, a, onSignInStart));
+    // Reacquire after call(): a synchronous failure may have removed both
+    // the request and the flow. Never write through their former pointers.
+    for (p.sign_in_starts.items, 0..) |*pending, i| if (pending.attempt == attempt) {
+        if (call) |request_id| {
+            pending.call = request_id;
+            if (p.sign_in) |*s| if (s.attempt == attempt) {
+                s.call = request_id;
+            };
+        } else {
+            _ = p.sign_in_starts.orderedRemove(i);
+            failSignIn(a, "Sign-in failed to start: Couldn't send request");
+        }
+        break;
+    };
 }
 
 fn clearFailure(a: *App) void {
@@ -290,13 +319,30 @@ fn failSignIn(a: *App, message: []const u8) void {
 }
 
 fn onSignInStart(a: *App, id: u64, r: rpc.Reply) void {
-    const s = if (a.view.agents.sign_in) |*x| x else return;
-    if (!current(&s.call, id)) return;
+    const p = &a.view.agents;
+    const attempt = for (p.sign_in_starts.items, 0..) |pending, i| {
+        if (pending.call == id or pending.call == in_call) {
+            _ = p.sign_in_starts.orderedRemove(i);
+            break pending.attempt;
+        }
+    } else return;
+    const login = if (r == .ok and r.ok == .object) r.ok.object.get("loginId") else null;
+    const wanted = if (p.sign_in) |s| s.attempt == attempt else false;
+    if (!wanted) {
+        // A cancelled or replaced start still created an engine task.
+        // Its reply belongs to that attempt, never the current retry.
+        if (login) |l| if (l == .string) cancelLogin(a, l.string);
+        return;
+    }
+    const s = &p.sign_in.?;
+    s.call = null;
     switch (r) {
-        .ok => |v| {
-            const login = if (v == .object) v.object.get("loginId") else null;
+        .ok => {
             if (login == null or login.? != .string) return failSignIn(a, "Sign-in failed to start: Unexpected reply");
-            s.login_id = a.gpa.dupe(u8, login.?.string) catch null;
+            s.login_id = a.gpa.dupe(u8, login.?.string) catch {
+                cancelLogin(a, login.?.string);
+                return failSignIn(a, "Sign-in failed to start: Out of memory");
+            };
             s.phase = .starting;
             s.next_poll = a.now + 1;
         },
@@ -313,13 +359,22 @@ fn poll(a: *App) void {
     const s = if (a.view.agents.sign_in) |*x| x else return;
     s.next_poll = null;
     const login = s.login_id orelse return;
-    send(a, &s.call, "PollAgentLogin", .{ .loginId = login }, .of(App, a, onPoll));
+    const attempt = s.attempt;
+    s.call = in_call;
+    const call = a.engine.call("PollAgentLogin", .{ .loginId = login }, .of(App, a, onPoll));
+    if (a.view.agents.sign_in) |*active| if (active.attempt == attempt and active.call == in_call) {
+        active.call = call;
+        if (call == null) failSignIn(a, "Couldn't check the sign-in: Couldn't send request");
+    };
 }
 
 fn onPoll(a: *App, id: u64, r: rpc.Reply) void {
     const p = &a.view.agents;
     const s = if (p.sign_in) |*x| x else return;
-    if (!current(&s.call, id)) return;
+    // An immediate failure belongs only to the poll being sent, not to
+    // any newer flow which happens to occupy the page.
+    if (s.call != id and s.call != in_call) return;
+    s.call = null;
     defer a.redraw();
     const v = switch (r) {
         .ok => |v| v,
@@ -359,8 +414,12 @@ pub fn cancelSignIn(a: *App) void {
     var s = p.sign_in orelse return;
     p.sign_in = null;
     defer s.deinit(a.gpa);
-    if (s.login_id) |login| _ = a.engine.call("CancelAgentLogin", .{ .loginId = login }, .of(App, a, onIgnored));
+    if (s.login_id) |login| cancelLogin(a, login);
     a.redraw();
+}
+
+fn cancelLogin(a: *App, login: []const u8) void {
+    _ = a.engine.call("CancelAgentLogin", .{ .loginId = login }, .of(App, a, onIgnored));
 }
 
 fn onIgnored(_: *App, _: u64, _: rpc.Reply) void {}
