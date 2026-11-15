@@ -27,7 +27,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  ios-recovery:
+  ios-recovery-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Release, Debug]
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -49,6 +53,7 @@ jobs:
               env.write('IOS_SIMULATOR_ID=' + iphones[0]['udid'] + '\n')
           PY
       - name: Build app and run recovery regressions
+        if: matrix.configuration == 'Release'
         working-directory: apps/ios
         run: |
           xcodebuild -project Harness.xcodeproj -scheme Harness \
@@ -67,8 +72,9 @@ jobs:
             -only-testing:HarnessTests/LivePerfTests \
             ENABLE_TESTABILITY=YES CODE_SIGNING_ALLOWED=NO test
       # The layout probes and scroll matrix are intentionally DEBUG-only.
-      # Keep this separate from the Release diagnostics/privacy regressions.
+      # Give each configuration its own cold-build budget on a separate runner.
       - name: Run transcript scroll matrix
+        if: matrix.configuration == 'Debug'
         working-directory: apps/ios
         run: |
           xcodebuild -project Harness.xcodeproj -scheme Harness \
@@ -82,8 +88,19 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: reauth-ios-test-results
+          name: reauth-ios-${{ matrix.configuration }}-test-results
           path: |
             ${{ runner.temp }}/reauth-tests.xcresult
             ${{ runner.temp }}/scroll-matrix-tests.xcresult
           if-no-files-found: ignore
+
+  # Preserve the required check name and reject failed, cancelled or skipped runs.
+  ios-recovery:
+    if: ${{ always() }}
+    needs: [ios-recovery-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require both configurations to pass
+        env:
+          RECOVERY_RESULT: ${{ needs['ios-recovery-tests'].result }}
+        run: test "$RECOVERY_RESULT" = success
