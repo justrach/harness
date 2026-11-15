@@ -164,6 +164,79 @@ fn textRect(t: *ui.Tester, text: []const u8) !ui.Rect {
     return error.TextMissing;
 }
 
+test "expanded tree is newest first and appending preserves detail identity and controls" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    const initial = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"reply","role":"assistant","status":"complete","parts":[
+        \\ {"id":"older","kind":"tool","call":{"kind":"exec","command":"echo older"},"resolved":true,"output":"older detail"},
+        \\ {"id":"thought","kind":"reasoning","text":"Synthetic reasoning"},
+        \\ {"id":"recent","kind":"tool","call":{"kind":"exec","command":"echo recent"},"resolved":true,"output":"recent detail"}]}]}
+    , .{});
+    defer initial.deinit();
+    try h.a.transcript.apply(initial.value);
+    h.t.settle(1);
+    try h.click("Thought process · ran 2 commands");
+    const recent = try textRect(&h.t, "echo recent");
+    const thought = try textRect(&h.t, "Thought process");
+    const older = try textRect(&h.t, "echo older");
+    try testing.expect(recent.y < thought.y and thought.y < older.y);
+    h.t.click(recent.x + 4, recent.y + recent.h / 2);
+    h.t.settle(1);
+    try testing.expect(h.t.hasText("recent detail"));
+    try testing.expect(!h.t.hasText("older detail"));
+    var recent_id: ?u64 = null;
+    for (h.t.ctx.nodes.items) |node| switch (node.content) {
+        .text => |text| if (std.mem.eql(u8, text.str, "echo recent")) {
+            recent_id = node.id;
+        },
+        else => {},
+    };
+    try testing.expect(recent_id != null);
+
+    const appended = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"upsert":[{"after":null,"entry":{"id":"reply","role":"assistant","status":"streaming","parts":[
+        \\ {"id":"older","kind":"tool","call":{"kind":"exec","command":"echo older"},"resolved":true,"output":"older detail"},
+        \\ {"id":"thought","kind":"reasoning","text":"Synthetic reasoning"},
+        \\ {"id":"recent","kind":"tool","call":{"kind":"exec","command":"echo recent"},"resolved":true,"output":"recent detail"},
+        \\ {"id":"newest","kind":"tool","call":{"kind":"exec","command":"echo newest\nsecond line"}}]}}]}
+    , .{});
+    defer appended.deinit();
+    try h.a.transcript.apply(appended.value);
+    h.t.frame();
+    // A new top row uses the first displayed reveal slot, not its old
+    // chronological index. Existing part-keyed controls retain their state.
+    const motion = h.a.view.tool_ui.rows.get(@import("tool_ui_state.zig").key("synthetic", "reply", "newest")).?;
+    try testing.expectApproxEqAbs(@as(f64, 0.090), motion.reveal.? - motion.started.?, 0.0001);
+    h.t.settle(1);
+    const newest = try textRect(&h.t, "echo newest second line");
+    const shifted = try textRect(&h.t, "echo recent");
+    try testing.expect(newest.y < shifted.y);
+    try testing.expect(shifted.y < (try textRect(&h.t, "Thought process")).y);
+    try testing.expect((try textRect(&h.t, "Thought process")).y < (try textRect(&h.t, "echo older")).y);
+    for (h.t.ctx.nodes.items) |node| switch (node.content) {
+        .text => |text| if (std.mem.eql(u8, text.str, "echo recent")) {
+            try testing.expectEqual(recent_id.?, node.id);
+        },
+        else => {},
+    };
+    try testing.expect(h.a.view.groupOpen("detail/synthetic/reply/recent", false));
+    try testing.expect(!h.a.view.groupOpen("detail/synthetic/reply/newest", false));
+    try testing.expect(h.t.hasText("recent detail"));
+    h.t.click(shifted.x + 4, shifted.y + shifted.h / 2);
+    h.t.settle(1);
+    try testing.expect(!h.t.hasText("recent detail"));
+    try h.click("echo newest second line");
+    try testing.expect(h.a.view.groupOpen("detail/synthetic/reply/newest", false));
+    try testing.expect(h.t.containsText("second line"));
+    try testing.expect(h.t.hasText("Tool access"));
+    const parts = h.a.transcript.entries.items[0].parts.items;
+    for ([_][]const u8{ "older", "thought", "recent", "newest" }, parts) |id, part| {
+        try testing.expectEqualStrings(id, part.id);
+    }
+}
+
 test "expanded tree results live beside the command, not in a duplicate list" {
     var h: Harness = undefined;
     try h.init();
@@ -182,7 +255,8 @@ test "expanded tree results live beside the command, not in a duplicate list" {
     const result = try textRect(&h.t, "48 passed");
     try testing.expect(@abs((command.y + command.h / 2) - (result.y + result.h / 2)) < 5);
     try testing.expect(result.x > command.x + command.w);
-    try h.click("Run");
+    h.t.click(command.x + 4, command.y + command.h / 2);
+    h.t.settle(1);
     try testing.expect(h.t.containsText("48 passed; 0 failed"));
     try h.click(summary);
     try testing.expect(!h.t.hasText("48 passed"));

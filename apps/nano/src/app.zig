@@ -44,11 +44,13 @@ pub const SplitReveal = struct {
 /// The window's own state, apart from the engine's.
 pub const View = struct {
     sidebar_open: bool = true,
-    /// A prompt was just sent: the open chat's transcript goes to its end
-    /// and follows the reply again, however far up it was read.
+    /// A prompt was just sent: position the new turn near the top, even
+    /// when the reader was browsing older work.
     stick_end: bool = false,
     /// Where the messages sent while a turn worked arrived in its reply.
     steer: @import("steer_order.zig").Store = .{},
+    /// Each transcript owns its current-turn anchor, including split peers.
+    reply_anchors: std.AutoHashMapUnmanaged(u64, @import("view_transcript.zig").TurnAnchor) = .empty,
     /// The jump pill is up. It stays until the reader is near the end.
     jump_shown: bool = false,
     jump_box: u64 = 0,
@@ -230,6 +232,7 @@ pub const View = struct {
         @import("text_buffer.zig").deinit(&v.search.query);
         @import("text_buffer.zig").deinit(&v.strip.query);
         v.tool_ui.deinit(gpa);
+        v.reply_anchors.deinit(gpa);
         v.github_ci.deinit(gpa);
         v.palette.deinit(gpa);
         v.model_picker.deinit(gpa);
