@@ -1,9 +1,11 @@
 //! Interactive Harness member card: 20 original Codegraff × Ensō layered
 //! Japanese artworks paired with 8 composable Ensō brushstrokes, 5 holographic
-//! finishes, and 8 Hanko seals (`card_scenes_data` — 128,000 unique combinations;
-//! 3,200 1-of-1 three-layer artworks for founders), 5×7 ASCII sky dither under
-//! parallax-shifted cutouts, 7-stop `#f4efe6` washi paper fade, member number
-//! (`000·XXX`), join date, and pointer glare.
+//! finishes (including Kumiko star-lattice foil), and 8 Hanko seals
+//! (`card_scenes_data` — 128,000 unique combinations; 3,200 1-of-1 three-layer
+//! artworks for founders), Seigaiha silkscreen wave + sunago gold-dust sky
+//! overlay under parallax-shifted cutouts, 7-stop `#f4efe6` washi paper fade,
+//! member number (`000·XXX`), join date, 3D perspective turn/lift motion, and
+//! deal-in foil sweep.
 const std = @import("std");
 const nanoui = @import("nanoui");
 const ui = nanoui.ui;
@@ -89,7 +91,12 @@ pub const State = struct {
     tilt_x: f32 = 0.5,
     tilt_y: f32 = 0.5,
     foil_strength: f32 = 0,
+    hover_lift: f32 = 0,
     hovered: bool = false,
+    seeded: bool = false,
+    seed_hash: u32 = 0,
+    arrive_at: f64 = 0,
+    glint_at: f64 = -10.0,
 
     pub fn deinit(s: *State, gpa: Allocator) void {
         s.sky.deinit(gpa);
@@ -106,6 +113,9 @@ pub const Props = struct {
     card_scenes: ?u32 = null,
     card_traits: ?WireCardTraits = null,
     preview: bool = false,
+    zoom_override: ?f32 = null,
+    still: bool = false,
+    arrive: bool = true,
     caption: ?[]const u8 = null,
     force_holo: ?[2]f32 = null,
 };
@@ -181,10 +191,6 @@ fn hash2(x: f32, y: f32) f32 {
     return fract(@sin(x * 127.1 + y * 311.7) * 43758.5453);
 }
 
-fn cellHash(cx: u32, cy: u32) f32 {
-    return hash2(@floatFromInt(cx), @floatFromInt(cy));
-}
-
 fn sampleSkyRgb(rgb: *const [sky_grid_w * sky_grid_h * 3]u8, u: f32, v: f32) [3]f32 {
     const fx = std.math.clamp(u, 0.0, 1.0) * @as(f32, @floatFromInt(sky_grid_w - 1));
     const fy = std.math.clamp(v, 0.0, 1.0) * @as(f32, @floatFromInt(sky_grid_h - 1));
@@ -213,9 +219,9 @@ fn sampleSkyRgb(rgb: *const [sky_grid_w * sky_grid_h * 3]u8, u: f32, v: f32) [3]
     return out;
 }
 
-/// Renders (or reuses cached) premultiplied BGRA8 texture implementing Zeron's
-/// `sky` shader (`member_card.luau`) over `depth == 0` artwork and underneath
-/// foreground parallax cutouts.
+/// Renders (or reuses cached) premultiplied BGRA8 Seigaiha (青海波) wave-crest
+/// silkscreen engraving + sunago gold-dust sky overlay over `depth == 0` artwork
+/// and underneath foreground parallax cutouts.
 pub fn renderSkyOverlay(
     cache: *SkyCache,
     gpa: Allocator,
@@ -264,18 +270,14 @@ pub fn renderSkyOverlay(
     const art_w: f32 = w_pt + 2.0 * bleed_x;
     const art_h: f32 = h_pt + 2.0 * bleed_y;
 
-    const dot_px: f32 = @max(1.0, 1.5 * zoom * s);
-    const cell_w: f32 = 6.0 * dot_px;
-    const cell_h: f32 = 8.0 * dot_px;
-    const origin_x: f32 = @as(f32, @floatFromInt(sky_seed % 9)) * zoom * s;
-    const origin_y: f32 = @as(f32, @floatFromInt((sky_seed / 9) % 12)) * zoom * s;
+    const cell_w: f32 = 24.0 * zoom;
+    const row_h: f32 = 10.5 * zoom;
+    const fan_r: f32 = cell_w * 0.56;
+    const ring_step: f32 = fan_r * 0.24;
+    const seed_ox: f32 = @as(f32, @floatFromInt(sky_seed % 23)) * zoom;
+    const seed_oy: f32 = @as(f32, @floatFromInt((sky_seed / 23) % 13)) * zoom;
     const h_f: f32 = @floatFromInt(h_px);
-
-    // Alpha equivalent for Zeron's `ink * k + own * 0.88 * (1 - k)` where k = 0.62:
-    // source-over dst multiplier = 1 - alpha => alpha = 1 - 0.88 * 0.38 = 0.6656 (170/255).
-    const lit_alpha_u8: u8 = 170;
-    // Dim steady sky by 0.88 where glyph is off (`1 - 0.88 = 0.12 => 31/255`).
-    const dim_alpha_u8: u8 = 31;
+    const drs = [_]i32{ 2, 1, 0, -1 };
 
     @memset(cache.buf, 0);
 
@@ -285,58 +287,68 @@ pub fn renderSkyOverlay(
         // Solid cream paper covers `v >= 0.76`.
         if (v >= 0.78) break;
 
-        const gy = py_f + origin_y;
-        const cy = @floor(gy / cell_h);
-        const fy_f = @floor(@mod(gy, cell_h) / dot_px);
+        const fade = 1.0 - smoothstep(0.64, 0.77, v);
+        const y_pt = py_f / s;
+        const v_art = (y_pt + bleed_y) / art_h;
+        const wy = y_pt + seed_oy;
+        const base_row_f = @floor(wy / row_h);
         const row = cache.buf[py * w_px * 4 ..];
 
-        if (fy_f < 0 or fy_f >= 7.0) {
-            for (0..w_px) |px| row[px * 4 + 3] = dim_alpha_u8;
-            continue;
-        }
-        const fy: u32 = @intFromFloat(fy_f);
-        const sample_y_pt = ((cy + 0.5) * cell_h - origin_y) / s;
-        const v_art = (sample_y_pt + bleed_y) / art_h;
-
-        var cached_cx: f32 = -1e9;
-        var cached_idx: usize = 0;
-        var cached_ink_b: u8 = 0;
-        var cached_ink_g: u8 = 0;
-        var cached_ink_r: u8 = 0;
-
         for (0..w_px) |px| {
-            const px_f = @as(f32, @floatFromInt(px)) + 0.5;
-            const gx = px_f + origin_x;
-            const fx_f = @floor(@mod(gx, cell_w) / dot_px);
+            const x_pt = (@as(f32, @floatFromInt(px)) + 0.5) / s;
+            const u_art = (x_pt + bleed_x) / art_w;
+            const c_rgb = sampleSkyRgb(sc.sky_rgb, u_art, v_art);
+            const luma = 0.299 * c_rgb[0] + 0.587 * c_rgb[1] + 0.114 * c_rgb[2];
+            const norm = std.math.clamp((luma - 0.26) / 0.68, 0.0, 1.0);
+            const lit = std.math.pow(f32, norm, 1.35);
+
+            const wx = x_pt + seed_ox;
+            var hit_r: f32 = 0.0;
+            var hit_fan = false;
+            for (drs) |dr| {
+                const row_r = base_row_f + @as(f32, @floatFromInt(dr));
+                const stagger: f32 = if (@mod(@floor(row_r), 2.0) != 0.0) 0.5 * cell_w else 0.0;
+                const col_c = @floor((wx - stagger) / cell_w + 0.5);
+                const cx = col_c * cell_w + stagger;
+                const cy = row_r * row_h + row_h * 0.85;
+                const dx = wx - cx;
+                const dy = wy - cy;
+                const dist = @sqrt(dx * dx + dy * dy);
+                if (dist <= fan_r and dy <= row_h * 0.28) {
+                    hit_r = dist;
+                    hit_fan = true;
+                    break;
+                }
+            }
+
+            var arc: f32 = 0.0;
+            if (hit_fan) {
+                const ring_d = @abs(fract(hit_r / ring_step) - 0.5);
+                const stroke_w = mixf(0.11, 0.30, lit);
+                arc = (1.0 - smoothstep(stroke_w * 0.42, stroke_w, ring_d)) * smoothstep(0.05, 0.52, lit);
+            }
+
+            const fleck_x = @floor(wx / (2.5 * zoom));
+            const fleck_y = @floor(wy / (2.5 * zoom));
+            const fleck: f32 = if (lit > 0.45 and hash2(fleck_x, fleck_y) > 0.968) (lit - 0.45) * 1.45 else 0.0;
+            const pattern = std.math.clamp(@max(arc * 0.88, fleck), 0.0, 1.0);
+
+            const peak = @max(c_rgb[0], @max(c_rgb[1], @max(c_rgb[2], 0.25)));
+            const ink_base = [3]f32{
+                std.math.clamp(c_rgb[0] / peak, 0.0, 1.0),
+                std.math.clamp(c_rgb[1] / peak, 0.0, 1.0),
+                std.math.clamp(c_rgb[2] / peak, 0.0, 1.0),
+            };
+            const ink = mix3(ink_base, .{ 0.96, 0.88, 0.72 }, 0.28 + 0.55 * std.math.clamp(fleck, 0.0, 1.0));
+            const out_a_f = mixf(0.11, 0.665, pattern) * fade;
+            const a_u8: u8 = @intFromFloat(@round(std.math.clamp(out_a_f, 0.0, 1.0) * 255.0));
+            const ink_scale = pattern * out_a_f * 255.0;
+
             const off = px * 4;
-            if (fx_f < 0 or fx_f >= 5.0) {
-                row[off + 3] = dim_alpha_u8;
-                continue;
-            }
-            const cx = @floor(gx / cell_w);
-            if (cx != cached_cx) {
-                cached_cx = cx;
-                const sample_x_pt = ((cx + 0.5) * cell_w - origin_x) / s;
-                const u_art = (sample_x_pt + bleed_x) / art_w;
-                const c_rgb = sampleSkyRgb(sc.sky_rgb, u_art, v_art);
-                const luma = 0.299 * c_rgb[0] + 0.587 * c_rgb[1] + 0.114 * c_rgb[2];
-                const norm = std.math.clamp((luma - 0.3) / 0.65, 0.0, 1.0);
-                const lit = std.math.pow(f32, norm, 1.6);
-                cached_idx = @min(@as(usize, 10), @as(usize, @intFromFloat(@floor(lit * 10.999))));
-                const peak = @max(c_rgb[0], @max(c_rgb[1], @max(c_rgb[2], 0.25)));
-                cached_ink_r = @intFromFloat(@round(std.math.clamp(c_rgb[0] / peak, 0.0, 1.0) * 0.62 * 255.0));
-                cached_ink_g = @intFromFloat(@round(std.math.clamp(c_rgb[1] / peak, 0.0, 1.0) * 0.62 * 255.0));
-                cached_ink_b = @intFromFloat(@round(std.math.clamp(c_rgb[2] / peak, 0.0, 1.0) * 0.62 * 255.0));
-            }
-            const fx: u32 = @intFromFloat(fx_f);
-            if (ascii.glyphBit(cached_idx, fx, fy)) {
-                row[off + 0] = cached_ink_b;
-                row[off + 1] = cached_ink_g;
-                row[off + 2] = cached_ink_r;
-                row[off + 3] = lit_alpha_u8;
-            } else {
-                row[off + 3] = dim_alpha_u8;
-            }
+            row[off + 0] = @min(a_u8, @as(u8, @intFromFloat(@round(ink[2] * ink_scale))));
+            row[off + 1] = @min(a_u8, @as(u8, @intFromFloat(@round(ink[1] * ink_scale))));
+            row[off + 2] = @min(a_u8, @as(u8, @intFromFloat(@round(ink[0] * ink_scale))));
+            row[off + 3] = a_u8;
         }
     }
 
@@ -459,20 +471,20 @@ pub fn renderFoilOverlay(
                     shine_a = (@min(star * glint, 1.0) * 0.95 + 0.05 * @exp(-across * across * 4.0)) * quiet;
                 },
                 .glyph => {
-                    const g_px: f32 = 1.5;
-                    const cw: f32 = 6.0 * g_px;
-                    const ch: f32 = 8.0 * g_px;
-                    const cx: u32 = @intFromFloat(@max(0.0, @floor(x_pt / cw)));
-                    const cy: u32 = @intFromFloat(@max(0.0, @floor(y_pt / ch)));
-                    const gidx: usize = 1 + @min(9, @as(usize, @intFromFloat(cellHash(cx, cy) * 9.999)));
-                    const fx_f = @floor((x_pt - @as(f32, @floatFromInt(cx)) * cw) / g_px);
-                    const fy_f = @floor((y_pt - @as(f32, @floatFromInt(cy)) * ch) / g_px);
-                    var lit: f32 = 0.0;
-                    if (fx_f >= 0.0 and fx_f < 5.0 and fy_f >= 0.0 and fy_f < 7.0) {
-                        if (ascii.glyphBit(gidx, @intFromFloat(fx_f), @intFromFloat(fy_f))) lit = 1.0;
-                    }
-                    shine_rgb = spectrum(v * 1.5 + u * 0.7 + tilt_x);
-                    shine_a = lit * @exp(-across * across * 7.0) * 0.6 * mixf(1.0, 0.3, paper);
+                    // Kumiko / Asanoha geometric star-lattice finish (non-ASCII).
+                    const pitch: f32 = 12.0;
+                    const half_sqrt3: f32 = 0.8660254;
+                    const d0 = @abs(fract(y_pt / pitch) - 0.5);
+                    const d1 = @abs(fract((half_sqrt3 * x_pt + 0.5 * y_pt) / pitch) - 0.5);
+                    const d2 = @abs(fract((-half_sqrt3 * x_pt + 0.5 * y_pt) / pitch) - 0.5);
+                    const s0 = @abs(fract((x_pt * 1.0) / (pitch * 0.57735)) - 0.5);
+                    const tri = @min(d0, @min(d1, d2));
+                    const lattice = @max(
+                        1.0 - smoothstep(0.035, 0.135, tri),
+                        (1.0 - smoothstep(0.025, 0.095, s0)) * 0.45,
+                    );
+                    shine_rgb = mix3(spectrum(v * 1.45 + u * 0.75 + tilt_x * 1.4), .{ 1.0, 0.96, 0.86 }, 0.22);
+                    shine_a = lattice * @exp(-across * across * 5.5) * 0.66 * mixf(1.0, 0.3, paper);
                 },
                 .aurora => {
                     const x = u * 2.2 - tilt_x * 2.0 + v * 0.35;
@@ -510,7 +522,7 @@ pub fn renderFoilOverlay(
 }
 
 pub fn draw(c: *ui.Context, gpa: Allocator, state: *State, k: theme.Colors, props: Props) void {
-    const zoom: f32 = if (props.preview) preview_zoom else 1.0;
+    const zoom: f32 = props.zoom_override orelse if (props.preview) preview_zoom else 1.0;
     const w: f32 = base_w * zoom;
     const h: f32 = base_h * zoom;
     const radius: f32 = 16.0 * zoom;
@@ -528,49 +540,182 @@ pub fn draw(c: *ui.Context, gpa: Allocator, state: *State, k: theme.Colors, prop
     const enso_layer = scenes_data.ensos[traits.enso % enso_count];
     const is_founder = if (props.member_number) |mn| (mn >= 1 and mn <= 1000) else false;
 
+    const motion_ok = !c.reduced_motion and !props.still;
+    const seed_hash = ascii.cardHashSalted(props.seed, if (props.preview) ":prev" else ":full") ^
+        @as(u32, @truncate(props.member_number orelse 0));
+    if (!state.seeded or state.seed_hash != seed_hash) {
+        state.seeded = true;
+        state.seed_hash = seed_hash;
+        state.arrive_at = c.time;
+        state.glint_at = if (props.arrive and motion_ok) c.time else -10.0;
+    }
+
+    const arrive_dur: f64 = 0.50;
+    const glint_dur: f64 = 0.62;
+    const arr_elapsed = c.time - state.arrive_at;
+    var arrive_y: f32 = 0.0;
+    var arrive_opacity: f32 = 1.0;
+    var active_anim_k: f32 = 0.0;
+    if (props.arrive and motion_ok and arr_elapsed >= 0.0 and arr_elapsed < arrive_dur) {
+        const t_arr: f32 = std.math.clamp(@as(f32, @floatCast(arr_elapsed / arrive_dur)), 0.0, 1.0);
+        const inv = 1.0 - t_arr;
+        const ease = 1.0 - inv * inv * inv;
+        arrive_y = (1.0 - ease) * 28.0 * zoom;
+        arrive_opacity = 0.12 + 0.88 * ease;
+        active_anim_k = @max(active_anim_k, 1.0 - t_arr);
+        c.frameIn(1.0 / 60.0);
+        c.animationFrame();
+    }
+
+    const gl_elapsed = c.time - state.glint_at;
+    var glint_strength: f32 = 0.0;
+    var glint_pt = [2]f32{ 0.5, 0.45 };
+    if (motion_ok and gl_elapsed >= 0.0 and gl_elapsed < glint_dur) {
+        const t_gl: f32 = std.math.clamp(@as(f32, @floatCast(gl_elapsed / glint_dur)), 0.0, 1.0);
+        const s_gl = t_gl * t_gl * (3.0 - 2.0 * t_gl);
+        glint_pt = .{ mixf(-0.35, 1.35, s_gl), 0.45 };
+        glint_strength = @sin(t_gl * std.math.pi) * 0.92;
+        active_anim_k = @max(active_anim_k, glint_strength);
+        c.frameIn(1.0 / 60.0);
+        c.animationFrame();
+    }
+
     var num_buf: [24]u8 = undefined;
     const num_str = ascii.formatMemberNumber(&num_buf, props.member_number);
     var date_buf: [32]u8 = undefined;
     const since_str = ascii.formatSinceDate(&date_buf, props.started_at orelse 1794700800);
 
-    const col = ui.div(c).column().itemsCenter().gap(8);
+    const col = ui.div(c).column().itemsCenter().gap(10);
     defer col.end();
 
     {
+        // Stationary unturned hit-box: 3D turning & hovering lift happen on `mover`
+        // inside so tilted corners never walk out from under a resting cursor.
         ui.key(c, if (props.preview) "member-card-preview" else "member-card");
-        const card = ui.div(c).column().size(w, h).rounded(radius).bg(ui.Color.hex(0x1c1b22))
-            .shadow(.{ .color = ui.Color.black.alpha(0.28), .y = 14.0 * zoom, .blur = 32.0 * zoom })
-            .clip();
-        defer card.end();
+        const stage = ui.div(c).size(w, h).control();
+        defer stage.end();
 
-        const hot = card.hovered() and !props.preview;
+        const hot = stage.hovered() and !props.still;
+        if (stage.clicked() and motion_ok) {
+            state.glint_at = c.time;
+            c.changed = true;
+            c.frameIn(1.0 / 60.0);
+            c.animationFrame();
+        }
         state.hovered = hot;
         if (hot) {
-            if (c.rects.get(c.node(card.index).id)) |rect| {
+            if (c.rects.get(stage.id())) |rect| {
                 state.hover_x = std.math.clamp((c.input.mouse.x - rect.x) / @max(1.0, rect.w), 0.0, 1.0);
                 state.hover_y = std.math.clamp((c.input.mouse.y - rect.y) / @max(1.0, rect.h), 0.0, 1.0);
             }
         }
-        const target_tx: f32 = if (hot and !c.reduced_motion) state.hover_x else 0.5;
-        const target_ty: f32 = if (hot and !c.reduced_motion) state.hover_y else 0.5;
-        const target_foil: f32 = if (hot) 1.0 else 0.0;
-        if (c.reduced_motion) {
+        const target_tx: f32 = if (hot and motion_ok) state.hover_x else 0.5;
+        const target_ty: f32 = if (hot and motion_ok) state.hover_y else 0.5;
+        const target_foil: f32 = if (hot and !props.still) 1.0 else 0.0;
+        const target_lift: f32 = if (hot and motion_ok) 1.0 else 0.0;
+        if (!motion_ok) {
             state.tilt_x = 0.5;
             state.tilt_y = 0.5;
             state.foil_strength = target_foil;
+            state.hover_lift = 0.0;
         } else {
             state.tilt_x += (target_tx - state.tilt_x) * 0.25;
             state.tilt_y += (target_ty - state.tilt_y) * 0.25;
             state.foil_strength += (target_foil - state.foil_strength) * 0.25;
-            if (@abs(target_tx - state.tilt_x) > 0.005 or @abs(target_ty - state.tilt_y) > 0.005 or @abs(target_foil - state.foil_strength) > 0.01) {
+            state.hover_lift += (target_lift - state.hover_lift) * 0.22;
+            const settling = @abs(target_tx - state.tilt_x) > 0.002 or
+                @abs(target_ty - state.tilt_y) > 0.002 or
+                @abs(target_foil - state.foil_strength) > 0.004 or
+                @abs(target_lift - state.hover_lift) > 0.004;
+            if (settling) {
                 c.frameIn(1.0 / 60.0);
+                c.animationFrame();
+            } else {
+                state.tilt_x = target_tx;
+                state.tilt_y = target_ty;
+                state.foil_strength = target_foil;
+                state.hover_lift = target_lift;
             }
         }
 
         const effective_tx = if (props.force_holo) |fh| fh[0] else state.tilt_x;
         const effective_ty = if (props.force_holo) |fh| fh[1] else state.tilt_y;
-        const effective_foil = if (props.force_holo != null) 1.0 else state.foil_strength;
-        const foil_pt = if (props.force_holo) |fh| fh else [2]f32{ state.hover_x, state.hover_y };
+        const hover_k = if (props.force_holo != null and motion_ok) @as(f32, 1.0) else state.hover_lift;
+        const dx = effective_tx - 0.5;
+        const dy = effective_ty - 0.5;
+        const effective_foil = if (props.force_holo != null)
+            @as(f32, 1.0)
+        else if (glint_strength > state.foil_strength)
+            glint_strength
+        else
+            state.foil_strength;
+        const foil_pt = if (props.force_holo) |fh|
+            fh
+        else if (glint_strength > state.foil_strength and !hot)
+            glint_pt
+        else
+            [2]f32{ state.hover_x, state.hover_y };
+
+        // Soft sky-tinted ambient halo floating outside behind the card.
+        {
+            const glow_rgb = sampleSkyRgb(sky_sc.sky_rgb, 0.5, 0.28);
+            const halo_a: f32 = (if (k.dark) @as(f32, 0.24) else 0.14) + hover_k * 0.14;
+            const glow_col: ui.Color = .{
+                .r = std.math.clamp(glow_rgb[0] * 1.12, 0.0, 1.0),
+                .g = std.math.clamp(glow_rgb[1] * 1.12, 0.0, 1.0),
+                .b = std.math.clamp(glow_rgb[2] * 1.12, 0.0, 1.0),
+                .a = halo_a,
+            };
+            ui.div(c).absolute()
+                .offset(12.0 * zoom - dx * 6.0 * zoom, 14.0 * zoom + arrive_y * 0.5 - dy * 4.0 * zoom)
+                .size(w - 24.0 * zoom, h - 24.0 * zoom)
+                .rounded(radius)
+                .opacity(arrive_opacity)
+                .shadow(.{
+                    .color = glow_col,
+                    .y = 4.0 * zoom,
+                    .blur = (36.0 + hover_k * 16.0) * zoom,
+                    .spread = (8.0 + hover_k * 6.0) * zoom,
+                })
+                .end();
+        }
+
+        const turn_rad: f32 = if (!motion_ok or (@abs(dx) < 0.002 and hover_k == 0.0))
+            0.0
+        else
+            dx * 0.28;
+        const card_scale: f32 = if (!motion_ok) 1.0 else (1.0 + hover_k * 0.035);
+        const card_ox: f32 = if (!motion_ok) 0.0 else dx * 10.0 * zoom;
+        const card_oy: f32 = (if (!motion_ok) @as(f32, 0.0) else (dy * 7.0 - hover_k * 7.0) * zoom) + arrive_y;
+        const sh_x: f32 = -dx * 18.0 * zoom;
+        const sh_y: f32 = (14.0 + hover_k * 10.0) * zoom;
+        const sh_blur: f32 = (32.0 + hover_k * 14.0) * zoom;
+
+        var mover = ui.div(c).absolute()
+            .offset(card_ox, card_oy)
+            .size(w, h)
+            .rounded(radius)
+            .opacity(arrive_opacity)
+            .shadow(.{
+                .color = ui.Color.black.alpha(0.30 + hover_k * 0.12),
+                .x = sh_x,
+                .y = sh_y,
+                .blur = sh_blur,
+            });
+        if (turn_rad != 0.0 or card_scale != 1.0) {
+            mover = mover.pivot(0.5, 0.5);
+            if (turn_rad != 0.0) mover = mover.turn(turn_rad, 900.0 * zoom);
+            if (card_scale != 1.0) mover = mover.scale(card_scale);
+        }
+        defer mover.end();
+
+        const card = ui.div(c).wFull().hFull().rounded(radius).bg(ui.Color.hex(0x1c1b22)).clip();
+        defer card.end();
+
+        const layer_drift: f32 = if (!motion_ok) 0.0 else blk: {
+            const k_wave = @max(hover_k, active_anim_k);
+            break :blk if (k_wave > 0.01) @as(f32, @floatCast(@sin(c.time * 1.4))) * 3.0 * zoom * k_wave else 0.0;
+        };
 
         // 1. Steady background (`depth == 0`: sky / back) across bleed box.
         {
@@ -584,7 +729,7 @@ pub fn draw(c: *ui.Context, gpa: Allocator, state: *State, k: theme.Colors, prop
             });
         }
 
-        // 2. 5×7 ASCII character sky overlay sampling the selected sky layer.
+        // 2. Seigaiha wave silkscreen + sunago gold-dust sky overlay sampling the sky layer.
         if (renderSkyOverlay(&state.sky, gpa, w, h, c.scale, traits.sky % scene_count, traits.sky_seed)) |tex| {
             ui.texture(c, .{
                 .absolute = true,
@@ -594,13 +739,13 @@ pub fn draw(c: *ui.Context, gpa: Allocator, state: *State, k: theme.Colors, prop
             }, tex, .{ 0, 0, 1, 1 }, 1.0);
         }
 
-        // 3a. Shared Ensō halo layer (`depth == 1.0`) shifted against tilt.
+        // 3a. Shared Ensō halo layer (`depth == 1.0`) shifted against tilt & gentle motion.
         {
-            const shift_x = if (props.preview or c.reduced_motion)
+            const shift_x = if (!motion_ok)
                 @as(f32, 0.0)
             else
-                std.math.clamp((0.5 - effective_tx) * 1.0 * 16.0 * zoom, -bleed_x, bleed_x);
-            const shift_y = if (props.preview or c.reduced_motion)
+                std.math.clamp((0.5 - effective_tx) * 1.0 * 16.0 * zoom + layer_drift, -bleed_x, bleed_x);
+            const shift_y = if (!motion_ok)
                 @as(f32, 0.0)
             else
                 std.math.clamp((0.5 - effective_ty) * 1.0 * 10.0 * zoom, -bleed_y, bleed_y);
@@ -616,11 +761,11 @@ pub fn draw(c: *ui.Context, gpa: Allocator, state: *State, k: theme.Colors, prop
 
         // 3b. Foreground cutout layer (`depth == 2.0`) shifted against tilt.
         {
-            const shift_x = if (props.preview or c.reduced_motion)
+            const shift_x = if (!motion_ok)
                 @as(f32, 0.0)
             else
-                std.math.clamp((0.5 - effective_tx) * 2.0 * 16.0 * zoom, -bleed_x, bleed_x);
-            const shift_y = if (props.preview or c.reduced_motion)
+                std.math.clamp((0.5 - effective_tx) * 2.0 * 16.0 * zoom + layer_drift * 1.6, -bleed_x, bleed_x);
+            const shift_y = if (!motion_ok)
                 @as(f32, 0.0)
             else
                 std.math.clamp((0.5 - effective_ty) * 2.0 * 10.0 * zoom, -bleed_y, bleed_y);
@@ -721,7 +866,7 @@ pub fn draw(c: *ui.Context, gpa: Allocator, state: *State, k: theme.Colors, prop
             }
         }
 
-        // 6. Holographic foil finish & pointer glare (on hover or forced preview).
+        // 6. Holographic foil finish & pointer glare (on hover, deal-in glint, or forced preview).
         if (effective_foil > 0.01) {
             if (renderFoilOverlay(&state.foil, gpa, w, h, traits.holo, foil_pt, effective_foil)) |tex| {
                 ui.texture(c, .{
@@ -897,7 +1042,7 @@ test "all 20 card scenes and 8 shared Ensō layers decode cleanly through nanoui
     try testing.expectEqual(@as(usize, 48), decoded_total);
 }
 
-test "renderSkyOverlay produces premultiplied BGRA8 sky dither, reuses cache, and leaves bottom transparent for paper" {
+test "renderSkyOverlay produces premultiplied BGRA8 Seigaiha silkscreen wave overlay, reuses cache, and leaves bottom transparent for paper" {
     var cache: SkyCache = .{};
     defer cache.deinit(testing.allocator);
 
@@ -915,15 +1060,15 @@ test "renderSkyOverlay produces premultiplied BGRA8 sky dither, reuses cache, an
     // Every pixel satisfies premultiplied BGRA invariant (b,g,r <= a).
     var saw_lit = false;
     var saw_dim = false;
-    for (0..360 * 400) |p| {
+    for (0..360 * 320) |p| {
         const off = p * 4;
         const b = tex1.bgra[off + 0];
         const g = tex1.bgra[off + 1];
         const r = tex1.bgra[off + 2];
         const a = tex1.bgra[off + 3];
         try testing.expect(b <= a and g <= a and r <= a);
-        if (a == 170) saw_lit = true;
-        if (a == 31) saw_dim = true;
+        if (a >= 95) saw_lit = true;
+        if (a == 28) saw_dim = true;
     }
     try testing.expect(saw_lit and saw_dim);
 
@@ -952,4 +1097,61 @@ test "renderFoilOverlay produces valid premultiplied BGRA8 for all 5 finishes" {
         }
         try testing.expect(nonzero_counts[idx] > 100);
     }
+}
+
+test "member card arrives with foil sweep, turns in 3D on preview hover, and settles to zero wakeups at rest" {
+    theme.registerFonts();
+    const Host = struct {
+        card: State = .{},
+        preview: bool = true,
+        fn view(h: *@This(), c: *ui.Context) void {
+            const root = ui.div(c).wFull().hFull().p(32).column().itemsStart();
+            defer root.end();
+            draw(c, testing.allocator, &h.card, theme.colors(true), .{
+                .seed = ascii.preview_seed,
+                .name = "You",
+                .preview = h.preview,
+            });
+        }
+    };
+
+    var host: Host = .{};
+    defer host.card.deinit(testing.allocator);
+
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, ui.View.init(&host, Host.view), .{ .width = 360, .height = 420, .scale = 1, .dark = true });
+    defer t.deinit();
+
+    // Arrival deal-in + sweep starts active and settles cleanly to zero wakeups.
+    try testing.expect(t.ctx.animating);
+    t.advance(0.8);
+    try testing.expect(!t.ctx.animating and t.ctx.frame_in == null);
+    for (t.instances.items) |inst| try testing.expectEqual(@as(f32, 0.0), inst.turn[0]);
+
+    // Hovering near the left edge of the signed-out preview card turns and lifts it.
+    t.moveTo(56, 120);
+    t.advance(0.35);
+    try testing.expect(host.card.hovered);
+    try testing.expect(host.card.hover_lift > 0.9);
+    try testing.expect(host.card.foil_strength > 0.9);
+
+    var saw_turn = false;
+    var saw_perspective: f32 = 0;
+    for (t.instances.items) |inst| {
+        if (inst.turn[0] != 0.0) {
+            saw_turn = true;
+            saw_perspective = inst.turn[1];
+        }
+    }
+    try testing.expect(saw_turn);
+    try testing.expect(saw_perspective > 100.0);
+
+    // Moving the pointer off settles cleanly back to rest with zero idle wakeups.
+    t.moveTo(4, 4);
+    t.advance(0.8);
+    try testing.expect(!host.card.hovered);
+    try testing.expectEqual(@as(f32, 0.0), host.card.hover_lift);
+    try testing.expectEqual(@as(f32, 0.0), host.card.foil_strength);
+    try testing.expect(!t.ctx.animating and t.ctx.frame_in == null);
+    for (t.instances.items) |inst| try testing.expectEqual(@as(f32, 0.0), inst.turn[0]);
 }

@@ -1,5 +1,6 @@
-//! Settings › Account (`profile.luau`): signed-out preview card + Sign in,
-//! and signed-in member identity + interactive holographic MemberCard.
+//! Settings › Account (`profile.luau`): signed-out preview card + outside
+//! Sign in action, and signed-in member identity + interactive 3D MemberCard
+//! floating outside the settings card.
 const std = @import("std");
 const nanoui = @import("nanoui");
 const ui = nanoui.ui;
@@ -20,78 +21,82 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
     set.space(c, 24);
 
     const wide = set.inner_w >= 560;
-    const layout = if (wide)
-        ui.div(c).row().wFull().gap(28).itemsStart()
-    else
-        ui.div(c).column().wFull().gap(24);
-    defer layout.end();
+    const card_bg = k.ink(if (k.dark) 0.038 else 0.025);
+    const card_edge = if (k.dark) k.border else @import("view_panel_chrome.zig").zenEdge(k);
 
     if (a.account.user) |*u| {
         const display_name = if (u.name) |n| (if (n.len > 0) n else u.email) else u.email;
         const seed_str = if (u.id.len > 0) u.id else if (u.email.len > 0) u.email else display_name;
         const shown_name = if (display_name.len > 0) display_name else "Member";
+        const card_zoom: f32 = if (!wide or set.inner_w >= 680) 1.0 else 0.78;
+        const aside_w: f32 = member_card.base_w * card_zoom + 16;
 
-        // Left column: profile card + sync info + Sign out + link to CLI provider accounts.
+        const layout = if (wide)
+            ui.div(c).row().wFull().gap(28).itemsStart()
+        else
+            ui.div(c).column().wFull().gap(24);
+        defer layout.end();
+
+        if (!wide) drawSignedInAside(c, a, k, seed_str, shown_name, u, card_zoom, false, aside_w);
+
+        // Left column: profile settings group card + external Sign out / Provider accounts bar.
         {
-            const left = if (wide) ui.div(c).column().grow().w(0).gap(16) else ui.div(c).column().wFull().gap(16);
+            const left = if (wide) ui.div(c).column().grow().w(0).gap(12) else ui.div(c).column().wFull().gap(12);
             defer left.end();
 
-            const card_bg = k.ink(if (k.dark) 0.038 else 0.025);
-            const card_edge = if (k.dark) k.border else @import("view_panel_chrome.zig").zenEdge(k);
-            const card = ui.div(c).column().wFull().rounded(12).border(card_edge).borderW(1)
-                .bg(card_bg).p(20).gap(16);
-            defer card.end();
+            ui.text(c, "Harness Account", set.st(c, 13, .{ .weight = .semibold, .color = k.text }));
 
             {
-                const top = ui.div(c).row().wFull().gap(14).itemsCenter();
-                defer top.end();
+                const card = ui.div(c).column().wFull().p(1).rounded(12).border(card_edge).borderW(1).bg(card_bg);
+                defer card.end();
 
-                const avatar_box = ui.div(c).row().size(44, 44).center().roundedFull().bg(k.accent_wash).border(k.border).borderW(1).clip();
                 {
-                    defer avatar_box.end();
-                    if (a.account.avatar_bytes) |bytes| {
-                        _ = ui.image(c, .{
-                            .key = "profile-avatar",
-                            .source = .{ .encoded = bytes },
-                            .box = .{ .w = 44, .h = 44 },
-                            .radius = 22,
-                        });
-                    } else {
-                        ui.text(c, c.print("{c}", .{account.initial(shown_name)}), .{
-                            .size = 16,
-                            .weight = .semibold,
-                            .color = k.accent,
-                        });
+                    const hdr = ui.div(c).row().wFull().px(18).py(16).gap(14).itemsCenter();
+                    defer hdr.end();
+
+                    const avatar_box = ui.div(c).row().size(44, 44).center().roundedFull().bg(k.accent_wash).border(k.border).borderW(1).clip();
+                    {
+                        defer avatar_box.end();
+                        if (a.account.avatar_bytes) |bytes| {
+                            _ = ui.image(c, .{
+                                .key = "profile-avatar",
+                                .source = .{ .encoded = bytes },
+                                .box = .{ .w = 44, .h = 44 },
+                                .radius = 22,
+                            });
+                        } else {
+                            ui.text(c, c.print("{c}", .{account.initial(shown_name)}), .{
+                                .size = 16,
+                                .weight = .semibold,
+                                .color = k.accent,
+                            });
+                        }
+                    }
+
+                    const meta = ui.div(c).column().grow().w(0).gap(2);
+                    defer meta.end();
+
+                    const name_row = ui.div(c).row().wFull().gap(8).itemsCenter();
+                    {
+                        defer name_row.end();
+                        kit.ellipsisText(c, shown_name, set.st(c, 15, .{ .weight = .semibold, .color = k.text }), 240);
+                        if (u.member_number) |num| {
+                            var nbuf: [24]u8 = undefined;
+                            const pill = ui.div(c).row().px(8).py(2).roundedFull().bg(k.ink(if (k.dark) 0.12 else 0.06));
+                            defer pill.end();
+                            ui.text(c, c.print("#{s}", .{ascii.formatMemberNumber(&nbuf, num)}), .{
+                                .size = 11,
+                                .mono = true,
+                                .color = k.muted,
+                            });
+                        }
+                    }
+
+                    if (u.email.len > 0) {
+                        kit.ellipsisText(c, u.email, set.st(c, 12.5, .{ .color = k.muted }), 260);
                     }
                 }
 
-                const meta = ui.div(c).column().grow().w(0).gap(2);
-                defer meta.end();
-
-                const name_row = ui.div(c).row().wFull().gap(8).itemsCenter();
-                {
-                    defer name_row.end();
-                    kit.ellipsisText(c, shown_name, set.st(c, 15, .{ .weight = .semibold, .color = k.text }), 260);
-                    if (u.member_number) |num| {
-                        var nbuf: [24]u8 = undefined;
-                        const pill = ui.div(c).row().px(8).py(2).roundedFull().bg(k.ink(if (k.dark) 0.12 else 0.06));
-                        defer pill.end();
-                        ui.text(c, c.print("#{s}", .{ascii.formatMemberNumber(&nbuf, num)}), .{
-                            .size = 11,
-                            .mono = true,
-                            .color = k.muted,
-                        });
-                    }
-                }
-
-                if (u.email.len > 0) {
-                    kit.ellipsisText(c, u.email, set.st(c, 12.5, .{ .color = k.muted }), 280);
-                }
-            }
-
-            _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
-
-            {
                 var dbuf: [32]u8 = undefined;
                 const started_label = if (u.started_at) |ts|
                     c.print("{s}", .{ascii.formatSinceDate(&dbuf, ts)})
@@ -117,75 +122,57 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
                 infoRow(c, k, "Connected devices", c.print("{d}", .{a.devices.items.len}));
             }
 
-            _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
-
             {
-                const actions = ui.div(c).row().wFull().gap(10).itemsCenter();
+                const actions = ui.div(c).row().wFull().pt(2).gap(10).itemsCenter();
                 defer actions.end();
-
-                ui.key(c, "account-sign-out");
-                const so = ui.div(c).row().h(32).px(14).center().rounded(8).border(k.border).borderW(1).hover(k.hover).control();
-                {
-                    defer so.end();
-                    ui.text(c, "Sign out", set.st(c, 13, .{ .weight = .medium, .color = k.text }));
-                }
-                if (so.clicked()) account.signOut(a);
-
-                ui.spacer(c);
 
                 if (set.ghost(c, k, "Provider accounts")) {
                     a.settings.setSection(.agents);
                     a.redraw();
                 }
+
+                ui.spacer(c);
+
+                ui.key(c, "account-sign-out");
+                const so = ui.div(c).row().h(34).px(16).center().rounded(10).border(k.border).borderW(1).hover(k.hover).control();
+                {
+                    defer so.end();
+                    ui.text(c, "Sign out", set.st(c, 13, .{ .weight = .medium, .color = k.text }));
+                }
+                if (so.clicked()) account.signOut(a);
             }
         }
 
-        // Right column: interactive full-size 300×420 member card.
-        {
-            const right = if (wide) ui.div(c).column().w(member_card.base_w).itemsCenter() else ui.div(c).column().wFull().itemsCenter();
-            defer right.end();
-            member_card.draw(c, a.gpa, &a.view.profile_card, k, .{
-                .seed = seed_str,
-                .name = shown_name,
-                .member_number = u.member_number,
-                .started_at = u.started_at orelse @divFloor(a.nowMs(), 1000),
-                .card_scenes = u.card_scenes,
-                .card_traits = u.card_traits,
-                .preview = false,
-            });
-        }
+        if (wide) drawSignedInAside(c, a, k, seed_str, shown_name, u, card_zoom, true, aside_w);
     } else {
-        // Signed-out state: feature card + Sign in on left, 180×252 preview card on right.
+        // Signed-out state (`profile.luau`): 3-row Settings group + outside Sign in on left,
+        // floating interactive preview card ("You" / "000·000") outside on right (or above when narrow).
+        const preview_w = member_card.base_w * member_card.preview_zoom;
+        const aside_w = preview_w + 16;
+        const left_w = if (wide) @max(220.0, set.inner_w - 28.0 - aside_w) else set.inner_w;
+        const row_text_w = @max(120.0, left_w - 84.0);
+
+        const layout = if (wide)
+            ui.div(c).row().wFull().gap(28).itemsStart()
+        else
+            ui.div(c).column().wFull().gap(24);
+        defer layout.end();
+
+        if (!wide) drawSignedOutAside(c, a, k, false, aside_w);
+
         {
-            const left = if (wide) ui.div(c).column().grow().w(0).gap(16) else ui.div(c).column().wFull().gap(16);
+            const left = if (wide) ui.div(c).column().grow().w(0).gap(12) else ui.div(c).column().wFull().gap(12);
             defer left.end();
 
-            const card_bg = k.ink(if (k.dark) 0.038 else 0.025);
-            const card_edge = if (k.dark) k.border else @import("view_panel_chrome.zig").zenEdge(k);
-            const card = ui.div(c).column().wFull().rounded(12).border(card_edge).borderW(1)
-                .bg(card_bg).p(20).gap(14);
-            defer card.end();
+            ui.text(c, "Harness Account", set.st(c, 13, .{ .weight = .semibold, .color = k.text }));
 
             {
-                const title_row = ui.div(c).row().wFull().gap(10).itemsCenter();
-                defer title_row.end();
-                const emblem = ui.div(c).row().size(32, 32).center().rounded(8).bg(k.accent_wash);
-                {
-                    defer emblem.end();
-                    icons.icon(c, .@"user-rounded", 16, k.accent, 0);
-                }
-                ui.text(c, "Harness Account", set.st(c, 15, .{ .weight = .semibold, .color = k.text }));
-            }
+                const card = ui.div(c).column().wFull().p(1).rounded(12).border(card_edge).borderW(1).bg(card_bg);
+                defer card.end();
 
-            {
-                const body = ui.div(c).column().wFull();
-                defer body.end();
-                ui.text(c, "Sync sessions across Macs, iOS, and the web, launch cloud sandboxes, and claim your numbered member card stamped with the date you joined Harness.", .{
-                    .size = 13,
-                    .line_height = 13 * phi,
-                    .wrap = true,
-                    .color = k.muted,
-                });
+                featureRow(c, k, true, .@"user-rounded", "Your name and profile", "Synced display name, avatar, and Harness identity across workspaces.", row_text_w);
+                featureRow(c, k, false, .tag, "Your member card", "Numbered by when you joined, with 1-of-1 Founder editions.", row_text_w);
+                featureRow(c, k, false, .smartphone, "Your sessions, everywhere", "Pick up chats on macOS, iOS, and cloud sandboxes.", row_text_w);
             }
 
             if (a.account.scope == .development) {
@@ -193,43 +180,110 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
             }
 
             {
-                const actions = ui.div(c).row().wFull().pt(4).gap(10).itemsCenter();
+                const actions = ui.div(c).row().wFull().pt(2).gap(10).itemsCenter();
                 defer actions.end();
-
-                ui.key(c, "account-sign-in");
-                const btn = ui.div(c).row().h(34).px(16).gap(6).center().rounded(8).bg(k.text).hover(k.text.alpha(0.86)).control();
-                {
-                    defer btn.end();
-                    ui.text(c, "Sign in", set.st(c, 13, .{ .weight = .medium, .color = k.on_solid }));
-                }
-                if (btn.clicked()) account.enableSync(a);
 
                 if (set.ghost(c, k, "Provider accounts")) {
                     a.settings.setSection(.agents);
                     a.redraw();
                 }
+
+                ui.spacer(c);
+
+                ui.key(c, "account-sign-in");
+                const btn = ui.div(c).row().h(34).px(18).gap(6).center().rounded(10).bg(k.text).hover(k.text.alpha(0.86)).control();
+                {
+                    defer btn.end();
+                    ui.text(c, "Sign in", set.st(c, 13, .{ .weight = .medium, .color = k.on_solid }));
+                }
+                if (btn.clicked()) account.enableSync(a);
             }
         }
 
-        // Right column: compact 180×252 preview card ("000·000", "You", "Yours when you sign in").
-        {
-            const preview_w = member_card.base_w * member_card.preview_zoom;
-            const right = if (wide) ui.div(c).column().w(preview_w).itemsCenter() else ui.div(c).column().wFull().itemsCenter();
-            defer right.end();
-            member_card.draw(c, a.gpa, &a.view.profile_card, k, .{
-                .seed = ascii.preview_seed,
-                .name = "You",
-                .member_number = null,
-                .started_at = null,
-                .preview = true,
-                .caption = "Yours when you sign in",
-            });
-        }
+        if (wide) drawSignedOutAside(c, a, k, true, aside_w);
     }
 }
 
+fn drawSignedInAside(
+    c: *ui.Context,
+    a: *App,
+    k: theme.Colors,
+    seed_str: []const u8,
+    shown_name: []const u8,
+    u: *const account.User,
+    card_zoom: f32,
+    wide: bool,
+    aside_w: f32,
+) void {
+    const right = if (wide)
+        ui.div(c).column().w(aside_w).py(4).itemsCenter()
+    else
+        ui.div(c).column().wFull().py(4).itemsCenter();
+    defer right.end();
+
+    member_card.draw(c, a.gpa, &a.view.profile_card, k, .{
+        .seed = seed_str,
+        .name = shown_name,
+        .member_number = u.member_number,
+        .started_at = u.started_at orelse @divFloor(a.nowMs(), 1000),
+        .card_scenes = u.card_scenes,
+        .card_traits = u.card_traits,
+        .preview = false,
+        .zoom_override = card_zoom,
+    });
+}
+
+fn drawSignedOutAside(c: *ui.Context, a: *App, k: theme.Colors, wide: bool, aside_w: f32) void {
+    const right = if (wide)
+        ui.div(c).column().w(aside_w).py(4).itemsCenter()
+    else
+        ui.div(c).column().wFull().py(4).itemsCenter();
+    defer right.end();
+
+    const now_secs = a.nowMs();
+    member_card.draw(c, a.gpa, &a.view.profile_card, k, .{
+        .seed = ascii.preview_seed,
+        .name = "You",
+        .member_number = null,
+        .started_at = if (now_secs > 0) @divFloor(now_secs, 1000) else 1794700800,
+        .preview = true,
+        .caption = "Yours when you sign in",
+    });
+}
+
+fn featureRow(
+    c: *ui.Context,
+    k: theme.Colors,
+    first: bool,
+    icon: icons.Name,
+    title: []const u8,
+    body: []const u8,
+    text_w: f32,
+) void {
+    if (!first) _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
+    const r = ui.div(c).row().wFull().px(16).py(14).gap(14).itemsCenter();
+    defer r.end();
+
+    {
+        const tile = ui.div(c).row().size(36, 36).center().rounded(10).border(k.border).borderW(1).bg(k.ink(0.03));
+        defer tile.end();
+        icons.icon(c, icon, 16, k.muted, 0);
+    }
+
+    const col = ui.div(c).column().w(text_w).gap(2);
+    defer col.end();
+    ui.text(c, title, set.st(c, 13, .{ .weight = .medium, .color = k.text }));
+    ui.text(c, body, .{
+        .size = 12,
+        .line_height = 12 * 1.45,
+        .wrap = true,
+        .color = k.muted,
+    });
+}
+
 fn infoRow(c: *ui.Context, k: theme.Colors, label: []const u8, value: []const u8) void {
-    const r = ui.div(c).row().wFull().itemsCenter();
+    _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
+    const r = ui.div(c).row().wFull().px(18).py(12).itemsCenter();
     defer r.end();
     ui.text(c, label, set.st(c, 12.5, .{ .color = k.muted }));
     ui.spacer(c);
@@ -246,9 +300,12 @@ test "view_settings_profile renders signed-out preview and signed-in member card
 
     h.a.settings.setSection(.account);
     set.open(&h.a);
-    h.t.settle(0.3);
+    h.t.advance(0.8);
+    try testing.expect(!h.t.ctx.animating);
 
+    try testing.expect(h.t.hasText("Harness Account"));
     try testing.expect(h.t.hasText("Sign in"));
+    try testing.expect(h.t.hasText("Your name and profile"));
     try testing.expect(h.t.hasText("000\u{00b7}000"));
     try testing.expect(h.t.hasText("You"));
     try testing.expect(h.t.hasText("Yours when you sign in"));
@@ -259,7 +316,8 @@ test "view_settings_profile renders signed-out preview and signed-in member card
     defer signed.deinit();
     h.a.account.user = try account.readUser(testing.allocator, signed.value);
     h.a.account.scope = .synced;
-    h.t.settle(0.3);
+    h.t.advance(0.8);
+    try testing.expect(!h.t.ctx.animating);
 
     try testing.expect(h.t.hasText("Ada Lovelace"));
     try testing.expect(h.t.hasText("000\u{00b7}042"));
