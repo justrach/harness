@@ -50,6 +50,13 @@ teardown uses `destroyNow` after close decisions have been resolved, matching
 Windows' forced-disposal path and avoiding a vetoed-close teardown loop.
 This supplies the same dirty-document veto contract to all desktop windows.
 
+Harness-local sidebar scrollbar timing adds the optional
+`Style.scroll_bar_idle_timeout` in `src/ui/{types,scroll}.zig`. It includes
+its final 0.3-second fade, ignores stationary hover, and stays visible during
+thumb dragging. Null retains the upstream/default and legacy fade behavior.
+Harness's `Cmd+B sidebar scrollbars` test covers both production sidebar lists
+with simulated time, wheel input, hover, dragging and native screenshots.
+
 These changes live in this checked-in package, not an ignored download cache.
 
 To update: start with the pinned upstream distribution, retain the notices,
