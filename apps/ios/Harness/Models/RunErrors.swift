@@ -129,7 +129,13 @@ enum RunErrors {
 
     /// Read like a sign-in or a limit, but signing in to the agent's provider
     /// doesn't fix them: hosted credit, GitHub's own API, Harness's own account.
-    private static let notTheProvider = ["credit", "github", "graphql:", "harness login"]
+    private static let notTheProvider = [
+        "credit",
+        "github",
+        "graphql:",
+        "harness login",
+        "unsupported_capability",
+    ]
 
     /// The problem `message` reports, if the agent's provider account (its sign-in or API key) can fix it.
     static func providerProblem(_ message: String) -> ProviderProblem? {

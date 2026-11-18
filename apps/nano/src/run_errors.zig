@@ -128,7 +128,13 @@ const limit_reached = [_][]const u8{
 
 /// `NOT_THE_PROVIDER`: hosted credit, GitHub's own API and Harness's own
 /// account read like a sign-in or limit, but signing in doesn't fix them.
-const not_the_provider = [_][]const u8{ "credit", "github", "graphql:", "harness login" };
+const not_the_provider = [_][]const u8{
+    "credit",
+    "github",
+    "graphql:",
+    "harness login",
+    "unsupported_capability",
+};
 
 /// `provider_problem`: the problem `message` reports, if signing in to the
 /// agent's provider can fix it. ASCII is folded to lower case, and a curly
@@ -219,6 +225,8 @@ test "reads the errors the adapters and engine write" {
         "GitHub API rate limit reached",
         "GraphQL: API rate limit exceeded",
         "not signed in — run `harness login` on this machine first",
+        "chatgpt-new returned 400 (subscription_sharing_unsupported_capability): Unsupported capability: use an API key instead",
+        "Request failed (400): unsupported_capability — check your sign-in method or API key",
         "Harness exited with status 1",
         "Listening on port 4012",
         "",

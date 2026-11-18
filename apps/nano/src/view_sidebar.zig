@@ -208,6 +208,7 @@ pub fn openWorkspaces(c: *ui.Context, a: *App, k: theme.Colors) void {
     ui.key(c, "sidebar-open-workspaces");
     const list = ui.div(c).column().wFull().maxH(260).px(8).pt(6).gap(2).scrollY();
     c.node(list.index).style.scroll_edge_fade = 12;
+    c.node(list.index).style.scroll_bar_idle_timeout = 3;
     defer list.end();
     for (sessions.items, 0..) |sess, idx| {
         const title = if (sess.title_chat_id) |chat_id| (if (a.findChat(chat_id)) |chat| chatLabel(chat) else "New session") else "New session";
@@ -753,7 +754,7 @@ pub fn zenIndexPass(a: *const App, gpa: std.mem.Allocator) struct { listed: usiz
 }
 
 fn lists(c: *ui.Context, a: *App, k: theme.Colors) usize {
-    ui.scroll(c, .{ .grow = 1, .width = .fill, .padding = .{ .left = 8, .right = 8, .top = 4, .bottom = 8 }, .gap = 2 });
+    ui.scroll(c, .{ .grow = 1, .width = .fill, .padding = .{ .left = 8, .right = 8, .top = 4, .bottom = 8 }, .gap = 2, .scroll_bar_idle_timeout = 3 });
     defer ui.end(c);
     const scroll = c.stack.items[c.stack.items.len - 1];
     // Read the current offset on every rebuild: wheel input can change it

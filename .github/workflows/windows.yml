@@ -117,7 +117,7 @@ jobs:
       - name: Build application
         run: cargo build --release --locked -p harness
       - name: Verify portable packaging
-        run: ./scripts/package-windows.ps1 -ReleasesUrl "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download" -CargoProfile release
+        run: ./scripts/package-windows.ps1 -ReleasesUrl "https://github.com/justrach/nanoharness/releases/latest/download" -CargoProfile release
       - name: Application and updater tests
         run: cargo test --release --locked -p harness -p harness-update -p harness-observe
       - name: GUI subsystem and redirected CLI output

@@ -115,7 +115,13 @@ const LIMIT_REACHED: &[&str] = &[
 /// Failures that read like a sign-in or limit but that signing in to the
 /// agent's provider doesn't fix: hosted credit, GitHub's own API, and
 /// Harness's own account.
-const NOT_THE_PROVIDER: &[&str] = &["credit", "github", "graphql:", "harness login"];
+const NOT_THE_PROVIDER: &[&str] = &[
+    "credit",
+    "github",
+    "graphql:",
+    "harness login",
+    "unsupported_capability",
+];
 
 /// The problem `message` reports, if the agent's provider account (its
 /// sign-in or its API key) can fix it.
@@ -219,6 +225,8 @@ mod tests {
             "GitHub API rate limit reached",
             "GraphQL: API rate limit exceeded",
             "not signed in — run `harness login` on this machine first",
+            "chatgpt-new returned 400 (subscription_sharing_unsupported_capability): Unsupported capability: use an API key instead",
+            "Request failed (400): unsupported_capability — check your sign-in method or API key",
             "Harness exited with status 1",
             "Listening on port 4012",
             "",

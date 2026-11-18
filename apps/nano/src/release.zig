@@ -7,7 +7,7 @@ const std = @import("std");
 const nanoui = @import("nanoui");
 const Allocator = std.mem.Allocator;
 
-pub const manifest_url = "https://github.com/justrach/harness/releases/latest/download/manifest.json";
+pub const manifest_url = "https://github.com/justrach/nanoharness/releases/latest/download/manifest.json";
 pub const hour_ms: i64 = 60 * 60 * 1000;
 
 /// UI-thread state, driven by real (not awake/monotonic) milliseconds. After
