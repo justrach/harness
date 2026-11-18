@@ -387,6 +387,10 @@ pub const Style = struct {
     /// The indicator shows only while the box scrolls and a moment after,
     /// as macOS's overlay scrollers.
     scroll_bar_fades: bool = false,
+    /// Optional idle deadline in seconds, including the final 0.3s fade.
+    /// Unlike the legacy fade, stationary hover does not postpone hiding;
+    /// an active thumb drag keeps the indicator alive until release.
+    scroll_bar_idle_timeout: ?f32 = null,
     /// A box whose place down its parent changes from one layout to the
     /// next (a row above it gone) springs from where it was shown to where
     /// it is, as SwiftUI animates a stack's rows; its ancestors' offsets

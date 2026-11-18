@@ -457,7 +457,7 @@ pub fn triggerAppUpdate(a: *App, ver: []const u8) void {
     if (std.mem.eql(u8, ver, "preview")) return;
     initialize(a);
     if (!a.updates.app_can_install) {
-        openExternalUrl("https://github.com/justrach/harness/releases/latest");
+        openExternalUrl("https://github.com/justrach/nanoharness/releases/latest");
         return;
     }
     if (a.updates.app_ready) {
@@ -1411,7 +1411,7 @@ fn appUpdatedCard(c: *ui.Context, a: *App, k: theme.Colors) void {
         defer btns.end();
         ui.key(c, "app-updated-notes");
         const notes = ui.div(c).row().px(10).py(4).rounded(6).border(k.border).borderW(1).hover(k.hover);
-        if (notes.clicked()) openExternalUrl(c.print("https://github.com/justrach/harness/releases/tag/v{s}", .{ver}));
+        if (notes.clicked()) openExternalUrl(c.print("https://github.com/justrach/nanoharness/releases/tag/v{s}", .{ver}));
         ui.text(c, "Release notes", .{ .size = 11.5, .line_height = 16, .weight = .medium, .color = k.text });
         notes.end();
 

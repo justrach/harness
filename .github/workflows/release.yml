@@ -290,7 +290,7 @@ jobs:
           zig build test
           if ($LASTEXITCODE -ne 0) { throw 'Windows Nano tests failed' }
       - name: package portable app
-        run: ./scripts/package-windows.ps1 -ReleasesUrl "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download"
+        run: ./scripts/package-windows.ps1 -ReleasesUrl "https://github.com/justrach/nanoharness/releases/latest/download"
       - uses: actions/upload-artifact@v4
         with:
           name: windows-${{ runner.arch }}

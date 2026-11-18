@@ -37,7 +37,7 @@ pub(super) fn release_url() -> anyhow::Result<Option<String>> {
     }
     let config: Config = serde_json::from_slice(&std::fs::read(exe.with_file_name(CONFIG))?)
         .context("reading Windows update configuration")?;
-    super::validate_release_override(&config.releases_url).map(Some)
+    super::validate_release_override(super::migrate_release_base(&config.releases_url)).map(Some)
 }
 
 pub fn artifact(version: &str) -> String {
@@ -82,6 +82,12 @@ pub async fn stage(
     std::fs::remove_file(archive)?;
     verify(&staged)?;
     verify(&staged.with_file_name("harness-nano.exe"))?;
+    for &(name, _) in super::windows_package::OPTIONAL_FILES {
+        let opt = staged.with_file_name(name);
+        if opt.exists() {
+            verify(&opt)?;
+        }
+    }
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(15),
         tokio::process::Command::new(&staged)
@@ -105,6 +111,7 @@ pub async fn stage(
 fn checksum_path(staged: &Path) -> PathBuf {
     let checksum = super::windows_package::FILES
         .iter()
+        .chain(super::windows_package::OPTIONAL_FILES.iter())
         .find(|(name, _)| staged.file_name().is_some_and(|file| file == *name))
         .map(|(_, checksum)| *checksum)
         .unwrap_or("sha256");
@@ -158,6 +165,7 @@ pub fn apply(staged: &Path, directory: &Path, relaunch: bool) -> anyhow::Result<
         "update must run from its installation"
     );
     install_pair(staged, &installed)?;
+    let _ = super::windows_package::migrate_config_file(directory, CONFIG);
     if relaunch {
         std::process::Command::new(&installed)
             .args(["--wait-for-exit", &std::process::id().to_string()])
@@ -168,7 +176,10 @@ pub fn apply(staged: &Path, directory: &Path, relaunch: bool) -> anyhow::Result<
             .spawn()
             .context("relaunching updated application")?;
     }
-    for &(name, checksum) in super::windows_package::FILES {
+    for &(name, checksum) in super::windows_package::FILES
+        .iter()
+        .chain(super::windows_package::OPTIONAL_FILES.iter())
+    {
         let _ = std::fs::remove_file(staged.with_file_name(name));
         let _ = std::fs::remove_file(staged.with_file_name(checksum));
     }
@@ -178,15 +189,24 @@ pub fn apply(staged: &Path, directory: &Path, relaunch: bool) -> anyhow::Result<
     Ok(())
 }
 
-/// Swap the frontend and loader before the engine, restoring earlier members
-/// on failure. Verify every staged member before touching the installation.
+/// Swap the engine, frontend, and loader before the CLI, restoring earlier
+/// members on failure. Verify every staged member before touching the install.
 fn install_pair(staged: &Path, installed: &Path) -> anyhow::Result<()> {
+    let mut members: Vec<&'static str> = Vec::new();
+    for &(name, _) in super::windows_package::OPTIONAL_FILES {
+        recover_from_backup(&installed.with_file_name(name))?;
+        if staged.with_file_name(name).exists() {
+            verify(&staged.with_file_name(name))?;
+            members.push(name);
+        }
+    }
     for &(name, _) in super::windows_package::FILES {
         verify(&staged.with_file_name(name))?;
         recover_from_backup(&installed.with_file_name(name))?;
+        members.push(name);
     }
     let mut replaced: Vec<(PathBuf, bool)> = Vec::new();
-    for &(name, _) in super::windows_package::FILES {
+    for name in members {
         let destination = installed.with_file_name(name);
         let existed = destination.exists();
         if let Err(error) = swap_into_place(&staged.with_file_name(name), &destination) {
@@ -302,6 +322,7 @@ fn remove_own_backup() -> std::io::Result<()> {
     let Some(directory) = exe.parent() else {
         return Ok(());
     };
+    let _ = std::fs::remove_file(directory.join("harness-engine.exe.old"));
     let _ = std::fs::remove_file(directory.join("harness-nano.exe.old"));
     let _ = std::fs::remove_file(directory.join("WebView2Loader.dll.old"));
     std::fs::remove_file(directory.join(BACKUP))

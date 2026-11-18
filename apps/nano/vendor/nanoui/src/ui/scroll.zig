@@ -251,11 +251,14 @@ pub fn paintScrollbars(c: *Context, out: *std.ArrayList(metal.Instance), n: ctx_
     const over_bar = dragging or (visible.contains(c.input.mouse) and c.input.mouse.x >= n.rect.x + n.rect.w - 10);
     if (st.scroll and st.scroll_bar and visible.contains(c.input.mouse)) c.wants_moves = true;
     const moved = (c.scroll.get(n.id) orelse 0) + (c.scroll_x.get(n.id) orelse 0);
-    var bar: f32 = if (st.scroll_bar_fades) motion.flash(c, n.id, salt_bar_flash, moved, 0.8, 0.3) else 1;
-    if (over_bar and bar > 0) {
+    const hold = if (st.scroll_bar_idle_timeout) |timeout| @max(0, timeout - 0.3) else 0.8;
+    var bar: f32 = if (st.scroll_bar_fades or st.scroll_bar_idle_timeout != null) motion.flash(c, n.id, salt_bar_flash, moved, hold, 0.3) else 1;
+    if (dragging or (over_bar and bar > 0 and st.scroll_bar_idle_timeout == null)) {
         bar = 1;
-        _ = motion.flash(c, n.id, salt_bar_flash, moved + 0.0001, 0.8, 0.3);
-        _ = motion.flash(c, n.id, salt_bar_flash, moved, 0.8, 0.3);
+        _ = motion.flash(c, n.id, salt_bar_flash, moved, hold, 0.3);
+        // Leave a distinct watched value so release starts a fresh countdown,
+        // even when no frames ran under a stationary held pointer.
+        _ = motion.flash(c, n.id, salt_bar_flash, moved + 0.0001, hold, 0.3);
     }
     if (st.scroll and st.scroll_bar) paintScrollbar(c, out, n, visible, opacity * bar, over_bar);
     if (st.scroll_x and st.scroll_bar and bar > 0) paintScrollbarX(c, out, n, visible, opacity * bar);

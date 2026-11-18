@@ -247,15 +247,29 @@ fn release_base(edge_url: &str) -> anyhow::Result<String> {
     Ok(default_release_base(edge_url, &detect_install()))
 }
 
+pub const STABLE_RELEASE_BASE: &str =
+    "https://github.com/justrach/nanoharness/releases/latest/download";
+pub const LEGACY_RELEASE_BASE: &str =
+    "https://github.com/justrach/harness/releases/latest/download";
+
+#[allow(dead_code)]
+pub(crate) fn migrate_release_base(url: &str) -> &str {
+    if url.trim().trim_end_matches('/') == LEGACY_RELEASE_BASE {
+        STABLE_RELEASE_BASE
+    } else {
+        url
+    }
+}
+
 fn default_release_base(edge_url: &str, install: &InstallKind) -> String {
-    // The desktop app and managed server installs follow Harness's stable
+    // The desktop app and managed server installs follow NanoHarness's stable
     // GitHub releases: the release job attaches the manifest there next to
-    // every artifact, while the edge copy only moves when its upload runs.
+    // every artifact.
     if matches!(
         install,
         InstallKind::MacApp { .. } | InstallKind::Managed { .. }
     ) {
-        return "https://github.com/justrach/harness/releases/latest/download".into();
+        return STABLE_RELEASE_BASE.into();
     }
     format!("{}/releases", edge_url.trim_end_matches('/'))
 }
@@ -580,7 +594,11 @@ pub fn restart_service() -> anyhow::Result<()> {
         let uid = String::from_utf8_lossy(&output.stdout).trim().to_string();
         run(
             "launchctl",
-            &["kickstart", "-k", &format!("gui/{uid}/harness.codegraff.app")],
+            &[
+                "kickstart",
+                "-k",
+                &format!("gui/{uid}/harness.codegraff.app"),
+            ],
         )
     } else {
         run("systemctl", &["--user", "restart", "harness.service"])
@@ -603,7 +621,11 @@ pub async fn stage_mac_app(
     let version = &manifest.version;
     let file = mac_app_artifact(version);
     anyhow::ensure!(
-        manifest.files.get(&file).and_then(|meta| meta.sha256.as_deref()).is_some(),
+        manifest
+            .files
+            .get(&file)
+            .and_then(|meta| meta.sha256.as_deref())
+            .is_some(),
         "stable macOS update is missing the {file} checksum"
     );
     let dir = data_dir.join("updates").join(version);
@@ -624,7 +646,8 @@ pub async fn stage_mac_app(
         ],
     )?;
     std::fs::remove_file(&tarball).ok();
-    staged_mac_app(&dir).ok_or_else(|| anyhow::anyhow!("app tarball {file} did not contain Harness.app"))
+    staged_mac_app(&dir)
+        .ok_or_else(|| anyhow::anyhow!("app tarball {file} did not contain Harness.app"))
 }
 
 fn mac_app_has_executable(bundle: &Path) -> bool {
@@ -1617,18 +1640,26 @@ mod tests {
         assert!(app.supports_desktop_update());
         assert_eq!(
             default_release_base("https://example.test", &app),
-            "https://github.com/justrach/harness/releases/latest/download"
+            "https://github.com/justrach/nanoharness/releases/latest/download"
         );
         let server = InstallKind::Managed {
             app_root: PathBuf::from("/home/u/.harness/app"),
         };
         assert_eq!(
             default_release_base("https://example.test", &server),
-            "https://github.com/justrach/harness/releases/latest/download"
+            "https://github.com/justrach/nanoharness/releases/latest/download"
         );
         assert_eq!(
             default_release_base("https://example.test/", &InstallKind::Unmanaged),
             "https://example.test/releases"
+        );
+        assert_eq!(
+            migrate_release_base("https://github.com/justrach/harness/releases/latest/download/"),
+            STABLE_RELEASE_BASE
+        );
+        assert_eq!(
+            migrate_release_base("https://custom.example/releases"),
+            "https://custom.example/releases"
         );
     }
 
@@ -1695,10 +1726,13 @@ mod tests {
                 .contains("not supported on windows")
         );
         assert!(
-            apply_mac_app(&data_dir.join("Harness.app"), &data_dir.join("Installed.app"))
-                .unwrap_err()
-                .to_string()
-                .contains("not supported on windows")
+            apply_mac_app(
+                &data_dir.join("Harness.app"),
+                &data_dir.join("Installed.app")
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("not supported on windows")
         );
         assert!(
             restart_service()

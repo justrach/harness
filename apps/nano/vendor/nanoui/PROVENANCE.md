@@ -80,6 +80,13 @@ so their decoded pixels and layout agree. Harness's native headless
 `image orientation` regression checks small and large synthetic PNGs and
 actual rendered quadrant positions; ordinary reply-image tests remain intact.
 
+Harness-local sidebar scrollbar timing adds the optional
+`Style.scroll_bar_idle_timeout` in `src/ui/{types,scroll}.zig`. It includes
+its final 0.3-second fade, ignores stationary hover, and stays visible during
+thumb dragging. Null retains the upstream/default and legacy fade behavior.
+Harness's `Cmd+B sidebar scrollbars` test covers both production sidebar lists
+with simulated time, wheel input, hover, dragging and native screenshots.
+
 These changes live in this checked-in package, not an ignored download cache.
 
 To update: start with the pinned upstream distribution, retain the notices,

@@ -233,9 +233,14 @@ pub const Parser = struct {
 
     fn cells(p: *Parser, row: []const u8) ![]const Inline {
         var out: std.ArrayList(Inline) = .empty;
-        const inner = std.mem.trim(u8, row, " \t|");
-        var it = std.mem.splitScalar(u8, inner, '|');
-        while (it.next()) |cell| try out.append(p.arena, try p.inlines(std.mem.trim(u8, cell, " ")));
+        const inner = trimTableEdgePipes(row);
+        var start: usize = 0;
+        var i: usize = 0;
+        while (i <= inner.len) : (i += 1) {
+            if (i < inner.len and (inner[i] != '|' or escapedMath(inner, i))) continue;
+            try out.append(p.arena, try p.cellInlines(std.mem.trim(u8, inner[start..i], " \t")));
+            start = i + 1;
+        }
         return out.items;
     }
 
@@ -244,7 +249,15 @@ pub const Parser = struct {
     pub const Flags = struct { bold: bool = false, italic: bool = false, code: bool = false, strike: bool = false, link: bool = false, muted: bool = false };
 
     fn inlines(p: *Parser, src: []const u8) !Inline {
-        var b: Builder = .{ .arena = p.arena, .pal = p.pal };
+        return p.parseInlines(src, false);
+    }
+
+    fn cellInlines(p: *Parser, src: []const u8) !Inline {
+        return p.parseInlines(src, true);
+    }
+
+    fn parseInlines(p: *Parser, src: []const u8, in_table: bool) !Inline {
+        var b: Builder = .{ .arena = p.arena, .pal = p.pal, .in_table = in_table };
         try b.parse(src, .{});
         return .{ .text = b.text.items, .spans = b.spans.items, .images = b.images.items, .links = b.links.items, .maths = b.maths.items };
     }
@@ -258,6 +271,7 @@ pub const Parser = struct {
     pub const Builder = struct {
         arena: std.mem.Allocator,
         pal: Palette,
+        in_table: bool = false,
         text: std.ArrayList(u8) = .empty,
         spans: std.ArrayList(Span) = .empty,
         images: std.ArrayList(Image) = .empty,
@@ -335,7 +349,8 @@ pub const Parser = struct {
                     while (i + n < src.len and src[i + n] == '`') n += 1;
                     if (std.mem.indexOf(u8, src[i + n ..], src[i .. i + n])) |close| {
                         try b.emit(src[plain..i], f);
-                        const code_text = std.mem.trim(u8, src[i + n .. i + n + close], " ");
+                        const raw_code = std.mem.trim(u8, src[i + n .. i + n + close], " ");
+                        const code_text = if (b.in_table) try unescapeTableCodePipes(b.arena, raw_code) else raw_code;
                         var cf = f;
                         cf.code = true;
                         const is_code_url = !f.link and @import("browser_url.zig").allowedNavigation(code_text);
@@ -801,11 +816,39 @@ fn latexSymbol(cmd: []const u8) ?[]const u8 {
     return map.get(cmd);
 }
 
+fn trimTableEdgePipes(row: []const u8) []const u8 {
+    var s = std.mem.trim(u8, row, " \t");
+    if (s.len > 0 and s[0] == '|') s = s[1..];
+    if (s.len > 0 and s[s.len - 1] == '|' and !escapedMath(s, s.len - 1)) s = s[0 .. s.len - 1];
+    return s;
+}
+
+fn unescapeTableCodePipes(arena: std.mem.Allocator, raw: []const u8) ![]const u8 {
+    if (std.mem.indexOf(u8, raw, "\\|") == null) return raw;
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < raw.len) {
+        if (raw[i] == '\\' and i + 1 < raw.len and raw[i + 1] == '\\') {
+            try out.appendSlice(arena, "\\\\");
+            i += 2;
+            continue;
+        }
+        if (raw[i] == '\\' and i + 1 < raw.len and raw[i + 1] == '|') {
+            try out.append(arena, '|');
+            i += 2;
+            continue;
+        }
+        try out.append(arena, raw[i]);
+        i += 1;
+    }
+    return out.items;
+}
+
 /// Where `mark` closes, after `from`: not after a space, not escaped.
 fn closing(src: []const u8, from: usize, mark: []const u8) ?usize {
     var i = from;
     while (std.mem.indexOfPos(u8, src, i, mark)) |at| {
-        const before_ok = at > from and src[at - 1] != ' ' and src[at - 1] != '\\';
+        const before_ok = at > from and src[at - 1] != ' ' and !escapedMath(src, at);
         // `**a**b`: a single mark must not be half of a double one.
         const doubled = mark.len == 1 and at + 1 < src.len and src[at + 1] == mark[0];
         if (before_ok and !doubled) return at;
@@ -916,4 +959,34 @@ test "inline marks" {
     try std.testing.expect(in.spans[3].underline);
     try std.testing.expectEqualStrings("the docs", in.text[in.spans[3].start..in.spans[3].end]);
     try std.testing.expect(in.spans[4].strike);
+}
+
+test "tables keep escaped bars inside cells" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const src =
+        \\| Norm | Code | Literal | Tail |
+        \\|---|---|---|---|
+        \\| $\|x\|$ | `a\|b` | \|x\| | end\\\| |
+    ;
+    const blocks = parse(arena.allocator(), src, test_pal);
+    try std.testing.expectEqual(@as(usize, 1), blocks.len);
+    const tbl = blocks[0].table;
+    try std.testing.expectEqual(@as(usize, 4), tbl.header.len);
+    try std.testing.expectEqual(@as(usize, 4), tbl.rows[0].len);
+    try std.testing.expectEqualStrings("$\\|x\\|$", tbl.rows[0][0].text);
+    try std.testing.expectEqual(@as(usize, 1), tbl.rows[0][0].maths.len);
+    try std.testing.expectEqualStrings("\\|x\\|", tbl.rows[0][0].maths[0].source);
+    try std.testing.expectEqualStrings("a|b", tbl.rows[0][1].text);
+    try std.testing.expectEqualStrings("|x|", tbl.rows[0][2].text);
+    try std.testing.expectEqualStrings("end\\|", tbl.rows[0][3].text);
+
+    // Trailing escaped bar without a closing border pipe is cell content, not an outer pipe.
+    const noborder = parse(arena.allocator(),
+        \\| a | b |
+        \\|---|---|
+        \\| x | \|
+    , test_pal);
+    try std.testing.expectEqual(@as(usize, 2), noborder[0].table.rows[0].len);
+    try std.testing.expectEqualStrings("|", noborder[0].table.rows[0][1].text);
 }

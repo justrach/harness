@@ -10,13 +10,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 use harness_doc::SessionCommandPayload;
 use harness_proto::{
     Chat, ChatConfig, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, Session, SessionStatus,
     Space, UserInputAnswer,
 };
+use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
+use serde_json::{Value, json};
 
 use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
 use crate::turn_replies::{REPLIES_TRUNCATED_NOTE, turn_replies};
@@ -26,7 +26,7 @@ mod graff_peer;
 mod peer_messages;
 mod relay_ledger;
 mod rooms;
-use crate::harness::{HarnessInfo, TurnOutcome, Harness, session_for, short};
+use crate::harness::{Harness, HarnessInfo, TurnOutcome, session_for, short};
 
 /// Default and ceiling for the blocking waits.
 const DEFAULT_WAIT: Duration = Duration::from_secs(600);
@@ -41,12 +41,42 @@ const CHAT_WAIT_NOTE: &str = "The chat is still working. Its reply arrives in yo
 /// (the UI's staleness window): a crashed host must not read as busy forever.
 const SESSION_STALE: chrono::Duration = chrono::Duration::seconds(45);
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone)]
 pub struct ToolDef {
     pub name: &'static str,
     pub description: &'static str,
     pub input_schema: Value,
+}
+
+fn is_read_only_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "whoami"
+            | "list_devices"
+            | "list_projects"
+            | "list_harnesses"
+            | "list_models"
+            | "list_chats"
+            | "get_chat"
+            | "read_chat"
+            | "list_rooms"
+            | "room_inbox"
+            | "list_bots"
+    )
+}
+
+impl Serialize for ToolDef {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let ro = is_read_only_tool(self.name);
+        let mut map = serializer.serialize_map(Some(if ro { 4 } else { 3 }))?;
+        map.serialize_entry("name", self.name)?;
+        map.serialize_entry("description", self.description)?;
+        map.serialize_entry("inputSchema", &self.input_schema)?;
+        if ro {
+            map.serialize_entry("annotations", &json!({ "readOnlyHint": true }))?;
+        }
+        map.end()
+    }
 }
 
 pub struct Tools {
@@ -681,7 +711,10 @@ impl Tools {
             chats.retain(|c| c.space_id.as_deref() == Some(space.id.as_str()));
         }
         if args.device.is_some() {
-            let device = self.harness.resolve_device_id(args.device.as_deref()).await?;
+            let device = self
+                .harness
+                .resolve_device_id(args.device.as_deref())
+                .await?;
             chats.retain(|c| c.device_id == device);
         }
         if !args.include_archived {
@@ -776,7 +809,9 @@ impl Tools {
             }
             None => (
                 None,
-                self.harness.resolve_device_id(args.device.as_deref()).await?,
+                self.harness
+                    .resolve_device_id(args.device.as_deref())
+                    .await?,
             ),
         };
 
@@ -1489,8 +1524,8 @@ mod tests {
     use crate::harness::Origin;
     use async_trait::async_trait;
     use futures::StreamExt;
-    use std::sync::Mutex;
     use harness_rpc::{RpcError, RpcReply, RpcService, memory_client, methods};
+    use std::sync::Mutex;
 
     /// A fixed little workspace: one device, one project, one chat with a
     /// two-message transcript. Writes are recorded for assertions.
@@ -1631,7 +1666,10 @@ mod tests {
                             { "member": "alpha", "memberRef": "chat-alpha-1", "deviceId": "dev-local", "readSeq": 0 }
                         ]}),
                         (Some("POST"), p) if p.ends_with("/post") => {
-                            self.writes.lock().unwrap().push((method.to_owned(), params.clone()));
+                            self.writes
+                                .lock()
+                                .unwrap()
+                                .push((method.to_owned(), params.clone()));
                             json!({
                                 "message": { "seq": 3, "hop": 1 },
                                 "deliver": [
@@ -1645,7 +1683,11 @@ mod tests {
                                 "stripped": 0
                             })
                         }
-                        _ => return Ok(RpcReply::Value(json!({ "status": 404, "body": { "error": "not_found" } }))),
+                        _ => {
+                            return Ok(RpcReply::Value(
+                                json!({ "status": 404, "body": { "error": "not_found" } }),
+                            ));
+                        }
                     };
                     RpcReply::Value(json!({ "status": 200, "body": body }))
                 }
@@ -1659,10 +1701,16 @@ mod tests {
         let world = Arc::new(World::default());
         let tools = tools(
             world.clone(),
-            Origin { chat_id: Some("chat-beta-2".into()), device_id: Some("dev-local".into()) },
+            Origin {
+                chat_id: Some("chat-beta-2".into()),
+                device_id: Some("dev-local".into()),
+            },
         );
         let posted = tools
-            .call("post_room", json!({ "room": "build", "text": "@alpha tests are green" }))
+            .call(
+                "post_room",
+                json!({ "room": "build", "text": "@alpha tests are green" }),
+            )
             .await
             .unwrap();
         assert_eq!(posted["seq"], 3);
@@ -1673,13 +1721,21 @@ mod tests {
         assert_eq!(posted["woken"].as_array().unwrap().len(), 1);
 
         let writes = world.writes.lock().unwrap();
-        let (_, post) = writes.iter().find(|(m, _)| m == methods::ROOM_REQUEST).unwrap();
+        let (_, post) = writes
+            .iter()
+            .find(|(m, _)| m == methods::ROOM_REQUEST)
+            .unwrap();
         assert_eq!(post["body"]["member"], "beta");
         assert_eq!(post["body"]["fromUser"], false);
-        let (_, queued) = writes.iter().find(|(m, _)| m == methods::QUEUE_MESSAGE).unwrap();
+        let (_, queued) = writes
+            .iter()
+            .find(|(m, _)| m == methods::QUEUE_MESSAGE)
+            .unwrap();
         assert_eq!(queued["chatId"], "chat-alpha-1");
         let (text, meta) = harness_proto::room_delivery::lift(queued["text"].as_str().unwrap());
-        assert!(text.starts_with("[room message from beta · room build #3 · agent, advisory]: @alpha tests are green"));
+        assert!(text.starts_with(
+            "[room message from beta · room build #3 · agent, advisory]: @alpha tests are green"
+        ));
         let meta = meta.unwrap();
         assert_eq!(meta["room_id"], "room_0123456789abcdef01234567");
         assert_eq!(meta["from_user"], false);
@@ -3043,5 +3099,44 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("disabled in Settings"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn read_only_tools_serialize_read_only_hint_annotations() {
+        let world = Arc::new(World::default());
+        let origin = Origin {
+            chat_id: Some("chat-beta-2".into()),
+            device_id: Some("dev-local".into()),
+        };
+        let t = tools(world, origin);
+        let list = serde_json::to_value(t.list()).unwrap();
+        let arr = list.as_array().unwrap();
+        let expected_ro = [
+            "whoami",
+            "list_devices",
+            "list_projects",
+            "list_harnesses",
+            "list_models",
+            "list_chats",
+            "get_chat",
+            "read_chat",
+            "list_rooms",
+            "room_inbox",
+            "list_bots",
+        ];
+        let mut ro_seen = Vec::new();
+        for item in arr {
+            let name = item["name"].as_str().unwrap();
+            if expected_ro.contains(&name) {
+                assert_eq!(item["annotations"]["readOnlyHint"], json!(true), "{name}");
+                ro_seen.push(name);
+            } else {
+                assert!(
+                    item.get("annotations").is_none(),
+                    "unexpected annotations on {name}"
+                );
+            }
+        }
+        assert_eq!(ro_seen.len(), expected_ro.len());
     }
 }
