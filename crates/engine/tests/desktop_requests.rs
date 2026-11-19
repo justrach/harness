@@ -23,6 +23,49 @@ fn vectors() -> Value {
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 
+fn request_params(params: &Value, device: &str, project_dir: &str) -> Value {
+    match params {
+        Value::String(text) => {
+            Value::String(text.replace("$DEVICE", device).replace("$DIR", project_dir))
+        }
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| request_params(item, device, project_dir))
+                .collect(),
+        ),
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(key, value)| (key.clone(), request_params(value, device, project_dir)))
+                .collect(),
+        ),
+        _ => params.clone(),
+    }
+}
+
+#[test]
+fn request_placeholders_preserve_windows_paths_and_json_types() {
+    for project_dir in [
+        r#"C:\synthetic\O'Brien "quoted"\日本語"#,
+        r#"/synthetic/O'Brien "quoted"/日本語"#,
+    ] {
+        let params = serde_json::json!({
+            "path": "$DIR",
+            "nested": { "device": "$DEVICE", "command": "cd $DIR" },
+            "values": ["$DIR", "$DEVICE", 7, true, null],
+        });
+        assert_eq!(
+            request_params(&params, "synthetic-device", project_dir),
+            serde_json::json!({
+                "path": project_dir,
+                "nested": { "device": "synthetic-device", "command": format!("cd {project_dir}") },
+                "values": [project_dir, "synthetic-device", 7, true, null],
+            })
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_engine_understands_every_request_harness_nano_sends() {
     let dir = tempfile::tempdir().unwrap();
@@ -45,11 +88,7 @@ async fn the_engine_understands_every_request_harness_nano_sends() {
     for case in vectors()["requests"].as_array().unwrap() {
         let name = case["name"].as_str().unwrap();
         let method = case["method"].as_str().unwrap();
-        let params = serde_json::to_string(&case["params"])
-            .unwrap()
-            .replace("$DEVICE", &core.device_id)
-            .replace("$DIR", &project_dir);
-        let params: Value = serde_json::from_str(&params).unwrap();
+        let params = request_params(&case["params"], &core.device_id, &project_dir);
         eprintln!("→ {name}");
         let reply = tokio::time::timeout(
             std::time::Duration::from_secs(20),

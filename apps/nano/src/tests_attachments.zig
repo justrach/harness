@@ -80,7 +80,7 @@ test "image uploads chunk, commit on the chat host, and send the same attachment
     try pump(&a);
 }
 
-test "image-only sends work and failed uploads leave the draft intact" {
+test "attachment-only image sends work and failed uploads leave the draft intact" {
     var a: App = undefined;
     try connected(&a,
         \\{"UploadChunk":{},"UploadCommit":{"$err":"Synthetic upload failed"},"QueueCommand":{}}
@@ -102,8 +102,34 @@ test "image-only sends work and failed uploads leave the draft intact" {
     try pump(&a);
     a.composer.clear();
     a.send();
-    try testing.expectEqualStrings("See the attached image(s).\n\nAttached images (local files — open them to view):\n- /synthetic/uploads/image.png", a.pending_sends.items[0].part.text.items);
+    try testing.expectEqualStrings("See the attached file(s).\n\nAttached images (local files — open them to view):\n- /synthetic/uploads/image.png", a.pending_sends.items[0].part.text.items);
     try pump(&a);
+}
+
+test "attachment-only sends describe non-image and mixed files" {
+    const cases = .{
+        .{
+            .paths = &.{"/synthetic/uploads/report.txt"},
+            .expected = "See the attached file(s).\n\nAttached images (local files — open them to view):\n- /synthetic/uploads/report.txt",
+        },
+        .{
+            .paths = &.{ "/synthetic/uploads/report.txt", "/synthetic/uploads/image.png" },
+            .expected = "See the attached file(s).\n\nAttached images (local files — open them to view):\n- /synthetic/uploads/report.txt\n- /synthetic/uploads/image.png",
+        },
+    };
+    inline for (cases) |case| {
+        var a: App = undefined;
+        try connected(&a,
+            \\{"QueueCommand":{}}
+        );
+        defer a.deinit();
+        try attachments.restore(&a, "", case.paths);
+        a.send();
+        try testing.expectEqual(@as(usize, 1), a.pending_sends.items.len);
+        try testing.expectEqualStrings(case.expected, a.pending_sends.items[0].part.text.items);
+        try testing.expectEqual(@as(usize, 0), attachments.count(&a));
+        try pump(&a);
+    }
 }
 
 test "staged images stay with their chat and removing an upload is safe before its reply" {
