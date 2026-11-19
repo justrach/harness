@@ -1,9 +1,17 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    // Match Windows' installed Rust/SDK toolchain by default. An explicit
-    // GNU target still selects the matching Rust target below, never MSVC.
-    const target = b.standardTargetOptions(.{ .default_target = if (b.graph.host.result.os.tag == .windows) .{ .abi = .msvc } else .{} });
+    // Match Windows' installed Rust/SDK toolchain by default, and pin macOS
+    // builds to LSMinimumSystemVersion (12.0) so building on newer macOS hosts
+    // stays runnable on macOS 12.0 and all newer releases. An explicit
+    // -Dtarget always overrides these defaults.
+    const target = b.standardTargetOptions(.{
+        .default_target = switch (b.graph.host.result.os.tag) {
+            .windows => .{ .abi = .msvc },
+            .macos => .{ .os_version_min = .{ .semver = .{ .major = 12, .minor = 0, .patch = 0 } } },
+            else => .{},
+        },
+    });
     const optimize = b.standardOptimizeOption(.{});
     const loader = b.option([]const u8, "webview2-loader", "Path to the target's WebView2Loader.dll");
     const portable = b.option(bool, "portable", "Use portable text and CPU rendering for cross-platform regression tests") orelse false;

@@ -23,6 +23,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
 ARCH="$(uname -m)" # arm64 on Apple silicon runners
+ZIG_ARCH="$ARCH"
+[[ "$ZIG_ARCH" == "arm64" ]] && ZIG_ARCH=aarch64
+# Pin deployment target to LSMinimumSystemVersion (12.0) so binaries built on
+# newer macOS hosts (e.g. macOS 27) run on macOS 12.0 and every version above it.
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-12.0}"
 OUT_DIR="$ROOT/target/package"
 APP="$OUT_DIR/Harness.app"
 DMG="$OUT_DIR/harness-$VERSION-macos-$ARCH.dmg"
@@ -46,7 +51,7 @@ fi
 rm -rf "$APP" "$OUT_DIR"/harness-*-macos-*.dmg "$OUT_DIR"/harness-*-macos-*-app.tar.gz
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/bin"
 install -m 755 "$BUILD_BINARY" "$APP/Contents/MacOS/harness"
-(cd "$ROOT/apps/nano" && "$ROOT/scripts/heavy-build.sh" zig build -Doptimize=ReleaseSafe)
+(cd "$ROOT/apps/nano" && "$ROOT/scripts/heavy-build.sh" zig build -Doptimize=ReleaseSafe -Dtarget="${ZIG_ARCH}-macos.${MACOSX_DEPLOYMENT_TARGET}")
 install -m 755 "$ROOT/apps/nano/zig-out/bin/harness-nano" "$APP/Contents/MacOS/harness-nano"
 install -m 755 "$ROOT/apps/nano/zig-out/bin/harness-github-runners" "$APP/Contents/Resources/bin/harness-github-runners"
 sed "s/__VERSION__/$VERSION/" "$ROOT/dist/macos/Info.plist" >"$APP/Contents/Info.plist"
@@ -101,6 +106,37 @@ else
   rm -rf "$CODEDB_TMP"
 fi
 echo "bundled $("$APP/Contents/Resources/bin/codedb" --version | head -1)"
+
+# Guard against host-stamped macOS deployment targets (e.g. building on a
+# newer macOS host without pinning minos, which breaks launch on older macOS).
+check_macho_minos() {
+  local bin="$1"
+  local max_minos="$2"
+  local minos
+  minos="$(otool -l "$bin" | awk '
+    /cmd LC_BUILD_VERSION/ { in_bv = 1; next }
+    in_bv && /minos / { print $2; exit }
+    in_bv && /cmd / { in_bv = 0 }
+  ')"
+  if [[ -z "$minos" ]]; then
+    echo "error: $bin has no LC_BUILD_VERSION minos" >&2
+    exit 1
+  fi
+  if ! python3 -c '
+import sys
+def parse(v): return tuple(int(p) for p in v.split("."))
+sys.exit(0 if parse(sys.argv[1]) <= parse(sys.argv[2]) else 1)
+' "$minos" "$max_minos"; then
+    echo "error: $bin requires macOS $minos (expected <= $max_minos)" >&2
+    exit 1
+  fi
+}
+check_macho_minos "$APP/Contents/MacOS/harness" "$MACOSX_DEPLOYMENT_TARGET"
+check_macho_minos "$APP/Contents/MacOS/harness-nano" "$MACOSX_DEPLOYMENT_TARGET"
+check_macho_minos "$APP/Contents/Resources/bin/harness-github-runners" "$MACOSX_DEPLOYMENT_TARGET"
+check_macho_minos "$APP/Contents/Resources/bin/graff" "15.0"
+check_macho_minos "$APP/Contents/Resources/bin/codedb" "15.0"
+
 mkdir -p "$APP/Contents/Resources/licenses/fonts"
 cp "$ROOT/apps/nano/assets/fonts/licenses/"* "$APP/Contents/Resources/licenses/fonts/"
 cp "$ROOT/LICENSE" "$ROOT/THIRD_PARTY_NOTICES.md" "$APP/Contents/Resources/"
