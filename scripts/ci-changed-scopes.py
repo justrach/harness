@@ -124,7 +124,7 @@ def classify_scopes(changed_files: list[str], cargo_meaningful: bool) -> dict[st
     if not changed_files:
         return all_true_scopes()
 
-    paths = [p.lstrip("./") for p in changed_files if p and p.strip()]
+    paths = [p.removeprefix("./") for p in changed_files if p and p.strip()]
     if not paths:
         return all_true_scopes()
 
@@ -146,16 +146,18 @@ def classify_scopes(changed_files: list[str], cargo_meaningful: bool) -> dict[st
     ui_macos_rust = rust_core or any_exact({"dist/macos/Info.plist"})
     ui_macos_job = ui_macos_rust or nano_paths
 
-    win_ui = nano_paths or any_exact({".github/workflows/windows.yml", *scope_scripts})
+    windows_ci = any_exact({".github/workflows/windows.yml", *scope_scripts})
+    win_ui = nano_paths or windows_ci
     win_app = (
         rust_core
+        or windows_ci
         or any_prefix(("dist/windows/", ".github/actions/windows-rust/"))
         or any(
             fnmatch(p, "scripts/package-windows.ps1") or fnmatch(p, "scripts/test-windows-*.ps1")
             for p in paths
         )
     )
-    win_engine = rust_core or any_prefix((".github/actions/windows-rust/",))
+    win_engine = rust_core or windows_ci or any_prefix((".github/actions/windows-rust/",))
 
     cursor_rust = (
         cargo_meaningful

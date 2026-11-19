@@ -88,14 +88,25 @@ class CiChangedScopesTests(unittest.TestCase):
         for k in ("rust_core", "preview_rust", "android"):
             self.assertTrue(s[k], f"expected {k}=True")
 
-    def test_workflow_only_pr_skips_rust_and_android(self) -> None:
+    def test_windows_workflow_alone_runs_its_test_groups(self) -> None:
+        for path in (".github/workflows/windows.yml", "./.github/workflows/windows.yml"):
+            with self.subTest(path=path):
+                scopes = mod.classify_scopes([path], False)
+                for key in ("win_ui", "win_app", "win_engine"):
+                    self.assertTrue(scopes[key], f"expected {key}=True")
+                for key in ("rust_core", "cursor_rust", "preview_rust", "android"):
+                    self.assertFalse(scopes[key], f"expected {key}=False")
+
+    def test_workflow_only_pr_runs_windows_but_skips_unrelated_rust_and_android(self) -> None:
         s = mod.classify_scopes(
             [".github/workflows/windows.yml", ".github/workflows/ui-tests.yml", "scripts/ci-changed-scopes.py"],
             False,
         )
         self.assertTrue(s["nano_ui"])
         self.assertTrue(s["win_ui"])
-        for k in ("rust_core", "ui_session_sync", "ui_macos_rust", "win_app", "win_engine", "cursor_rust", "preview_rust", "android"):
+        self.assertTrue(s["win_app"])
+        self.assertTrue(s["win_engine"])
+        for k in ("rust_core", "ui_session_sync", "ui_macos_rust", "cursor_rust", "preview_rust", "android"):
             self.assertFalse(s[k], f"expected {k}=False")
 
     def test_workflow_dispatch_and_missing_base_fail_open(self) -> None:
